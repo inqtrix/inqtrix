@@ -1,0 +1,29 @@
+{
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "reasoningContent": {
+            "reasoningText": {
+              "text": "Erst denken, dann antworten.",
+              "signature": "sig-replay-thinking-1"
+            }
+          }
+        },
+        {
+          "text": "Mit Thinking-Block geliefert: Bedrock blendet die Reasoning-Phase separat ein."
+        }
+      ]
+    }
+  },
+  "usage": {
+    "inputTokens": 22,
+    "outputTokens": 31,
+    "totalTokens": 53
+  },
+  "metrics": {
+    "latencyMs": 1240
+  },
+  "stopReason": "end_turn"
+}

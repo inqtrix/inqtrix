@@ -1,0 +1,66 @@
+# Dex reference-IdP configuration for the Inqtrix dev stack.
+#
+# Mounted as a file ON PURPOSE: inlining the config into compose would
+# subject the bcrypt hash below to compose's $-interpolation (every $
+# would need doubling). Field names verified against dex v2.45.1.
+#
+# The issuer must be the SAME string for the backend (discovery/token calls)
+# and browser redirects. ``dex.localhost`` resolves to loopback in browsers
+# and is also a Compose network alias on the Dex service, so API containers
+# and a local browser use one canonical issuer.
+issuer: http://dex.localhost:5556/dex
+
+storage:
+  # memory: zero state, but signing keys regenerate on restart and
+  # invalidate live sessions — sqlite on a named volume keeps dev
+  # logins stable across container restarts.
+  type: sqlite3
+  config:
+    file: /var/dex/dex.db
+
+web:
+  # 0.0.0.0 INSIDE the container (the upstream dev config binds
+  # 127.0.0.1, which breaks port publishing); loopback-only exposure
+  # is enforced by the compose port mapping.
+  http: 0.0.0.0:5556
+
+oauth2:
+  # Dev convenience: skip the consent screen.
+  skipApprovalScreen: true
+
+staticClients:
+  - id: inqtrix-local
+    name: Inqtrix Dev
+    # The secret comes from the container environment (compose sets
+    # DEX_INQTRIX_CLIENT_SECRET) so nothing secret lives in this file.
+    secretEnv: DEX_INQTRIX_CLIENT_SECRET
+    redirectURIs:
+      # Must match INQTRIX_OIDC_REDIRECT_URL byte-for-byte; pick the
+      # 127.0.0.1 host form consistently (localhost is a DIFFERENT
+      # string to an exact-match check).
+      - http://127.0.0.1:5100/api/auth/callback
+      # Vite dev server: its proxy forwards /api to the backend, so
+      # the callback lands same-origin with the SPA (cookies are
+      # host-scoped, ports do not matter).
+      - http://127.0.0.1:5173/api/auth/callback
+      # Stack mode (Python web ingress on 8080). NOTE: bundled-Dex
+      # is loopback-only and intended for local validation. Production
+      # deployments use an external IdP.
+      - http://localhost:8080/api/auth/callback
+      - http://127.0.0.1:8080/api/auth/callback
+
+enablePasswordDB: true
+staticPasswords:
+  # Demo user: admin@example.com / password (upstream dev hash,
+  # bcrypt cost 10). Mint new hashes with:
+  #   htpasswd -bnBC 10 "" 'newpassword' | tr -d ':\n'
+  - email: admin@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: admin
+    userID: 08a8684b-db88-4b73-90a9-3cd1661f5466
+  # Second demo user (same password) for multi-user flows: grant a
+  # share as admin, receive it as bianca.
+  - email: bianca@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: bianca
+    userID: 3f1c70b1-6f0e-4cd1-9c2e-5a90b4f1d2aa

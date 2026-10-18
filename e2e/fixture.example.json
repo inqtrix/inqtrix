@@ -1,0 +1,75 @@
+{
+  "version": 2,
+  "locale": "en",
+  "users": {
+    "owner": {
+      "displayName": "Owner User",
+      "storageState": "./.auth/owner.json",
+      "userId": "00000000-0000-4000-8000-000000000001"
+    },
+    "collaborator": {
+      "displayName": "Collaborator User",
+      "storageState": "./.auth/collaborator.json",
+      "userId": "00000000-0000-4000-8000-000000000002"
+    }
+  },
+  "documents": {
+    "concurrent": "collaboration-e2e-concurrent",
+    "detachedTransfer": "collaboration-e2e-detached-transfer",
+    "directEdit": "collaboration-e2e-direct",
+    "downgrade": "collaboration-e2e-downgrade",
+    "gatewayOutage": "collaboration-e2e-gateway-outage",
+    "outage": "collaboration-e2e-outage",
+    "protocol": "collaboration-e2e-protocol",
+    "reconciliation": "collaboration-e2e-reconciliation",
+    "suggestion": {
+      "documentId": "collaboration-e2e-suggestion",
+      "expectedPermission": "suggest",
+      "expectedAuthorId": "00000000-0000-4000-8000-000000000002"
+    },
+    "revocation": "collaboration-e2e-revocation",
+    "staysConnected": "ed_example_stays_connected",
+    "aiSuggestion": "ed_example_ai_suggestion"
+  },
+  "controls": {
+    "baseURL": "https://collaboration-fixture-control.example.test",
+    "authorizationEnv": "INQTRIX_E2E_CONTROL_TOKEN",
+    "armGatewayOutagePath": "/v1/test/collaboration/gateway-outage:arm",
+    "armLostAckPath": "/v1/test/collaboration/lost-ack:arm",
+    "armOutagePath": "/v1/test/collaboration/outage:arm",
+    "operationStatusPath": "/v1/test/collaboration/operation:status",
+    "restorePath": "/v1/test/collaboration/restore",
+    "restartPath": "/v1/test/collaboration/restart"
+  },
+  "privateAnchors": {
+    "documents": {
+      "chromium-desktop": "collaboration-e2e-private-anchors-chromium-desktop",
+      "chromium-mobile": "collaboration-e2e-private-anchors-chromium-mobile",
+      "firefox-desktop": "collaboration-e2e-private-anchors-firefox-desktop",
+      "webkit-desktop": "collaboration-e2e-private-anchors-webkit-desktop"
+    },
+    "owner": {
+      "commentAnchorText": "owner-private-comment-anchor",
+      "commentText": "owner-private-comment-marker",
+      "aiAnchorText": "owner-private-ai-anchor",
+      "aiText": "owner-private-ai-marker"
+    },
+    "collaborator": {
+      "commentAnchorText": "collaborator-private-comment-anchor",
+      "commentText": "collaborator-private-comment-marker",
+      "aiAnchorText": "collaborator-private-ai-anchor",
+      "aiText": "collaborator-private-ai-marker"
+    }
+  },
+  "transports": {
+    "vite": {
+      "baseURL": "http://127.0.0.1:5173"
+    },
+    "nginx": {
+      "baseURL": "http://127.0.0.1:8080"
+    },
+    "python-gateway": {
+      "baseURL": "http://127.0.0.1:4173"
+    }
+  }
+}

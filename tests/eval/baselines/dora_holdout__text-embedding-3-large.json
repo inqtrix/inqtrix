@@ -1,0 +1,10 @@
+{
+  "_inqtrix_version": "0.2.0",
+  "_context": "Held-out baseline for 8 stratified queries (3 multi / 2 fact / 2 paraphrase / 1 exact) split out of the DORA tier and computed by subset aggregation from the same captured qdrant hybrid + Cohere-rerank-v4.0-pro + contextual-retrieval result. This tier is never a tuning target and is used only as an overfitting-regression gate; a tuning tier that improves while this one regresses indicates overfitting.",
+  "recall_at_1": 1.0,
+  "recall_at_3": 1.0,
+  "recall_at_5": 1.0,
+  "mrr": 1.0,
+  "ndcg_at_5": 0.99,
+  "multi_complete_at_5": 1.0
+}

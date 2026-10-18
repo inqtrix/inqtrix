@@ -1,0 +1,10 @@
+{
+  "_inqtrix_version": "0.2.0",
+  "_context": "Regression baseline over the BSI C5 corpus with column-interleaved criterion pairs (CON ids): qdrant hybrid + Cohere-rerank-v4.0-pro + contextual retrieval (gpt-5.4 contextualizer), 233 docs, 33 retrieval queries. b19 (paraphrase, gsk-con-6) ranks third behind its CON siblings; recall@3 is 1.0. multi_complete is 0.75 because b30 (4-doc backup-encryption aggregation) crowds out the c5-ops pair, which leaves documented multi-hop headroom.",
+  "recall_at_1": 0.9697,
+  "recall_at_3": 1.0,
+  "recall_at_5": 1.0,
+  "mrr": 0.9798,
+  "ndcg_at_5": 0.9714,
+  "multi_complete_at_5": 0.75
+}

@@ -1,0 +1,128 @@
+{{- if and .Values.migrations.enabled .Release.IsUpgrade .Values.migrations.maintenanceConfirmed }}
+{{- $fullname := include "inqtrix.fullname" . }}
+{{- $serviceAccount := include "inqtrix.internalServiceAccountName" (dict "root" . "component" "schema-maintenance") }}
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceAccount }}
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-30"
+    "helm.sh/hook-delete-policy": before-hook-creation
+automountServiceAccountToken: true
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-schema-maintenance
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-30"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames:
+      - {{ $fullname }}-api
+      - {{ $fullname }}-worker
+      - {{ $fullname }}-collaboration
+      - {{ $fullname }}-pgbouncer
+    verbs: ["patch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    resourceNames: [{{ printf "%s-api" $fullname | quote }}]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  # The hook revokes this binding before it exits, including timeout/error
+  # paths. The unbound Role and tokenless account are inert until Helm's next
+  # before-hook-creation cleanup.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    resourceNames: [{{ printf "%s-schema-maintenance" $fullname | quote }}]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-schema-maintenance
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-30"
+    "helm.sh/hook-delete-policy": before-hook-creation
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-schema-maintenance
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-schema-maintenance
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add (int .Values.migrations.maintenanceTimeoutSeconds) 60 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $serviceAccount }}
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: quiesce
+          image: {{ include "inqtrix.image.api" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command:
+            - python
+            - -m
+            - inqtrix.deployment.kubernetes_maintenance
+          env:
+            - name: INQTRIX_K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: INQTRIX_K8S_RELEASE
+              value: {{ .Release.Name | quote }}
+            - name: INQTRIX_K8S_WORKLOAD_PREFIX
+              value: {{ $fullname | quote }}
+            - name: INQTRIX_K8S_QUIESCE_TIMEOUT_SECONDS
+              value: {{ .Values.migrations.maintenanceTimeoutSeconds | quote }}
+            - name: INQTRIX_K8S_MAINTENANCE_ROLE_BINDING
+              value: {{ printf "%s-schema-maintenance" $fullname | quote }}
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+{{- end }}

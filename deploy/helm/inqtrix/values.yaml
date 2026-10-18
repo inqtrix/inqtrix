@@ -1,0 +1,671 @@
+# Default values for the Inqtrix chart.
+#
+# This file is the single source of truth for every knob; the deployment guide
+# (docs/deployment/kubernetes.md) references these keys rather than repeating
+# them. Defaults target a PRODUCTION posture: external PostgreSQL, no bundled
+# backing services, a locked-down security context. The default topology is
+# the API, the web gateway and the durable worker; it needs PostgreSQL, a
+# Valkey-compatible queue and a shared S3 object store, each external by
+# default. Flip the *.enabled flags below to bundle them for a self-contained
+# turnkey demo, or set worker.enabled=false for the single-pod variant (one API
+# replica that runs every job itself; PostgreSQL is then the only requirement).
+
+# -- First-party container images. Production references require an immutable
+# sha256 digest. Local development may deliberately opt into tag-only images
+# with image.allowUnpinned=true. Tags remain in pinned references for readable
+# diagnostics: registry/repository:tag@sha256:...
+image:
+  registry: ghcr.io/inqtrix
+  pullPolicy: IfNotPresent
+  allowUnpinned: false
+  api:
+    repository: inqtrix-api
+    tag: ""
+    digest: ""
+  web:
+    repository: inqtrix-web
+    tag: ""
+    digest: ""
+  collaboration:
+    repository: inqtrix-collaboration
+    tag: ""
+    digest: ""
+# -- Names of image-pull Secrets when the registry is private
+# (kubectl create secret docker-registry ...).
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Non-secret application configuration. Every key here is rendered verbatim
+# into a ConfigMap and injected into the api/worker pods via envFrom, so
+# the names must match Inqtrix settings exactly (see src/inqtrix/settings.py and
+# docs/configuration/settings-and-env.md). Secrets do NOT belong here -- use the
+# `secret` block below.
+config:
+  INQTRIX_STORAGE_BACKEND: postgres
+  INQTRIX_AUTH_MODE: infer
+  INQTRIX_SERVER_HOST: "0.0.0.0"
+  INQTRIX_SERVER_PORT: "5100"
+  # INQTRIX_OBJECT_STORE_BACKEND is derived, not baked here: local by default, s3 when
+  # s3.enabled bundles MinIO (see configmap.yaml). Set it here explicitly ONLY to point
+  # at an external S3 endpoint (an explicit config value still wins over the derived one).
+  INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
+  # Pooled-engine connection budget. Every process counts the pooled engines
+  # it actually builds and logs the worst case at startup, so the number
+  # never has to be reconstructed from a list here. Worst case per process =
+  # pooled_engines x (POOL_SIZE + MAX_OVERFLOW), plus the agent checkpointer's
+  # own pool where the workspace agent runs. Size the sum over ALL replicas
+  # below Postgres max_connections, raise that ceiling on the BUNDLED server
+  # with postgres.maxConnections, or front the database with a transaction
+  # pooler (pgbouncer.enabled below); a process whose own budget exceeds the
+  # server limit says so at startup. Defaults: 5 / 10 / 30.
+  # INQTRIX_DATABASE_POOL_SIZE: "5"
+  # INQTRIX_DATABASE_POOL_MAX_OVERFLOW: "10"
+  # INQTRIX_DATABASE_POOL_TIMEOUT_SECONDS: "30"
+  # Per-statement ceiling on pooled engines (seconds, 0 disables); bounds
+  # in-flight statements on dead connections. Default 120.
+  # INQTRIX_DATABASE_COMMAND_TIMEOUT_SECONDS: "120"
+# -- Free-form extra non-secret env merged into the ConfigMap (provider models,
+# feature flags, OIDC issuer/client-id, tuning -- anything non-secret).
+extraConfig: {}
+
+# -- Secret values (DB URL, session/PAT/pseudonym secrets, OIDC client secret,
+# S3/Qdrant/LLM keys -- the fields settings.py marks
+# secret). INQTRIX_PSEUDONYM_PEPPER belongs here too: the Secret reaches API
+# and worker pods alike, which is exactly the sharing the stable log
+# pseudonyms require (required for oidc mode).
+secret:
+  # When create=true and existingSecret is empty, the chart renders a Secret
+  # from `data` below. For PRODUCTION bring your own Secret instead and set
+  # existingSecret to its name (the chart-managed path is a dev convenience).
+  create: true
+  existingSecret: ""
+  # key: value pairs placed into the chart-managed Secret. Provide via
+  # --set-string secret.data.INQTRIX_DATABASE_URL=... or a values override; do
+  # NOT commit real secrets into a values file.
+  data: {}
+
+# -- Prometheus /metrics endpoint on the API pods. Off by default. Sets
+# INQTRIX_METRICS_ENABLED and, when podAnnotations is true, the
+# prometheus.io/scrape annotations for an annotation-based Prometheus. The
+# series carry no run-id/subject/session labels. When an API key is set (auth
+# apikey mode), /metrics is Bearer-gated with that key; otherwise keep it
+# cluster-internal (this endpoint is not exposed through the web Ingress).
+metrics:
+  enabled: false
+  # Emit prometheus.io/{scrape,port,path} pod annotations (classic scrape
+  # config). Set false when you use a PodMonitor/ServiceMonitor CR instead.
+  podAnnotations: true
+  # Worker-process exporter: each worker pod serves its OWN registry on this
+  # port (INQTRIX_WORKER_METRICS_PORT; no pushgateway — scrape every replica).
+  # 0 keeps the worker without an exporter. Requires metrics.enabled=true.
+  workerPort: 0
+
+# -- OpenTelemetry trace export for the agentic runs (INQTRIX_TRACING).
+# Off by default (spans then only correlate JSON log lines when the app
+# enables local mode itself). The MINIMAL enterprise path is an EXISTING
+# Langfuse server: set enabled + otlpEndpoint + headersSecret — no
+# in-cluster deployment needed. To co-deploy Langfuse, install the
+# official `langfuse` chart (repo https://langfuse.github.io/langfuse-k8s)
+# as a SEPARATE release and point otlpEndpoint at its service; the recipe is
+# in docs/deployment/kubernetes.md.
+observability:
+  tracing:
+    enabled: false
+    # off | local | file | otlp — the sink INQTRIX_TRACING is set to when
+    # enabled. otlp needs otlpEndpoint; the API server and the worker get
+    # identical settings (one trace spans both).
+    mode: "otlp"
+    # OTLP/HTTP base endpoint, e.g. for Langfuse:
+    # http://langfuse-web.langfuse.svc:3000/api/public/otel
+    otlpEndpoint: ""
+    # Secret carrying the FULL OTEL_EXPORTER_OTLP_HEADERS value, e.g.
+    # "Authorization=Basic <base64(pk-lf-…:sk-lf-…)>,x-langfuse-ingestion-version=4"
+    # (the second pair is required for real-time display in Langfuse).
+    headersSecret:
+      name: ""
+      key: "OTEL_EXPORTER_OTLP_HEADERS"
+    # Head-sampling ratio (INQTRIX_TRACE_SAMPLE_RATE); 1.0 keeps everything.
+    sampleRate: ""
+    # Browser base URL of the Langfuse UI (INQTRIX_TRACE_UI_URL) for the
+    # admin "open trace" deep link; empty hides the link.
+    uiUrl: ""
+    # Trace retention in days (INQTRIX_TRACE_RETENTION_DAYS), enforced by
+    # the worker's cleanup job against the Langfuse API (otlp mode only;
+    # 0 disables). Empty keeps the application default (30).
+    retentionDays: ""
+    # mode "file" with worker.enabled needs ONE spool directory that api
+    # and worker pods share, or the admin trace export never sees the
+    # worker-written run spans. Name an existing RWX PersistentVolumeClaim
+    # here; the chart then mounts it at /var/lib/inqtrix/traces in both
+    # deployments and points INQTRIX_TRACE_SPOOL_DIR at it. Leaving it
+    # empty in file mode with a worker is refused at render time.
+    spoolClaim: ""
+    # Recording DEPTH (OBSERVABILITY_PROFILE): summary | forensic.
+    # forensic additionally records prompts, raw provider responses, tool
+    # arguments and per-source search records — only meaningful with a
+    # recording sink (mode file/otlp at sampleRate 1.0); the app warns at
+    # startup otherwise. Empty keeps the application default (summary).
+    profile: ""
+    # Per-attribute content byte BACKSTOP (INQTRIX_TRACE_MAX_ATTR_BYTES).
+    # Sized so it does not fire in normal operation; raise it rather than
+    # accept truncated prompts. Empty keeps the default (1 MiB).
+    maxAttrBytes: ""
+
+  # -- Machine-readable stdout logs (INQTRIX_LOG_FORMAT=json). Recommended
+  # for container runtimes: stdout then carries the full configured level
+  # with the correlation envelope (request_id/run_id/user/trace_id), so a
+  # log line and its trace join without a lookup. Empty keeps text.
+  logFormat: ""
+
+  # -- Retention for the two durable trails the worker prunes daily.
+  # BOTH jobs live in the worker process: without worker.enabled these
+  # values describe an intent, not an enforced policy. Empty keeps the
+  # application defaults (audit 365 days, usage ledger 730 = 24 months);
+  # 0 keeps rows forever.
+  retention:
+    auditDays: ""
+    usageDays: ""
+
+# -- API server (FastAPI, python -m inqtrix). Stateless; scale via replicaCount
+# or autoscaling. More than one replica requires the worker (on by default):
+# without it every API process executes runs itself and fails the runs another
+# process executes as lost, so the chart refuses that render. See Scaling in
+# docs/deployment/kubernetes.md.
+api:
+  replicaCount: 1
+  # Default sizing for the shipped run cap (MAX_CONCURRENT /
+  # RUN_MAX_CONCURRENT, 100 each). Resident memory grows with the number of
+  # concurrent runs (about 620 MB for the api at that cap, with providers
+  # mostly waiting), so treat the memory request as a floor for that cap: a
+  # request below the pod's real load leaves it burstable, and a burstable
+  # pod is the first thing evicted under node pressure. Lower the run cap
+  # before lowering the request; raise request and limit together for a
+  # higher cap or heavier providers.
+  # CPU: one API process serves every request on a single event loop, so a
+  # pod uses at most about one core; add replicas rather than raising the
+  # limit. Measured on a local reference stack, an idle API needs about 0.05
+  # cores plus a few milliseconds of CPU per second for each open browser tab,
+  # and chat answers are computed here too. The 250m request is a starting
+  # point for a small team without live collaboration: watch the real usage.
+  # With collaboration.enabled the API relays and persists every editor
+  # update (roughly 13 ms of CPU each under sustained typing, derived from the
+  # same measurements), so request 1 core per replica there. An HPA target is
+  # a percentage of this request.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 768Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 60
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- Web UI (dependency-light Python web gateway serving the React bundle and
+# reverse-proxying HTTP/WebSocket traffic on one origin). Stateless.
+web:
+  replicaCount: 1
+  # -- Forwarded-scheme override for the Python web gateway ("" derives it from
+  # chart-owned ingress/Route TLS settings). Set "https" when a TLS
+  # terminator the chart does not own (own LoadBalancer, Gateway API,
+  # service mesh) fronts the web Service. When INQTRIX_PUBLIC_BASE_URL is
+  # explicit, this scheme must match it; the web gateway rejects a mismatch
+  # at startup rather than forwarding contradictory origin metadata.
+  # -- Per-worker ceiling for the gateway's pooled backend connections
+  # (INQTRIX_MAX_UPSTREAM_CONNECTIONS). Unset (null) keeps the gateway's
+  # built-in default -- deliberately not restated here, so there is one
+  # source of truth. Every open SSE stream holds one upstream connection for
+  # its whole duration; exhaustion is a 503 naming the variable. Set only a
+  # positive integer; anything below 1 fails the render.
+  # This is a typed value because the web pod has NO envFrom: entries in
+  # config:/extraConfig: never reach it.
+  maxUpstreamConnections: null
+  externalScheme: ""
+  # -- Extra environment for the web container (e.g. an explicit
+  # INQTRIX_PROXY_MAX_BODY_BYTES when the derived default does not fit).
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 60
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- Optional private editor collaboration service. Disabled by default. The
+# browser never reaches this Service directly: the Python web gateway proxies
+# /collaboration to FastAPI, whose gateway authenticates and relays to
+# this single-writer process. The Deployment is intentionally fixed at one
+# replica with Recreate strategy; there is no HPA, PDB, or persistence knob.
+collaboration:
+  enabled: false
+  # A dedicated existing Secret may hold only the collaboration bearer value.
+  # When empty, the chart uses the main app Secret selected by secret.* below.
+  # In either Secret, `key` must contain at least 32 characters and must differ
+  # from INQTRIX_SESSION_SECRET. The value is injected into API and Node but is
+  # never rendered into a ConfigMap or command line.
+  secret:
+    existingSecret: ""
+    key: INQTRIX_COLLABORATION_SECRET
+  # Memory: Node caps its heap at about half of the container memory limit,
+  # so the limit stays twice the request. Measured on a local reference stack,
+  # the idle service holds about 130 MiB and keeps 210 to 315 MiB after work;
+  # open documents cost little, while typing in long documents allocates
+  # heavily for as long as it lasts (four people typing in 85-page documents
+  # peaked near 1 GiB). For teams that type concurrently in documents of about
+  # 50 pages or more, use requests 1Gi and limits 2Gi. Sizing rule and CPU
+  # figures: Scaling in docs/deployment/kubernetes.md. Every change restarts
+  # the single replica (Recreate) and briefly disconnects all editors.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- Durable worker (inqtrix-worker), on by default. It executes research and
+# agent runs, knowledge indexing, upload recovery, bulk deletions and the
+# retention jobs, and it resumes interrupted work after a restart. It needs
+# INQTRIX_STORAGE_BACKEND=postgres, a Valkey queue (the chart derives
+# INQTRIX_QUEUE_BACKEND=valkey; the URL comes from valkey.enabled or the
+# Secret) and a shared S3 object store, because it reads the files the API
+# wrote. The render fails and names whatever is missing. Set enabled=false for
+# the single-pod variant: one API replica that runs every job itself, without
+# crash resume and without the retention jobs.
+worker:
+  enabled: true
+  replicaCount: 1
+  # Default sizing for the shipped run cap (MAX_CONCURRENT /
+  # RUN_MAX_CONCURRENT, 100 each). Resident memory grows with the number of
+  # concurrent runs (about 700 MB for the worker at that cap, with providers
+  # mostly waiting), so treat the memory request as a floor for that cap: a
+  # request below the pod's real load leaves it burstable, and a burstable
+  # pod is the first thing evicted under node pressure. Lower the run cap
+  # before lowering the request; raise request and limit together for a
+  # higher cap or heavier providers.
+  # CPU: a run mostly waits on providers, but writing its report is real
+  # work: measured on a local reference stack, a compact research run used
+  # about 0.05 cores on average and about 0.3 cores while writing its report.
+  # The 250m request is a starting point; size it from the number of runs
+  # that write reports at the same time.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 768Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- One-shot DB migration as a Helm hook running `inqtrix-migrate`; Helm blocks
+# until it succeeds, so a failed migration fails the release. Hook phase depends
+# on where the DB comes from: pre-install for an external DB (exists before the
+# app), post-install when Postgres is bundled (created during install); always
+# pre-upgrade. Only meaningful with the postgres storage backend. Disable to run
+# migrations out-of-band.
+migrations:
+  enabled: true
+  backoffLimit: 1
+  # RLS authority used by inqtrix-migrate: auto (bundled/backwards-compatible),
+  # owner (portable managed-Postgres maintenance), or bypass (a dedicated
+  # BYPASSRLS role). Every installed-schema upgrade additionally requires
+  # maintenanceConfirmed=true to authorize the chart's bounded pre-upgrade hook
+  # to scale API/worker/collaboration to zero and drain their pools.
+  rlsMode: auto
+  maintenanceConfirmed: false
+  # Schema upgrades render a pre-upgrade hook that removes the API HPA, scales
+  # API/worker/collaboration to zero, and waits for their Pods to terminate
+  # before the migration hook runs. The hook revokes its temporary RoleBinding
+  # before exit. The normal Helm apply restores workloads after migration and,
+  # with API autoscaling, writes minReplicas once to reactivate the HPA from 0.
+  # Keep it above the worker's 120-second termination grace period, which a
+  # draining worker pod may use in full.
+  maintenanceTimeoutSeconds: 300
+  # Dedicated Secret containing ONLY the direct migration DSN. It is required
+  # for an external database when rlsMode is owner or bypass; the
+  # backwards-compatible runtime URL fallback remains available only to
+  # bundled Postgres and external auto-mode migrations. The name must differ
+  # from secret.existingSecret (or the chart-managed application Secret).
+  databaseSecret:
+    name: ""
+    key: INQTRIX_MIGRATION_DATABASE_URL
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# -- Kubernetes Service ports. The collaboration port is ClusterIP-only and is
+# not added to the public web Service or Ingress.
+service:
+  type: ClusterIP
+  apiPort: 5100
+  webPort: 8080
+  collaborationPort: 1234
+
+# -- Ingress. The web Service is the single ingress target.
+ingress:
+  enabled: false
+  className: ""
+  # -- Ingress annotations are controller-specific, so the chart cannot set
+  # them for you -- but with most controllers the DEFAULTS break Inqtrix:
+  # ingress-nginx caps request bodies at 1m (every file upload > 1 MiB dies at
+  # the ingress with a bare 413 before Inqtrix is ever reached, despite the
+  # web pod's own 110m limit) and cuts responses idle for 60s (editor AI calls
+  # block up to 630s, non-streaming chat completions up to 3630s, and chat SSE
+  # emits no keepalive frames). For ingress-nginx start from:
+  #   nginx.ingress.kubernetes.io/proxy-body-size: "110m"
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3630"
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: "3630"
+  # Raise proxy-body-size together with INQTRIX_MAX_FILE_BYTES and the
+  # timeouts together with INQTRIX_MAX_TOTAL_SECONDS.
+  annotations: {}
+  host: inqtrix.example.com
+  path: /
+  pathType: Prefix
+  tls:
+    enabled: false
+    secretName: ""
+
+# -- Object-store persistence for the local backend, which only the single-pod
+# variant (worker.enabled=false, one API replica) can use. When enabled a PVC is
+# created; it is mounted at config.INQTRIX_OBJECT_STORE_PATH (the exact path the
+# app writes to, so the mount and the app can never drift) only while the
+# effective backend is local. With S3 the PVC stays in place but unmounted until
+# you disable persistence, which deletes it; copy its objects to the bucket
+# first. Without persistence the local backend uses an emptyDir (object-store
+# data is lost on pod restart).
+persistence:
+  enabled: false
+  size: 5Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+# -- Pod-level security context. seccompProfile is always RuntimeDefault. On
+# vanilla Kubernetes a fixed non-root UID and fsGroup are applied (see
+# nonRootUid/fsGroup).
+podSecurityContext: {}
+nonRootUid: 1001
+fsGroup: 1001
+
+# -- Container-level security context. The images run
+# non-root, bind only ports >1024 (5100 / 8080) and write only to mounted
+# emptyDir/PVC volumes, so a read-only root filesystem and dropping all
+# capabilities are safe.
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  # create=false is the strict BYO contract: name must identify an existing,
+  # unannotated internal account and the chart creates no internal accounts.
+  # API/worker may still select separately managed workload-identity accounts
+  # via their component name overrides. Set name=default only deliberately.
+  create: true
+  name: ""
+  annotations: {}
+  # Per-workload overrides are additive. They let API/worker use an annotated
+  # workload-identity ServiceAccount without granting cloud identity to web,
+  # collaboration, migrations, or Helm tests. Empty names fall back to the
+  # shared ServiceAccount above. annotations are accepted only with create=true;
+  # externally managed account annotations belong on that external resource.
+  api:
+    create: false
+    name: ""
+    annotations: {}
+    automountServiceAccountToken: false
+  worker:
+    create: false
+    name: ""
+    annotations: {}
+    automountServiceAccountToken: false
+
+# ---------------------------------------------------------------------------
+# Optional bundled backing services (turnkey demo). Default OFF -> the app uses
+# the external connections from `config` + `secret`. When enabled, the chart
+# starts a minimal single-pod instance AND auto-wires the matching connection
+# into the app (INQTRIX_DATABASE_URL / INQTRIX_QDRANT_URL+VECTOR_BACKEND+
+# KNOWLEDGE_ENABLED / INQTRIX_VALKEY_URL / INQTRIX_OBJECT_STORE_BACKEND+
+# S3_ENDPOINT_URL+S3_BUCKET+S3 keys; the queue backend follows worker.enabled)
+# so a turnkey demo is one command. While a service is bundled, its
+# service-specific values block is the only topology and credential source;
+# parallel config/secret overrides fail rendering.
+# If secret.existingSecret is set, the chart cannot write derived secret keys
+# into that user-managed Secret; include the connection value and matching raw
+# backing-service credential there yourself.
+#
+# All bundled services are single-pod, demo/dev ONLY (not highly available); for
+# production on any platform prefer managed instances and leave these disabled.
+#
+# qdrant, valkey and s3 (minio) write only to their own data directory and need
+# no /etc/passwd entry, so each carries a fixed non-root UID plus a matching
+# fsGroup. The bundled POSTGRES is the exception: the official image's initdb
+# looks the UID up in /etc/passwd, so its UID is pinned separately.
+#
+# postgres.enabled ALSO DERIVES the runtime login policy (see configmap.yaml):
+#   enabled=true  -> INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=bundled_legacy
+#   enabled=false -> INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=restricted
+# Reason: the official Postgres image creates POSTGRES_USER as a SUPERUSER that
+# owns every object, and the chart builds INQTRIX_DATABASE_URL from exactly that
+# user -- so the bundled runtime login is privileged by construction and only
+# bundled_legacy accepts it. With an EXTERNAL database (enabled=false) the auth
+# block below is IGNORED, and your INQTRIX_DATABASE_URL login must be an
+# unprivileged role that can SET ROLE to INQTRIX_DATABASE_APP_ROLE. Create the
+# three roles once as described in docs/deployment/database-migrations.md.
+# Do NOT override the policy back to bundled_legacy to silence a managed-database
+# role error: that runs the whole application as a database superuser.
+postgres:
+  enabled: false
+  image: docker.io/library/postgres:18.4-trixie@sha256:8ff36f3c66371cba71d20ceedccfc3de9669a68737607888c4ef0af93abe8e39
+  imagePullPolicy: IfNotPresent
+  auth:
+    # Bundled database ONLY (ignored when enabled=false). Becomes the image's
+    # POSTGRES_USER, which Postgres creates as a superuser owning every object.
+    # No Inqtrix role name is fixed by this -- external deployments name their
+    # own roles and carry the app role in INQTRIX_DATABASE_APP_ROLE.
+    username: inqtrix
+    # Embedded verbatim into INQTRIX_DATABASE_URL, so use only URL-unreserved
+    # characters [A-Za-z0-9._~-] (the chart fails the render otherwise). For an
+    # arbitrary password, use an external database with secret.data.INQTRIX_DATABASE_URL.
+    password: ""
+    database: inqtrix
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: ""
+  # Vanilla-k8s security context (official postgres runs as uid 999).
+  podSecurityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+  # -- Server ceiling on concurrent client connections for the BUNDLED
+  # Postgres. The image default of 100 does not cover the shipped run cap: run
+  # threads open a connection per database operation, and an api plus a worker
+  # each add their own pooled budget, which both report at startup. 300 carries
+  # headroom for that sum; it is an engineering estimate, not a figure measured
+  # at the run cap. Raising it costs memory per connection --
+  # postgres.resources below is sized for this value. Ignored entirely when
+  # postgres.enabled is false -- an external database is the operator's.
+  maxConnections: 300
+  # Sized for postgres.maxConnections above: ~1.95 MB per resting connection
+  # plus shared_buffers, and work_mem may be taken more than once per active
+  # query. Lower maxConnections before lowering this.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+# Transaction-mode PgBouncer in front of the BUNDLED Postgres (requires
+# postgres.enabled). When enabled, the app's derived INQTRIX_DATABASE_URL
+# points at the pooler (with ?prepared_statement_cache_size=0 appended);
+# the migrate hook keeps the DIRECT Postgres URL (DDL does not multiplex).
+# An explicit secret.data.INQTRIX_DATABASE_URL always wins — external-DB
+# deployments run their own pooler and point that URL wherever they like.
+# The image is the CloudNativePG upstream PgBouncer package. Inqtrix supplies
+# the configuration and creates a mode-0600 userlist from the chart Secret at
+# runtime; no custom image is built.
+pgbouncer:
+  enabled: false
+  image: ghcr.io/cloudnative-pg/pgbouncer:1.25.1-trixie@sha256:e6ddfe22d845e603825e235dd8334b21ecd125abea2a2172478f556b8dee2bb8
+  imagePullPolicy: IfNotPresent
+  poolMode: transaction
+  maxClientConn: 400
+  defaultPoolSize: 20
+  # pgbouncer >= 1.21 tracks named prepared statements under transaction
+  # pooling — required for asyncpg (belt-and-braces with the URL param).
+  maxPreparedStatements: 200
+  # Fixed non-root UID, GID and fsGroup, like the other bundled services.
+  podSecurityContext:
+    runAsUser: 998
+    runAsGroup: 996
+    fsGroup: 996
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+
+qdrant:
+  enabled: false
+  image: docker.io/qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
+  imagePullPolicy: IfNotPresent
+  # The chart runs the upstream image as a fixed non-root UID on vanilla
+  # Kubernetes. The template therefore routes every mutable Qdrant path
+  # (init marker, storage, snapshots, temp files) into the mounted storage
+  # volume instead of the image-owned /qdrant directory.
+  # Required when the bundled service is enabled. It is wired into both
+  # Qdrant and the app as INQTRIX_QDRANT_API_KEY.
+  apiKey: ""
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  # Fixed non-root UID + fsGroup so the data volume is owned and writable.
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+valkey:
+  enabled: false
+  # Engine of the BUNDLED broker: "valkey" (default) or "redis". It selects the
+  # container command and probe binaries (valkey-server/-cli vs redis-server/-cli);
+  # every server flag and the probes' REDISCLI_AUTH are identical on both, and the
+  # app speaks plain RESP either way (Redis 6.2 is the floor -- XAUTOCLAIM). Any
+  # other value fails the render. Set this TOGETHER with the image: a redis image
+  # carries no valkey-* binaries, so changing only the image fails at container
+  # start. Only the valkey image below is digest-pinned and updated by this
+  # project: selecting redis means supplying your own pinned image and tracking
+  # its CVEs. An EXTERNAL broker needs neither value -- set
+  # secret.data.INQTRIX_VALKEY_URL (or put it in secret.existingSecret and
+  # confirm it with config.INQTRIX_QUEUE_BACKEND=valkey) and leave enabled=false.
+  engine: valkey
+  image: docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
+  imagePullPolicy: IfNotPresent
+  # Embedded verbatim into INQTRIX_VALKEY_URL, so use only URL-unreserved
+  # characters [A-Za-z0-9._~-] (the chart fails the render otherwise).
+  password: ""
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  # Fixed non-root UID + fsGroup so the data volume is owned and writable.
+  podSecurityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Bundled S3-compatible object store (MinIO) -- the turnkey equivalent of the
+# Compose `--profile s3` SeaweedFS service. Enable for a self-contained object
+# store; the bucket is created automatically on first upload. For production prefer
+# external/managed S3 (set INQTRIX_OBJECT_STORE_BACKEND=s3 plus the S3_* config/secret
+# yourself) and leave this disabled. The worker (on by default) and every
+# multi-replica setup need a shared object store, this one or an external S3:
+# the local backend is per-pod disk.
+s3:
+  enabled: false
+  image: docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+  imagePullPolicy: IfNotPresent
+  # MinIO root credentials ARE the S3 access/secret keys auto-wired into the app.
+  # Unlike the DB/Valkey passwords these are sent as request credentials (not embedded
+  # in a URL), so any value works; the secret key must be >= 8 characters (MinIO).
+  accessKey: inqtrix
+  secretKey: ""
+  # Bucket the app uses; created automatically on first upload.
+  bucket: inqtrix-files
+  # Optional CA ConfigMap for a private external S3-compatible endpoint. This
+  # mount is added only to API/worker and automatically sets
+  # INQTRIX_S3_CA_BUNDLE to mountPath. It is also usable with enabled=false.
+  caBundle:
+    existingConfigMap: ""
+    key: ca.crt
+    mountPath: /etc/inqtrix/object-store/ca.crt
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  # Fixed non-root UID + fsGroup so the data volume is owned and writable.
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi

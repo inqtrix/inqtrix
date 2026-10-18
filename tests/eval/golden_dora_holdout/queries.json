@@ -1,0 +1,72 @@
+{
+ "description": "HELD-OUT split of the DORA tier (Regulation (EU) 2022/2554): 8 stratified queries (3 multi / 2 fact / 2 paraphrase / 1 exact) removed from golden_dora. POLICY: never tuned against — no retrieval knob, prompt, or profile change may be optimized on this set; it runs only as a held-out regression gate to detect over-fitting of the tuning tiers. Its baseline lives in baselines/dora_holdout__<model>.json and is established as a deliberate reviewed commit. The corpus is SHARED with golden_dora (see GOLDEN_SETS['dora_holdout'] in tests/eval/harness.py) — rebuild via golden_dora/build_corpus.py.",
+ "queries": [
+  {
+   "id": "d03",
+   "query": "Wie haeufig muessen die dafuer ermittelten Finanzunternehmen bedrohungsorientierte Penetrationstests durchfuehren, welche Funktionen und Systeme muss ein solcher Test einschliessen, und welche Anforderungen muessen die herangezogenen Tester erfuellen?",
+   "relevant": [
+    "artikel-026",
+    "artikel-027"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "d06",
+   "query": "Welche Vorkehrungen muss ein Finanzunternehmen treffen, um nach einer schwerwiegenden Betriebsstoerung seine kritischen Funktionen fortzufuehren und IKT-Systeme samt Daten wiederherzustellen — von der Geschaeftsfortfuehrungsleitlinie bis zur Datensicherung?",
+   "relevant": [
+    "artikel-011",
+    "artikel-012"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "d09",
+   "query": "Wer genehmigt und ueberwacht im Finanzunternehmen die IKT-Geschaeftsfortfuehrungsleitlinie, und welche Ziele muss diese Leitlinie verfolgen und wie oft muessen die zugehoerigen Plaene getestet werden?",
+   "relevant": [
+    "artikel-005",
+    "artikel-011"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "d12",
+   "query": "Anhand welcher Kriterien klassifizieren Finanzunternehmen IKT-bezogene Vorfaelle und bestimmen deren Auswirkungen?",
+   "relevant": [
+    "artikel-018"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "d15",
+   "query": "Welche Angaben zu den Standorten der Datenverarbeitung muessen vertragliche Vereinbarungen ueber die Nutzung von IKT-Dienstleistungen enthalten?",
+   "relevant": [
+    "artikel-030"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "d22",
+   "query": "Was muss eine Bank vorab abwaegen, wenn sie alle wichtigen IT-Aufgaben an einen einzigen Anbieter geben will, fuer den es kaum Ersatz gibt?",
+   "relevant": [
+    "artikel-029"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "d23",
+   "query": "Muessen wir unsere Kunden sofort benachrichtigen, wenn eine schwere IT-Panne ihr Geld betrifft, und was muessen wir ihnen dabei mitteilen?",
+   "relevant": [
+    "artikel-019"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "d26",
+   "query": "Gegen wen kann ein Zwangsgeld von bis zu '1 % des durchschnittlichen weltweiten Tagesumsatzes' verhaengt werden und wie lange hoechstens?",
+   "relevant": [
+    "artikel-035"
+   ],
+   "category": "exact"
+  }
+ ]
+}

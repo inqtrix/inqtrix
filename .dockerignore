@@ -1,0 +1,45 @@
+# Keep the Docker build context small and secret-free.
+
+# Secrets — never bake env files into an image.
+.env
+.env.*
+*.env
+deploy/.env.stack
+deploy/env/*.env
+deploy/.secrets
+
+# Python build/runtime artefacts
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.egg-info
+
+# Node / frontend artefacts (rebuilt inside Dockerfile.web)
+**/node_modules
+apps/research-desk/dist
+apps/collaboration-server/dist
+packages/editor-schema/dist
+
+# VCS, local agent memory, IDE
+.git
+.gitignore
+.cursor
+.claude
+
+# Tests, local run artefacts, docs, examples, README media — no image build
+# reads them. `e2e` carries the local Playwright/verification results, which are
+# the single largest thing the daemon would otherwise copy on every build.
+tests
+e2e
+docs
+examples
+logs
+assets
+
+# Private local operator workspace. Never enters a build context, so it never
+# reaches the podman machine VM and never becomes a layer if a future COPY
+# widens to the repository root.
+untracked

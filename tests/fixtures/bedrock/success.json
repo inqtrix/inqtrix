@@ -1,0 +1,21 @@
+{
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "text": "Bedrock-Converse-Replay liefert Bedrock-modellspezifische output_config-Felder."
+        }
+      ]
+    }
+  },
+  "usage": {
+    "inputTokens": 14,
+    "outputTokens": 18,
+    "totalTokens": 32
+  },
+  "metrics": {
+    "latencyMs": 850
+  },
+  "stopReason": "end_turn"
+}

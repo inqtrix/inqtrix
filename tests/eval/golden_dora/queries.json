@@ -1,0 +1,189 @@
+{
+ "description": "Hard German retrieval golden set over DORA, Regulation (EU) 2022/2554: all 64 articles as single documents (corpus gitignored, rebuilt from the Publications Office Cellar by build_corpus.py — EU legal texts are free to reuse; we keep the repo source-clean like the other rebuildable tiers). The set is deliberately weighted toward the dimension the BSI tier measured headroom on (multi_complete 0.75): 9 of 31 queries are genuine multi-hop/aggregation questions whose complete answer spans 2-4 articles, and the single-document queries lean on DORA's near-identical sibling obligations (financial entities vs. critical ICT third-party providers, full vs. simplified risk framework, the three incident report types, TLPT vs. general testing) as natural distractors. Queries were drafted and adversarially label-verified against the actual corpus text. The no_evidence queries are excluded from retrieval metrics by design; they exist for a future answer-eval parametrization (the answer harness currently runs the base set only). Eight stratified queries were moved to golden_dora_holdout (never tuned against; held-out overfitting-regression gate only); the corpus is shared.",
+ "queries": [
+  {
+   "id": "d01",
+   "query": "Ein Finanzunternehmen erlebt einen schwerwiegenden IKT-bezogenen Vorfall: Anhand welcher Kriterien wird der Vorfall klassifiziert, welche Meldungen muss das Unternehmen der zustaendigen Behoerde in welcher Abfolge vorlegen, und wer legt die Fristen und Standardvorlagen fuer diese Meldungen fest?",
+   "relevant": [
+    "artikel-018",
+    "artikel-019",
+    "artikel-020"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "d02",
+   "query": "Welche Beurteilungen muss ein Finanzunternehmen vor Abschluss eines Vertrags ueber IKT-Dienstleistungen fuer kritische oder wichtige Funktionen vornehmen, und welche zusaetzlichen Vertragsbestimmungen muss die Vereinbarung fuer solche Funktionen mindestens enthalten?",
+   "relevant": [
+    "artikel-028",
+    "artikel-029",
+    "artikel-030"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "d04",
+   "query": "Nachdem ein IKT-Drittdienstleister als kritisch eingestuft wurde: Wer wird zu seiner federfuehrenden Ueberwachungsbehoerde ernannt, was bewertet diese Behoerde bei ihm, und welche Befugnisse stehen ihr dabei zur Verfuegung?",
+   "relevant": [
+    "artikel-031",
+    "artikel-033",
+    "artikel-035"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "d05",
+   "query": "Fuer welche Finanzunternehmen gilt nur der vereinfachte IKT-Risikomanagementrahmen, und welche Pflichten des regulaeren Rahmens — etwa unabhaengige Kontrollfunktion und interne Revision — entfallen dadurch fuer sie?",
+   "relevant": [
+    "artikel-016",
+    "artikel-006"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "d07",
+   "query": "Wie sind die Testpflichten zur digitalen operationalen Resilienz abgestuft: Welche Arten von Tests umfasst das allgemeine Testprogramm, was muss mindestens jaehrlich getestet werden, und wer muss zusaetzlich erweiterte bedrohungsorientierte Tests durchfuehren?",
+   "relevant": [
+    "artikel-024",
+    "artikel-025",
+    "artikel-026"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "d08",
+   "query": "Worueber muessen Finanzunternehmen den zustaendigen Behoerden jaehrlich aus ihrem Informationsregister zu IKT-Vertraegen berichten, und wofuer werden diese Berichte auf Unionsebene weiterverwendet?",
+   "relevant": [
+    "artikel-028",
+    "artikel-031"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "d10",
+   "query": "Welche Finanzunternehmen muessen anstelle der Artikel 5 bis 15 nur einen vereinfachten IKT-Risikomanagementrahmen einhalten?",
+   "relevant": [
+    "artikel-016"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "d11",
+   "query": "Welche drei Arten von Meldungen muessen Finanzunternehmen der zustaendigen Behoerde bei einem schwerwiegenden IKT-bezogenen Vorfall vorlegen?",
+   "relevant": [
+    "artikel-019"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "d13",
+   "query": "In welchem zeitlichen Abstand muessen Finanzunternehmen mindestens erweiterte Tests anhand von bedrohungsorientierten Penetrationstests (TLPT) durchfuehren?",
+   "relevant": [
+    "artikel-026"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "d14",
+   "query": "Durch welche Versicherung muessen Tester abgesichert sein, die Finanzunternehmen fuer TLPT heranziehen?",
+   "relevant": [
+    "artikel-027"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "d16",
+   "query": "Wie hoch darf das taegliche Zwangsgeld hoechstens sein, das die federfuehrende Ueberwachungsbehoerde gegen einen kritischen IKT-Drittdienstleister verhaengt?",
+   "relevant": [
+    "artikel-035"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "d17",
+   "query": "Darf die federfuehrende Ueberwachungsbehoerde bei Vor-Ort-Inspektionen Geschaeftsraeume eines kritischen IKT-Drittdienstleisters versiegeln?",
+   "relevant": [
+    "artikel-039"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "d18",
+   "query": "Welchen Plan B muss eine Bank in der Schublade haben, falls ihr Cloud-Anbieter ploetzlich ausfaellt oder man aus dem Vertrag raus muss, ohne dass das Geschaeft stillsteht?",
+   "relevant": [
+    "artikel-028"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "d19",
+   "query": "Muss eine Wertpapier-Verwahrstelle ein zweites Rechenzentrum in ausreichender raeumlicher Entfernung betreiben, damit der Betrieb weiterlaeuft, wenn der Hauptstandort ausfaellt?",
+   "relevant": [
+    "artikel-012"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "d20",
+   "query": "Wie oft muessen Banken Uebungen durchfuehren lassen, bei denen beauftragte Hacker einen echten Angriff auf die laufenden Systeme simulieren?",
+   "relevant": [
+    "artikel-026"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "d21",
+   "query": "Sind regelmaessige Trainings zur IT-Sicherheit fuer die gesamte Belegschaft bis hinauf zur Chefetage wirklich Pflicht?",
+   "relevant": [
+    "artikel-013"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "d24",
+   "query": "Welche vertraglichen Vereinbarungen muessen Finanzunternehmen im 'Informationsregister' erfassen und wem ist es auf Verlangen vorzulegen?",
+   "relevant": [
+    "artikel-028"
+   ],
+   "category": "exact"
+  },
+  {
+   "id": "d25",
+   "query": "Aus welchen Mitgliedern setzt sich das 'Ueberwachungsforum' zusammen und wer nimmt nur als Beobachter teil?",
+   "relevant": [
+    "artikel-032"
+   ],
+   "category": "exact"
+  },
+  {
+   "id": "d27",
+   "query": "Welche maximale Geldbusse in Euro sieht DORA fuer ein Finanzunternehmen vor, das gegen die Anforderungen an das IKT-Risikomanagement verstoesst?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "d28",
+   "query": "Innerhalb wie vieler Stunden muss ein Finanzunternehmen die Erstmeldung eines schwerwiegenden IKT-bezogenen Vorfalls bei der zustaendigen Behoerde einreichen?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "d29",
+   "query": "Nach welchem benannten Standard, etwa ISO 27001, muessen Finanzunternehmen ihr IKT-Risikomanagement gemaess DORA zertifizieren lassen?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "d30",
+   "query": "Wie hoch sind die jaehrlichen Ueberwachungsgebuehren in Euro, die ein kritischer IKT-Drittdienstleister an die federfuehrende Ueberwachungsbehoerde entrichten muss?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "d31",
+   "query": "Ab welchem Marktanteil in Prozent wird ein IKT-Drittdienstleister nach DORA als kritisch eingestuft?",
+   "relevant": [],
+   "category": "no_evidence"
+  }
+ ]
+}

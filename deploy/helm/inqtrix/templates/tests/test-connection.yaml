@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-test-health
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "test") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  serviceAccountName: {{ include "inqtrix.internalServiceAccountName" (dict "root" . "component" "test") }}
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- include "inqtrix.podSecurityContext" . | nindent 4 }}
+  containers:
+    - name: health
+      image: {{ include "inqtrix.image.api" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        capabilities:
+          drop:
+            - ALL
+      command:
+        - python
+        - -c
+        - |
+          import json, sys, urllib.request
+          url = "http://{{ include "inqtrix.fullname" . }}-api:{{ .Values.service.apiPort }}/readyz"
+          with urllib.request.urlopen(url, timeout=10) as response:
+              payload = json.load(response)
+          if payload.get("status") not in {"ready", "degraded"}:
+              sys.exit(1)
+          {{- $explicitStore := coalesce .Values.config.INQTRIX_OBJECT_STORE_BACKEND .Values.extraConfig.INQTRIX_OBJECT_STORE_BACKEND "" }}
+          {{- $effectiveStore := $explicitStore }}
+          {{- if not $effectiveStore }}
+          {{- $effectiveStore = ternary "s3" "local" .Values.s3.enabled }}
+          {{- end }}
+          {{- if eq ($effectiveStore | toString) "s3" }}
+          if payload.get("checks", {}).get("object_store") != "ok":
+              sys.exit(1)
+          {{- end }}

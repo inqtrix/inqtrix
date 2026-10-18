@@ -1,0 +1,101 @@
+{
+  "description": "Cross-language anchor-resolver parity: the Python _resolve_anchor (editor_patch_service.py) and the TS port resolveAnchorInMarkdown (anchoring.ts) must return the SAME start offset (or null abstention) for every case. Byte-literal semantics: NO whitespace normalization — the whitespace cases pin exactly that axis.",
+  "cases": [
+    {
+      "name": "single_occurrence_wins",
+      "content": "Alpha beta gamma. Delta epsilon.",
+      "find": "beta",
+      "quote_before": "",
+      "quote_after": "",
+      "expected": 6
+    },
+    {
+      "name": "not_found_is_null",
+      "content": "Alpha beta gamma.",
+      "find": "zeta",
+      "quote_before": "",
+      "quote_after": "",
+      "expected": null
+    },
+    {
+      "name": "multi_without_quotes_abstains",
+      "content": "Wert eins. Wert zwei.",
+      "find": "Wert",
+      "quote_before": "",
+      "quote_after": "",
+      "expected": null
+    },
+    {
+      "name": "quote_before_disqualifies_hard",
+      "content": "Wert eins. Marker davor Wert zwei.",
+      "find": "Wert",
+      "quote_before": "Marker davor",
+      "quote_after": "",
+      "expected": 24
+    },
+    {
+      "name": "summed_distance_picks_nearest",
+      "content": "A Wert x. Anker B Wert y. Anker naeher Wert z.",
+      "find": "Wert",
+      "quote_before": "Anker",
+      "quote_after": "",
+      "expected": 18
+    },
+    {
+      "name": "symmetric_tie_abstains",
+      "content": "Q Wert a. Q Wert b.",
+      "find": "Wert",
+      "quote_before": "Q",
+      "quote_after": "",
+      "expected": null
+    },
+    {
+      "name": "quote_after_symmetric_tie_abstains",
+      "content": "Wert a Ende weit weg. Wert b Ende.",
+      "find": "Wert",
+      "quote_before": "",
+      "quote_after": "Ende",
+      "expected": null
+    },
+    {
+      "name": "whitespace_axis_newline_is_literal",
+      "content": "Zeile eins\nZeile zwei",
+      "find": "eins Zeile",
+      "quote_before": "",
+      "quote_after": "",
+      "expected": null
+    },
+    {
+      "name": "whitespace_axis_newline_matches_byte_true",
+      "content": "Zeile eins\nZeile zwei",
+      "find": "eins\nZeile",
+      "quote_before": "",
+      "quote_after": "",
+      "expected": 6
+    },
+    {
+      "name": "whitespace_axis_double_space_is_literal",
+      "content": "Wort  doppelt und Wort einfach.",
+      "find": "Wort doppelt",
+      "quote_before": "",
+      "quote_after": "",
+      "expected": null
+    },
+    {
+      "name": "both_quotes_sum",
+      "content": "L Wert R weit. L nah Wert R.",
+      "find": "Wert",
+      "quote_before": "L",
+      "quote_after": "R",
+      "expected": 2
+    },
+    {
+      "name": "quote_after_distance_picks_nearest",
+      "content": "Wert a x Ende. Wert b Ende.",
+      "find": "Wert",
+      "quote_before": "",
+      "quote_after": "Ende",
+      "expected": 15
+    }
+  ]
+}

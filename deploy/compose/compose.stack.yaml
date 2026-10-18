@@ -1,0 +1,822 @@
+# Canonical Compose stack. Raw Compose is the source-of-truth interface and
+# must pass BOTH files in this order:
+#
+#   docker compose -f deploy/compose/compose.stack.yaml \
+#     --env-file deploy/.env.stack.secrets \
+#     --env-file deploy/.env.stack up -d --build
+#
+# The optional ``inqtrix-deploy`` wrapper selects these same canonical files
+# and adds preflight, maintenance, redaction, and destructive-operation gates:
+#
+#   inqtrix-deploy up --detach --build
+#
+# Requires Docker Compose >= 2.24: this file uses the env_file long form with
+# `required` and `depends_on` with `required: false`. Older compose versions
+# fail with a schema error ("additional property ... is not allowed") that
+# does not name the real cause. `podman compose` must delegate to an equally
+# recent docker-compose.
+#
+# Compose does not auto-load files with these names. The secrets file loads
+# first; the non-secret config loads second and contains the visible DSN
+# expression that references the password. API and worker load the same ordered
+# pair through ``env_file``. Their explicit INQTRIX_DATABASE_URL entries also
+# make the effective runtime target visible in rendered Compose configuration.
+# The migration job never
+# loads either runtime file: it receives the interpolated runtime DSN only as
+# the bundled-database fallback, while an optional migration-only file can
+# override it with INQTRIX_MIGRATION_DATABASE_URL.
+#
+# Default stack (no profile): postgres + migrate (one-shot) + api + web.
+# The browser hits ONE origin (http://localhost:8080); the dependency-light
+# Python web gateway in the `web` container reverse-proxies /api, /v1,
+# /health, /readyz and /collaboration to the `api` service, so there is no
+# CORS and no VITE_INQTRIX_API_BASE_URL build-time coupling.
+#
+# Optional profiles (add as needed, e.g. --profile knowledge --profile workers):
+#   knowledge -> qdrant (persistent/hybrid retrieval)
+#   workers   -> valkey + a worker process (durable run scaling)
+#   s3        -> seaweedfs (S3 object store instead of the local volume)
+#   oidc      -> dex (enterprise SSO; the default is local auth)
+#   collaboration -> private single-replica editor collaboration service
+#                    (also set INQTRIX_COLLABORATION_ENABLED=true + a secret)
+#
+# The optional wrapper validates this relationship in both directions:
+# selecting a bundled service hostname requires its profile, and selecting a
+# profile requires the matching app topology. Managed external endpoints omit
+# the corresponding bundled profile.
+#
+# Copy deploy/.env.stack.example to deploy/.env.stack and
+# deploy/.env.stack.secrets.example to deploy/.env.stack.secrets. Keep the
+# latter mode 0600. Every config copy declares root-relative INQTRIX_ENV_FILE
+# and INQTRIX_SECRETS_FILE pointers so raw Compose and service ``env_file`` use
+# the identical named pair.
+#
+# Image policy: only Docker Official Images or Docker-Sponsored upstream OSS,
+# always tag + digest pinned. Refresh digests deliberately.
+
+name: inqtrix
+
+services:
+  postgres:
+    # Docker Official Image, PostgreSQL 18.4 on Debian Trixie. Not published
+    # on a host port: only the api/migrate/
+    # worker services reach it over the compose network. Back up via
+    # `compose exec postgres pg_dump` (see docs/deployment/runbooks.md).
+    image: docker.io/library/postgres:18.4-trixie@sha256:8ff36f3c66371cba71d20ceedccfc3de9669a68737607888c4ef0af93abe8e39
+    environment:
+      POSTGRES_USER: ${INQTRIX_PG_USER:-inqtrix}
+      POSTGRES_PASSWORD: ${INQTRIX_PG_PASSWORD:-}
+      POSTGRES_DB: ${INQTRIX_PG_DB:-inqtrix}
+    # Server ceiling on concurrent client connections. The image default of
+    # 100 does not cover the shipped run cap: run threads open a connection
+    # per database operation, and an API plus a worker each add their own
+    # pooled budget, which both report at startup. 300 carries headroom for that
+    # sum; it is an engineering estimate, not a figure measured at the run cap
+    # -- lower it on a memory-tight host, and raise this service's memory when
+    # raising it further. A non-numeric value fails the server
+    # start rather than being ignored.
+    command:
+      - postgres
+      - -c
+      - max_connections=${INQTRIX_BUNDLED_POSTGRES_MAX_CONNECTIONS:-300}
+    volumes:
+      # postgres:18 moved PGDATA into a version-scoped subdir and declares
+      # VOLUME /var/lib/postgresql — mount the named volume THERE.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  pgbouncer:
+    # Optional transaction-mode connection pooler in front of Postgres
+    # (--profile pgbouncer). Opt in by ALSO pointing INQTRIX_DATABASE_URL at
+    # pgbouncer:6432 (see deploy/.env.stack.example); migrate below stays
+    # wired directly to postgres:5432 (DDL does not multiplex).
+    # Uses the CloudNativePG upstream package. The read-only container creates
+    # a mode-0600 userlist in tmpfs from its narrowly scoped environment, then
+    # unsets the password before execing PgBouncer.
+    # MAX_PREPARED_STATEMENTS (pgbouncer >= 1.21) makes asyncpg's named
+    # prepared statements safe under transaction pooling; the URL-side
+    # ?prepared_statement_cache_size=0 in the example env is belt-and-braces.
+    profiles: ["pgbouncer"]
+    image: ghcr.io/cloudnative-pg/pgbouncer:1.25.1-trixie@sha256:e6ddfe22d845e603825e235dd8334b21ecd125abea2a2172478f556b8dee2bb8
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        case "$${DB_USER}" in
+          ""|*[!A-Za-z0-9._~-]*) echo "invalid PgBouncer DB_USER" >&2; exit 64 ;;
+        esac
+        case "$${DB_PASSWORD}" in
+          ""|*[!A-Za-z0-9._~-]*) echo "invalid PgBouncer password charset" >&2; exit 64 ;;
+        esac
+        install -d -m 0700 /tmp/inqtrix-pgbouncer
+        printf '"%s" "%s"\n' "$${DB_USER}" "$${DB_PASSWORD}" > /tmp/inqtrix-pgbouncer/userlist.txt
+        unset DB_PASSWORD
+        exec /usr/sbin/pgbouncer /etc/inqtrix-pgbouncer/pgbouncer.ini
+    environment:
+      DB_USER: ${INQTRIX_PG_USER:-inqtrix}
+      DB_NAME: ${INQTRIX_PG_DB:-inqtrix}
+      DB_PASSWORD: ${INQTRIX_PG_PASSWORD:-}
+    volumes:
+      - ../pgbouncer/pgbouncer.ini:/etc/inqtrix-pgbouncer/pgbouncer.ini:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1m
+    depends_on:
+      postgres:
+        condition: service_healthy
+        # `required: false` (here and on every other postgres dependency)
+        # keeps the default stack byte-identical while the bundled service
+        # runs, but lets compose.external-db.yaml deactivate it: a skipped
+        # optional dependency only warns instead of failing the deployment.
+        required: false
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -p 6432 -U $${DB_USER} -d $${DB_NAME}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  migrate:
+    # One-shot schema migration. Runs the packaged Alembic migrations to head
+    # and exits 0. Compose starts it automatically and the api/worker wait for
+    # successful completion; an operator does not normally invoke it by hand.
+    # The packaged command remains available only for break-glass recovery.
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    command: ["inqtrix-migrate"]
+    environment:
+      # Bundled migrations always connect directly to PostgreSQL, even when
+      # API/worker use the transaction-pooling PgBouncer runtime DSN. This
+      # transparent fallback is assembled from the same config/secrets pair,
+      # so bundled mode never needs a third credential file.
+      #
+      # Managed deployments select compose.external-db.yaml, whose required,
+      # migration-only env file supplies INQTRIX_MIGRATION_DATABASE_URL. The
+      # migration command prefers that dedicated value over this fallback.
+      INQTRIX_DATABASE_URL: postgresql+asyncpg://${INQTRIX_PG_USER:-inqtrix}:${INQTRIX_PG_PASSWORD:-}@postgres:5432/${INQTRIX_PG_DB:-inqtrix}
+      INQTRIX_MIGRATION_RLS_MODE: ${INQTRIX_MIGRATION_RLS_MODE:-auto}
+      INQTRIX_MIGRATION_SERVICES_QUIESCED: ${INQTRIX_MIGRATION_SERVICES_QUIESCED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    restart: "no"
+
+  api:
+    # The FastAPI server (python -m inqtrix) on the internal network port
+    # 5100. Not published on the host: the web container is the only ingress.
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    env_file:
+      - path: ../../${INQTRIX_SECRETS_FILE:-deploy/.env.stack.secrets}
+        required: true
+      - path: ../../${INQTRIX_ENV_FILE:-deploy/.env.stack}
+        required: true
+    environment:
+      INQTRIX_SERVER_HOST: "0.0.0.0"
+      INQTRIX_SERVER_PORT: "5100"
+      # Keep the effective runtime target explicit in ``compose config``.
+      # ``inqtrix-deploy config --redact`` removes credentials before output.
+      INQTRIX_DATABASE_URL: ${INQTRIX_DATABASE_URL:?set INQTRIX_DATABASE_URL in the paired Compose env files}
+      INQTRIX_OBJECT_STORE_BACKEND: ${INQTRIX_OBJECT_STORE_BACKEND:-local}
+      INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
+      INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY: ${INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY:-bundled_legacy}
+      # env_file is operator-controlled. Never let a mistakenly reused
+      # migration-only env expose its privileged DSN to the runtime process.
+      INQTRIX_MIGRATION_DATABASE_URL: ""
+      # Private service-network addresses. They are inert while
+      # INQTRIX_COLLABORATION_ENABLED remains false, preserving the default
+      # stack while making the collaboration profile deterministic.
+      INQTRIX_COLLABORATION_HTTP_URL: http://collaboration:1234
+      INQTRIX_COLLABORATION_WS_URL: ws://collaboration:1234/collaboration
+      # Every collaboration session returns these limits to the browser so
+      # it can pace and bound its frames. Interpolate them exactly as the
+      # collaboration service below does, so the API never announces a value
+      # Node does not enforce.
+      INQTRIX_COLLABORATION_MAX_FRAME_BYTES: ${INQTRIX_COLLABORATION_MAX_FRAME_BYTES:-2097152}
+      INQTRIX_COLLABORATION_MAX_QUEUED_BYTES: ${INQTRIX_COLLABORATION_MAX_QUEUED_BYTES:-8388608}
+      INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES: ${INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES:-32}
+      INQTRIX_COLLABORATION_UPDATE_RATE_COUNT: ${INQTRIX_COLLABORATION_UPDATE_RATE_COUNT:-120}
+      INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS: ${INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS:-10}
+      # Shared spool volume (INQTRIX_TRACING=file): the admin trace
+      # export reads from the API process, but run spans are written by
+      # the worker — without a shared directory the export would never
+      # see them. The spool's writer-token/stale-window design exists
+      # exactly for this multi-process sharing; the volume also keeps
+      # recordings across container recreates.
+      # Fixed on purpose (no env override): the path must stay ON the
+      # shared trace_spool volume below — a divergent value would
+      # silently hide worker spans from the admin export and drop
+      # recordings on recreate. Relocate by editing volume+path together.
+      INQTRIX_TRACE_SPOOL_DIR: /var/lib/inqtrix/traces
+    volumes:
+      - objectstore:/var/lib/inqtrix/objects
+      - trace_spool:/var/lib/inqtrix/traces
+      - type: bind
+        source: ${INQTRIX_S3_CA_BUNDLE_HOST:-/dev/null}
+        target: /etc/inqtrix/object-store/ca.pem
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # The slim python image ships no curl; probe with the stdlib instead.
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5100/readyz').status==200 else 1)\"",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  web:
+    # Python web gateway serving the built React bundle + reverse-proxying
+    # the API and collaboration WebSocket. This is the single host ingress.
+    # It stays bound to loopback by default; set
+    # INQTRIX_WEB_BIND_ADDRESS=0.0.0.0 for an explicit LAN test or put a TLS
+    # reverse proxy in front for production remote access (see
+    # docs/deployment/production-checklist.md).
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web
+    user: "1001:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # Explicit adapter contract. The nginx override changes only the
+      # adapter sentinel; the direct-TLS override changes only the TLS
+      # sentinel. Their combination is rejected by nginx at startup.
+      INQTRIX_WEB_ADAPTER: python
+      INQTRIX_DIRECT_TLS: "false"
+      INQTRIX_BACKEND_URL: http://api:5100
+      # The gateway derives forwarded Host/Proto only from these
+      # operator-owned public-boundary values. X-Forwarded-For retains the
+      # normal append-only proxy chain. Keep HTTP for the normal LAN stack.
+      # Edge/direct TLS deployments set an exact HTTPS public base URL.
+      INQTRIX_EXTERNAL_SCHEME: ${INQTRIX_EXTERNAL_SCHEME:-}
+      INQTRIX_PUBLIC_BASE_URL: ${INQTRIX_PUBLIC_BASE_URL:-}
+      # The gateway derives its proxy cap as the API file limit + 10 MiB, so
+      # the API's labelled 413 remains authoritative. An explicit byte cap
+      # wins.
+      INQTRIX_MAX_FILE_BYTES: ${INQTRIX_MAX_FILE_BYTES:-104857600}
+      INQTRIX_PROXY_MAX_BODY_BYTES: ${INQTRIX_PROXY_MAX_BODY_BYTES:-}
+      INQTRIX_MAX_UPSTREAM_CONNECTIONS: ${INQTRIX_MAX_UPSTREAM_CONNECTIONS:-512}
+      INQTRIX_COLLABORATION_MAX_FRAME_BYTES: ${INQTRIX_COLLABORATION_MAX_FRAME_BYTES:-2097152}
+      INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES: ${INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES:-32}
+      RESEARCH_DESK_WORKERS: ${RESEARCH_DESK_WORKERS:-1}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${INQTRIX_WEB_BIND_ADDRESS:-127.0.0.1}:${INQTRIX_WEB_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health').status==200 else 1)\"",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    restart: unless-stopped
+
+  collaboration:
+    # Optional single-writer editor collaboration service. FastAPI remains the
+    # only browser-facing WebSocket gateway; this container has no host port.
+    # It receives a deliberately narrow environment rather than env_file, so
+    # database, auth-session, provider, and object-store credentials never
+    # enter the Node process. The service validates the secret and API URL at
+    # startup and fails loudly when the profile is enabled incompletely.
+    profiles: ["collaboration"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.collaboration
+    user: "1001:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      INQTRIX_API_INTERNAL_URL: http://api:5100
+      INQTRIX_COLLABORATION_AWARENESS_RATE_PER_SECOND: ${INQTRIX_COLLABORATION_AWARENESS_RATE_PER_SECOND:-20}
+      INQTRIX_COLLABORATION_BIND_ADDRESS: "0.0.0.0"
+      INQTRIX_COLLABORATION_HTTP_TIMEOUT_MS: ${INQTRIX_COLLABORATION_HTTP_TIMEOUT_MS:-5000}
+      INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS: ${INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS:-15}
+      INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS: ${INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS:-5}
+      INQTRIX_COLLABORATION_MAINTENANCE_INTERVAL_SECONDS: ${INQTRIX_COLLABORATION_MAINTENANCE_INTERVAL_SECONDS:-60}
+      INQTRIX_COLLABORATION_MAX_DOCUMENT_BYTES: ${INQTRIX_COLLABORATION_MAX_DOCUMENT_BYTES:-10485760}
+      INQTRIX_COLLABORATION_MAX_FRAME_BYTES: ${INQTRIX_COLLABORATION_MAX_FRAME_BYTES:-2097152}
+      INQTRIX_COLLABORATION_MAX_QUEUED_BYTES: ${INQTRIX_COLLABORATION_MAX_QUEUED_BYTES:-8388608}
+      INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES: ${INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES:-32}
+      INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT: ${INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT:-5}
+      INQTRIX_COLLABORATION_POLICY_POLL_MS: ${INQTRIX_COLLABORATION_POLICY_POLL_MS:-2000}
+      INQTRIX_COLLABORATION_POLICY_REVALIDATION_TIMEOUT_MS: ${INQTRIX_COLLABORATION_POLICY_REVALIDATION_TIMEOUT_MS:-7500}
+      INQTRIX_COLLABORATION_PORT: "1234"
+      INQTRIX_COLLABORATION_SECRET: ${INQTRIX_COLLABORATION_SECRET:-}
+      INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS: ${INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS:-5}
+      INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS: ${INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS:-1000}
+      INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS: ${INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS:-30000}
+      INQTRIX_COLLABORATION_SNAPSHOT_TAIL_BYTES: ${INQTRIX_COLLABORATION_SNAPSHOT_TAIL_BYTES:-1048576}
+      INQTRIX_COLLABORATION_SNAPSHOT_UPDATE_COUNT: ${INQTRIX_COLLABORATION_SNAPSHOT_UPDATE_COUNT:-256}
+      INQTRIX_COLLABORATION_SOCKET_BACKPRESSURE_BYTES: ${INQTRIX_COLLABORATION_SOCKET_BACKPRESSURE_BYTES:-4194304}
+      INQTRIX_COLLABORATION_TENANT_ID: ${INQTRIX_COLLABORATION_TENANT_ID:-default}
+      INQTRIX_COLLABORATION_UPDATE_RATE_COUNT: ${INQTRIX_COLLABORATION_UPDATE_RATE_COUNT:-120}
+      INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS: ${INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS:-10}
+      # Test-only fault decisions remain absent unless an operator explicitly
+      # enables the local verification profile for this container.
+      INQTRIX_COLLABORATION_VERIFICATION_FAULTS: ${INQTRIX_COLLABORATION_VERIFICATION_FAULTS:-0}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:1234/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  worker:
+    # Durable-run worker. Enable with --profile workers together with
+    # INQTRIX_QUEUE_BACKEND=valkey + INQTRIX_VALKEY_URL in deploy/.env.stack.
+    # Shares the object-store volume so worker runs reach uploaded blobs.
+    profiles: ["workers"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    command: ["inqtrix-worker"]
+    env_file:
+      - path: ../../${INQTRIX_SECRETS_FILE:-deploy/.env.stack.secrets}
+        required: true
+      - path: ../../${INQTRIX_ENV_FILE:-deploy/.env.stack}
+        required: true
+    environment:
+      INQTRIX_DATABASE_URL: ${INQTRIX_DATABASE_URL:?set INQTRIX_DATABASE_URL in the paired Compose env files}
+      INQTRIX_OBJECT_STORE_BACKEND: ${INQTRIX_OBJECT_STORE_BACKEND:-local}
+      INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
+      INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY: ${INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY:-bundled_legacy}
+      INQTRIX_MIGRATION_DATABASE_URL: ""
+      # Same private collaboration addresses as the api service: the worker
+      # loads the SAME shared env file, so with
+      # INQTRIX_COLLABORATION_ENABLED=true its settings validation requires
+      # coherent URLs too (without these the worker crash-loops and queued
+      # runs are never claimed). Inert while the flag stays false.
+      INQTRIX_COLLABORATION_HTTP_URL: http://collaboration:1234
+      INQTRIX_COLLABORATION_WS_URL: ws://collaboration:1234/collaboration
+      # Same shared spool volume as the api service (see the comment
+      # there): worker-written run spans must be readable by the API's
+      # trace-export endpoint in file mode.
+      # Fixed on purpose (no env override): the path must stay ON the
+      # shared trace_spool volume below — a divergent value would
+      # silently hide worker spans from the admin export and drop
+      # recordings on recreate. Relocate by editing volume+path together.
+      INQTRIX_TRACE_SPOOL_DIR: /var/lib/inqtrix/traces
+    volumes:
+      - objectstore:/var/lib/inqtrix/objects
+      - trace_spool:/var/lib/inqtrix/traces
+      - type: bind
+        source: ${INQTRIX_S3_CA_BUNDLE_HOST:-/dev/null}
+        target: /etc/inqtrix/object-store/ca.pem
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      migrate:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    restart: unless-stopped
+
+  qdrant:
+    # Persistent/hybrid knowledge store. Enable with --profile knowledge +
+    # INQTRIX_KNOWLEDGE_ENABLED=true, INQTRIX_VECTOR_BACKEND=qdrant,
+    # INQTRIX_QDRANT_URL=http://qdrant:6333 in deploy/.env.stack and a
+    # non-placeholder INQTRIX_QDRANT_API_KEY in the paired secrets file.
+    image: docker.io/qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
+    profiles: ["knowledge"]
+    environment:
+      QDRANT__SERVICE__API_KEY: ${INQTRIX_QDRANT_API_KEY:-}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    # Qdrant itself permits an empty key. Keep raw Compose as safe as the
+    # optional deployment CLI: selecting the bundled profile must fail closed
+    # before the upstream entrypoint can start an unauthenticated listener.
+    command:
+      - /usr/bin/bash
+      - -euc
+      - |
+        if [[ -z "$${QDRANT__SERVICE__API_KEY}" || "$${QDRANT__SERVICE__API_KEY}" == CHANGE_ME* ]]; then
+          echo >&2 "INQTRIX_QDRANT_API_KEY must be set to a non-placeholder value when --profile knowledge starts bundled Qdrant"
+          exit 78
+        fi
+        exec ./entrypoint.sh
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  valkey:
+    # Job-queue broker for the workers profile. The queue speaks the Redis
+    # protocol, so INQTRIX_BROKER_ENGINE (valkey|redis) selects the server/CLI
+    # binaries and INQTRIX_BROKER_IMAGE the image; both default to the pinned
+    # Valkey below, and only that default is maintained by this project. The
+    # pair also applies to the separate langfuse broker further down.
+    image: ${INQTRIX_BROKER_IMAGE:-docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9}
+    profiles: ["workers"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        : "$${INQTRIX_VALKEY_PASSWORD:?INQTRIX_VALKEY_PASSWORD is required for the workers profile}"
+        exec ${INQTRIX_BROKER_ENGINE:-valkey}-server \
+          --requirepass "$${INQTRIX_VALKEY_PASSWORD}" \
+          --appendonly yes \
+          --appendfsync everysec \
+          --save 3600 1
+    environment:
+      INQTRIX_VALKEY_PASSWORD: ${INQTRIX_VALKEY_PASSWORD:-}
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "REDISCLI_AUTH=\"$${INQTRIX_VALKEY_PASSWORD}\" ${INQTRIX_BROKER_ENGINE:-valkey}-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  seaweedfs:
+    # S3 object store (alternative to the default local volume). Enable with
+    # --profile s3 + INQTRIX_OBJECT_STORE_BACKEND=s3 and the S3 credentials.
+    # SeaweedFS defaults to anonymous access when both AWS variables are
+    # absent, so the entrypoint checks them before starting. This keeps the
+    # inactive profile optional while making an enabled profile fail closed.
+    image: docker.io/chrislusf/seaweedfs:4.33@sha256:f0b358973e81f884304737645dd3b278c590c2c9d47d60089729d46324f70495
+    profiles: ["s3"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        : "$${AWS_ACCESS_KEY_ID:?INQTRIX_S3_ACCESS_KEY is required for the s3 profile}"
+        : "$${AWS_SECRET_ACCESS_KEY:?INQTRIX_S3_SECRET_KEY is required for the s3 profile}"
+        # -volume.max=0 sizes the volume count by free disk instead of the
+        # default 8: every bucket gets its OWN volume collection, and the
+        # fixed default is exhausted by the first bucket — a second bucket
+        # (e.g. the observability profile's langfuse bucket) then fails
+        # with "No writable volumes".
+        exec weed server -dir=/data -s3 -s3.port=8333 -master.volumeSizeLimitMB=1024 -volume.max=0
+    environment:
+      AWS_ACCESS_KEY_ID: ${INQTRIX_S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${INQTRIX_S3_SECRET_KEY:-}
+    volumes:
+      - seaweedfs_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:8333 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ #
+  # OPTIONAL: LLM-TRACE BACKEND (--profile observability)
+  #
+  # Self-hosted Langfuse v3 as the OTLP trace backend for the agentic
+  # runs (INQTRIX_TRACING=otlp). Strictly optional Baukasten module:
+  # without this profile the app still records via local/file modes.
+  # Reuses the bundled Postgres (own database) and the s3 profile's
+  # SeaweedFS (own bucket); ClickHouse and a dedicated Valkey (Langfuse
+  # requires the instance-wide noeviction policy) are net-new. Requires
+  # --profile s3 alongside (or external INQTRIX_S3_* endpoints).
+  # Headless init: org/project/user and the OTLP project keys come from
+  # LANGFUSE_INIT_* — no UI click needed; the SAME keys form the
+  # Authorization header for OTEL_EXPORTER_OTLP_HEADERS.
+  # ------------------------------------------------------------------ #
+  clickhouse:
+    # Langfuse v3 OLAP store (traces/observations/scores). >=24.3
+    # required; single node (LANGFUSE CLICKHOUSE_CLUSTER_ENABLED=false).
+    image: docker.io/clickhouse/clickhouse-server:25.5@sha256:397c960a9a27cc75ff914fc2398dd7f13c2c6787c426ca1dc1bc865c74096475
+    profiles: ["observability"]
+    environment:
+      CLICKHOUSE_DB: langfuse
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test:
+        ["CMD-SHELL", "clickhouse-client --user langfuse --password \"$${CLICKHOUSE_PASSWORD}\" --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  langfuse-valkey:
+    # Dedicated broker/cache for Langfuse (BullMQ). Deliberately NOT the
+    # workers-profile Valkey: Langfuse demands the INSTANCE-WIDE
+    # maxmemory-policy noeviction, and coupling the run queue to the
+    # trace backend would let observability trouble stall run dispatch. The
+    # ENGINE/IMAGE selection is shared with the workers broker above; the
+    # instances stay separate.
+    image: ${INQTRIX_BROKER_IMAGE:-docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9}
+    profiles: ["observability"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        : "$${LANGFUSE_VALKEY_PASSWORD:?LANGFUSE_VALKEY_PASSWORD is required for the observability profile}"
+        exec ${INQTRIX_BROKER_ENGINE:-valkey}-server \
+          --requirepass "$${LANGFUSE_VALKEY_PASSWORD}" \
+          --maxmemory-policy noeviction \
+          --appendonly no
+    environment:
+      LANGFUSE_VALKEY_PASSWORD: ${LANGFUSE_VALKEY_PASSWORD:-}
+    volumes:
+      - langfuse_valkey_data:/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "REDISCLI_AUTH=\"$${LANGFUSE_VALKEY_PASSWORD}\" ${INQTRIX_BROKER_ENGINE:-valkey}-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  langfuse-init-db:
+    # One-shot: create the SEPARATE langfuse database in the bundled
+    # Postgres (idempotent). With an external database, create it
+    # manually and set LANGFUSE_DATABASE_URL instead — this job then
+    # simply reports the skip.
+    image: docker.io/library/postgres:18.4-trixie@sha256:8ff36f3c66371cba71d20ceedccfc3de9669a68737607888c4ef0af93abe8e39
+    profiles: ["observability"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ -n "$${LANGFUSE_DATABASE_URL:-}" ]; then
+          echo "skip: LANGFUSE_DATABASE_URL is set — the langfuse database is managed externally"
+          exit 0
+        fi
+        export PGPASSWORD="$${INQTRIX_PG_PASSWORD:?INQTRIX_PG_PASSWORD is required to provision the langfuse database}"
+        DB="$${LANGFUSE_PG_DB:-langfuse}"
+        if psql -h postgres -U "$${INQTRIX_PG_USER:-inqtrix}" -d "$${INQTRIX_PG_DB:-inqtrix}" -tAc "SELECT 1 FROM pg_database WHERE datname='$${DB}'" | grep -q 1; then
+          echo "langfuse database '$${DB}' already exists"
+        else
+          psql -h postgres -U "$${INQTRIX_PG_USER:-inqtrix}" -d "$${INQTRIX_PG_DB:-inqtrix}" -c "CREATE DATABASE \"$${DB}\""
+          echo "langfuse database '$${DB}' created"
+        fi
+    environment:
+      INQTRIX_PG_USER: ${INQTRIX_PG_USER:-inqtrix}
+      INQTRIX_PG_DB: ${INQTRIX_PG_DB:-inqtrix}
+      INQTRIX_PG_PASSWORD: ${INQTRIX_PG_PASSWORD:-}
+      LANGFUSE_PG_DB: ${LANGFUSE_PG_DB:-langfuse}
+      LANGFUSE_DATABASE_URL: ${LANGFUSE_DATABASE_URL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    restart: "no"
+
+  langfuse-bucket-init:
+    # One-shot: create the langfuse bucket in the bundled SeaweedFS
+    # (idempotent, verified). Skips loudly when the S3 endpoint is not
+    # the bundled seaweedfs (external MinIO/S3: create the bucket there).
+    image: docker.io/chrislusf/seaweedfs:4.33@sha256:f0b358973e81f884304737645dd3b278c590c2c9d47d60089729d46324f70495
+    profiles: ["observability"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        # SAME default as LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT below: an
+        # empty endpoint means the bundled seaweedfs, so the bucket must
+        # be created here — skipping would leave langfuse pointing at a
+        # bucket nobody provisioned.
+        case "$${INQTRIX_S3_ENDPOINT_URL:-http://seaweedfs:8333}" in
+          *seaweedfs*) ;;
+          *) echo "skip: S3 endpoint is external — create bucket '$${LANGFUSE_S3_BUCKET:-langfuse}' there"; exit 0 ;;
+        esac
+        BUCKET="$${LANGFUSE_S3_BUCKET:-langfuse}"
+        # timeout sits DIRECTLY on weed shell (it blocks forever on an
+        # unreachable master): wrapping an outer sh would kill only the
+        # sh while the orphaned weed keeps the pipe open and awk/grep
+        # wait forever. Field-exact name match: "langfuse" must not be
+        # satisfied by a bucket merely containing that string.
+        if ! echo "s3.bucket.list" | timeout 30 weed shell -master seaweedfs:9333 | awk '{print $$1}' | grep -qx "$${BUCKET}"; then
+          echo "s3.bucket.create -name $${BUCKET}" | timeout 30 weed shell -master seaweedfs:9333
+        fi
+        echo "s3.bucket.list" | timeout 30 weed shell -master seaweedfs:9333 | awk '{print $$1}' | grep -qx "$${BUCKET}"
+        echo "langfuse bucket '$${BUCKET}' ready"
+    environment:
+      INQTRIX_S3_ENDPOINT_URL: ${INQTRIX_S3_ENDPOINT_URL:-}
+      LANGFUSE_S3_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+        required: false
+    restart: "no"
+
+  langfuse-worker:
+    # Async ingestion: S3-first raw events -> ClickHouse.
+    # The official web entrypoint owns the PostgreSQL and ClickHouse schema
+    # migrations. The worker seeds prices, evaluators and dashboard widgets,
+    # so it must not start until those migrations and web startup completed.
+    image: docker.io/langfuse/langfuse-worker:3@sha256:8892d4fc8f51733ba06019c4a1cdb0074d10423661bb074202afd30b8eaf4867
+    profiles: ["observability"]
+    environment: &langfuse-core-env
+      # NOTE (least privilege): the bundled default reuses the inqtrix
+      # Postgres user and the instance S3 root credentials — acceptable
+      # for the single-operator bundle, since langfuse only ever touches
+      # its own database/bucket. Hardened deployments should provision a
+      # dedicated role/user and set LANGFUSE_DATABASE_URL plus dedicated
+      # S3 credentials instead (see docs/deployment/kubernetes.md).
+      #
+      # Secrets use ":-" (empty default), NOT ":?": compose interpolates
+      # required-variable markers for EVERY service regardless of the
+      # selected profiles, so ":?" here would break `config`/`up` for
+      # operators who never enable observability. Fail-fast for the
+      # ACTIVE profile lives in the deploy CLI preflight
+      # (required_profile_secrets) and in the services' own startup
+      # validation.
+      DATABASE_URL: ${LANGFUSE_DATABASE_URL:-postgresql://${INQTRIX_PG_USER:-inqtrix}:${INQTRIX_PG_PASSWORD}@postgres:5432/${LANGFUSE_PG_DB:-langfuse}}
+      SALT: ${LANGFUSE_SALT:-}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: langfuse-valkey
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LANGFUSE_VALKEY_PASSWORD:-}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${INQTRIX_S3_REGION:-us-east-1}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${INQTRIX_S3_ENDPOINT_URL:-http://seaweedfs:8333}
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${INQTRIX_S3_ACCESS_KEY:-}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${INQTRIX_S3_SECRET_KEY:-}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      # AWS SDK v3 sends CRC32 integrity trailers by default since
+      # 3.729 — SeaweedFS/older MinIO answer them with InternalError.
+      # WHEN_REQUIRED restores classic behaviour for S3 compatibles.
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
+      TELEMETRY_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      clickhouse:
+        condition: service_healthy
+      langfuse-valkey:
+        condition: service_healthy
+      langfuse-init-db:
+        condition: service_completed_successfully
+      langfuse-bucket-init:
+        condition: service_completed_successfully
+      langfuse:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+
+  langfuse:
+    # Langfuse web: UI + OTLP ingest (/api/public/otel). Published ONLY
+    # on localhost — the trace UI is an operator tool with its own
+    # login, never part of the product ingress.
+    image: docker.io/langfuse/langfuse:3@sha256:576132f792276d07380f46a6958877a38a51d20a94e42fa9b3cb096d76db1d9c
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:${INQTRIX_LANGFUSE_PORT:-3300}:3000"
+    environment:
+      <<: *langfuse-core-env
+      # Next.js standalone binds to the address in HOSTNAME. Without this
+      # pin it binds the container IP only and the 127.0.0.1 healthcheck
+      # below fails forever while the service actually works.
+      HOSTNAME: "0.0.0.0"
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-}
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:${INQTRIX_LANGFUSE_PORT:-3300}}
+      # Headless bootstrap (idempotent): org/project/user + the OTLP
+      # project keys exist right after first start — no UI click.
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-inqtrix}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-Inqtrix}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-inqtrix}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-Inqtrix}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      clickhouse:
+        condition: service_healthy
+      langfuse-valkey:
+        condition: service_healthy
+      langfuse-init-db:
+        condition: service_completed_successfully
+      langfuse-bucket-init:
+        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
+        required: false
+    healthcheck:
+      test:
+        ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/public/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  dex:
+    # Reference OIDC IdP for the enterprise oidc profile (the default
+    # is local auth). Any OIDC-compliant provider works; Dex is only the dev
+    # reference. Enable with --profile oidc + INQTRIX_AUTH_MODE=oidc.
+    image: ghcr.io/dexidp/dex:v2.45.1@sha256:8499afd690c437f52301efd2b05b2455da5bd2dfc20332cd697dc9937f808462
+    profiles: ["oidc"]
+    environment:
+      DEX_INQTRIX_CLIENT_SECRET: ${INQTRIX_OIDC_CLIENT_SECRET:-}
+    networks:
+      default:
+        aliases:
+          - dex.localhost
+    ports:
+      # The issuer is intentionally one byte-identical browser/backend URL.
+      # A configurable host port without rewriting Dex's issuer and redirect
+      # URI would create a non-working parallel contract.
+      - "127.0.0.1:5556:5556"
+    volumes:
+      - ./dex-config.yaml:/etc/dex/config.yaml:ro
+      - dex_data:/var/dex
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:5556/dex/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  clickhouse_data:
+  langfuse_valkey_data:
+  # OTLP-JSON trace spool (INQTRIX_TRACING=file), shared api+worker so the
+  # admin export sees every process's spans; size-capped app-side.
+  trace_spool:
+  # The api/worker now run as non-root (UID 1001, group 0). A FRESH objectstore
+  # volume inherits the image directory's group-0-writable permissions. If you
+  # are upgrading a stack that ran the OLD root image, the existing volume is
+  # root-owned; fix it ONCE before the first non-root start (or recreate it):
+  #   docker compose run --rm --user 0 api \
+  #     sh -c 'chgrp -R 0 /var/lib/inqtrix/objects && chmod -R g=u /var/lib/inqtrix/objects'
+  objectstore:
+  qdrant_storage:
+  valkey_data:
+  seaweedfs_data:
+  dex_data:

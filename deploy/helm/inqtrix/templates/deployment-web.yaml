@@ -1,0 +1,163 @@
+{{- $explicitPublicBase := coalesce .Values.config.INQTRIX_PUBLIC_BASE_URL .Values.extraConfig.INQTRIX_PUBLIC_BASE_URL "" -}}
+{{- $publicBase := $explicitPublicBase -}}
+{{- if and (not $publicBase) .Values.ingress.enabled -}}
+{{- $publicScheme := ternary "https" "http" .Values.ingress.tls.enabled -}}
+{{- $publicBase = printf "%s://%s" $publicScheme .Values.ingress.host -}}
+{{- end -}}
+{{- $publicScheme := "" -}}
+{{- if $publicBase -}}
+{{- $normalizedPublicBase := lower $publicBase -}}
+{{- if hasPrefix "https://" $normalizedPublicBase -}}
+{{- $publicScheme = "https" -}}
+{{- else if hasPrefix "http://" $normalizedPublicBase -}}
+{{- $publicScheme = "http" -}}
+{{- else -}}
+{{- fail "INQTRIX_PUBLIC_BASE_URL must be an absolute HTTP(S) origin" -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.web.externalScheme (not (or (eq .Values.web.externalScheme "http") (eq .Values.web.externalScheme "https"))) -}}
+{{- fail "web.externalScheme must be http or https" -}}
+{{- end -}}
+{{- if and $publicScheme .Values.web.externalScheme (ne $publicScheme .Values.web.externalScheme) -}}
+{{- fail "web.externalScheme must match the scheme in INQTRIX_PUBLIC_BASE_URL" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-web
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "web") | nindent 4 }}
+spec:
+  {{- if not .Values.web.autoscaling.enabled }}
+  replicas: {{ .Values.web.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "web") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "inqtrix.internalServiceAccountName" (dict "root" . "component" "web") }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: web
+          image: {{ include "inqtrix.image.web" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            # The Python web gateway is the one public origin and proxies /api,
+            # /v1, /health, /readyz, and /collaboration to FastAPI.
+            - name: INQTRIX_BACKEND_URL
+              value: "http://{{ include "inqtrix.fullname" . }}-api:{{ .Values.service.apiPort }}"
+            # The gateway overwrites client forwarding headers with the protocol
+            # owned by the chart's public TLS boundary. web.externalScheme
+            # overrides the derivation for TLS terminators the chart does not
+            # own (own LoadBalancer, Gateway API, service mesh). It must match
+            # INQTRIX_PUBLIC_BASE_URL when both are explicit; a contradiction
+            # makes gateway startup fail.
+            - name: INQTRIX_EXTERNAL_SCHEME
+              {{- if .Values.web.externalScheme }}
+              value: {{ .Values.web.externalScheme | quote }}
+              {{- else if $publicScheme }}
+              value: {{ $publicScheme | quote }}
+              {{- else }}
+              value: {{ if and .Values.ingress.enabled .Values.ingress.tls.enabled }}"https"{{ else }}"http"{{ end }}
+              {{- end }}
+            {{- if $publicBase }}
+            - name: INQTRIX_PUBLIC_BASE_URL
+              value: {{ $publicBase | quote }}
+            {{- end }}
+            {{- $maxFileBytes := coalesce .Values.config.INQTRIX_MAX_FILE_BYTES .Values.extraConfig.INQTRIX_MAX_FILE_BYTES "" }}
+            {{- if $maxFileBytes }}
+            {{- /* int64 silently casts an unparsable value to 0, which would
+                   render a 10 MiB cap and kill uploads without any error --
+                   fail the render instead of deriving from garbage. */}}
+            {{- if not (regexMatch "^[0-9]+$" (toString $maxFileBytes)) }}
+            {{- fail (printf "config.INQTRIX_MAX_FILE_BYTES must be plain bytes (digits only), got %q. Size syntax such as 110m is unsupported; use an integer byte value." (toString $maxFileBytes)) }}
+            {{- end }}
+            - name: INQTRIX_MAX_FILE_BYTES
+              value: {{ toString $maxFileBytes | quote }}
+            {{- end }}
+            {{- $frameBytes := coalesce .Values.config.INQTRIX_COLLABORATION_MAX_FRAME_BYTES .Values.extraConfig.INQTRIX_COLLABORATION_MAX_FRAME_BYTES "" }}
+            {{- if $frameBytes }}
+            - name: INQTRIX_COLLABORATION_MAX_FRAME_BYTES
+              value: {{ toString $frameBytes | quote }}
+            {{- end }}
+            {{- $queuedFrames := coalesce .Values.config.INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES .Values.extraConfig.INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES "" }}
+            {{- if $queuedFrames }}
+            - name: INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES
+              value: {{ toString $queuedFrames | quote }}
+            {{- end }}
+            {{- /* kindIs "invalid" is Helm's null test: only an UNSET value
+                   skips the block. An explicit 0 must fail loudly below --
+                   silently treating it as "unset" would be a silent
+                   fallback. */}}
+            {{- if not (kindIs "invalid" .Values.web.maxUpstreamConnections) }}
+            {{- /* Guard BEFORE the int coercion: Helm's int turns true into 1
+                   and truncates 512.9 to 512, so a type check after the
+                   coercion can never see the garbage. The digit round-trip
+                   rejects bools and non-integral floats in both the --set
+                   and the values-file form. No leading zeros: sprig's int
+                   parses base 0, so "0512" would silently mean octal 330. */}}
+            {{- if not (regexMatch "^(0|[1-9][0-9]*)$" (toString .Values.web.maxUpstreamConnections)) }}
+            {{- fail (printf "web.maxUpstreamConnections must be a positive integer, got %v (kind %s)" .Values.web.maxUpstreamConnections (kindOf .Values.web.maxUpstreamConnections)) }}
+            {{- end }}
+            {{- $maxUpstream := int .Values.web.maxUpstreamConnections }}
+            {{- if lt $maxUpstream 1 }}
+            {{- fail (printf "web.maxUpstreamConnections must be a positive integer, got %v" .Values.web.maxUpstreamConnections) }}
+            {{- end }}
+            # Per-worker ceiling for pooled backend connections. A typed value
+            # because config:/extraConfig: cannot reach this pod -- it has no
+            # envFrom -- and the only alternative was a hand-written
+            # web.extraEnv entry nobody would find. Unset, the gateway's own
+            # built-in default applies (one source of truth, no duplicate).
+            - name: INQTRIX_MAX_UPSTREAM_CONNECTIONS
+              value: {{ $maxUpstream | toString | quote }}
+            {{- end }}
+            {{- with .Values.web.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.webPort }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "inqtrix.webWritableVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "inqtrix.webWritableVolumes" . | nindent 8 }}
+      {{- with .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,118 @@
+{{- if .Values.qdrant.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-qdrant
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "qdrant") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "inqtrix.selectorLabels" (dict "root" . "component" "qdrant") | nindent 4 }}
+  ports:
+    - name: http
+      port: 6333
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: 6334
+      targetPort: grpc
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-qdrant
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "qdrant") | nindent 4 }}
+spec:
+  serviceName: {{ include "inqtrix.fullname" . }}-qdrant
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "qdrant") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "qdrant") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.bundledPodSecurityContext" (dict "root" . "svc" .Values.qdrant.podSecurityContext) | nindent 8 }}
+      containers:
+        - name: qdrant
+          image: {{ .Values.qdrant.image }}
+          imagePullPolicy: {{ .Values.qdrant.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: QDRANT__TELEMETRY_DISABLED
+              value: "true"
+            - name: QDRANT_INIT_FILE_PATH
+              value: /qdrant/storage/.qdrant-initialized
+            - name: QDRANT__STORAGE__STORAGE_PATH
+              value: /qdrant/storage
+            - name: QDRANT__STORAGE__SNAPSHOTS_PATH
+              value: /qdrant/storage/snapshots
+            - name: QDRANT__STORAGE__TEMP_PATH
+              value: /qdrant/storage/tmp
+            - name: QDRANT__SERVICE__API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.secretName" . }}
+                  key: INQTRIX_QDRANT_API_KEY
+          ports:
+            - name: http
+              containerPort: 6333
+            - name: grpc
+              containerPort: 6334
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.qdrant.resources | nindent 12 }}
+          volumeMounts:
+            - name: storage
+              mountPath: /qdrant/storage
+      {{- if not .Values.qdrant.persistence.enabled }}
+      volumes:
+        - name: storage
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.qdrant.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.qdrant.persistence.size }}
+        {{- with .Values.qdrant.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+  {{- end }}
+{{- end }}

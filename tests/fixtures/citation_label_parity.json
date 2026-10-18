@@ -1,0 +1,324 @@
+{
+  "note": "Hand-maintained expected values of the citation grammar (src/inqtrix/citation_labels.py and apps/research-desk/src/components/markdown/citationGrammar.ts); both languages must reproduce every case. Digits and separators are ASCII on both sides, lines end where Python's str.splitlines ends them, and formulas are recognized in the backend only, so no case holds a closed formula. Change a case only together with both implementations.",
+  "cases": [
+    {
+      "name": "group becomes single brackets",
+      "families": "KW",
+      "text": "Marktteilnehmer wäre.[K2, W7]",
+      "canonical": "Marktteilnehmer wäre.[K2] [W7]",
+      "malformed": []
+    },
+    {
+      "name": "semicolon group",
+      "families": "KW",
+      "text": "Satz [K2; W7].",
+      "canonical": "Satz [K2] [W7].",
+      "malformed": []
+    },
+    {
+      "name": "group without spaces",
+      "families": "KW",
+      "text": "Satz [K2,W7].",
+      "canonical": "Satz [K2] [W7].",
+      "malformed": []
+    },
+    {
+      "name": "group with inner spaces",
+      "families": "KW",
+      "text": "Satz [ K2 , W7 ].",
+      "canonical": "Satz [K2] [W7].",
+      "malformed": []
+    },
+    {
+      "name": "repeated member kept once",
+      "families": "KW",
+      "text": "Satz [K2, K2].",
+      "canonical": "Satz [K2].",
+      "malformed": []
+    },
+    {
+      "name": "group before a colon mid-sentence",
+      "families": "KW",
+      "text": "Zwei Wege [K2, W7]: erstens",
+      "canonical": "Zwei Wege [K2] [W7]: erstens",
+      "malformed": []
+    },
+    {
+      "name": "three members",
+      "families": "KWE",
+      "text": "Satz [K1, W2, E3].",
+      "canonical": "Satz [K1] [W2] [E3].",
+      "malformed": []
+    },
+    {
+      "name": "family outside the vocabulary stays",
+      "families": "KW",
+      "text": "Kind [E1, E2].",
+      "canonical": "Kind [E1, E2].",
+      "malformed": []
+    },
+    {
+      "name": "spreadsheet cells stay",
+      "families": "KW",
+      "text": "Die Zellen [A1, B2] tragen die Summe.",
+      "canonical": "Die Zellen [A1, B2] tragen die Summe.",
+      "malformed": []
+    },
+    {
+      "name": "link text stays",
+      "families": "KW",
+      "text": "Link [K2](https://example.com) bleibt.",
+      "canonical": "Link [K2](https://example.com) bleibt.",
+      "malformed": []
+    },
+    {
+      "name": "group as link text is malformed",
+      "families": "KW",
+      "text": "Gruppe [K2, W7](https://example.com).",
+      "canonical": "Gruppe [K2, W7](https://example.com).",
+      "malformed": [
+        "[K2, W7]"
+      ]
+    },
+    {
+      "name": "a label right after a link destination is prose",
+      "families": "KW",
+      "text": "Laut [Bericht](https://a.org/x)[W3] und [W1](https://a.org)[W2](https://b.org).",
+      "canonical": "Laut [Bericht](https://a.org/x)[W3] und [W1](https://a.org)[W2](https://b.org).",
+      "malformed": []
+    },
+    {
+      "name": "a group right after a bare URL is prose",
+      "families": "KW",
+      "text": "Quelle https://a.org/x [K2, W7] Ende.",
+      "canonical": "Quelle https://a.org/x [K2] [W7] Ende.",
+      "malformed": []
+    },
+    {
+      "name": "inline code stays",
+      "families": "KW",
+      "text": "Code `[K2, W7]` bleibt.",
+      "canonical": "Code `[K2, W7]` bleibt.",
+      "malformed": []
+    },
+    {
+      "name": "fenced code stays",
+      "families": "KW",
+      "text": "```\n[K2, W7]\n```\nnach [K2, W7]\n",
+      "canonical": "```\n[K2, W7]\n```\nnach [K2] [W7]\n",
+      "malformed": []
+    },
+    {
+      "name": "longer fence closes only on its own marker",
+      "families": "KW",
+      "text": "````\n```\n[K1, K2]\n````\n[K1, K2]\n",
+      "canonical": "````\n```\n[K1, K2]\n````\n[K1] [K2]\n",
+      "malformed": []
+    },
+    {
+      "name": "a carriage return ends a line",
+      "families": "KW",
+      "text": "Intro\r```\r[K1, K2]\r```\r[K1, K2]",
+      "canonical": "Intro\r```\r[K1, K2]\r```\r[K1] [K2]",
+      "malformed": []
+    },
+    {
+      "name": "a line separator ends a line",
+      "families": "KW",
+      "text": "Intro ``` [K1, K2] ``` [K1, K2]",
+      "canonical": "Intro ``` [K1, K2] ``` [K1] [K2]",
+      "malformed": []
+    },
+    {
+      "name": "adjacent single brackets stay",
+      "families": "KW",
+      "text": "Angrenzend [K2][W7] bleibt.",
+      "canonical": "Angrenzend [K2][W7] bleibt.",
+      "malformed": []
+    },
+    {
+      "name": "escaped brackets are literal text",
+      "families": "KW",
+      "text": "Beleg \\[W1\\] und \\[K2, W7\\].",
+      "canonical": "Beleg \\[W1\\] und \\[K2, W7\\].",
+      "malformed": []
+    },
+    {
+      "name": "an unclosed double dollar is no formula",
+      "families": "KW",
+      "text": "Preisniveau $$$ gut [W1, W2].",
+      "canonical": "Preisniveau $$$ gut [W1] [W2].",
+      "malformed": []
+    },
+    {
+      "name": "range is malformed, never expanded",
+      "families": "KW",
+      "text": "Spanne [K3–K5].",
+      "canonical": "Spanne [K3–K5].",
+      "malformed": [
+        "[K3–K5]"
+      ]
+    },
+    {
+      "name": "slash is malformed",
+      "families": "KW",
+      "text": "Schräg [K2/W7].",
+      "canonical": "Schräg [K2/W7].",
+      "malformed": [
+        "[K2/W7]"
+      ]
+    },
+    {
+      "name": "prose join is malformed",
+      "families": "KW",
+      "text": "Verbunden [K2 und W7].",
+      "canonical": "Verbunden [K2 und W7].",
+      "malformed": [
+        "[K2 und W7]"
+      ]
+    },
+    {
+      "name": "label next to words is malformed",
+      "families": "KW",
+      "text": "Gemischt [K2, siehe oben].",
+      "canonical": "Gemischt [K2, siehe oben].",
+      "malformed": [
+        "[K2, siehe oben]"
+      ]
+    },
+    {
+      "name": "label with a note is malformed",
+      "families": "KW",
+      "text": "Seite [K2: S. 14].",
+      "canonical": "Seite [K2: S. 14].",
+      "malformed": [
+        "[K2: S. 14]"
+      ]
+    },
+    {
+      "name": "a label-first marker of a delegated run is malformed",
+      "families": "KWE",
+      "text": "Kind [E9: nicht zugeordnet].",
+      "canonical": "Kind [E9: nicht zugeordnet].",
+      "malformed": [
+        "[E9: nicht zugeordnet]"
+      ]
+    },
+    {
+      "name": "a marker is no citation",
+      "families": "KW",
+      "text": "Marker [unbelegt: K2] und [unbelegt: K3–K5].",
+      "canonical": "Marker [unbelegt: K2] und [unbelegt: K3–K5].",
+      "malformed": []
+    },
+    {
+      "name": "a marker as link text is no citation",
+      "families": "KW",
+      "text": "Marker [unbelegt: K2, W7](https://x).",
+      "canonical": "Marker [unbelegt: K2, W7](https://x).",
+      "malformed": []
+    },
+    {
+      "name": "non-ASCII digits stay",
+      "families": "KW",
+      "text": "Ziffern [K٢, W7].",
+      "canonical": "Ziffern [K٢, W7].",
+      "malformed": [
+        "[K٢, W7]"
+      ]
+    },
+    {
+      "name": "full-width digit stays",
+      "families": "KW",
+      "text": "Ziffern [K２, W7].",
+      "canonical": "Ziffern [K２, W7].",
+      "malformed": [
+        "[K２, W7]"
+      ]
+    },
+    {
+      "name": "non-breaking space separator stays",
+      "families": "KW",
+      "text": "Trenner [K2, W7].",
+      "canonical": "Trenner [K2, W7].",
+      "malformed": [
+        "[K2, W7]"
+      ]
+    },
+    {
+      "name": "control-character separator stays",
+      "families": "KW",
+      "text": "Trenner [K2,\u001fW7].",
+      "canonical": "Trenner [K2,\u001fW7].",
+      "malformed": [
+        "[K2,\u001fW7]"
+      ]
+    },
+    {
+      "name": "lowercase is no label",
+      "families": "KW",
+      "text": "Klein [k2, w7].",
+      "canonical": "Klein [k2, w7].",
+      "malformed": []
+    },
+    {
+      "name": "leading zero is a label",
+      "families": "KW",
+      "text": "Null [K0, K01].",
+      "canonical": "Null [K0] [K01].",
+      "malformed": []
+    },
+    {
+      "name": "a label inside a word is no label",
+      "families": "KW",
+      "text": "Marken [BMW3er Reihe] und [SK2 Norm].",
+      "canonical": "Marken [BMW3er Reihe] und [SK2 Norm].",
+      "malformed": []
+    },
+    {
+      "name": "two malformed in text order",
+      "families": "KW",
+      "text": "Erst [K3–K5], dann [K2, W7](https://x).",
+      "canonical": "Erst [K3–K5], dann [K2, W7](https://x).",
+      "malformed": [
+        "[K3–K5]",
+        "[K2, W7]"
+      ]
+    },
+    {
+      "name": "link text with a word is ordinary",
+      "families": "KW",
+      "text": "Linktext [Quelle K2](https://x).",
+      "canonical": "Linktext [Quelle K2](https://x).",
+      "malformed": []
+    },
+    {
+      "name": "no bracket at all",
+      "families": "KW",
+      "text": "Ohne Klammer.",
+      "canonical": "Ohne Klammer.",
+      "malformed": []
+    },
+    {
+      "name": "a tilde fence ends at a carriage return",
+      "families": "KW",
+      "text": "Intro\r~~~\r[K1, K2]\r~~~\r[K1, K2]",
+      "canonical": "Intro\r~~~\r[K1, K2]\r~~~\r[K1] [K2]",
+      "malformed": []
+    },
+    {
+      "name": "a tilde fence ends at a line separator",
+      "families": "KW",
+      "text": "Intro ~~~ [K1, K2] ~~~ [K1, K2]",
+      "canonical": "Intro ~~~ [K1, K2] ~~~ [K1] [K2]",
+      "malformed": []
+    },
+    {
+      "name": "a half-escaped bracket is literal text",
+      "families": "KW",
+      "text": "Halb [W1\\] offen.",
+      "canonical": "Halb [W1\\] offen.",
+      "malformed": []
+    }
+  ]
+}

@@ -1,0 +1,125 @@
+{{- if .Values.s3.enabled }}
+{{- /*
+Bundled S3-compatible object store (MinIO) for a turnkey demo -- the Helm
+equivalent of the Compose `--profile s3` SeaweedFS service. Single-pod, demo/dev
+ONLY (not HA). Unlike the bundled Postgres, this works on vanilla Kubernetes AND
+MinIO writes only to its data dir and needs no /etc/passwd entry, so a fixed
+non-root UID plus fsGroup is enough (see inqtrix.bundledPodSecurityContext).
+The bucket is created on first write by the app's S3ObjectStore.ensure_bucket(), so
+no init job is needed. Connection + credentials are auto-wired into the app (see
+configmap.yaml / secret.yaml). MinIO root credentials ARE the S3 access/secret keys.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-minio
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "minio") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "inqtrix.selectorLabels" (dict "root" . "component" "minio") | nindent 4 }}
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-minio
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "minio") | nindent 4 }}
+spec:
+  serviceName: {{ include "inqtrix.fullname" . }}-minio
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "minio") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "minio") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.bundledPodSecurityContext" (dict "root" . "svc" .Values.s3.podSecurityContext) | nindent 8 }}
+      containers:
+        - name: minio
+          image: {{ .Values.s3.image }}
+          imagePullPolicy: {{ .Values.s3.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          # Serve the S3 API on a fixed port; the console is not used by the app and
+          # is intentionally left unconfigured (version-robust against MinIO's
+          # console changes -- only the S3 API matters here).
+          args:
+            - server
+            - /data
+            - --address
+            - ":9000"
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.secretName" . }}
+                  key: INQTRIX_S3_ACCESS_KEY
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.secretName" . }}
+                  key: INQTRIX_S3_SECRET_KEY
+          ports:
+            - name: s3
+              containerPort: 9000
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: s3
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: s3
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.s3.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- if not .Values.s3.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.s3.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.s3.persistence.size }}
+        {{- with .Values.s3.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+  {{- end }}
+{{- end }}

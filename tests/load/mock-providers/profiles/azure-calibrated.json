@@ -1,0 +1,176 @@
+{
+  "operations": {
+    "agent_kernel.chat.llm": {
+      "calls_per_run_median": 4,
+      "completion_tokens_median": 327,
+      "latency_seconds": {
+        "max": 187.654,
+        "p50": 5.657,
+        "p95": 160.763
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 6536,
+      "samples": 25
+    },
+    "agent_kernel.kernel.judge.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 195,
+      "latency_seconds": {
+        "max": 2.546,
+        "p50": 2.546,
+        "p95": 2.546
+      },
+      "models": [
+        "gpt-5.4-mini"
+      ],
+      "prompt_tokens_median": 1049,
+      "samples": 1
+    },
+    "knowledge.knowledge.contextualize.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 39,
+      "latency_seconds": {
+        "max": 2.165,
+        "p50": 1.87,
+        "p95": 2.165
+      },
+      "models": [
+        "gpt-5.4-mini"
+      ],
+      "prompt_tokens_median": 658,
+      "samples": 5
+    },
+    "knowledge.knowledge.decompose.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 74,
+      "latency_seconds": {
+        "max": 1.465,
+        "p50": 1.377,
+        "p95": 1.465
+      },
+      "models": [
+        "gpt-5.4-mini"
+      ],
+      "prompt_tokens_median": 197,
+      "samples": 5
+    },
+    "knowledge.knowledge.gate.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 93,
+      "latency_seconds": {
+        "max": 1.731,
+        "p50": 1.563,
+        "p95": 1.731
+      },
+      "models": [
+        "gpt-5.4-mini"
+      ],
+      "prompt_tokens_median": 4855,
+      "samples": 5
+    },
+    "knowledge.text_completion.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 7322,
+      "latency_seconds": {
+        "max": 97.906,
+        "p50": 70.569,
+        "p95": 97.906
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 5621,
+      "samples": 5
+    },
+    "research.answer.llm": {
+      "calls_per_run_median": 6.0,
+      "completion_tokens_median": 3731,
+      "latency_seconds": {
+        "max": 96.403,
+        "p50": 43.213,
+        "p95": 84.351
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 37218,
+      "samples": 36
+    },
+    "research.classify.llm": {
+      "calls_per_run_median": 1.0,
+      "completion_tokens_median": 105,
+      "latency_seconds": {
+        "max": 2.761,
+        "p50": 1.902,
+        "p95": 2.761
+      },
+      "models": [
+        "gpt-5.4-mini"
+      ],
+      "prompt_tokens_median": 541,
+      "samples": 10
+    },
+    "research.evaluate.llm": {
+      "calls_per_run_median": 3,
+      "completion_tokens_median": 173,
+      "latency_seconds": {
+        "max": 4.9,
+        "p50": 3.262,
+        "p95": 4.794
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 10455,
+      "samples": 20
+    },
+    "research.plan.llm": {
+      "calls_per_run_median": 3,
+      "completion_tokens_median": 208,
+      "latency_seconds": {
+        "max": 6.297,
+        "p50": 3.454,
+        "p95": 5.74
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 2088,
+      "samples": 22
+    },
+    "research.search.llm": {
+      "calls_per_run_median": 22,
+      "completion_tokens_median": 881,
+      "latency_seconds": {
+        "max": 9.188,
+        "p50": 4.694,
+        "p95": 8.104
+      },
+      "models": [
+        "gpt-5.4-mini"
+      ],
+      "prompt_tokens_median": 2280,
+      "samples": 140
+    },
+    "research.web_search.web_search": {
+      "calls_per_run_median": 22,
+      "completion_tokens_median": 0,
+      "latency_seconds": {
+        "max": 56.881,
+        "p50": 23.413,
+        "p95": 46.755
+      },
+      "models": [],
+      "prompt_tokens_median": 0,
+      "samples": 140
+    }
+  },
+  "provenance": {
+    "derived_from": "run trace export (GET /v1/admin/runs/{run_id}/trace/export)",
+    "operations": 12,
+    "provider_call_samples": 414,
+    "traces_read": 20
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "name": "@inqtrix/editor-schema",
+  "private": true,
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./browser": {
+      "types": "./src/browser.ts",
+      "import": "./src/browser.ts"
+    },
+    "./core": {
+      "types": "./src/core.ts",
+      "import": "./src/core.ts"
+    },
+    "./protocol": {
+      "types": "./src/protocolEntry.ts",
+      "import": "./src/protocolEntry.ts"
+    },
+    "./server": {
+      "types": "./src/server.ts",
+      "import": "./src/server.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "pretest": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@handlewithcare/prosemirror-suggest-changes": "0.1.8",
+    "@hocuspocus/transformer": "4.3.0",
+    "@tiptap/core": "3.31.3",
+    "@tiptap/extension-document": "3.31.3",
+    "@tiptap/extension-highlight": "3.31.3",
+    "@tiptap/extension-link": "3.31.3",
+    "@tiptap/extension-mathematics": "3.31.3",
+    "@tiptap/extension-table": "3.31.3",
+    "@tiptap/extension-task-item": "3.31.3",
+    "@tiptap/extension-task-list": "3.31.3",
+    "@tiptap/extension-text-align": "3.31.3",
+    "@tiptap/markdown": "3.31.3",
+    "@tiptap/pm": "3.31.3",
+    "@tiptap/starter-kit": "3.31.3",
+    "@tiptap/y-tiptap": "3.0.9",
+    "yjs": "13.6.31"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "typescript": "6.0.3",
+    "vitest": "4.1.7"
+  },
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10.9.0"
+  }
+}

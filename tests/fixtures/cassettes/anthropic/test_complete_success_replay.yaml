@@ -1,0 +1,41 @@
+# Hand-crafted Anthropic Messages API success response.
+# Schema: https://docs.anthropic.com/en/api/messages (content-block array,
+# usage with input_tokens/output_tokens, stop_reason).
+interactions:
+  - request:
+      body: null
+      headers:
+        Content-Type:
+          - application/json
+        User-Agent:
+          - inqtrix/0.1
+      method: POST
+      uri: https://api.anthropic.com/v1/messages
+    response:
+      body:
+        string: |
+          {
+            "id": "msg_replay_success_001",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [
+              {
+                "type": "text",
+                "text": "Inqtrix bietet 14-phasige Audit-Stabilitaet und Constructor-First-Provider."
+              }
+            ],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {
+              "input_tokens": 11,
+              "output_tokens": 17
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

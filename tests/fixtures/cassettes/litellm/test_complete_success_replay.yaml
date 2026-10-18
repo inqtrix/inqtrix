@@ -1,0 +1,43 @@
+# Hand-crafted from OpenAI Chat Completions response shape on 2026-04-19.
+# Replace via INQTRIX_RECORD_MODE=once when the proxy schema changes.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: http://localhost:4000/v1/chat/completions
+    response:
+      body:
+        string: |
+          {
+            "id": "chatcmpl-replay-success-001",
+            "object": "chat.completion",
+            "created": 1745000000,
+            "model": "gpt-4o",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Inqtrix ist ein iterativer Recherche-Agent fuer mehrstufige Web-Recherchen mit nachvollziehbarer Belegfuehrung."
+                },
+                "finish_reason": "stop"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 12,
+              "completion_tokens": 22,
+              "total_tokens": 34
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

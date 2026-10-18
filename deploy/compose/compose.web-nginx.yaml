@@ -1,0 +1,28 @@
+# Optional Enterprise nginx edge. Overlay this after compose.stack.yaml while
+# keeping the same logical `web` service and public port.
+#
+#   podman compose -f deploy/compose/compose.stack.yaml \
+#     -f deploy/compose/compose.web-nginx.yaml \
+#     --env-file deploy/.env.stack.secrets \
+#     --env-file deploy/.env.stack up -d --build
+#
+# The equivalent wrapper selection is:
+#
+#   inqtrix-deploy --web-nginx up --detach --build
+
+services:
+  web:
+    build:
+      target: web-nginx
+    image: ${INQTRIX_WEB_NGINX_IMAGE:-inqtrix-web-nginx:local}
+    environment:
+      # Semantic adapter sentinel consumed by the nginx entrypoint validator.
+      # compose.web-tls.yaml sets INQTRIX_DIRECT_TLS=true; nginx rejects that
+      # combination with a domain-specific startup error.
+      INQTRIX_WEB_ADAPTER: nginx
+      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -q -O /dev/null "http://127.0.0.1:8080/health"

@@ -1,0 +1,54 @@
+# Inqtrix collaboration image: builds the private Node WebSocket service from
+# the frozen npm workspace, then runs only the bundled artifact as non-root.
+#
+# Build context is the repository root:
+#   docker build -f deploy/docker/Dockerfile.collaboration -t inqtrix-collaboration .
+
+# --- Stage 1: install the frozen workspace and bundle the service ---
+FROM docker.io/library/node:22.23.1-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS build
+WORKDIR /repo
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+
+# Every workspace manifest is copied because npm validates the root workspace
+# graph during `npm ci`, even though this target installs only the two
+# workspaces the bundle needs. Order and spelling match Dockerfile.web so both
+# images keep the same manifest layers.
+COPY package.json package-lock.json ./
+COPY apps/collaboration-server/package.json apps/collaboration-server/
+COPY apps/research-desk/package.json apps/research-desk/
+COPY packages/editor-schema/package.json packages/editor-schema/
+RUN npm ci \
+      --workspace @inqtrix/collaboration-server \
+      --workspace @inqtrix/editor-schema
+
+COPY apps/collaboration-server ./apps/collaboration-server
+COPY packages/editor-schema ./packages/editor-schema
+RUN npm --workspace @inqtrix/collaboration-server run build
+
+# --- Stage 2: read-only-compatible, non-root runtime ---
+FROM docker.io/library/node:22.23.1-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build /repo/apps/collaboration-server/dist ./dist
+
+# Match the API image's identity contract: UID 1001 has no /etc/passwd entry,
+# so its primary group is 0. The process writes nowhere, but group-readable
+# and group-executable application files keep the image valid regardless of
+# which non-root UID the runtime assigns.
+RUN chgrp -R 0 /app && chmod -R g=u /app
+USER 1001
+EXPOSE 1234
+# OCI metadata. Static only, and on purpose: `revision` and `created` are
+# build-time facts this repository cannot know (there is no publishing
+# pipeline), and a label carrying an empty value is worse than an absent one
+# -- a scanner reads it as "declared, and blank". The version and licence are
+# NOT typed twice: tests/test_image_metadata.py pins them against pyproject
+# and legal.py, because a derived artefact drifts the moment nothing checks it.
+LABEL org.opencontainers.image.title="Inqtrix Collaboration" \
+      org.opencontainers.image.description="Inqtrix live collaboration server for the editor." \
+      org.opencontainers.image.version="0.2.0" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/inqtrix/inqtrix" \
+      org.opencontainers.image.documentation="https://github.com/inqtrix/inqtrix#readme"
+
+CMD ["node", "--enable-source-maps", "dist/main.cjs"]

@@ -1,0 +1,159 @@
+# Publish immutable, attestable first-party images. This workflow is deliberately
+# separate from CI: pull requests and local/* branches can build and test, but
+# only a published SemVer release or an explicit operator dispatch may write to
+# GHCR. Every third-party action is pinned to a full commit SHA.
+
+name: release-images
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer image tag, for example v0.2.0"
+        required: true
+        type: string
+
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: scan ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: api
+            dockerfile: deploy/docker/Dockerfile.api
+          - component: web
+            dockerfile: deploy/docker/Dockerfile.web
+          - component: collaboration
+            dockerfile: deploy/docker/Dockerfile.collaboration
+    env:
+      SCAN_IMAGE: inqtrix-scan/${{ matrix.component }}:${{ github.sha }}
+
+    steps:
+      - name: Check out the exact release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # This unprivileged job has no package-write, attestation, or OIDC
+      # permission. The release job below can run only after all three scans
+      # pass and reuses this content-addressed cache.
+      - name: Build amd64 image for the vulnerability gate
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.SCAN_IMAGE }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      - name: Reject fixable high and critical vulnerabilities
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ env.SCAN_IMAGE }}
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          output-format: table
+          grype-version: v0.112.0
+
+  publish:
+    name: publish ${{ matrix.component }}
+    needs: scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: api
+            dockerfile: deploy/docker/Dockerfile.api
+          - component: web
+            dockerfile: deploy/docker/Dockerfile.web
+          - component: collaboration
+            dockerfile: deploy/docker/Dockerfile.collaboration
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ghcr.io/bzandi/inqtrix-${{ matrix.component }}
+
+    steps:
+      - name: Check out the exact release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Validate version and create immutable tags
+        id: release
+        shell: bash
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION:-${DISPATCH_VERSION:-}}"
+          if [[ ! "${version}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::Release version must be an exact SemVer tag such as v0.2.0"
+            exit 1
+          fi
+          {
+            echo "version=${version}"
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:${version}"
+            echo "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build and publish the signed multiarch image
+        id: push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.release.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Add keyless GitHub/Sigstore provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

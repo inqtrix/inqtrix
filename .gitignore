@@ -27,8 +27,8 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#   Usually these files are written by a python script from a template
-#   before PyInstaller builds the exe, so as to inject date/other infos into it.
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -61,6 +61,13 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# Logs
+logs/*
+!logs/.keep
+
+# Debug dataflow dumps (scripts/debug_search_dataflow.py)
+scripts/debug_out/
+
 # Flask stuff:
 instance/
 .webassets-cache
@@ -92,34 +99,34 @@ ipython_config.py
 #   However, in case of collaboration, if having platform-specific dependencies or dependencies
 #   having no cross-platform support, pipenv may install dependencies that don't work, or not
 #   install all needed dependencies.
-# Pipfile.lock
+#Pipfile.lock
 
 # UV
 #   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
 #   This is especially recommended for binary packages to ensure reproducibility, and is more
 #   commonly ignored for libraries.
-# uv.lock
+#uv.lock
 
 # poetry
 #   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
 #   This is especially recommended for binary packages to ensure reproducibility, and is more
 #   commonly ignored for libraries.
 #   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-# poetry.lock
-# poetry.toml
+#poetry.lock
+#poetry.toml
 
 # pdm
 #   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
 #   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
 #   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-# pdm.lock
-# pdm.toml
+#pdm.lock
+#pdm.toml
 .pdm-python
 .pdm-build/
 
 # pixi
 #   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-# pixi.lock
+#pixi.lock
 #   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
 #   in the .venv directory. It is recommended not to include this directory in version control.
 .pixi
@@ -130,19 +137,6 @@ __pypackages__/
 # Celery stuff
 celerybeat-schedule
 celerybeat.pid
-
-# Redis
-*.rdb
-*.aof
-*.pid
-
-# RabbitMQ
-mnesia/
-rabbitmq/
-rabbitmq-data/
-
-# ActiveMQ
-activemq-data/
 
 # SageMath parsed files
 *.sage.py
@@ -182,26 +176,24 @@ dmypy.json
 cython_debug/
 
 # PyCharm
-#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#   and can be added to the global gitignore or merged into this file.  For a more nuclear
-#   option (not recommended) you can uncomment the following to ignore the entire idea folder.
-# .idea/
+#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
+#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
+#  and can be added to the global gitignore or merged into this file.  For a more nuclear
+#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
+#.idea/
 
 # Abstra
-#   Abstra is an AI-powered process automation framework.
-#   Ignore directories containing user credentials, local state, and settings.
-#   Learn more at https://abstra.io/docs
+# Abstra is an AI-powered process automation framework.
+# Ignore directories containing user credentials, local state, and settings.
+# Learn more at https://abstra.io/docs
 .abstra/
 
 # Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#   you could uncomment the following to ignore the entire vscode folder
+#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore
+#  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
+#  and can be added to the global gitignore or merged into this file. However, if you prefer,
+#  you could uncomment the following to ignore the entire vscode folder
 # .vscode/
-# Temporary file for partial code execution
-tempCodeRunnerFile.py
 
 # Ruff stuff:
 .ruff_cache/
@@ -209,10 +201,91 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Cursor
+#  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
+#  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
+#  refer to https://docs.cursor.com/context/ignore-files
+.cursorignore
+.cursorindexingignore
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Streamlit
-.streamlit/secrets.toml
+# Custom
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+.DS_Store
+.vscode/
+.env
+.env.stack.azure
+.env.*
+*.env
+!.env.example
+# Curated, secret-free deployment templates are the only deploy `.env.*`
+# exceptions; runtime environment files remain covered by the private patterns.
+!deploy/.env.stack.example
+!deploy/.env.stack.secrets.example
+!deploy/.env.migrate.secrets.example
+deploy/.secrets/
+inqtrix.yaml
+inqtrix.yml
+.inqtrix.yaml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+tests/integration/runs/
+tests/integration/reports/
+
+# Local Claude state and instruction overlays may contain machine-specific
+# prompts, session data, or private operational context. These paths are a
+# permanent version-control boundary: never add, stage, commit, or mirror them
+# into the distributable product source.
+.claude/
+*.claude
+[Cc][Ll][Aa][Uu][Dd][Ee].md
+
+# Local Cursor workspace state may contain caches, private architecture notes,
+# or editor-specific context. The whole tree is permanently local-only.
+# Internal development memory must never be copied into public documentation.
+.cursor/
+[Cc][Uu][Rr][Ss][Oo][Rr].md
+
+# Local testing
+main.py
+
+tests/integration/
+
+# Local Codex/agent instruction overlay; permanently operator-specific and not
+# part of the distributable product source.
+[Aa][Gg][Ee][Nn][Tt][Ss].md
+
+# Frontend workspaces
+node_modules/
+apps/*/dist/
+apps/*/.vite/
+apps/*/node_modules/
+!apps/research-desk/src/lib/
+!apps/research-desk/src/lib/**
+# Local object store (default INQTRIX_OBJECT_STORE_PATH) and eval artifacts
+data/
+tests/eval/artifacts/
+tests/eval/golden_hard/corpus/
+tests/eval/golden_bsi/corpus/
+tests/eval/golden_dora/corpus/
+tests/eval/golden_gquad/corpus/
+tests/eval/golden_gquad/queries.json
+
+# Captured provider responses replayed by the load-measurement mock. Derived
+# from an operator's own run traces and therefore real questions, answers, and
+# source material. The paired timing profile under profiles/ holds only counts
+# and durations and stays tracked.
+tests/load/mock-providers/corpus/

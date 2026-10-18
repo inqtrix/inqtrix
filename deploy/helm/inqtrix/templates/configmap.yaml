@@ -1,0 +1,165 @@
+{{- /*
+Non-secret app config. Bundled backing services auto-wire their non-secret
+connection settings; anything set explicitly in config/extraConfig wins (merge
+precedence: config > extraConfig > derived).
+*/}}
+{{- /* Fail fast: postgres storage backend with no database configured would
+       render an empty INQTRIX_DATABASE_URL and break migrate + api at runtime. */}}
+{{- if and (eq (.Values.config.INQTRIX_STORAGE_BACKEND | toString) "postgres") (not .Values.postgres.enabled) (not .Values.secret.existingSecret) (not (hasKey .Values.secret.data "INQTRIX_DATABASE_URL")) }}
+{{- fail "INQTRIX_STORAGE_BACKEND is \"postgres\" but no database is configured. Set ONE of: --set postgres.enabled=true (bundled demo DB), --set secret.existingSecret=<name> (a Secret carrying INQTRIX_DATABASE_URL), or --set-string secret.data.INQTRIX_DATABASE_URL=<url>. For a stateless single-pod trial: --set worker.enabled=false --set config.INQTRIX_STORAGE_BACKEND=memory --set migrations.enabled=false." }}
+{{- end }}
+{{- if .Values.s3.enabled }}
+{{- $explicitS3Keys := list "INQTRIX_OBJECT_STORE_BACKEND" "INQTRIX_S3_AUTH_MODE" "INQTRIX_S3_ENDPOINT_URL" "INQTRIX_S3_BUCKET" "INQTRIX_S3_ADDRESSING_STYLE" "INQTRIX_S3_BUCKET_PROVISIONING" }}
+{{- range $key := $explicitS3Keys }}
+{{- if or (hasKey $.Values.config $key) (hasKey $.Values.extraConfig $key) }}
+{{- fail (printf "bundled MinIO topology is derived from s3.*; do not also set config/extraConfig.%s" $key) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- /* INQTRIX_REPLICA_COUNT is fully chart-derived below. A user-supplied
+       value can only be redundant or wrong: too LOW is caught by the render
+       guard on the chart's own count, but too HIGH passes the chart and then
+       fails every api pod at startup (the app-side local-store guard) -- a
+       spurious crash loop pointing away from its cause. Refuse the render. */}}
+{{- range $key := list "INQTRIX_REPLICA_COUNT" }}
+{{- if or (hasKey $.Values.config $key) (hasKey $.Values.extraConfig $key) }}
+{{- fail (printf "%s is derived by the chart from api.replicaCount/autoscaling and worker.replicaCount; do not also set config/extraConfig.%s" $key $key) }}
+{{- end }}
+{{- end }}
+{{- /* Topology. The worker (on by default) claims runs from the Postgres run
+       store through a Valkey queue and reads the files the API wrote, so it
+       needs all three; one message names every missing part. Without the
+       worker each API process executes jobs itself and treats runs that
+       another process executes as lost, so that variant supports exactly
+       one API replica. The bundled-MinIO check above runs first so a
+       conflicting store reports its own cause. `default ""` keeps an
+       all-empty coalesce from turning into the string "<nil>". */}}
+{{- $topologyStore := include "inqtrix.objectStoreBackend" . }}
+{{- $topologyStorage := coalesce .Values.config.INQTRIX_STORAGE_BACKEND .Values.extraConfig.INQTRIX_STORAGE_BACKEND "" | default "" | toString }}
+{{- $topologyQueue := coalesce .Values.config.INQTRIX_QUEUE_BACKEND .Values.extraConfig.INQTRIX_QUEUE_BACKEND "" | default "" | toString }}
+{{- $apiReplicas := int (include "inqtrix.apiReplicaCeiling" .) }}
+{{- if .Values.worker.enabled }}
+{{- if eq $topologyQueue "memory" }}
+{{- fail "config.INQTRIX_QUEUE_BACKEND=memory contradicts worker.enabled=true (the chart default): the worker refuses to start without the Valkey queue, and the API would run every job itself. Remove the key (the chart derives valkey) or set worker.enabled=false." }}
+{{- end }}
+{{- $missing := list }}
+{{- if ne $topologyStorage "postgres" }}
+{{- $missing = append $missing (printf "INQTRIX_STORAGE_BACKEND=postgres (found %q)" $topologyStorage) }}
+{{- end }}
+{{- /* The chart cannot read a user-managed Secret, so a Valkey URL that only
+       lives in secret.existingSecret must be confirmed explicitly; otherwise
+       an upgrade would start API and worker without a queue URL. */}}
+{{- $valkeyUrlInValues := or (hasKey .Values.secret.data "INQTRIX_VALKEY_URL") (get .Values.config "INQTRIX_VALKEY_URL") (get .Values.extraConfig "INQTRIX_VALKEY_URL") }}
+{{- $valkeyUrlConfirmed := and .Values.secret.existingSecret (eq $topologyQueue "valkey") }}
+{{- if not (or .Values.valkey.enabled $valkeyUrlInValues $valkeyUrlConfirmed) }}
+{{- $missing = append $missing "a Valkey queue (valkey.enabled=true with valkey.password; INQTRIX_VALKEY_URL in secret.data; or INQTRIX_VALKEY_URL in secret.existingSecret, confirmed with config.INQTRIX_QUEUE_BACKEND=valkey because the chart cannot read that Secret)" }}
+{{- end }}
+{{- if eq $topologyStore "local" }}
+{{- $missing = append $missing "a shared object store (s3.enabled=true with s3.secretKey for the bundled MinIO, or config.INQTRIX_OBJECT_STORE_BACKEND=s3 with an external endpoint); the local backend is per-pod disk" }}
+{{- end }}
+{{- if $missing }}
+{{- fail (printf "worker.enabled=true (the chart default) runs research and agent runs, indexing and retention jobs in a worker Deployment and needs: %s. Provide them, or set worker.enabled=false for the single-pod variant (one API replica that runs every job itself)." (join "; " $missing)) }}
+{{- end }}
+{{- else }}
+{{- if eq $topologyQueue "valkey" }}
+{{- fail "INQTRIX_QUEUE_BACKEND=valkey hands runs to a worker, but worker.enabled=false renders none, so queued runs would never start. Set worker.enabled=true or remove the key." }}
+{{- end }}
+{{- if gt $apiReplicas 1 }}
+{{- fail (printf "worker.enabled=false runs every job inside the API process, which supports exactly one API replica (%d requested through api.replicaCount or api.autoscaling.maxReplicas): each API process fails the runs another process executes as lost. Enable the worker to run more than one API replica." $apiReplicas) }}
+{{- end }}
+{{- end }}
+{{- /* Pods that share the object store: the API ceiling from above (static
+       replicaCount, or the autoscaler maximum) plus the worker replicas. */}}
+{{- $storeSharers := $apiReplicas }}
+{{- if .Values.worker.enabled }}
+{{- /* Count the ACTUAL worker replicas, not a flat 1: with
+       worker.replicaCount > 1 the flat count understated the sharers and
+       fed the app a wrong INQTRIX_REPLICA_COUNT. */}}
+{{- $storeSharers = add $storeSharers (max 1 (int .Values.worker.replicaCount)) }}
+{{- end }}
+{{- /* Object-store backend default lives in the derived layer (not the config
+       defaults) so s3.enabled can flip it to "s3" -- a baked-in config default would
+       always win over the derived value. The app default is "local" too. An explicit
+       config/extraConfig value still wins (e.g. to point at an external S3). The
+       replica hint feeds the app's own startup guard (defense in depth for
+       non-Helm deploys). */}}
+{{- $runtimeLoginPolicy := ternary "bundled_legacy" "restricted" .Values.postgres.enabled }}
+{{- $derived := dict "INQTRIX_OBJECT_STORE_BACKEND" "local" "INQTRIX_REPLICA_COUNT" (printf "%d" (int $storeSharers)) "INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY" $runtimeLoginPolicy }}
+{{- $explicitPublicBase := coalesce .Values.config.INQTRIX_PUBLIC_BASE_URL .Values.extraConfig.INQTRIX_PUBLIC_BASE_URL "" }}
+{{- /* The public URL is a trust anchor for same-origin WebSocket checks after
+       TLS termination. Derive it only from the chart-owned ingress/Route;
+       explicit config or extraConfig still wins through merge precedence. */}}
+{{- if .Values.ingress.enabled }}
+{{- $publicScheme := ternary "https" "http" .Values.ingress.tls.enabled }}
+{{- $_ := set $derived "INQTRIX_PUBLIC_BASE_URL" (printf "%s://%s" $publicScheme .Values.ingress.host) }}
+{{- end }}
+{{- /* Behind the chart-owned edge every request reaches the API with TWO
+       X-Forwarded-For hops: the ingress controller writes
+       the client address, then the Python web gateway appends its peer.
+       The login rate limiter reads the address trusted_proxy_hops from the
+       right; the app default of 1 would therefore key every client on the
+       edge pod IP, collapsing all users into one lockout bucket (a third
+       party spraying failed logins at a victim's email would lock the victim
+       out). The chart knows its own two-hop topology, so it sets the depth in
+       the derived layer; explicit config/extraConfig still wins (e.g. 3 with
+       an additional cloud load balancer in front). */}}
+{{- if .Values.ingress.enabled }}
+{{- $_ := set $derived "INQTRIX_TRUSTED_PROXY_HOPS" "2" }}
+{{- end }}
+{{- if .Values.qdrant.enabled }}
+{{- $_ := set $derived "INQTRIX_KNOWLEDGE_ENABLED" "true" }}
+{{- $_ := set $derived "INQTRIX_VECTOR_BACKEND" "qdrant" }}
+{{- $_ := set $derived "INQTRIX_QDRANT_URL" (printf "http://%s-qdrant:6333" (include "inqtrix.fullname" .)) }}
+{{- end }}
+{{- /* The worker drains the Valkey queue, so the queue backend follows the
+       worker, whichever Valkey source the topology check accepted. Without a
+       worker the app keeps the in-process queue (the single-pod variant); a
+       bundled Valkey then serves only features such as guest-link rate
+       limits. An explicit memory queue with a worker fails above. */}}
+{{- if .Values.worker.enabled }}
+{{- $_ := set $derived "INQTRIX_QUEUE_BACKEND" "valkey" }}
+{{- end }}
+{{- /* Bundled MinIO: point the object store at the in-cluster S3 endpoint and
+       retain the historical static/path-style/create-if-missing contract. The
+       access/secret keys are derived into the Secret. */}}
+{{- if .Values.s3.enabled }}
+{{- $_ := set $derived "INQTRIX_OBJECT_STORE_BACKEND" "s3" }}
+{{- $_ := set $derived "INQTRIX_S3_AUTH_MODE" "static" }}
+{{- $_ := set $derived "INQTRIX_S3_ENDPOINT_URL" (printf "http://%s-minio:9000" (include "inqtrix.fullname" .)) }}
+{{- $_ := set $derived "INQTRIX_S3_BUCKET" .Values.s3.bucket }}
+{{- $_ := set $derived "INQTRIX_S3_ADDRESSING_STYLE" "path" }}
+{{- $_ := set $derived "INQTRIX_S3_BUCKET_PROVISIONING" "create_if_missing" }}
+{{- end }}
+{{- if .Values.s3.caBundle.existingConfigMap }}
+{{- $_ := set $derived "INQTRIX_S3_CA_BUNDLE" .Values.s3.caBundle.mountPath }}
+{{- end }}
+{{- /* Prometheus /metrics: the image bakes in the metrics extra, so this flag
+       alone mounts the endpoint (scrape wiring lives on the api pod annotations). */}}
+{{- if and (gt (int (.Values.metrics.workerPort | default 0)) 0) (not .Values.metrics.enabled) }}
+{{- fail "metrics.workerPort requires metrics.enabled=true (the worker exporter is gated by INQTRIX_METRICS_ENABLED; a silently dropped port would hide the misconfiguration)" }}
+{{- end }}
+{{- if .Values.metrics.enabled }}
+{{- $_ := set $derived "INQTRIX_METRICS_ENABLED" "true" }}
+{{- if gt (int (.Values.metrics.workerPort | default 0)) 0 }}
+{{- $_ := set $derived "INQTRIX_WORKER_METRICS_PORT" (printf "%d" (int .Values.metrics.workerPort)) }}
+{{- end }}
+{{- end }}
+{{- /* Collaboration stays absent from the default ConfigMap. Enabling the
+       module wires FastAPI only to the private ClusterIP Service; the browser
+       continues to use the same-origin /collaboration gateway. */}}
+{{- if .Values.collaboration.enabled }}
+{{- $_ := set $derived "INQTRIX_COLLABORATION_ENABLED" "true" }}
+{{- $_ := set $derived "INQTRIX_COLLABORATION_HTTP_URL" (printf "http://%s-collaboration:%d" (include "inqtrix.fullname" .) (int .Values.service.collaborationPort)) }}
+{{- $_ := set $derived "INQTRIX_COLLABORATION_WS_URL" (printf "ws://%s-collaboration:%d/collaboration" (include "inqtrix.fullname" .) (int .Values.service.collaborationPort)) }}
+{{- end }}
+{{- $merged := merge (deepCopy .Values.config) .Values.extraConfig $derived }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "inqtrix.fullname" . }}
+  labels:
+    {{- include "inqtrix.labels" (dict "root" .) | nindent 4 }}
+data:
+  {{- range $key, $value := $merged }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

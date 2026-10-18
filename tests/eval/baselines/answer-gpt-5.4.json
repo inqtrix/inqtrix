@@ -1,0 +1,7 @@
+{
+  "_inqtrix_version": "0.2.0",
+  "_context": "Regression baseline: gate ON with the three-way coverage verdict, memory store + text-embedding-3-large, EVAL_CHUNK_MAX_CHARS=400, profile standard. Partial coverage answers with the gaps named instead of refusing wholesale, so the q39 docs-in-tension question is answered; abstention is measured as declared absence (canonical refusal or an explicit statement that the requested fact is absent from the documents).",
+  "abstention_rate": 1.0,
+  "false_refusal_rate": 0.0,
+  "citation_rate": 1.0
+}

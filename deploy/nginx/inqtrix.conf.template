@@ -1,0 +1,152 @@
+# Runtime values are validated by 10-inqtrix-env.envsh before envsubst.
+resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+
+map $http_upgrade $inqtrix_connection_upgrade {
+    default upgrade;
+    ''      '';
+}
+
+# nginx cannot remove an arbitrarily named request header nominated by
+# Connection without an extension module. Fail closed when a client nominates
+# anything beyond the protocol options the edge itself understands. Python
+# can remove such a field dynamically; both adapters therefore enforce the
+# same boundary even though nginx answers the malformed request with 400.
+map $http_connection $inqtrix_invalid_connection_options {
+    default 1;
+    ""      0;
+    ~*^\s*(?:close|keep-alive|upgrade)(?:\s*,\s*(?:close|keep-alive|upgrade))*\s*$ 0;
+}
+
+log_format inqtrix_safe
+    '$remote_addr [$time_iso8601] '
+    '"$request_method $inqtrix_log_path $server_protocol" '
+    '$status $body_bytes_sent ${request_time}s';
+
+server {
+    include /tmp/inqtrix-listen.conf;
+    server_name _;
+    server_tokens off;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Baseline for EVERY response, mirroring the Python edge
+    # (src/inqtrix_web_gateway/security_headers.py). The guest locations keep
+    # their stricter Referrer-Policy; nginx's add_header inheritance means a
+    # location that sets its own list replaces this one wholesale, which is why
+    # static-headers.conf repeats what it needs.
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # As an nginx variable, so the included guest header list can restate it
+    # (that file is not run through envsubst).
+    set $inqtrix_hsts "${INQTRIX_HSTS_HEADER}";
+    add_header Strict-Transport-Security $inqtrix_hsts always;
+    client_max_body_size ${INQTRIX_PROXY_MAX_BODY_BYTES};
+
+    set $inqtrix_backend "${INQTRIX_BACKEND_URL}";
+    set $inqtrix_forwarded_scheme "${INQTRIX_FORWARDED_SCHEME}";
+    set $inqtrix_forwarded_host "${INQTRIX_FORWARDED_HOST}";
+    # Location matching operates on nginx's normalized URI. Initialise the
+    # public-path policy here, then let the normalized asset/guest/share-link
+    # locations override it. Never classify security-sensitive paths from
+    # raw $request_uri: encoded separators and route letters are normalized
+    # before routing and must receive the same policy as their plain forms.
+    set $inqtrix_log_path $uri;
+    set $inqtrix_static_cache_control "no-cache";
+    set $inqtrix_guest_referrer_policy "";
+    set $inqtrix_guest_content_type_options "";
+
+    access_log /dev/stdout inqtrix_safe;
+    # nginx cannot redact request targets in its built-in error-log format.
+    # Runtime request diagnostics therefore stay in the sanitized access log;
+    # startup/configuration failures still use the process-level error log.
+    error_log /dev/stderr crit;
+    error_page 413 = @request_too_large;
+    error_page 502 = @backend_unreachable;
+    error_page 400 = @invalid_connection_options;
+
+    location @invalid_connection_options {
+        default_type application/json;
+        return 400 '{"detail":"Invalid Connection header"}';
+    }
+
+    location @request_too_large {
+        default_type application/json;
+        return 413 '{"detail":"Request body too large"}';
+    }
+
+    location @backend_unreachable {
+        default_type application/json;
+        return 502 '{"detail":"Backend unreachable"}';
+    }
+
+    location /api/ {
+        include /etc/nginx/inqtrix/proxy-common.conf;
+    }
+
+    location ~ ^/v1/editor/share-links(?:/|$) {
+        set $inqtrix_log_path /v1/editor/share-links/[REDACTED];
+        include /etc/nginx/inqtrix/proxy-common.conf;
+    }
+
+    location /v1/ {
+        include /etc/nginx/inqtrix/proxy-common.conf;
+    }
+
+    location = /health {
+        include /etc/nginx/inqtrix/proxy-common.conf;
+    }
+
+    location = /readyz {
+        include /etc/nginx/inqtrix/proxy-common.conf;
+    }
+
+    location = /collaboration/instance {
+        include /etc/nginx/inqtrix/proxy-common.conf;
+    }
+
+    location = /collaboration {
+        include /etc/nginx/inqtrix/proxy-common.conf;
+    }
+
+    location /assets/ {
+        set $inqtrix_static_cache_control "public, max-age=31536000, immutable";
+        default_type application/javascript;
+        include /etc/nginx/inqtrix/static-headers.conf;
+        # Serve the build's precompressed sibling instead of compressing
+        # per request. Kept in step with the Python edge on purpose: a
+        # gateway that silently shipped 3.5x more bytes than the other
+        # would be an adapter divergence, not an optimisation detail.
+        # Brotli needs ngx_brotli, which the stock image lacks, so this
+        # edge negotiates gzip only — still correct, just less optimal.
+        gzip_static on;
+        try_files $uri =404;
+    }
+
+    location ~ ^/s(?:/|$) {
+        set $inqtrix_log_path /s/[REDACTED];
+        set $inqtrix_static_cache_control "no-store";
+        set $inqtrix_guest_referrer_policy "no-referrer";
+        set $inqtrix_guest_content_type_options "nosniff";
+        include /etc/nginx/inqtrix/static-headers.conf;
+        try_files $uri @inqtrix_guest_spa;
+    }
+
+    # Keep the guest classification while serving the SPA shell. An ordinary
+    # internal redirect to /index.html would re-enter the generic location and
+    # silently downgrade no-store and token redaction.
+    location @inqtrix_guest_spa {
+        set $inqtrix_log_path /s/[REDACTED];
+        set $inqtrix_static_cache_control "no-store";
+        set $inqtrix_guest_referrer_policy "no-referrer";
+        set $inqtrix_guest_content_type_options "nosniff";
+        include /etc/nginx/inqtrix/static-headers.conf;
+        try_files /index.html =404;
+    }
+
+    location / {
+        include /etc/nginx/inqtrix/static-headers.conf;
+        try_files $uri /index.html;
+    }
+}

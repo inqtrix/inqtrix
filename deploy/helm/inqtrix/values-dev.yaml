@@ -1,0 +1,31 @@
+# Smallest value set that renders the chart, for lint and template checks.
+#
+# The chart fails closed on what a release must supply and a render check must
+# not invent: an image digest, a database, the Valkey queue and the shared
+# object store that the default worker needs, and the credential of every
+# bundled service. This file answers exactly those by bundling the three
+# backing services with throwaway credentials, so the documented gate command
+# renders the default topology, worker included, and runs green.
+#
+# Not a deployment configuration. It allows unpinned images and carries
+# throwaway credentials, so it must never be passed to `helm install`.
+
+image:
+  allowUnpinned: true
+
+postgres:
+  enabled: true
+  auth:
+    password: render-check-only
+
+valkey:
+  enabled: true
+  password: render-check-only
+
+s3:
+  enabled: true
+  secretKey: render-check-only
+
+secret:
+  data:
+    INQTRIX_SESSION_SECRET: render-check-only-0123456789abcdef0123456789abcdef

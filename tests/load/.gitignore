@@ -1,0 +1,6 @@
+*.lease.json
+*.session.json
+*lease-fixture*.json
+*session-fixture*.json
+*token-fixture*.json
+!session-fixture.example.json

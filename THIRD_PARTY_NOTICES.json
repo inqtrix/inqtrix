@@ -1,0 +1,6817 @@
+{
+  "generated_by": "scripts/generate_third_party_notices.py",
+  "packages": [
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "alembic",
+      "version": "1.18.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "annotated-doc",
+      "version": "0.0.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "annotated-types",
+      "version": "0.7.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "anyio",
+      "version": "4.13.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "argon2-cffi",
+      "version": "23.1.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "argon2-cffi-bindings",
+      "version": "25.1.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "asyncpg",
+      "version": "0.31.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "manual override: Azure SDK for Python repository license",
+      "name": "azure-ai-projects",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "manual override: Azure SDK for Python repository license",
+      "name": "azure-core",
+      "version": "1.39.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "manual override: Azure SDK for Python repository license",
+      "name": "azure-identity",
+      "version": "1.25.3"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "azure-storage-blob",
+      "version": "12.29.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "beautifulsoup4",
+      "version": "4.15.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License",
+      "name": "boto3",
+      "version": "1.42.85"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License",
+      "name": "botocore",
+      "version": "1.42.85"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "cachetools",
+      "version": "5.5.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Mozilla Public License 2.0 (MPL 2.0)",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "certifi",
+      "version": "2026.2.25"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "cffi",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License",
+      "name": "charset-normalizer",
+      "version": "3.4.6"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "click",
+      "version": "8.3.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache-2.0 OR BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "cryptography",
+      "version": "46.0.7"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Python Software Foundation License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "defusedxml",
+      "version": "0.7.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "distro",
+      "version": "1.9.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "fastapi",
+      "version": "0.135.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "filelock",
+      "version": "3.32.5"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "flatbuffers",
+      "version": "25.12.19"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "h11",
+      "version": "0.16.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "httpcore",
+      "version": "1.0.9"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "httpcore2",
+      "version": "2.3.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "httpx",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "httpx2",
+      "version": "2.3.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "idna",
+      "version": "3.11"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "isodate",
+      "version": "0.7.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "jiter",
+      "version": "0.13.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "jmespath",
+      "version": "1.1.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "joserfc",
+      "version": "1.7.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "jsonpatch",
+      "version": "1.33"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "jsonpointer",
+      "version": "3.1.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "langchain-core",
+      "version": "1.6.3"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "langchain-protocol",
+      "version": "0.0.18"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "langgraph",
+      "version": "1.2.11"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "langgraph-checkpoint",
+      "version": "4.1.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "langgraph-prebuilt",
+      "version": "1.1.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "langgraph-sdk",
+      "version": "0.4.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License",
+      "name": "langsmith",
+      "version": "0.12.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "magika",
+      "version": "0.6.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "mako",
+      "version": "1.3.12"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "markdown-it-py",
+      "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "markdownify",
+      "version": "1.2.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "markitdown",
+      "version": "0.1.6"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "markupsafe",
+      "version": "3.0.3"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "mdurl",
+      "version": "0.1.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "msal",
+      "version": "1.35.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "msal-extensions",
+      "version": "1.3.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "numpy",
+      "version": "2.4.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "onnxruntime",
+      "version": "1.26.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "openai",
+      "version": "2.32.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MPL-2.0 AND (Apache-2.0 OR MIT)",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "orjson",
+      "version": "3.11.7"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache-2.0 OR MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "ormsgpack",
+      "version": "1.12.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache-2.0 OR BSD-2-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "packaging",
+      "version": "26.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "perplexityai",
+      "version": "0.34.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "3-Clause BSD License",
+      "metadata_source": "python package metadata: License",
+      "name": "protobuf",
+      "version": "7.34.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "pycparser",
+      "version": "3.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "pydantic",
+      "version": "2.12.5"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "pydantic-core",
+      "version": "2.41.5"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "pydantic-settings",
+      "version": "2.13.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "pygments",
+      "version": "2.19.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "pyjwt",
+      "version": "2.12.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License / BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "python-dateutil",
+      "version": "2.9.0.post0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License",
+      "name": "python-dotenv",
+      "version": "1.2.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "python-multipart",
+      "version": "0.0.32"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "pyyaml",
+      "version": "6.0.3"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "requests",
+      "version": "2.33.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "requests-file",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "requests-toolbelt",
+      "version": "1.0.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "rich",
+      "version": "14.3.3"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "s3transfer",
+      "version": "0.16.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "six",
+      "version": "1.17.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License / MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "sniffio",
+      "version": "1.3.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "soupsieve",
+      "version": "2.8.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License",
+      "name": "sqlalchemy",
+      "version": "2.0.50"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "starlette",
+      "version": "1.0.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "tenacity",
+      "version": "9.1.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "tldextract",
+      "version": "5.3.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MPL-2.0 AND MIT",
+      "metadata_source": "python package metadata: License",
+      "name": "tqdm",
+      "version": "4.67.3"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "truststore",
+      "version": "0.10.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "PSF-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "typing-extensions",
+      "version": "4.15.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "typing-inspection",
+      "version": "0.4.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "urllib3",
+      "version": "2.6.3"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "uuid-utils",
+      "version": "0.14.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "uvicorn",
+      "version": "0.42.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "websockets",
+      "version": "15.0.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "xxhash",
+      "version": "3.6.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "zstandard",
+      "version": "0.25.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "anthropic",
+      "version": "1.5.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "bracex",
+      "version": "3.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "deepagents",
+      "version": "0.7.13"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "docstring-parser",
+      "version": "0.18.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "fakeredis",
+      "version": "2.36.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "filetype",
+      "version": "1.2.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "google-auth",
+      "version": "2.58.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "google-genai",
+      "version": "2.23.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "googleapis-common-protos",
+      "version": "1.75.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "grpcio",
+      "version": "1.81.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "iniconfig",
+      "version": "2.3.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "langchain",
+      "version": "1.4.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "langchain-anthropic",
+      "version": "1.7.2"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License",
+      "name": "langchain-google-genai",
+      "version": "4.4.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "langgraph-checkpoint-postgres",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "opentelemetry-api",
+      "version": "1.44.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "opentelemetry-exporter-otlp-proto-common",
+      "version": "1.44.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "opentelemetry-exporter-otlp-proto-http",
+      "version": "1.44.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "opentelemetry-proto",
+      "version": "1.44.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "opentelemetry-sdk",
+      "version": "1.44.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "opentelemetry-semantic-conventions",
+      "version": "0.65b0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "pluggy",
+      "version": "1.6.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "portalocker",
+      "version": "3.2.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0 AND BSD-2-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "prometheus-client",
+      "version": "0.25.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "LGPL-3.0-only",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "psycopg",
+      "version": "3.3.4"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "LGPL-3.0-only",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "psycopg-pool",
+      "version": "3.3.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "BSD-2-Clause",
+      "metadata_source": "python package metadata: License",
+      "name": "pyasn1",
+      "version": "0.6.3"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "pyasn1-modules",
+      "version": "0.4.2"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "pytest",
+      "version": "9.0.2"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "pytest-asyncio",
+      "version": "1.3.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "pytest-recording",
+      "version": "0.13.4"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "qdrant-client",
+      "version": "1.19.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "redis",
+      "version": "8.0.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "ruff",
+      "version": "0.16.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "sortedcontainers",
+      "version": "2.4.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "valkey",
+      "version": "6.1.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "vcrpy",
+      "version": "8.1.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "wcmatch",
+      "version": "11.0.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "BSD-2-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "wrapt",
+      "version": "2.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@antfu/install-pkg",
+      "version": "1.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@braintree/sanitize-url",
+      "version": "7.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@chevrotain/types",
+      "version": "11.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/autocomplete",
+      "version": "6.20.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/commands",
+      "version": "6.10.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/lang-css",
+      "version": "6.3.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/lang-html",
+      "version": "6.4.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/lang-javascript",
+      "version": "6.2.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/lang-markdown",
+      "version": "6.5.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/language",
+      "version": "6.12.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/lint",
+      "version": "6.9.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/search",
+      "version": "6.7.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/state",
+      "version": "6.6.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/state",
+      "version": "6.7.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@codemirror/view",
+      "version": "6.43.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@floating-ui/core",
+      "version": "1.8.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@floating-ui/dom",
+      "version": "1.8.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@floating-ui/react-dom",
+      "version": "2.1.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@floating-ui/utils",
+      "version": "0.2.12"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "OFL-1.1",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@fontsource-variable/inter",
+      "version": "5.2.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@handlewithcare/prosemirror-suggest-changes",
+      "version": "0.1.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@hocuspocus/common",
+      "version": "4.4.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@hocuspocus/provider",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@hocuspocus/transformer",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@iconify/types",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@iconify/utils",
+      "version": "3.1.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@inqtrix/editor-schema",
+      "version": "0.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@lezer/common",
+      "version": "1.5.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@lezer/css",
+      "version": "1.3.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@lezer/highlight",
+      "version": "1.2.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@lezer/html",
+      "version": "1.3.13"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@lezer/javascript",
+      "version": "1.5.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@lezer/lr",
+      "version": "1.4.10"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@lezer/markdown",
+      "version": "1.7.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@lifeomic/attempt",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@marijn/find-cluster-break",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@mermaid-js/parser",
+      "version": "1.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-android-arm64",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-darwin-arm64",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-darwin-x64",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-linux-arm-gnueabihf",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-linux-arm64-gnu",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-linux-arm64-musl",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-linux-riscv64-gnu",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-linux-x64-gnu",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-linux-x64-musl",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-win32-arm64-msvc",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/canvas-win32-x64-msvc",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/number",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/primitive",
+      "version": "1.1.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-arrow",
+      "version": "1.1.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-collection",
+      "version": "1.1.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-compose-refs",
+      "version": "1.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-context",
+      "version": "1.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-context",
+      "version": "1.1.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-direction",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-dismissable-layer",
+      "version": "1.1.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-dropdown-menu",
+      "version": "2.1.16"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-focus-guards",
+      "version": "1.1.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-focus-scope",
+      "version": "1.1.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-id",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-menu",
+      "version": "2.1.16"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-popper",
+      "version": "1.2.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-portal",
+      "version": "1.1.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-presence",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-primitive",
+      "version": "2.1.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-primitive",
+      "version": "2.1.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-progress",
+      "version": "1.1.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-roving-focus",
+      "version": "1.1.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-scroll-area",
+      "version": "1.2.10"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-select",
+      "version": "2.2.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-separator",
+      "version": "1.1.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-slot",
+      "version": "1.2.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-slot",
+      "version": "1.2.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-switch",
+      "version": "1.2.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-tabs",
+      "version": "1.1.13"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-tooltip",
+      "version": "1.2.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-use-callback-ref",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-use-controllable-state",
+      "version": "1.2.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-use-effect-event",
+      "version": "0.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-use-escape-keydown",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-use-layout-effect",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-use-previous",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-use-rect",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-use-size",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/react-visually-hidden",
+      "version": "1.2.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@radix-ui/rect",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@shikijs/core",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@shikijs/engine-javascript",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@shikijs/engine-oniguruma",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@shikijs/langs",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@shikijs/primitive",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@shikijs/themes",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@shikijs/types",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@shikijs/vscode-textmate",
+      "version": "10.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/core",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-blockquote",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-bold",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-bubble-menu",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-bullet-list",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-code",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-code-block",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-collaboration",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-collaboration-caret",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-document",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-drag-handle",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-drag-handle-react",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-dropcursor",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-floating-menu",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-gapcursor",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-hard-break",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-heading",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-highlight",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-horizontal-rule",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-italic",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-link",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-list",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-list-item",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-list-keymap",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-mathematics",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-node-range",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-ordered-list",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-paragraph",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-strike",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-table",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-table-cell",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-table-header",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-table-row",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-task-item",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-task-list",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-text",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-text-align",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extension-underline",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/extensions",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/markdown",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/pm",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/react",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/starter-kit",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/suggestion",
+      "version": "3.31.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tiptap/y-tiptap",
+      "version": "3.0.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3",
+      "version": "7.4.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-array",
+      "version": "3.2.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-axis",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-brush",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-chord",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-color",
+      "version": "3.1.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-contour",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-delaunay",
+      "version": "6.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-dispatch",
+      "version": "3.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-drag",
+      "version": "3.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-dsv",
+      "version": "3.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-ease",
+      "version": "3.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-fetch",
+      "version": "3.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-force",
+      "version": "3.0.10"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-format",
+      "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-geo",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-hierarchy",
+      "version": "3.1.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-interpolate",
+      "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-path",
+      "version": "3.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-polygon",
+      "version": "3.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-quadtree",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-random",
+      "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-scale",
+      "version": "4.0.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-scale-chromatic",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-selection",
+      "version": "3.0.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-shape",
+      "version": "3.1.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-time",
+      "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-time-format",
+      "version": "4.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-timer",
+      "version": "3.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-transition",
+      "version": "3.0.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/d3-zoom",
+      "version": "3.0.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/debug",
+      "version": "4.1.13"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/estree",
+      "version": "1.0.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/estree-jsx",
+      "version": "1.0.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/geojson",
+      "version": "7946.0.16"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/hast",
+      "version": "3.0.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/katex",
+      "version": "0.16.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/mdast",
+      "version": "4.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/ms",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/node",
+      "version": "24.12.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/node",
+      "version": "25.9.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/react",
+      "version": "19.2.14"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/react-dom",
+      "version": "19.2.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/trusted-types",
+      "version": "2.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/unist",
+      "version": "2.0.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/unist",
+      "version": "3.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/use-sync-external-store",
+      "version": "0.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@ungap/structured-clone",
+      "version": "1.3.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@upsetjs/venn.js",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@xmldom/xmldom",
+      "version": "0.8.15"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "argparse",
+      "version": "1.0.10"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "aria-hidden",
+      "version": "1.2.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "bail",
+      "version": "2.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "base64-js",
+      "version": "1.5.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "bluebird",
+      "version": "3.4.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "ccount",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "character-entities",
+      "version": "2.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "character-entities-html4",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "character-entities-legacy",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "character-reference-invalid",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "class-variance-authority",
+      "version": "0.7.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "clsx",
+      "version": "2.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "codemirror",
+      "version": "6.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "comma-separated-tokens",
+      "version": "2.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "commander",
+      "version": "7.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "commander",
+      "version": "8.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "core-util-is",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "cose-base",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "cose-base",
+      "version": "2.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "crelt",
+      "version": "1.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "csstype",
+      "version": "3.2.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "cytoscape",
+      "version": "3.34.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "cytoscape-cose-bilkent",
+      "version": "4.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "cytoscape-fcose",
+      "version": "2.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3",
+      "version": "7.9.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-array",
+      "version": "2.12.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-array",
+      "version": "3.2.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-axis",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-brush",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-chord",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-color",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-contour",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-delaunay",
+      "version": "6.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-dispatch",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-drag",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-dsv",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-ease",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-fetch",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-force",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-format",
+      "version": "3.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-geo",
+      "version": "3.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-hierarchy",
+      "version": "3.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-interpolate",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-path",
+      "version": "1.0.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-path",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-polygon",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-quadtree",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-random",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-sankey",
+      "version": "0.12.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-scale",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-scale-chromatic",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-selection",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-shape",
+      "version": "1.3.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-shape",
+      "version": "3.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-time",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-time-format",
+      "version": "4.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-timer",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-transition",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "d3-zoom",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "dagre-d3-es",
+      "version": "7.0.14"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "dayjs",
+      "version": "1.11.21"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "debug",
+      "version": "4.4.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "decode-named-character-reference",
+      "version": "1.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "delaunator",
+      "version": "5.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "dequal",
+      "version": "2.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "detect-node-es",
+      "version": "1.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "devlop",
+      "version": "1.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "diff",
+      "version": "9.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "dingbat-to-unicode",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "docx",
+      "version": "9.7.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "(MPL-2.0 OR Apache-2.0)",
+      "metadata_source": "package-lock.json metadata",
+      "name": "dompurify",
+      "version": "3.4.13"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD",
+      "metadata_source": "package-lock.json metadata",
+      "name": "duck",
+      "version": "0.1.12"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "entities",
+      "version": "6.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "es-toolkit",
+      "version": "1.49.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "escape-string-regexp",
+      "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "escape-string-regexp",
+      "version": "5.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "estree-util-is-identifier-name",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "extend",
+      "version": "3.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "fast-equals",
+      "version": "5.4.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "framer-motion",
+      "version": "12.42.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "get-nonce",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hachure-fill",
+      "version": "0.5.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hash.js",
+      "version": "1.1.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-from-dom",
+      "version": "5.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-from-html",
+      "version": "2.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-from-html-isomorphic",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-from-parse5",
+      "version": "8.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-is-element",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-parse-selector",
+      "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-to-html",
+      "version": "9.0.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-to-jsx-runtime",
+      "version": "2.3.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-to-text",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hast-util-whitespace",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "hastscript",
+      "version": "9.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "html-to-image",
+      "version": "1.11.13"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "html-url-attributes",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "html-void-elements",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "iconv-lite",
+      "version": "0.6.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "immediate",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "import-meta-resolve",
+      "version": "4.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "inherits",
+      "version": "2.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "inline-style-parser",
+      "version": "0.2.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "internmap",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "internmap",
+      "version": "2.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "is-alphabetical",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "is-alphanumerical",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "is-decimal",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "is-hexadecimal",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "is-plain-obj",
+      "version": "4.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "isarray",
+      "version": "1.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "isomorphic.js",
+      "version": "0.2.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "js-tokens",
+      "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "(MIT OR GPL-3.0-or-later)",
+      "metadata_source": "package-lock.json metadata",
+      "name": "jszip",
+      "version": "3.10.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "katex",
+      "version": "0.16.47"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "manual override: bundled LICENSE file; package.json omits the field",
+      "name": "khroma",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "layout-base",
+      "version": "1.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "layout-base",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lib0",
+      "version": "0.2.117"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lie",
+      "version": "3.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "linkifyjs",
+      "version": "4.3.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lodash-es",
+      "version": "4.18.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "longest-streak",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "loose-envify",
+      "version": "1.4.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lop",
+      "version": "0.4.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lucide-react",
+      "version": "1.17.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "make-cancellable-promise",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "make-event-props",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mammoth",
+      "version": "1.12.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "markdown-table",
+      "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "marked",
+      "version": "16.4.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "marked",
+      "version": "17.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-find-and-replace",
+      "version": "3.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-from-markdown",
+      "version": "2.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-gfm",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-gfm-autolink-literal",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-gfm-footnote",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-gfm-strikethrough",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-gfm-table",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-gfm-task-list-item",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-math",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-mdx-expression",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-mdx-jsx",
+      "version": "3.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-mdxjs-esm",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-phrasing",
+      "version": "4.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-to-hast",
+      "version": "13.2.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-to-markdown",
+      "version": "2.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mdast-util-to-string",
+      "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "merge-refs",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "mermaid",
+      "version": "11.16.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-core-commonmark",
+      "version": "2.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-extension-gfm",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-extension-gfm-autolink-literal",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-extension-gfm-footnote",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-extension-gfm-strikethrough",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-extension-gfm-table",
+      "version": "2.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-extension-gfm-tagfilter",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-extension-gfm-task-list-item",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-extension-math",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-factory-destination",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-factory-label",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-factory-space",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-factory-title",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-factory-whitespace",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-character",
+      "version": "2.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-chunked",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-classify-character",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-combine-extensions",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-decode-numeric-character-reference",
+      "version": "2.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-decode-string",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-encode",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-html-tag-name",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-normalize-identifier",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-resolve-all",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-sanitize-uri",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-subtokenize",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-symbol",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "micromark-util-types",
+      "version": "2.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "minimalistic-assert",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "motion",
+      "version": "12.38.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "motion-dom",
+      "version": "12.42.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "motion-utils",
+      "version": "12.39.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "ms",
+      "version": "2.1.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "nanoid",
+      "version": "3.3.18"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "nanoid",
+      "version": "5.1.16"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "oniguruma-parser",
+      "version": "0.12.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "oniguruma-to-es",
+      "version": "4.3.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "option",
+      "version": "0.2.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "orderedmap",
+      "version": "2.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "package-manager-detector",
+      "version": "1.7.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "(MIT AND Zlib)",
+      "metadata_source": "package-lock.json metadata",
+      "name": "pako",
+      "version": "1.0.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "parse-entities",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "parse5",
+      "version": "7.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "path-data-parser",
+      "version": "0.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "path-is-absolute",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "pdfjs-dist",
+      "version": "5.4.296"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "points-on-curve",
+      "version": "0.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "points-on-path",
+      "version": "0.2.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "process-nextick-args",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "property-information",
+      "version": "7.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-changeset",
+      "version": "2.4.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-commands",
+      "version": "1.7.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-dropcursor",
+      "version": "1.8.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-gapcursor",
+      "version": "1.4.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-history",
+      "version": "1.5.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-inputrules",
+      "version": "1.5.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-keymap",
+      "version": "1.2.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-model",
+      "version": "1.25.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-schema-list",
+      "version": "1.5.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-state",
+      "version": "1.4.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-tables",
+      "version": "1.8.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-transform",
+      "version": "1.12.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prosemirror-view",
+      "version": "1.42.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "react",
+      "version": "19.2.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "react-dom",
+      "version": "19.2.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "react-markdown",
+      "version": "10.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "react-pdf",
+      "version": "10.4.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "react-remove-scroll",
+      "version": "2.7.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "react-remove-scroll-bar",
+      "version": "2.3.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "react-resizable-panels",
+      "version": "4.11.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "react-style-singleton",
+      "version": "2.2.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "readable-stream",
+      "version": "2.3.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "regex",
+      "version": "6.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "regex-recursion",
+      "version": "6.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "regex-utilities",
+      "version": "2.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "rehype-katex",
+      "version": "7.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "remark-gfm",
+      "version": "4.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "remark-math",
+      "version": "6.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "remark-parse",
+      "version": "11.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "remark-rehype",
+      "version": "11.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "remark-stringify",
+      "version": "11.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "Unlicense",
+      "metadata_source": "package-lock.json metadata",
+      "name": "robust-predicates",
+      "version": "3.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "rope-sequence",
+      "version": "1.3.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "roughjs",
+      "version": "4.6.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "rw",
+      "version": "1.3.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "safe-buffer",
+      "version": "5.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "safer-buffer",
+      "version": "2.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BlueOak-1.0.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "sax",
+      "version": "1.6.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "scheduler",
+      "version": "0.27.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "setimmediate",
+      "version": "1.0.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "shiki",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "space-separated-tokens",
+      "version": "2.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "sprintf-js",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "string_decoder",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "stringify-entities",
+      "version": "4.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "style-mod",
+      "version": "4.1.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "style-to-js",
+      "version": "1.1.21"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "style-to-object",
+      "version": "1.0.14"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "stylis",
+      "version": "4.4.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tailwind-merge",
+      "version": "3.6.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tiny-invariant",
+      "version": "1.3.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tinyexec",
+      "version": "1.2.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tokenx",
+      "version": "1.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "trim-lines",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "trough",
+      "version": "2.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "ts-dedent",
+      "version": "2.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "0BSD",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tslib",
+      "version": "2.8.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tw-animate-css",
+      "version": "1.4.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "underscore",
+      "version": "1.13.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "undici-types",
+      "version": "7.16.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "undici-types",
+      "version": "7.24.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "unified",
+      "version": "11.0.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "unist-util-find-after",
+      "version": "5.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "unist-util-is",
+      "version": "6.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "unist-util-position",
+      "version": "5.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "unist-util-remove-position",
+      "version": "5.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "unist-util-stringify-position",
+      "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "unist-util-visit",
+      "version": "5.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "unist-util-visit-parents",
+      "version": "6.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "use-callback-ref",
+      "version": "1.3.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "use-sidecar",
+      "version": "1.1.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "use-sync-external-store",
+      "version": "1.6.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "util-deprecate",
+      "version": "1.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "uuid",
+      "version": "14.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "vfile",
+      "version": "6.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "vfile-location",
+      "version": "5.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "vfile-message",
+      "version": "4.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "w3c-keyname",
+      "version": "2.2.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "warning",
+      "version": "4.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "web-namespaces",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "xml",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "xml-js",
+      "version": "1.6.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "xmlbuilder",
+      "version": "10.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "y-prosemirror",
+      "version": "1.3.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "y-protocols",
+      "version": "1.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "yjs",
+      "version": "13.6.31"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "zwitch",
+      "version": "2.0.4"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@emnapi/core",
+      "version": "1.10.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@emnapi/core",
+      "version": "1.11.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@emnapi/runtime",
+      "version": "1.10.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@emnapi/runtime",
+      "version": "1.11.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@emnapi/wasi-threads",
+      "version": "1.2.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@emnapi/wasi-threads",
+      "version": "1.2.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@eslint-community/eslint-utils",
+      "version": "4.9.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@eslint-community/regexpp",
+      "version": "4.12.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@eslint/config-array",
+      "version": "0.23.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@eslint/config-helpers",
+      "version": "0.5.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@eslint/core",
+      "version": "1.2.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@eslint/js",
+      "version": "10.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@eslint/object-schema",
+      "version": "3.0.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@eslint/plugin-kit",
+      "version": "0.7.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@humanfs/core",
+      "version": "0.19.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@humanfs/node",
+      "version": "0.16.8"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@humanfs/types",
+      "version": "0.15.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@humanwhocodes/module-importer",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@humanwhocodes/retry",
+      "version": "0.4.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@jridgewell/gen-mapping",
+      "version": "0.3.13"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@jridgewell/remapping",
+      "version": "2.3.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@jridgewell/resolve-uri",
+      "version": "3.1.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@jridgewell/sourcemap-codec",
+      "version": "1.5.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@jridgewell/trace-mapping",
+      "version": "0.3.31"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/wasm-runtime",
+      "version": "1.1.4"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@napi-rs/wasm-runtime",
+      "version": "1.1.6"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@oxc-project/types",
+      "version": "0.133.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@oxc-project/types",
+      "version": "0.139.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-android-arm64",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-android-arm64",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-darwin-arm64",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-darwin-arm64",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-darwin-x64",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-darwin-x64",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-freebsd-x64",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-freebsd-x64",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-arm-gnueabihf",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-arm-gnueabihf",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-arm64-gnu",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-arm64-gnu",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-arm64-musl",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-arm64-musl",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-ppc64-gnu",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-ppc64-gnu",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-s390x-gnu",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-s390x-gnu",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-x64-gnu",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-x64-gnu",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-x64-musl",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-linux-x64-musl",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-openharmony-arm64",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-openharmony-arm64",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-wasm32-wasi",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-wasm32-wasi",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-win32-arm64-msvc",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-win32-arm64-msvc",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-win32-x64-msvc",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/binding-win32-x64-msvc",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/pluginutils",
+      "version": "1.0.0-rc.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@rolldown/pluginutils",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@standard-schema/spec",
+      "version": "1.1.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/node",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-android-arm64",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-darwin-arm64",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-darwin-x64",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-freebsd-x64",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-linux-arm-gnueabihf",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-linux-arm64-gnu",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-linux-arm64-musl",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-linux-x64-gnu",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-linux-x64-musl",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-wasm32-wasi",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-win32-arm64-msvc",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/oxide-win32-x64-msvc",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tailwindcss/vite",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tybys/wasm-util",
+      "version": "0.10.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@tybys/wasm-util",
+      "version": "0.10.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/chai",
+      "version": "5.2.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/deep-eql",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/esrecurse",
+      "version": "4.3.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/json-schema",
+      "version": "7.0.15"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/eslint-plugin",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/parser",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/project-service",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/scope-manager",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/tsconfig-utils",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/type-utils",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/types",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/typescript-estree",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/utils",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@typescript-eslint/visitor-keys",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@vitejs/plugin-react",
+      "version": "6.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@vitest/expect",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@vitest/mocker",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@vitest/pretty-format",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@vitest/runner",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@vitest/snapshot",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@vitest/spy",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@vitest/utils",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "acorn",
+      "version": "8.17.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "acorn-jsx",
+      "version": "5.3.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "ajv",
+      "version": "6.15.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "assertion-error",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "balanced-match",
+      "version": "4.0.4"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "brace-expansion",
+      "version": "5.0.9"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "chai",
+      "version": "6.2.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "convert-source-map",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "cross-spawn",
+      "version": "7.0.6"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "deep-is",
+      "version": "0.1.4"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "detect-libc",
+      "version": "2.1.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "enhanced-resolve",
+      "version": "5.24.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "es-module-lexer",
+      "version": "2.3.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "eslint",
+      "version": "10.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "eslint-scope",
+      "version": "9.1.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "eslint-visitor-keys",
+      "version": "3.4.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "eslint-visitor-keys",
+      "version": "5.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "espree",
+      "version": "11.2.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "esquery",
+      "version": "1.7.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "esrecurse",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "estraverse",
+      "version": "5.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "estree-walker",
+      "version": "3.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "esutils",
+      "version": "2.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "expect-type",
+      "version": "1.4.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "fast-deep-equal",
+      "version": "3.1.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "fast-json-stable-stringify",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "fast-levenshtein",
+      "version": "2.0.6"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "fdir",
+      "version": "6.5.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "file-entry-cache",
+      "version": "8.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "find-up",
+      "version": "5.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "flat-cache",
+      "version": "4.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "flatted",
+      "version": "3.4.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "fsevents",
+      "version": "2.3.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "fsevents",
+      "version": "2.3.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "glob-parent",
+      "version": "6.0.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "globals",
+      "version": "17.6.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "graceful-fs",
+      "version": "4.2.11"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "ignore",
+      "version": "5.3.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "ignore",
+      "version": "7.0.6"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "imurmurhash",
+      "version": "0.1.4"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "is-extglob",
+      "version": "2.1.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "is-glob",
+      "version": "4.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "isexe",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "jiti",
+      "version": "2.7.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "json-buffer",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "json-schema-traverse",
+      "version": "0.4.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "json-stable-stringify-without-jsonify",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "keyv",
+      "version": "4.5.4"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "levn",
+      "version": "0.4.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-android-arm64",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-darwin-arm64",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-darwin-x64",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-freebsd-x64",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-linux-arm-gnueabihf",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-linux-arm64-gnu",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-linux-arm64-musl",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-linux-x64-gnu",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-linux-x64-musl",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-win32-arm64-msvc",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "lightningcss-win32-x64-msvc",
+      "version": "1.32.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "locate-path",
+      "version": "6.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "magic-string",
+      "version": "0.30.21"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "BlueOak-1.0.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "minimatch",
+      "version": "10.2.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "natural-compare",
+      "version": "1.4.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "obug",
+      "version": "2.1.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "optionator",
+      "version": "0.9.4"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "p-limit",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "p-locate",
+      "version": "5.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "path-exists",
+      "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "path-key",
+      "version": "3.1.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "pathe",
+      "version": "2.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "picocolors",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "picomatch",
+      "version": "4.0.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "postcss",
+      "version": "8.5.26"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "prelude-ls",
+      "version": "1.2.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "punycode",
+      "version": "2.3.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "rolldown",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "rolldown",
+      "version": "1.1.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "semver",
+      "version": "7.8.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "shebang-command",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "shebang-regex",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "siginfo",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "source-map-js",
+      "version": "1.2.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "stackback",
+      "version": "0.0.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "std-env",
+      "version": "4.2.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tailwindcss",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tapable",
+      "version": "2.3.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tinybench",
+      "version": "2.9.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tinyglobby",
+      "version": "0.2.17"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "tinyrainbow",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "ts-api-utils",
+      "version": "2.5.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "type-check",
+      "version": "0.4.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "typescript",
+      "version": "6.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "typescript-eslint",
+      "version": "8.59.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "package-lock.json metadata",
+      "name": "uri-js",
+      "version": "4.4.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "vite",
+      "version": "8.0.16"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "vite",
+      "version": "8.1.4"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "vitest",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "package-lock.json metadata",
+      "name": "which",
+      "version": "2.0.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "why-is-node-running",
+      "version": "2.3.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "word-wrap",
+      "version": "1.2.5"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "yocto-queue",
+      "version": "0.1.0"
+    },
+    {
+      "dependency_surface": "node-prod",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@hocuspocus/server",
+      "version": "4.3.0"
+    },
+    {
+      "dependency_surface": "node-prod",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "async-mutex",
+      "version": "0.5.0"
+    },
+    {
+      "dependency_surface": "node-prod",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "crossws",
+      "version": "0.4.10"
+    },
+    {
+      "dependency_surface": "node-prod",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "kleur",
+      "version": "4.1.5"
+    },
+    {
+      "dependency_surface": "node-prod",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "ws",
+      "version": "8.21.0"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/aix-ppc64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/android-arm",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/android-arm64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/android-x64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/darwin-arm64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/darwin-x64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/freebsd-arm64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/freebsd-x64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/linux-arm",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/linux-arm64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/linux-ia32",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/linux-loong64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/linux-mips64el",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/linux-ppc64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/linux-riscv64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/linux-s390x",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/linux-x64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/netbsd-arm64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/netbsd-x64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/openbsd-arm64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/openbsd-x64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/openharmony-arm64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/sunos-x64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/win32-arm64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/win32-ia32",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@esbuild/win32-x64",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@playwright/test",
+      "version": "1.61.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "@types/ws",
+      "version": "8.18.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MPL-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "axe-core",
+      "version": "4.12.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "MIT",
+      "metadata_source": "package-lock.json metadata",
+      "name": "esbuild",
+      "version": "0.28.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "playwright",
+      "version": "1.61.1"
+    },
+    {
+      "dependency_surface": "node-dev",
+      "ecosystem": "node",
+      "license": "Apache-2.0",
+      "metadata_source": "package-lock.json metadata",
+      "name": "playwright-core",
+      "version": "1.61.1"
+    }
+  ],
+  "schema_version": "inqtrix-third-party-notices-v1",
+  "sources": {
+    "javascript_lock": "package-lock.json",
+    "javascript_note": "package-lock.json is the sole JavaScript dependency source.",
+    "javascript_packages": [
+      "package.json",
+      "apps/research-desk/package.json",
+      "apps/collaboration-server/package.json",
+      "packages/editor-schema/package.json"
+    ],
+    "python_lock": "uv.lock"
+  }
+}

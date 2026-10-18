@@ -1,0 +1,144 @@
+{{- if .Values.pgbouncer.enabled }}
+{{- if not .Values.postgres.enabled }}
+{{- fail "pgbouncer.enabled requires postgres.enabled: the bundled pooler fronts the bundled database only. For an external database run your own pooler and point secret.data.INQTRIX_DATABASE_URL at it (with ?prepared_statement_cache_size=0)." }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-pgbouncer
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "pgbouncer") | nindent 4 }}
+data:
+  pgbouncer.ini: |-
+    [databases]
+    * = host={{ include "inqtrix.fullname" . }}-postgres port=5432
+
+    [pgbouncer]
+    listen_addr = 0.0.0.0
+    listen_port = 6432
+    unix_socket_dir =
+    auth_type = scram-sha-256
+    auth_file = /tmp/inqtrix-pgbouncer/userlist.txt
+    pool_mode = {{ .Values.pgbouncer.poolMode }}
+    max_client_conn = {{ .Values.pgbouncer.maxClientConn }}
+    default_pool_size = {{ .Values.pgbouncer.defaultPoolSize }}
+    max_prepared_statements = {{ .Values.pgbouncer.maxPreparedStatements }}
+    ignore_startup_parameters = extra_float_digits
+    server_reset_query = DISCARD ALL
+    server_check_delay = 30
+    server_connect_timeout = 15
+    query_wait_timeout = 120
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-pgbouncer
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "pgbouncer") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "inqtrix.selectorLabels" (dict "root" . "component" "pgbouncer") | nindent 4 }}
+  ports:
+    - name: pgbouncer
+      port: 6432
+      targetPort: pgbouncer
+      protocol: TCP
+---
+{{- /* Stateless pooler: a Deployment, unlike the data-bearing StatefulSets.
+       Transaction mode multiplexes the app's many engine pools onto
+       defaultPoolSize server connections; maxPreparedStatements (pgbouncer
+       >= 1.21) keeps asyncpg's named prepared statements safe, paired with
+       ?prepared_statement_cache_size=0 in the derived app URL. */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-pgbouncer
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "pgbouncer") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "pgbouncer") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ printf "%s|%s|%s|%s" .Values.pgbouncer.poolMode .Values.pgbouncer.maxClientConn .Values.pgbouncer.defaultPoolSize .Values.pgbouncer.maxPreparedStatements | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "pgbouncer") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.bundledPodSecurityContext" (dict "root" . "svc" .Values.pgbouncer.podSecurityContext) | nindent 8 }}
+      containers:
+        - name: pgbouncer
+          image: {{ .Values.pgbouncer.image }}
+          imagePullPolicy: {{ .Values.pgbouncer.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |-
+              umask 077
+              case "${DB_USER}" in
+                ""|*[!A-Za-z0-9._~-]*) echo "invalid PgBouncer DB_USER" >&2; exit 64 ;;
+              esac
+              case "${DB_PASSWORD}" in
+                ""|*[!A-Za-z0-9._~-]*) echo "invalid PgBouncer password charset" >&2; exit 64 ;;
+              esac
+              install -d -m 0700 /tmp/inqtrix-pgbouncer
+              printf '"%s" "%s"\n' "${DB_USER}" "${DB_PASSWORD}" > /tmp/inqtrix-pgbouncer/userlist.txt
+              unset DB_PASSWORD
+              exec /usr/sbin/pgbouncer /etc/inqtrix-pgbouncer/pgbouncer.ini
+          env:
+            - name: DB_USER
+              value: {{ .Values.postgres.auth.username | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.secretName" . }}
+                  key: INQTRIX_BUNDLED_POSTGRES_PASSWORD
+            - name: DB_NAME
+              value: {{ .Values.postgres.auth.database | quote }}
+          ports:
+            - name: pgbouncer
+              containerPort: 6432
+          readinessProbe:
+            tcpSocket:
+              port: pgbouncer
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: pgbouncer
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.pgbouncer.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/inqtrix-pgbouncer
+              readOnly: true
+            - name: runtime
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "inqtrix.fullname" . }}-pgbouncer
+            items:
+              - key: pgbouncer.ini
+                path: pgbouncer.ini
+        - name: runtime
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+{{- end }}

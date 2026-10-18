@@ -1,0 +1,10 @@
+{
+  "_inqtrix_version": "0.2.0",
+  "_context": "Regression baseline for qdrant hybrid (BM25-german, RRF) + Cohere-rerank-v4.0-pro via Azure Foundry, EVAL_CHUNK_MAX_CHARS=400. Dense-only configurations stay within the 0.05 tolerance (recall@1 0.9773); hybrid without reranking (0.886) fails by design.",
+  "recall_at_1": 1.0,
+  "recall_at_3": 1.0,
+  "recall_at_5": 1.0,
+  "mrr": 1.0,
+  "ndcg_at_5": 1.0,
+  "multi_complete_at_5": 1.0
+}

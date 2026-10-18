@@ -1,0 +1,32 @@
+# Hand-crafted 404 DeploymentNotFound — the canonical "you typed the
+# wrong deployment name" error from Azure OpenAI.  Tests assert that
+# AzureOpenAIAPIError carries the structured details surfaced by
+# extract_azure_api_error_details (status_code, request_id, error_code).
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test-resource.openai.azure.com/openai/v1/chat/completions
+    response:
+      body:
+        string: |
+          {
+            "error": {
+              "code": "DeploymentNotFound",
+              "message": "The API deployment for this resource does not exist."
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-azure-replay-404-1"
+      status:
+        code: 404
+        message: Not Found
+version: 1

@@ -1,0 +1,160 @@
+#!/bin/sh
+# Sourced by the nginx-unprivileged entrypoint. Keep all dynamic output under
+# /tmp so the edge works with Compose's read-only root filesystem.
+
+inqtrix_env_error() {
+    echo "inqtrix nginx configuration error: $*" >&2
+    return 1
+}
+
+inqtrix_valid_authority() {
+    [ -n "$1" ] \
+        && printf '%s\n' "$1" | grep -Eq '^[][A-Za-z0-9._:-]+$'
+}
+
+INQTRIX_WEB_ADAPTER="${INQTRIX_WEB_ADAPTER:-nginx}"
+INQTRIX_DIRECT_TLS="${INQTRIX_DIRECT_TLS:-false}"
+if [ "$INQTRIX_WEB_ADAPTER" != "nginx" ]; then
+    inqtrix_env_error \
+        "nginx image requires INQTRIX_WEB_ADAPTER=nginx; select compose.web-nginx.yaml exactly once" \
+        || return 1
+fi
+case "$INQTRIX_DIRECT_TLS" in
+    false) ;;
+    true)
+        inqtrix_env_error \
+            "INQTRIX_DIRECT_TLS=true is supported only by the Python web adapter; do not combine compose.web-nginx.yaml with compose.web-tls.yaml" \
+            || return 1
+        ;;
+    *)
+        inqtrix_env_error "INQTRIX_DIRECT_TLS must be true or false" \
+            || return 1
+        ;;
+esac
+if [ -n "${RESEARCH_DESK_SSL_CERTFILE:-}" ] \
+    || [ -n "${RESEARCH_DESK_SSL_KEYFILE:-}" ] \
+    || [ -n "${RESEARCH_DESK_SSL_KEYFILE_PASSWORD:-}" ]; then
+    inqtrix_env_error \
+        "RESEARCH_DESK_SSL_* direct-TLS variables are supported only by the Python web adapter; nginx requires external TLS termination" \
+        || return 1
+fi
+
+NGINX_ENVSUBST_OUTPUT_DIR="${NGINX_ENVSUBST_OUTPUT_DIR:-/tmp/nginx-conf.d}"
+mkdir -p "$NGINX_ENVSUBST_OUTPUT_DIR"
+export NGINX_ENVSUBST_OUTPUT_DIR
+
+INQTRIX_BACKEND_URL="${INQTRIX_BACKEND_URL:-http://api:5100}"
+case "$INQTRIX_BACKEND_URL" in
+    http://*)
+        inqtrix_backend_scheme=http
+        inqtrix_backend_authority=${INQTRIX_BACKEND_URL#http://}
+        ;;
+    https://*)
+        inqtrix_env_error \
+            "nginx supports only a private HTTP backend; use the Python web gateway when a verified HTTPS upstream is required" \
+            || return 1
+        ;;
+    *)
+        inqtrix_env_error \
+            "INQTRIX_BACKEND_URL must be an absolute HTTP(S) origin" || return 1
+        ;;
+esac
+inqtrix_backend_authority=${inqtrix_backend_authority%/}
+if ! inqtrix_valid_authority "$inqtrix_backend_authority"; then
+    inqtrix_env_error \
+        "INQTRIX_BACKEND_URL must contain only an authority, without credentials, path, query, or fragment" \
+        || return 1
+fi
+INQTRIX_BACKEND_URL="${inqtrix_backend_scheme}://${inqtrix_backend_authority}"
+export INQTRIX_BACKEND_URL
+
+INQTRIX_EXTERNAL_SCHEME="${INQTRIX_EXTERNAL_SCHEME:-}"
+case "$INQTRIX_EXTERNAL_SCHEME" in
+    ""|http|https) ;;
+    *)
+        inqtrix_env_error "INQTRIX_EXTERNAL_SCHEME must be http or https" \
+            || return 1
+        ;;
+esac
+
+# HSTS only over TLS, and only for THIS host. The clause that would bind
+# sibling hosts is deliberately absent: domain-wide policy belongs to whoever
+# owns the domain edge, not to one application behind it. Mirrors
+# src/inqtrix_web_gateway/security_headers.py so both edges answer alike.
+if [ "$INQTRIX_EXTERNAL_SCHEME" = "https" ]; then
+    INQTRIX_HSTS_HEADER="max-age=15552000"
+else
+    INQTRIX_HSTS_HEADER=""
+fi
+export INQTRIX_HSTS_HEADER
+
+if [ -n "${INQTRIX_PUBLIC_BASE_URL:-}" ]; then
+    case "$INQTRIX_PUBLIC_BASE_URL" in
+        http://*)
+            INQTRIX_FORWARDED_SCHEME=http
+            INQTRIX_FORWARDED_HOST=${INQTRIX_PUBLIC_BASE_URL#http://}
+            ;;
+        https://*)
+            INQTRIX_FORWARDED_SCHEME=https
+            INQTRIX_FORWARDED_HOST=${INQTRIX_PUBLIC_BASE_URL#https://}
+            ;;
+        *)
+            inqtrix_env_error \
+                "INQTRIX_PUBLIC_BASE_URL must be an absolute HTTP(S) origin" \
+                || return 1
+            ;;
+    esac
+    INQTRIX_FORWARDED_HOST=${INQTRIX_FORWARDED_HOST%/}
+    if ! inqtrix_valid_authority "$INQTRIX_FORWARDED_HOST"; then
+        inqtrix_env_error \
+            "INQTRIX_PUBLIC_BASE_URL must contain only an authority, without credentials, path, query, or fragment" \
+            || return 1
+    fi
+    if [ -n "$INQTRIX_EXTERNAL_SCHEME" ] \
+        && [ "$INQTRIX_EXTERNAL_SCHEME" != "$INQTRIX_FORWARDED_SCHEME" ]; then
+        inqtrix_env_error \
+            "INQTRIX_EXTERNAL_SCHEME must match the scheme in INQTRIX_PUBLIC_BASE_URL" \
+            || return 1
+    fi
+else
+    # envsubst performs one substitution pass, leaving these nginx runtime
+    # variables intact in the rendered configuration. An explicit external
+    # scheme remains available for a trusted edge proxy.
+    INQTRIX_FORWARDED_SCHEME=${INQTRIX_EXTERNAL_SCHEME:-'$scheme'}
+    INQTRIX_FORWARDED_HOST='$http_host'
+fi
+export INQTRIX_FORWARDED_SCHEME INQTRIX_FORWARDED_HOST
+
+INQTRIX_MAX_FILE_BYTES="${INQTRIX_MAX_FILE_BYTES:-104857600}"
+case "$INQTRIX_MAX_FILE_BYTES" in
+    ''|*[!0-9]*)
+        inqtrix_env_error "INQTRIX_MAX_FILE_BYTES must be a positive integer" \
+            || return 1
+        ;;
+esac
+if ! [ "$INQTRIX_MAX_FILE_BYTES" -gt 0 ] 2>/dev/null; then
+    inqtrix_env_error "INQTRIX_MAX_FILE_BYTES must be a positive integer" \
+        || return 1
+fi
+if [ -z "${INQTRIX_PROXY_MAX_BODY_BYTES:-}" ]; then
+    INQTRIX_PROXY_MAX_BODY_BYTES=$(
+        expr "$INQTRIX_MAX_FILE_BYTES" + 10485760
+    )
+fi
+case "$INQTRIX_PROXY_MAX_BODY_BYTES" in
+    ''|*[!0-9]*)
+        inqtrix_env_error \
+            "INQTRIX_PROXY_MAX_BODY_BYTES must be a positive integer" \
+            || return 1
+        ;;
+esac
+if ! [ "$INQTRIX_PROXY_MAX_BODY_BYTES" -gt 0 ] 2>/dev/null; then
+    inqtrix_env_error \
+        "INQTRIX_PROXY_MAX_BODY_BYTES must be a positive integer" \
+        || return 1
+fi
+export INQTRIX_PROXY_MAX_BODY_BYTES
+
+printf 'listen 8080;\n' > /tmp/inqtrix-listen.conf
+
+unset inqtrix_backend_authority inqtrix_backend_scheme

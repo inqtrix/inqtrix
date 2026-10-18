@@ -1,0 +1,82 @@
+# Measurement override: run the stack instrumented, isolated, and observable.
+#
+# This override changes nothing about how the application answers. It only
+# makes the stack measurable: the Prometheus endpoints are switched on and
+# published on loopback, because container statistics alone cannot show queue
+# depth, admission rejections, or per-operation provider timing.
+#
+# The project name is deliberately distinct. A measurement runs against its own
+# volumes so queue and corpus state are known and reproducible, and so the
+# operator's daily stack keeps its data and stays usable. The paired env files
+# are still required and still passed unchanged.
+#
+# Providers stay REAL here. Measuring against real providers is the primary
+# method: it carries no fidelity question, and one hundred research runs cost
+# roughly the price of a single engineer-hour. Add
+# compose.loadtest-providers.yaml on top only for the repeated sweeps where
+# paying the provider bill for every arm buys nothing — and only once a real
+# run has shown the stand-in reproduces the behaviour under test.
+#
+# Usage (note the distinct project name -- this is a second, independent stack;
+# run the first-run owner setup once against it):
+#
+#   INQTRIX_WEB_PORT=8081 \
+#   podman compose -f deploy/compose/compose.stack.yaml \
+#     -f deploy/compose/compose.loadtest.yaml \
+#     --env-file <secrets-file> --env-file <config-file> \
+#     --profile knowledge --profile s3 --profile workers --profile collaboration \
+#     up -d --build
+#
+# Notes:
+# - INQTRIX_WEB_PORT must differ from the daily stack's edge port whenever both
+#   run at once. Compose appends published ports rather than replacing them, so
+#   this override cannot move the edge on its own; the base file's own
+#   interpolation variable is the seam.
+# - Two stacks sharing one host share its CPU. That is fine while building or
+#   rehearsing, but a capacity RESULT must be produced with the other stack
+#   stopped, otherwise the contention is attributed to the application.
+# - SEARCH_CACHE_TTL is forced to 0. The search provider is built once per
+#   process and caches results across every run and user in it, so repeated
+#   questions would be served from memory and concurrent load would measure a
+#   cache rather than the system. Every virtual user must also ask a distinct
+#   question.
+# - INQTRIX_WORKER_CONCURRENCY is left to the paired env file on purpose: it is
+#   the variable a capacity measurement varies between runs.
+name: inqtrix-loadtest
+
+services:
+  api:
+    environment:
+      - SEARCH_CACHE_TTL=0
+      - INQTRIX_METRICS_ENABLED=true
+      # Concurrency ceilings are passed through from the invoking shell and
+      # left untouched otherwise. They are the measurement's independent
+      # variables, and they decide what a run measures at all: with more
+      # users than slots, the surplus waits in the admission queue and the
+      # recorded resource use describes the slots, not the users. Raise them
+      # above the user count to measure true concurrency; leave them at the
+      # deployment's values to measure the queueing experience itself.
+      - MAX_CONCURRENT
+      - RUN_MAX_CONCURRENT
+      - RUN_MAX_CONCURRENT_PER_USER
+      - RUN_QUEUE_MAX_SIZE
+      # Pool sizing travels the same way: the connection budget is the other
+      # half of a capacity measurement, and it is the knob a deployment
+      # reaches for when that budget will not fit.
+      - INQTRIX_DATABASE_POOL_SIZE
+      - INQTRIX_DATABASE_POOL_MAX_OVERFLOW
+    ports:
+      # Loopback only: the harness scrapes /metrics directly rather than
+      # through the web edge.
+      - "127.0.0.1:5101:5100"
+
+  worker:
+    environment:
+      - SEARCH_CACHE_TTL=0
+      - INQTRIX_METRICS_ENABLED=true
+      # Run-execution counters live on the worker's own registry; unset, this
+      # port stays dark and a measurement sees only the API side of the queue.
+      - INQTRIX_WORKER_METRICS_PORT=9109
+      - INQTRIX_WORKER_CONCURRENCY
+    ports:
+      - "127.0.0.1:9109:9109"

@@ -1,0 +1,49 @@
+# Hand-crafted Azure OpenAI success response — Service-Principal auth.
+# Wire shape is identical to api-key auth; the SP-specific work happens
+# in the OpenAI SDK's azure_ad_token_provider callable, which the test
+# patches via tests/replay/test_azure_openai_replay.py.  A different
+# deployment name (sp-gpt4o-deployment) keeps this cassette distinct
+# from the api-key cassette for clarity.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test-resource.openai.azure.com/openai/v1/chat/completions
+    response:
+      body:
+        string: |
+          {
+            "id": "chatcmpl-azure-replay-sp-001",
+            "object": "chat.completion",
+            "created": 1745001100,
+            "model": "sp-gpt4o-deployment",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Service-Principal-Auth liefert dasselbe API-Schema, nur mit Bearer-Header."
+                },
+                "finish_reason": "stop"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 11,
+              "completion_tokens": 14,
+              "total_tokens": 25
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-azure-replay-sp-1"
+      status:
+        code: 200
+        message: OK
+version: 1

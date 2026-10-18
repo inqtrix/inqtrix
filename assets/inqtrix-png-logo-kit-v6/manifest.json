@@ -1,0 +1,778 @@
+{
+  "name": "Inqtrix PNG logo kit",
+  "palette": {
+    "ink": "#132536",
+    "paper": "#F4F1EA",
+    "petrol": "#08686D",
+    "light_petrol": "#71C8CD"
+  },
+  "geometry": "Open inquiry frame with a rounded horizontal thread terminal",
+  "copy_language": "en",
+  "canonical_raster_canvas": [
+    909,
+    909
+  ],
+  "sources": {
+    "matte": "sources/inqtrix-matte-source.png",
+    "ambient_background": "sources/inqtrix-ambient-background-source.png",
+    "app_tile": "sources/inqtrix-app-tile-source.png",
+    "creation": "Built-in image generation for material sources; deterministic foreground extraction, petrol color derivation, composition and raster export"
+  },
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 6519,
+      "sha256": "b4e879a4ee6bc2d4d88b54a6910389377c1a5d992dc29fb49b8dd54a63b96231"
+    },
+    {
+      "path": "apple-touch-icon-180.png",
+      "bytes": 10298,
+      "sha256": "b0536875922dab04304e9215e203f1373c92a5372cc425726a946e833d622626",
+      "width": 180,
+      "height": 180,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "copy.json",
+      "bytes": 362,
+      "sha256": "bf730aa3233a41900c654a233f1c6b581f96be03d743fdbd63f64c5fecbc4b87"
+    },
+    {
+      "path": "export-ui.py",
+      "bytes": 4159,
+      "sha256": "0657f2723b7aafb0ad4ee986ece323a375de9d859ebb11f1fe9268a7d85b8844"
+    },
+    {
+      "path": "favicon-16.png",
+      "bytes": 754,
+      "sha256": "203acddbfe6165bf08002f9a84c6d802bc13fe65d6a695873b98fd3dd184656d",
+      "width": 16,
+      "height": 16,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "favicon-32.png",
+      "bytes": 1543,
+      "sha256": "24a09d2b994d8c73e977e5b9b49517462df84b4e26dce3f7e03b3d780524bea1",
+      "width": 32,
+      "height": 32,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "favicon-48.png",
+      "bytes": 2228,
+      "sha256": "5a8c16f33af4aa1e71bad3a6a412bacaafc57ab25e33d8f6830e4c305194ad03",
+      "width": 48,
+      "height": 48,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "favicon.ico",
+      "bytes": 4579,
+      "sha256": "40e4694703b310b2383991b63c0630a7a8cb0606eed6930af407303aeb33977a",
+      "width": 48,
+      "height": 48,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true,
+      "embedded_sizes": [
+        [
+          16,
+          16
+        ],
+        [
+          32,
+          32
+        ],
+        [
+          48,
+          48
+        ]
+      ]
+    },
+    {
+      "path": "inqtrix-brand-portfolio-v6.png",
+      "bytes": 2746909,
+      "sha256": "3cc69b66fda88b62fb5b467230af2d450ae741b4a03e95cbbc7377200be7416e",
+      "width": 2160,
+      "height": 3240,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "inqtrix-brand-portfolio-v6.pptx",
+      "bytes": 2929586,
+      "sha256": "e6c47e015e9ee81fab08c956461bf7eac485483eb97ddf0b22299385cfed9ccb"
+    },
+    {
+      "path": "inqtrix-desktop-icon-1024.png",
+      "bytes": 866308,
+      "sha256": "aa549bf5918bb092e6a3311757d120d89aa7c375bcf1dcac995f9015e189c8a2",
+      "width": 1024,
+      "height": 1024,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-desktop-icon-128.png",
+      "bytes": 14870,
+      "sha256": "03146b3cb52ab9eb5d20319ca4f30a2ba683022965b45dc1b4c1fab841ba2fb2",
+      "width": 128,
+      "height": 128,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-desktop-icon-256.png",
+      "bytes": 49281,
+      "sha256": "b325e088c6cf301772d90a6acc3b3730f13728b3d4c7c3973dcd418183aefd8f",
+      "width": 256,
+      "height": 256,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-desktop-icon-512.png",
+      "bytes": 203512,
+      "sha256": "3ffdda9a35b2d4518b071d0567055b93482ce65b4fdc1b41da97c502af0e453e",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-desktop-icon-64.png",
+      "bytes": 4925,
+      "sha256": "6029b525030cb5bbdb675b92432d6f7a4522fbe42e0a43651452422fb5cfd902",
+      "width": 64,
+      "height": 64,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-github-hero-compact-dark-rounded.png",
+      "bytes": 499554,
+      "sha256": "ac48843eda021033016273994c83360ef8d69c39d72010581ab58c7e227519e9",
+      "width": 1600,
+      "height": 320,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-github-hero-compact-dark.png",
+      "bytes": 499467,
+      "sha256": "6f16c40c687827e50010072d47576f615efc7e1607edb32605d484583b5afebd",
+      "width": 1600,
+      "height": 320,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "inqtrix-github-hero-compact-light-rounded.png",
+      "bytes": 56114,
+      "sha256": "e0d6268e9b98979003ecc640f6fd2ab7a45eb71c93467695c780acef1599e441",
+      "width": 1600,
+      "height": 320,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-github-hero-compact-light.png",
+      "bytes": 55895,
+      "sha256": "f27e4ded62e93806808e6bef0265a5b6b6f8466331395694d51d6e0532d52a8c",
+      "width": 1600,
+      "height": 320,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "inqtrix-github-hero-extended-dark.png",
+      "bytes": 625845,
+      "sha256": "8c13419b06a4a742c0878e597a2b916c563d5f6cffa8e7c0cff336bb45edb8bc",
+      "width": 1600,
+      "height": 400,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "inqtrix-github-social-preview-1280x640.png",
+      "bytes": 745987,
+      "sha256": "452a7bcd0573a2837fd8bdc4b5638c11cf84b0340893b258a36770b406eff4ad",
+      "width": 1280,
+      "height": 640,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "inqtrix-hero-lockup-dark-transparent.png",
+      "bytes": 23950,
+      "sha256": "d20e750c1f13b64bb29ec06ce3b4d1a85e884045ba19f02083f70add6febb5b1",
+      "width": 898,
+      "height": 252,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-hero-lockup-light-transparent.png",
+      "bytes": 22596,
+      "sha256": "686a340e254566d820bdb2b72a4160f12a2d07a11efa63e79ffea510427b79a5",
+      "width": 898,
+      "height": 252,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-darkmode-1024.png",
+      "bytes": 556220,
+      "sha256": "3486a29d400c09016f291784449c303848d5a2035ac459c53ab4a3a6e36faf18",
+      "width": 1024,
+      "height": 1024,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-darkmode-128.png",
+      "bytes": 11137,
+      "sha256": "a4b096c06fdb046e673739ae8c6c4feb8a756276f89bd12589cd3886cd5b25b8",
+      "width": 128,
+      "height": 128,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-darkmode-256.png",
+      "bytes": 34668,
+      "sha256": "e883db63f3b82d97c0289893148adfc32a69a434098d625791c1d06b2cbf1a21",
+      "width": 256,
+      "height": 256,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-darkmode-512.png",
+      "bytes": 140068,
+      "sha256": "cc931a228fc01c8beb4bcee20a377da0c8066a2ef240aa2ddf6fb548dd919ce8",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-darkmode-64.png",
+      "bytes": 4111,
+      "sha256": "c5119697c032cdcfdae56e30d5d1a99bc16c04a92d047b522d7cd0307db59ce2",
+      "width": 64,
+      "height": 64,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-dark-1024.png",
+      "bytes": 33803,
+      "sha256": "2e766e015f403097b6601fd3392a9126145aa59f8cf667793df6172cd13095b7",
+      "width": 1024,
+      "height": 1024,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-dark-128.png",
+      "bytes": 4528,
+      "sha256": "5d3c5f8964b1688a4814eb8b0bde23eb1372f2e4ca8a5da0f4da0cd618ac34ea",
+      "width": 128,
+      "height": 128,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-dark-24.png",
+      "bytes": 1110,
+      "sha256": "071380115ee22f6dfdf272ab19acd88f76f85aca0e7c718b1645b7ef9192a5ea",
+      "width": 24,
+      "height": 24,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-dark-256.png",
+      "bytes": 8521,
+      "sha256": "727969eb12c80d45efd857148e34bddc53462159f505c4bce4e7e8214bb515c5",
+      "width": 256,
+      "height": 256,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-dark-32.png",
+      "bytes": 1367,
+      "sha256": "8662c2f67789988a65f9800b77f17aa65c13d64c651af4ff42cb3c34793c7b28",
+      "width": 32,
+      "height": 32,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-dark-48.png",
+      "bytes": 2045,
+      "sha256": "2810b4c789fdf8f54b8205e857ff51d3b7ef616379c5e3ed678c900a873fe182",
+      "width": 48,
+      "height": 48,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-dark-512.png",
+      "bytes": 16613,
+      "sha256": "c20de975dc4f6a7ac911f2229879ef5d5ba39ca2a99069160c55aed6b5a49ca0",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-dark-64.png",
+      "bytes": 2474,
+      "sha256": "a0d06ae300343404f6c89f45662deb9e2656531acb2aceea80b312afb5d4bf12",
+      "width": 64,
+      "height": 64,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-light-1024.png",
+      "bytes": 31125,
+      "sha256": "96e1a33d30247009303b23aa7a851b70ec7f2b661bd26ef020d99bbfbebee0b1",
+      "width": 1024,
+      "height": 1024,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-light-128.png",
+      "bytes": 4019,
+      "sha256": "3f4f09175c8a973a68685253166f76cd49d9ab74a159d5ee2992a7c70fe12dfe",
+      "width": 128,
+      "height": 128,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-light-24.png",
+      "bytes": 968,
+      "sha256": "9e553ebda69bf80657ab11b5749cf7b8f89f7349f22ba71029e6998ca8c11892",
+      "width": 24,
+      "height": 24,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-light-256.png",
+      "bytes": 7459,
+      "sha256": "dc88bc279bd9bee34b5692952e317da2ab40e3f899dec571649969bb69e02ae6",
+      "width": 256,
+      "height": 256,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-light-32.png",
+      "bytes": 1256,
+      "sha256": "695a7bd995f72a815c6f9aa8925362d97708c72f599b55212d83a66aa6a964b8",
+      "width": 32,
+      "height": 32,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-light-48.png",
+      "bytes": 1781,
+      "sha256": "0f20ce4c228e5ebb0c577382d0c9a2a2a3db72edccecbd5b97074e08027e26c9",
+      "width": 48,
+      "height": 48,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-light-512.png",
+      "bytes": 14539,
+      "sha256": "95eadc3164770fc6d229ed96b953f41148b8cf97415b4ed2e456cc5fa1262bd4",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-flat-light-64.png",
+      "bytes": 2214,
+      "sha256": "b18adf215b2f4b7e39d27ac2278eaf990420ff5557abc79115820cc5f8bb478a",
+      "width": 64,
+      "height": 64,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-lightmode-1024.png",
+      "bytes": 694101,
+      "sha256": "e7215404bebdeefc0f3779f5af92ada61f9f2b0203557184961b95f2928e6d58",
+      "width": 1024,
+      "height": 1024,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-lightmode-128.png",
+      "bytes": 12521,
+      "sha256": "09f3015a29aa47d9535435703e42fc5e1e8a8388c125a1bac6899fde8ddb618f",
+      "width": 128,
+      "height": 128,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-lightmode-256.png",
+      "bytes": 40893,
+      "sha256": "ff7d9299c6092b55285f3d5c97e332dbd24166a7820f1c376dd1e2c4c1203d2a",
+      "width": 256,
+      "height": 256,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-lightmode-512.png",
+      "bytes": 170487,
+      "sha256": "cb116c34bcd7740df4a2e6307f48b166d6c41e9e5bc6ac1aca9a3b2426832cda",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-lightmode-64.png",
+      "bytes": 4409,
+      "sha256": "080b58ea4d35ca8a5d1e71f386999bf9b3f9a8e20ecdc2eb2d83be02cecc87a4",
+      "width": 64,
+      "height": 64,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-navy-1024.png",
+      "bytes": 30609,
+      "sha256": "4af3a2cf3f0f53e56d86d003a906f0338e098a89aa06f43a159ae2dddfdaac72",
+      "width": 1024,
+      "height": 1024,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-navy-128.png",
+      "bytes": 3869,
+      "sha256": "2e58c2abd969c642654cfeaf041f0fb342e841bd6048eb3bbc2975fce6e28f4d",
+      "width": 128,
+      "height": 128,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-navy-256.png",
+      "bytes": 7219,
+      "sha256": "8c5a8b0d2d8fd593a0eeef767f57f0eea4e830368c1b1224eb09ca7197f7fa86",
+      "width": 256,
+      "height": 256,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-navy-512.png",
+      "bytes": 13833,
+      "sha256": "6f470ee3ad506d0100622085c56287b139a5fd26293af0769fbae27eef52c6d7",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-navy-64.png",
+      "bytes": 2117,
+      "sha256": "b5235f78b0d908fa693c51fd9f43020e9d2cae1673aa0d855c95a024687a28ef",
+      "width": 64,
+      "height": 64,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-white-1024.png",
+      "bytes": 24020,
+      "sha256": "81cf3209a8117d2c8b936c1c205e88c0955400768394e4f214339d136351ba73",
+      "width": 1024,
+      "height": 1024,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-white-128.png",
+      "bytes": 2859,
+      "sha256": "b1510e8c7bce73fcbbf622a1a24accfd0305f18337680744b20a1daa77108265",
+      "width": 128,
+      "height": 128,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-white-256.png",
+      "bytes": 5408,
+      "sha256": "25daf3c533d53c5f2473118a84b2d63f0b9399e1fdf4b06d175e69ddc62d833a",
+      "width": 256,
+      "height": 256,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-white-512.png",
+      "bytes": 10963,
+      "sha256": "d6a84ddea02d70acabcd7f4e545201a792831bdcc0dd51938b94ea14a9fddc80",
+      "width": 512,
+      "height": 512,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-mark-mono-white-64.png",
+      "bytes": 1500,
+      "sha256": "5e1ed595bc9d64fea9449edac80dd09777f0db48b30a33e8d459ecd940e5417a",
+      "width": 64,
+      "height": 64,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-navbar-dark-transparent.png",
+      "bytes": 8654,
+      "sha256": "ff40b2c707f8872b617de1c0c33e88c7d9ce932eeb0ef7999baf3ecc07d58343",
+      "width": 452,
+      "height": 130,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-navbar-light-transparent.png",
+      "bytes": 7975,
+      "sha256": "7a3c051829ece847abda5354f18575bd771378f4e28ffc1eaafc551bcb588ab1",
+      "width": 452,
+      "height": 130,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-navbar-with-tagline-dark-transparent.png",
+      "bytes": 13928,
+      "sha256": "f87d1550022c922c6be0dacd66406c86c3dfc0e89b949c34eec57ea97d9a6f0f",
+      "width": 579,
+      "height": 152,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-navbar-with-tagline-light-transparent.png",
+      "bytes": 13157,
+      "sha256": "be1825f9aea97393dc5338a8232d4b34c14244d2f1bcf618f5c29f6de92a4889",
+      "width": 579,
+      "height": 152,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-website-background-dark-1920x1080.png",
+      "bytes": 1848087,
+      "sha256": "f5749bd0fc3f30ec78ff78ab556487577219dc10f5930364dabfc55cf233f7dc",
+      "width": 1920,
+      "height": 1080,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "inqtrix-website-background-light-1920x1080.png",
+      "bytes": 553760,
+      "sha256": "fcb16800c5ee0ef000c7b1b8ce3bd266348125d91964f39328dbe660e7d880ee",
+      "width": 1920,
+      "height": 1080,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "inqtrix-website-hero-dark-1920x1080.png",
+      "bytes": 1893557,
+      "sha256": "ece60d86e1dbc73d88cea75d50e2cfdd9958ee09c2f4ebd93bf336ba24e2ed80",
+      "width": 1920,
+      "height": 1080,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "inqtrix-website-hero-light-1920x1080.png",
+      "bytes": 613713,
+      "sha256": "5592386dfc960d08fe70d1ec8f7b595d6ff7b56d994aa57d6976fc181a086a73",
+      "width": 1920,
+      "height": 1080,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "inqtrix-wordmark-dark-transparent.png",
+      "bytes": 6707,
+      "sha256": "3fd9719982c5190e63fc6954760dde1f658b0b71dd457d6e0e321c8df90ea30d",
+      "width": 528,
+      "height": 170,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "inqtrix-wordmark-light-transparent.png",
+      "bytes": 6726,
+      "sha256": "3be9bc3d4c55fc902bec563ca0b299add9530fb2844c43c83a6d3cf01db4f5c2",
+      "width": 528,
+      "height": 170,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "previews/inqtrix-lock-screen-dark-concept.png",
+      "bytes": 1447039,
+      "sha256": "df05862fb6323ea3bb5a7af76cbb39698e7f13e1f95769e2acb6d46284711115",
+      "width": 1448,
+      "height": 1086,
+      "mode": "RGB",
+      "has_alpha": false,
+      "role": "visual concept; not running application"
+    },
+    {
+      "path": "previews/inqtrix-lock-screen-light-concept.png",
+      "bytes": 1259308,
+      "sha256": "451c5c4d562ee3102b8b3252647af988943b6d5290507fe5a6275bc638590f6a",
+      "width": 1448,
+      "height": 1086,
+      "mode": "RGB",
+      "has_alpha": false,
+      "role": "visual concept; not running application"
+    },
+    {
+      "path": "previews/inqtrix-readme-hero.png",
+      "bytes": 243472,
+      "sha256": "2c8269625bcfb2ab5ac7ad737ab9e301fd75ce80075146121bb4e7d42f31d39a",
+      "width": 960,
+      "height": 240,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false,
+      "role": "README banner preview"
+    },
+    {
+      "path": "source-briefs.json",
+      "bytes": 1603,
+      "sha256": "789dcaf0ca6e1d784cb9d7a4628effd54bbeba9cd12cd5dc30f5b286549abc29"
+    },
+    {
+      "path": "sources/inqtrix-ambient-background-source.png",
+      "bytes": 1243229,
+      "sha256": "6812834ab52d6513f4d8d18a9dfb320bdbe48237448a431d71c59bbe9c5568a8",
+      "width": 1672,
+      "height": 941,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": false
+    },
+    {
+      "path": "sources/inqtrix-app-tile-source.png",
+      "bytes": 1120283,
+      "sha256": "2345abd9e58359f830256d397bb058f9d85732343ae1c886163779d540153850",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "has_alpha": true,
+      "contains_transparency": true
+    },
+    {
+      "path": "sources/inqtrix-matte-source.png",
+      "bytes": 2143481,
+      "sha256": "3dac13a7bef99627ab2946d6a246d435fb8e1638c38d651402eb399be4c4f770",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGB",
+      "has_alpha": false
+    }
+  ],
+  "contrast": {
+    "petrol_on_white": 6.54,
+    "petrol_on_paper": 5.8,
+    "light_petrol_on_ink": 8.06,
+    "scope": "Specified flat sRGB color pairs; not full interface conformance"
+  }
+}

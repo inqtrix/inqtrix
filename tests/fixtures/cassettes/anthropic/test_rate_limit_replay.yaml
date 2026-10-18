@@ -1,0 +1,35 @@
+# Hand-crafted 429 from the Anthropic Messages API. The provider must
+# escalate this immediately as AgentRateLimited (no retry) so the graph
+# can abort the run instead of burning the global token budget on
+# guaranteed-fail retries.
+interactions:
+  - request:
+      body: null
+      headers:
+        Content-Type:
+          - application/json
+        User-Agent:
+          - inqtrix/0.1
+      method: POST
+      uri: https://api.anthropic.com/v1/messages
+    response:
+      body:
+        string: |
+          {
+            "type": "error",
+            "error": {
+              "type": "rate_limit_error",
+              "message": "Number of request tokens has exceeded your per-minute rate limit"
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        retry-after:
+          - "60"
+        request-id:
+          - "req-replay-rate-limit-1"
+      status:
+        code: 429
+        message: Too Many Requests
+version: 1

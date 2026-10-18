@@ -1,0 +1,111 @@
+{{- if .Values.valkey.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-valkey
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "valkey") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "inqtrix.selectorLabels" (dict "root" . "component" "valkey") | nindent 4 }}
+  ports:
+    - name: valkey
+      port: 6379
+      targetPort: valkey
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-valkey
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "valkey") | nindent 4 }}
+spec:
+  serviceName: {{ include "inqtrix.fullname" . }}-valkey
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "valkey") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "valkey") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.bundledPodSecurityContext" (dict "root" . "svc" .Values.valkey.podSecurityContext) | nindent 8 }}
+      containers:
+        - name: valkey
+          image: {{ .Values.valkey.image }}
+          imagePullPolicy: {{ .Values.valkey.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.secretName" . }}
+                  key: INQTRIX_BUNDLED_VALKEY_PASSWORD
+          # $(VALKEY_PASSWORD) is expanded from the env var above by Kubernetes.
+          command:
+            - {{ include "inqtrix.brokerBinary" . }}-server
+            - --requirepass
+            - $(VALKEY_PASSWORD)
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec
+            - --dir
+            - /data
+          ports:
+            - name: valkey
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" {{ include "inqtrix.brokerBinary" . }}-cli ping | grep -q PONG"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" {{ include "inqtrix.brokerBinary" . }}-cli ping | grep -q PONG"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.valkey.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- if not .Values.valkey.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.valkey.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.valkey.persistence.size }}
+        {{- with .Values.valkey.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+  {{- end }}
+{{- end }}

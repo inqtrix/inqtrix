@@ -1,0 +1,192 @@
+{
+  "note": "Hand-maintained expected values of the Python reference (artifact_names.py); both languages must reproduce them. Change a case only together with both implementations.",
+  "slug_cases": [
+    {
+      "title": "Marktbericht",
+      "slug": "marktbericht"
+    },
+    {
+      "title": "Marktbericht Q3 — Übersicht",
+      "slug": "marktbericht-q3-ubersicht"
+    },
+    {
+      "title": "Märktbericht",
+      "slug": "marktbericht"
+    },
+    {
+      "title": "PROJEKTSTATUSBERICHT V2",
+      "slug": "projektstatusbericht-v2"
+    },
+    {
+      "title": "  Führungs-Résumé (final)!  ",
+      "slug": "fuhrungs-resume-final"
+    },
+    {
+      "title": "",
+      "slug": "dokument"
+    },
+    {
+      "title": "   ",
+      "slug": "dokument"
+    },
+    {
+      "title": "###",
+      "slug": "dokument"
+    },
+    {
+      "title": "straße & maß",
+      "slug": "stra-e-ma"
+    },
+    {
+      "title": "Café à la crème",
+      "slug": "cafe-a-la-creme"
+    },
+    {
+      "title": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "title": "ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab",
+      "slug": "ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-ab-"
+    },
+    {
+      "title": "Zahlen 123 und 456",
+      "slug": "zahlen-123-und-456"
+    },
+    {
+      "title": "日本語タイトル",
+      "slug": "dokument"
+    },
+    {
+      "title": "Mixed 日本語 and latin",
+      "slug": "mixed-and-latin"
+    },
+    {
+      "title": "Sprechzettel: Q&A",
+      "slug": "sprechzettel-q-a"
+    },
+    {
+      "title": "-schon-getrimmt-",
+      "slug": "schon-getrimmt"
+    },
+    {
+      "title": "waermepumpen-deutschland-2026.md",
+      "slug": "waermepumpen-deutschland-2026"
+    },
+    {
+      "title": "Bericht.MD ",
+      "slug": "bericht"
+    },
+    {
+      "title": "notizen.md.md",
+      "slug": "notizen-md"
+    }
+  ],
+  "assign_cases": [
+    {
+      "items": [
+        [
+          "a1",
+          "Marktbericht"
+        ],
+        [
+          "a2",
+          "Marktbericht"
+        ],
+        [
+          "a3",
+          "Märktbericht"
+        ]
+      ],
+      "expected": {
+        "a1": "marktbericht.md",
+        "a2": "marktbericht-2.md",
+        "a3": "marktbericht-3.md"
+      }
+    },
+    {
+      "items": [
+        [
+          "b1",
+          "Memo"
+        ],
+        [
+          "b2",
+          "Bericht"
+        ],
+        [
+          "b3",
+          "Memo"
+        ],
+        [
+          "b4",
+          "Memo"
+        ]
+      ],
+      "expected": {
+        "b1": "memo.md",
+        "b2": "bericht.md",
+        "b3": "memo-2.md",
+        "b4": "memo-3.md"
+      }
+    },
+    {
+      "items": [
+        [
+          "c1",
+          ""
+        ],
+        [
+          "c2",
+          "###"
+        ],
+        [
+          "c3",
+          "dokument"
+        ]
+      ],
+      "expected": {
+        "c1": "dokument.md",
+        "c2": "dokument-2.md",
+        "c3": "dokument-3.md"
+      }
+    },
+    {
+      "items": [
+        [
+          "d1",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        [
+          "d2",
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        ]
+      ],
+      "expected": {
+        "d1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md",
+        "d2": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2.md"
+      }
+    },
+    {
+      "items": [
+        [
+          "e1",
+          "Plan-2"
+        ],
+        [
+          "e2",
+          "Plan"
+        ],
+        [
+          "e3",
+          "Plan"
+        ]
+      ],
+      "expected": {
+        "e1": "plan-2.md",
+        "e2": "plan.md",
+        "e3": "plan-3.md"
+      }
+    }
+  ]
+}

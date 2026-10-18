@@ -1,0 +1,7 @@
+{
+  "_inqtrix_version": "0.2.0",
+  "_context": "DORA gruendlich baseline: memory store + text-embedding-3-large, three-way coverage verdict + declared-absence abstention ruler. Partial coverage answers with the gaps named; a binary coverage gate would refuse answerable multi-aspect questions with partial evidence wholesale. second_pass 0.65 shows the vocabulary-bridge rewrite loop actively working on this tier.",
+  "abstention_rate": 1.0,
+  "false_refusal_rate": 0.0,
+  "citation_rate": 1.0
+}

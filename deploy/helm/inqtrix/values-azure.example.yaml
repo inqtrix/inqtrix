@@ -1,0 +1,73 @@
+# Example overlay for an Azure-backed Inqtrix demo.
+#
+# This public file intentionally contains no secrets. Every enabled bundled
+# service now requires an explicit credential: postgres.auth.password,
+# qdrant.apiKey, valkey.password, and s3.secretKey. Supply them together with
+# provider/session credentials through a private values file (recommended),
+# `secret.data.*` where applicable, or a complete external Secret.
+#
+# The overlay bundles Postgres, Qdrant, Valkey AND an S3 object store (MinIO) for a
+# self-contained, one-command demo. For a managed database drop `postgres.enabled`
+# and point INQTRIX_DATABASE_URL at an
+# external/managed database (e.g. Azure Database for PostgreSQL). It does not bundle
+# an identity provider; local auth needs no extra service.
+#
+# Azure prerequisites (NOT created by the chart): the model names below are Azure
+# DEPLOYMENT names that must already exist in your Azure OpenAI resource
+# (REASONING_MODEL / TIER_*_MODEL / INQTRIX_EMBEDDING_MODEL), and WEB_SEARCH_AGENT_NAME
+# must reference an Azure AI Foundry web-search agent you created beforehand. Replace
+# every placeholder endpoint and project path with your own values.
+
+config:
+  INQTRIX_AUTH_MODE: local
+  INQTRIX_LOCAL_REGISTRATION: closed
+  INQTRIX_STORAGE_BACKEND: postgres
+
+  INQTRIX_LLM_PROVIDER: azure
+  AZURE_OPENAI_ENDPOINT: https://your-resource.openai.azure.com/
+  REASONING_MODEL: gpt-5.4
+  TIER_HIGH_MODEL: gpt-5.4
+  TIER_MID_MODEL: gpt-5.4
+  TIER_FAST_MODEL: gpt-5.4-mini
+  TIER_HIGH_EFFORT: medium
+  INQTRIX_SELECTABLE_CHAT_MODELS: gpt-5.4,gpt-5.4-mini,gpt-5.4-nano
+
+  INQTRIX_SEARCH_PROVIDER: azure_foundry
+  AZURE_AI_PROJECT_ENDPOINT: https://your-project.services.ai.azure.com/api/projects/your-project
+  WEB_SEARCH_AGENT_NAME: web-search-agent
+  WEB_SEARCH_AGENT_VERSION: "2"
+
+  INQTRIX_EMBEDDING_PROVIDER: azure
+  INQTRIX_EMBEDDING_AZURE_ENDPOINT: https://your-resource.openai.azure.com/
+  INQTRIX_EMBEDDING_MODEL: text-embedding-3-large
+
+  INQTRIX_KNOWLEDGE_ENABLED: "true"
+  INQTRIX_VECTOR_BACKEND: qdrant
+
+  INQTRIX_QUOTA_ENABLED: "true"
+
+# Bundled backing services. The database, knowledge/vector, queue and object-store
+# connections (INQTRIX_DATABASE_URL / INQTRIX_QDRANT_URL / INQTRIX_VALKEY_URL /
+# INQTRIX_OBJECT_STORE_BACKEND + INQTRIX_S3_* ) are auto-wired into the app, so none
+# of them need to be set under `config` above.
+postgres:
+  enabled: true
+
+qdrant:
+  enabled: true
+
+valkey:
+  enabled: true
+
+# Bundled MinIO object store. s3.secretKey is required; no fallback credential
+# exists.
+s3:
+  enabled: true
+
+# Durable run worker: the chart default, stated here because the overlay depends
+# on it. It uses the bundled Valkey queue and the MinIO object store above.
+worker:
+  enabled: true
+
+secret:
+  data: {}

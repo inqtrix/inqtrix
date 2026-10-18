@@ -1,0 +1,333 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource scraping the Inqtrix API and worker /metrics endpoints",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "title": "Inqtrix Observability",
+  "uid": "inqtrix-observability",
+  "tags": ["inqtrix"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "HTTP (RED)",
+      "id": 100,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by route",
+      "id": 101,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(inqtrix_http_requests_total[$__rate_interval])) by (handler)",
+          "legendFormat": "{{handler}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate (4xx / 5xx)",
+      "id": 102,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(inqtrix_http_requests_total{status=~\"5..\"}[$__rate_interval])) by (handler)",
+          "legendFormat": "5xx {{handler}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(inqtrix_http_requests_total{status=~\"4..\"}[$__rate_interval])) by (status)",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request latency p95 by route",
+      "id": 103,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum(rate(inqtrix_http_request_duration_seconds_bucket[$__rate_interval])) by (le, handler))",
+          "legendFormat": "{{handler}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "LLM & Search",
+      "id": 200,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM requests by model / outcome",
+      "id": 201,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(inqtrix_llm_requests_total[$__rate_interval])) by (model, outcome)",
+          "legendFormat": "{{model}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM latency p95 by provider / operation",
+      "id": 202,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum(rate(inqtrix_llm_request_duration_seconds_bucket[$__rate_interval])) by (le, provider, operation))",
+          "legendFormat": "{{provider}} {{operation}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Token throughput by feature",
+      "id": 203,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(inqtrix_llm_tokens_total[$__rate_interval])) by (feature, token_type)",
+          "legendFormat": "{{feature}} {{token_type}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM failures by outcome",
+      "id": 204,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(inqtrix_llm_requests_total{outcome!=\"success\"}[$__rate_interval])) by (provider, outcome)",
+          "legendFormat": "{{provider}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Web search rate / p95 by provider",
+      "id": 205,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [
+        {
+          "matcher": { "id": "byFrameRefID", "options": "B" },
+          "properties": [{ "id": "unit", "value": "s" }, { "id": "custom.axisPlacement", "value": "right" }]
+        }
+      ] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(inqtrix_search_requests_total[$__rate_interval])) by (provider, engine)",
+          "legendFormat": "rate {{provider}} {{engine}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum(rate(inqtrix_search_request_duration_seconds_bucket[$__rate_interval])) by (le, provider))",
+          "legendFormat": "p95 {{provider}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Runs & Worker",
+      "id": 300,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Run segment duration p95 by mode (parked runs resume as new segments)",
+      "id": 301,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum(rate(inqtrix_run_duration_seconds_bucket[$__rate_interval])) by (le, mode))",
+          "legendFormat": "{{mode}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Run queue wait p50 / p95 (first deliveries)",
+      "id": 302,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum(rate(inqtrix_run_queue_wait_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum(rate(inqtrix_run_queue_wait_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker jobs by loop / outcome",
+      "id": 303,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(inqtrix_worker_jobs_total[$__rate_interval])) by (loop, outcome)",
+          "legendFormat": "{{loop}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue depth / active / rejections",
+      "id": 304,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "inqtrix_run_queue_depth",
+          "legendFormat": "queued"
+        },
+        {
+          "refId": "B",
+          "expr": "inqtrix_run_active",
+          "legendFormat": "active"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(inqtrix_run_admission_rejected_total[$__rate_interval])) by (reason)",
+          "legendFormat": "rejected {{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Knowledge",
+      "id": 400,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Retrieval step latency p95",
+      "id": 401,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum(rate(inqtrix_retrieval_duration_seconds_bucket[$__rate_interval])) by (le, step))",
+          "legendFormat": "{{step}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Embedding calls (rate / p95)",
+      "id": 402,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [
+        {
+          "matcher": { "id": "byFrameRefID", "options": "B" },
+          "properties": [{ "id": "unit", "value": "s" }, { "id": "custom.axisPlacement", "value": "right" }]
+        }
+      ] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(inqtrix_llm_requests_total{operation=\"embeddings\"}[$__rate_interval])) by (model, outcome)",
+          "legendFormat": "rate {{model}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum(rate(inqtrix_llm_request_duration_seconds_bucket{operation=\"embeddings\"}[$__rate_interval])) by (le, model))",
+          "legendFormat": "p95 {{model}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Indexed documents by outcome",
+      "id": 403,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(inqtrix_indexing_documents_total[$__rate_interval])) by (outcome)",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    }
+  ]
+}

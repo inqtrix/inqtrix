@@ -1,0 +1,126 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-postgres
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "inqtrix.selectorLabels" (dict "root" . "component" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-postgres
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  serviceName: {{ include "inqtrix.fullname" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "postgres") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        {{- with .Values.postgres.podSecurityContext }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          imagePullPolicy: {{ .Values.postgres.imagePullPolicy }}
+          {{- /* Same guard order as web.maxUpstreamConnections: the digit
+                 round-trip must run BEFORE the int coercion, which would
+                 silently turn true into 1, truncate floats, and parse a
+                 leading zero as OCTAL (0512 -> 330). */}}
+          {{- if not (regexMatch "^(0|[1-9][0-9]*)$" (toString .Values.postgres.maxConnections)) }}
+          {{- fail (printf "postgres.maxConnections must be a positive integer, got %v (kind %s)" .Values.postgres.maxConnections (kindOf .Values.postgres.maxConnections)) }}
+          {{- end }}
+          {{- $maxConn := .Values.postgres.maxConnections | int }}
+          {{- if lt $maxConn 1 }}
+          {{- fail (printf "postgres.maxConnections must be a positive integer, got %v" .Values.postgres.maxConnections) }}
+          {{- end }}
+          # "postgres" is spelled out rather than left to the entrypoint's
+          # leading-dash fixup, so this reads the same as the Compose stack
+          # and does not hinge on an image implementation detail.
+          args: ["postgres", "-c", "max_connections={{ $maxConn }}"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.secretName" . }}
+                  key: INQTRIX_BUNDLED_POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.auth.database | quote }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgres.auth.username | quote }}, "-d", {{ .Values.postgres.auth.database | quote }}]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgres.auth.username | quote }}, "-d", {{ .Values.postgres.auth.database | quote }}]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            # postgres:18 declares VOLUME /var/lib/postgresql and makes
+            # /var/lib/postgresql/data a symlink; mount the real VOLUME path (as
+            # compose.stack.yaml does) and let the image place PGDATA under it.
+            # Mounting over the symlinked /data path is unreliable and can
+            # silently reinitialise the database.
+            - name: data
+              mountPath: /var/lib/postgresql
+      {{- if not .Values.postgres.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.postgres.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size }}
+        {{- with .Values.postgres.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+  {{- end }}
+{{- end }}

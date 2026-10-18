@@ -1,0 +1,55 @@
+# Optional direct-TLS override for Compose/Bare-Metal validation.
+#
+# Uses the same inqtrix-web image and service as compose.stack.yaml. Certificate
+# material stays outside the repository and is mounted read-only:
+#
+# Set INQTRIX_PUBLIC_BASE_URL, INQTRIX_WEB_TLS_CERTFILE, and
+# INQTRIX_WEB_TLS_KEYFILE for Compose interpolation, then run:
+#
+#   inqtrix-deploy --web-tls up --detach --build
+#
+# The one required public origin overrides any stale or absent value in the
+# paired runtime files for every Python service that consumes public URLs.
+
+services:
+  api:
+    environment:
+      INQTRIX_PUBLIC_BASE_URL: ${INQTRIX_PUBLIC_BASE_URL:?set the exact https public origin}
+      # Selecting the secure adapter must override plain-HTTP escape hatches
+      # that may still be present in the paired workstation environment.
+      INQTRIX_OIDC_INSECURE_DEV_COOKIES: "false"
+      INQTRIX_EDITOR_GUEST_LINKS_ALLOW_INSECURE_HTTP: "false"
+
+  worker:
+    environment:
+      INQTRIX_PUBLIC_BASE_URL: ${INQTRIX_PUBLIC_BASE_URL:?set the exact https public origin}
+
+  web:
+    environment:
+      # Direct TLS belongs to the default Python adapter. The nginx entrypoint
+      # rejects INQTRIX_WEB_ADAPTER=nginx plus this sentinel at startup.
+      INQTRIX_DIRECT_TLS: "true"
+      INQTRIX_EXTERNAL_SCHEME: https
+      INQTRIX_PUBLIC_BASE_URL: ${INQTRIX_PUBLIC_BASE_URL:?set the exact https public origin}
+      RESEARCH_DESK_SSL_CERTFILE: /run/inqtrix-tls/tls.crt
+      RESEARCH_DESK_SSL_KEYFILE: /run/inqtrix-tls/tls.key
+      RESEARCH_DESK_SSL_KEYFILE_PASSWORD: ${RESEARCH_DESK_SSL_KEYFILE_PASSWORD:-}
+    volumes:
+      - type: bind
+        source: ${INQTRIX_WEB_TLS_CERTFILE:?set an absolute TLS certificate path}
+        target: /run/inqtrix-tls/tls.crt
+        read_only: true
+      - type: bind
+        source: ${INQTRIX_WEB_TLS_KEYFILE:?set an absolute TLS private-key path}
+        target: /run/inqtrix-tls/tls.key
+        read_only: true
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import ssl,urllib.request,sys;
+          context=ssl.create_default_context();
+          context.check_hostname=False;
+          context.verify_mode=ssl.CERT_NONE;
+          response=urllib.request.urlopen('https://127.0.0.1:8080/health',context=context);
+          sys.exit(0 if response.status==200 else 1)"

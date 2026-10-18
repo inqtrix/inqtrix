@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "base_url": "https://inqtrix.example.test",
+  "api_probe": {
+    "contract": "inqtrix-health-v1",
+    "url": "/health"
+  },
+  "instance_probe": {
+    "contract": "inqtrix-collaboration-instance-v1",
+    "url": "/collaboration/instance"
+  },
+  "restart_control": {
+    "base_url": "https://collaboration-fixture-control.example.test",
+    "authorization_env": "INQTRIX_LOAD_RESTART_TOKEN",
+    "restart_path": "/v1/test/collaboration/restart"
+  },
+  "session_reissue": {
+    "authorization_env": "INQTRIX_LOAD_REISSUE_TOKEN",
+    "contract": "inqtrix-collaboration-session-reissue-v1",
+    "lease_ttl_seconds": 60,
+    "url": "https://collaboration-fixture-control.example.test/v1/test/collaboration/sessions/reissue"
+  },
+  "sessions": [
+    {
+      "access": "edit",
+      "expires_at": 4102444800,
+      "initial_write_mode": "edit",
+      "lease_token": "generated-lease-token-0001",
+      "protocol_version": 1,
+      "refresh_after": 4102444785,
+      "reissue_id": "load-session-0001",
+      "room": "inqtrix-editor-v1:load-document:g1",
+      "schema_version": 1,
+      "user": {
+        "id": "00000000-0000-4000-8000-000000000001"
+      },
+      "websocket_path": "/collaboration"
+    },
+    {
+      "access": "view",
+      "expires_at": 4102444800,
+      "initial_write_mode": "view",
+      "lease_token": "generated-lease-token-0002",
+      "protocol_version": 1,
+      "refresh_after": 4102444785,
+      "reissue_id": "load-session-0002",
+      "room": "inqtrix-editor-v1:load-document:g1",
+      "schema_version": 1,
+      "user": {
+        "id": "00000000-0000-4000-8000-000000000002"
+      },
+      "websocket_path": "/collaboration"
+    }
+  ]
+}

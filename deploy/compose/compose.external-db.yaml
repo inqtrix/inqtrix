@@ -1,0 +1,49 @@
+# External-database override: run the stack against a managed/external
+# PostgreSQL 15+ instead of the bundled container. Any PostgreSQL 15+
+# works, including pgvector-enabled images (e.g. pgvector 0.5.1 on
+# Postgres 15) — Inqtrix uses PostgreSQL relationally only, the vector
+# extension simply stays unused (vectors live in Qdrant).
+#
+# Usage:
+#   inqtrix-deploy --external-db \
+#     --migration-env-file deploy/.env.migrate.secrets.azure \
+#     up --detach --build
+#
+# Required:
+#   deploy/.env.stack:
+#   INQTRIX_DATABASE_URL   -> visible external DSN expression with a dedicated
+#                             unprivileged runtime login
+#   INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=restricted
+#   deploy/.env.stack.secrets:
+#   the password variable referenced by INQTRIX_DATABASE_URL
+#   deploy/.env.stack:
+#   INQTRIX_MIGRATION_RLS_MODE=bypass or owner
+#   deploy/.env.migrate.secrets.azure:
+#   INQTRIX_MIGRATION_DATABASE_URL -> privileged direct migration DSN
+#
+# Notes:
+# - Do NOT combine with `--profile pgbouncer`: the bundled pooler is
+#   hard-wired to the bundled database (DB_HOST: postgres). Front an
+#   external database with your own pooler and point INQTRIX_DATABASE_URL
+#   at it instead.
+# - The one-shot `migrate` service keeps running — it migrates the EXTERNAL
+#   database — and api/worker keep waiting for its successful completion.
+#   The base file marks every `depends_on: postgres` entry `required: false`,
+#   so deactivating the service here is safe.
+name: inqtrix
+
+services:
+  postgres:
+    # Assigning an inactive profile prevents the bundled database from
+    # starting; the base file defines the service without profiles, so this
+    # override is the single switch.
+    profiles: ["bundled-db-disabled"]
+
+  migrate:
+    # Keep privileged migration credentials scoped to the one-shot job.
+    # The pointer is repository-root-relative, matching INQTRIX_ENV_FILE and
+    # INQTRIX_SECRETS_FILE. ``../../`` converts that public contract to the
+    # Compose project base (deploy/compose); required=true makes a typo fatal.
+    env_file:
+      - path: ../../${INQTRIX_MIGRATION_ENV_FILE:?set a root-relative migration env file}
+        required: true

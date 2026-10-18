@@ -1,0 +1,106 @@
+{{- if .Values.migrations.enabled }}
+{{- if and (not .Values.postgres.enabled) (or (eq .Values.migrations.rlsMode "owner") (eq .Values.migrations.rlsMode "bypass")) (not .Values.migrations.databaseSecret.name) }}
+{{- fail "external PostgreSQL with migrations.rlsMode=owner or bypass requires migrations.databaseSecret.name; privileged migration credentials must remain outside the runtime application Secret" }}
+{{- end }}
+{{- if and .Values.migrations.databaseSecret.name (eq .Values.migrations.databaseSecret.name (include "inqtrix.secretName" .)) }}
+{{- fail "migrations.databaseSecret.name must differ from the runtime application Secret; a privileged migration DSN must never enter API or worker envFrom" }}
+{{- end }}
+{{- if not (has .Values.migrations.rlsMode (list "auto" "owner" "bypass")) }}
+{{- fail "migrations.rlsMode must be one of: auto, owner, bypass" }}
+{{- end }}
+{{- if and .Release.IsUpgrade (not .Values.migrations.maintenanceConfirmed) }}
+{{- fail "every installed-schema upgrade requires migrations.maintenanceConfirmed=true to authorize the chart-owned quiesce hook before migration" }}
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-migrate
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "migrate") | nindent 4 }}
+  annotations:
+    # Hook phase tracks WHEN the database is available, so a fresh install never
+    # deadlocks:
+    #   - external DB (postgres.enabled=false): pre-install -- the DB already
+    #     exists, so migrate runs before the app pods start (no crash loop).
+    #   - bundled DB (postgres.enabled=true): post-install -- the bundled Postgres
+    #     is a normal resource created during install, so migrate must run after
+    #     it exists. The app pods may restart a few times until migrate completes.
+    # pre-upgrade always applies (the DB exists on upgrade). Helm blocks until the
+    # Job succeeds, so a failed migration fails the release. The wait-for-db loop
+    # in the container handles "created but not yet accepting connections".
+    "helm.sh/hook": {{ if .Values.postgres.enabled }}post-install,pre-upgrade{{ else }}pre-install,pre-upgrade{{ end }}
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "inqtrix.internalServiceAccountName" (dict "root" . "component" "migrate") }}
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "inqtrix.image.api" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Wait until the database accepts connections (the bundled Postgres may
+          # still be starting after a post-install create), then migrate. asyncpg
+          # ships in the image; ~120s bound (60 x 2s) fails loudly on timeout.
+          command:
+            - sh
+            - -c
+            - |
+              n=0
+              until python -c "import asyncio,os,re,asyncpg; u=os.environ.get('INQTRIX_MIGRATION_DATABASE_URL') or os.environ.get('INQTRIX_DATABASE_URL'); asyncio.run(asyncpg.connect(re.sub(r'^(postgres(?:ql)?)\+[a-z0-9]+', r'\1', u)))" 2>/dev/null; do
+                n=$((n+1)); [ "$n" -ge 60 ] && { echo "database not reachable after timeout" >&2; exit 1; }
+                echo "waiting for database ($n)..."; sleep 2
+              done
+              exec inqtrix-migrate
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          # The optional migration Secret is injected only into this Job. The
+          # runtime Secret is retained as a backwards-compatible fallback for
+          # bundled and existing installations.
+          env:
+            - name: INQTRIX_MIGRATION_RLS_MODE
+              value: {{ .Values.migrations.rlsMode | quote }}
+            - name: INQTRIX_MIGRATION_SERVICES_QUIESCED
+              value: {{ .Values.migrations.maintenanceConfirmed | quote }}
+          {{- if .Values.migrations.databaseSecret.name }}
+            - name: INQTRIX_MIGRATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.migrations.databaseSecret.name }}
+                  key: {{ .Values.migrations.databaseSecret.key }}
+          {{- else }}
+            - name: INQTRIX_DATABASE_URL
+            {{- if .Values.secret.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.existingSecret }}
+                  key: INQTRIX_DATABASE_URL
+            {{- else }}
+              value: {{ include "inqtrix.databaseUrl" . | quote }}
+            {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /app/.cache
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+{{- end }}

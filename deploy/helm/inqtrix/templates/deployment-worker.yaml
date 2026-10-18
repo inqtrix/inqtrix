@@ -1,0 +1,81 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-worker
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if and .Values.metrics.enabled .Values.metrics.podAnnotations (gt (int (.Values.metrics.workerPort | default 0)) 0) }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metrics.workerPort | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "worker") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "inqtrix.workloadServiceAccountName" (dict "root" . "component" "worker") }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.worker.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.podSecurityContext" . | nindent 8 }}
+      # On SIGTERM the worker stops claiming and waits for in-flight jobs, up
+      # to 90 seconds per job loop (the first loop that times out ends the
+      # wait), then flushes its last trace and usage batches. 120 seconds
+      # covers a drain that ends within one such window; a job still running
+      # when the pod is killed is reclaimed by another worker once its
+      # heartbeat stops, and only the pod's final flush is lost.
+      # migrations.maintenanceTimeoutSeconds must stay above this value,
+      # because the schema-upgrade hook waits for the worker pods to terminate.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: worker
+          image: {{ include "inqtrix.image.api" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["inqtrix-worker"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            - name: INQTRIX_MIGRATION_DATABASE_URL
+              value: ""
+          {{- include "inqtrix.observabilityEnv" . | nindent 12 }}
+          {{- include "inqtrix.envFrom" . | nindent 10 }}
+          {{- if and .Values.metrics.enabled (gt (int (.Values.metrics.workerPort | default 0)) 0) }}
+          ports:
+            - name: metrics
+              containerPort: {{ int .Values.metrics.workerPort }}
+              protocol: TCP
+          {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "inqtrix.appWritableVolumeMounts" . | nindent 12 }}
+            {{- include "inqtrix.traceSpoolVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "inqtrix.appWritableVolumes" . | nindent 8 }}
+        {{- include "inqtrix.traceSpoolVolume" . | nindent 8 }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

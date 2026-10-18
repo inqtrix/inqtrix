@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-api
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "api") | nindent 4 }}
+spec:
+  {{- if and .Values.api.autoscaling.enabled .Values.migrations.enabled .Release.IsUpgrade .Values.migrations.maintenanceConfirmed }}
+  # The pre-upgrade maintenance hook deliberately sets scale=0, which pauses
+  # an HPA until a positive desired replica count is written. This one owner-
+  # upgrade render reactivates it after the migration hooks have succeeded.
+  replicas: {{ max 1 (int .Values.api.autoscaling.minReplicas) }}
+  {{- else if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # Roll the pods when the chart-managed Secret changes (envFrom would
+        # otherwise keep stale env until a manual restart). Constant when an
+        # existingSecret is used -- rotate that out-of-band (or via Reloader).
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if and .Values.metrics.enabled .Values.metrics.podAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.service.apiPort | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "api") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "inqtrix.workloadServiceAccountName" (dict "root" . "component" "api") }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.api.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "inqtrix.image.api" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.apiPort }}
+          env:
+            # Defense in depth for user-managed Secrets consumed via envFrom:
+            # the privileged migration DSN is never visible to runtime pods.
+            - name: INQTRIX_MIGRATION_DATABASE_URL
+              value: ""
+          {{- include "inqtrix.observabilityEnv" . | nindent 12 }}
+          {{- if .Values.collaboration.enabled }}
+            - name: INQTRIX_COLLABORATION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.collaborationSecretName" . }}
+                  key: {{ .Values.collaboration.secret.key }}
+          {{- end }}
+          {{- include "inqtrix.envFrom" . | nindent 10 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          # Readiness keys on /readyz (database/queue reachability, probes
+          # internally bounded at 2s): a pod whose Postgres or Valkey is down
+          # leaves the Service rotation instead of serving 500s. Liveness and
+          # startup stay on /health (provider-only) — a database outage must
+          # drain traffic, not restart-loop every pod.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "inqtrix.appWritableVolumeMounts" . | nindent 12 }}
+            {{- include "inqtrix.traceSpoolVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "inqtrix.appWritableVolumes" . | nindent 8 }}
+        {{- include "inqtrix.traceSpoolVolume" . | nindent 8 }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

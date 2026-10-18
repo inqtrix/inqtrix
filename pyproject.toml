@@ -1,0 +1,175 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inqtrix"
+dynamic = ["version"]
+description = "Iterative AI research agent with parallel web search, claim verification, and source tiering"
+readme = "README.md"
+authors = [{ name = "Babak Zandi" }]
+
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    # Cancellation-safe database finalization uses AnyIO's shield semantics
+    # because Starlette applies level cancellation to disconnected requests.
+    "anyio>=4.12,<5.0",
+    "fastapi>=0.135,<1.0",
+    "starlette>=1.0,<2.0",
+    "uvicorn[standard]>=0.42,<1.0",
+    "openai>=2.0,<3.0",
+    "langgraph>=1.2.5,<2.0",
+    "cachetools>=5.5,<6.0",
+    "pydantic-settings>=2.7,<3.0",
+    "python-dotenv>=1.0,<2.0",
+    "rich>=13.0",
+    "boto3>=1.35",
+    "azure-identity>=1.18",
+    # Pure-Python readline replacement that ships line editing (arrow-key
+    # cursor movement, history, Ctrl+A/E/W/U) for input() on Windows. GNU
+    # readline is part of the stdlib on Linux/macOS; the marker below
+    # makes this dependency a no-op on those platforms. Used by the
+    # interactive examples under examples/provider_stacks/*_chat.py.
+    "pyreadline3>=3.4 ; sys_platform == 'win32'",
+    "perplexityai>=0.34.0",
+    "azure-ai-projects>=2.1.0",
+    # Platform persistence layer (identity schema, RLS). SQLAlchemy 2.1
+    # is still beta as of mid-2026 — stay on 2.0.x until it stabilizes.
+    "sqlalchemy[asyncio]>=2.0.50,<2.1",
+    "asyncpg>=0.31,<1.0",
+    "alembic>=1.18,<2.0",
+    # Multipart form parsing for the file-upload surface (FastAPI
+    # requires it for UploadFile).
+    "python-multipart>=0.0.18,<1.0",
+    # Direct HTTP for the rerank API adapter (already a transitive
+    # dependency of the openai SDK; declared for honesty).
+    "httpx>=0.28,<1.0",
+    # Binary WebSocket relay from the public FastAPI gateway to the private
+    # collaboration service. Declared directly because application code uses
+    # the client API rather than relying on uvicorn's optional transitive extra.
+    "websockets>=15,<16",
+    # JOSE primitives for the OIDC BFF (id_token validation with an
+    # explicit algorithm allowlist, JWKS key sets). Same maintainer as
+    # Authlib but without the framework client's SessionMiddleware
+    # coupling; floor avoids the 2025/2026 Authlib JOSE CVE class.
+    "joserfc>=1.7.0,<2.0",
+    # Password hashing for native local auth (INQTRIX_AUTH_MODE=local):
+    # argon2id via the reference CFFI binding. Memory-hard, the modern
+    # default; the only credential-at-rest format Inqtrix mints.
+    "argon2-cffi>=23.1,<25",
+    # Default document parser: pure-Python file-to-markdown conversion,
+    # no ML models, always available. Azure Document Intelligence and
+    # Docling are optional tiers behind the same port.
+    "markitdown[pdf,docx,pptx,xlsx]>=0.1.1,<1.0",
+    "tldextract>=5.3,<6",
+]
+
+[project.optional-dependencies]
+# Qdrant-backed knowledge store with hybrid retrieval. The BM25 sparse
+# branch runs INSIDE the Qdrant server (core inference, server >= 1.15.3,
+# checked at startup) — no client-side embedding library, nothing
+# downloads at runtime.
+# The floor tracks the bundled server minor: Qdrant's supported upgrade
+# order is SDK first, then server, and an older client against a newer
+# server is the unsupported direction.
+knowledge-qdrant = [
+    "qdrant-client>=1.19,<2.0",
+]
+# Valkey-Streams job queue for durable run dispatch (INQTRIX_QUEUE_BACKEND=valkey).
+queue-valkey = [
+    "valkey>=6.1,<7.0",
+]
+# Prometheus /metrics endpoint (INQTRIX_METRICS_ENABLED=1). Off by default;
+# without this extra the server logs loudly and leaves /metrics unmounted.
+# prometheus-client only: the HTTP histograms are served by an in-tree ASGI
+# middleware, so we avoid prometheus-fastapi-instrumentator's starlette<1.0 pin.
+metrics = [
+    "prometheus-client>=0.20,<1.0",
+]
+# OpenTelemetry tracing (INQTRIX_TRACING=local|file|otlp). Off by default;
+# without this extra any non-off value logs loudly and tracing stays off.
+# SDK + OTLP/HTTP exporter only (both stable APIs) — the OTLP endpoint and
+# headers come from the standard OTEL_EXPORTER_OTLP_* variables, so a
+# Langfuse/Collector target is pure configuration.
+observability = [
+    "opentelemetry-sdk>=1.30,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.30,<2.0",
+]
+# Workspace-agent runtime (mode=workspace_agent):
+# deepagents is the sub-agent harness, the Postgres checkpointer keeps
+# interrupted phase machines resumable across workers. deepagents pulls
+# langchain-anthropic + langchain-google-genai unconditionally (see
+# THIRD_PARTY_NOTICES).
+agent = [
+    "deepagents>=0.7.13,<0.8",
+    "langchain>=1.3.11,<2.0",
+    "langgraph-checkpoint-postgres>=3.1.0,<4",
+    "psycopg[binary,pool]>=3.2",
+]
+dev = [
+    "ruff>=0.14.5",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "vcrpy>=8.1",
+    "pytest-recording>=0.13",
+    "fakeredis>=2.26",
+    "valkey>=6.1,<7.0",
+    "prometheus-client>=0.20,<1.0",
+    "opentelemetry-sdk>=1.30,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.30,<2.0",
+]
+
+[project.scripts]
+inqtrix-parity = "inqtrix.parity:main"
+inqtrix-migrate = "inqtrix.storage.migrate:main"
+inqtrix-worker = "inqtrix.worker.__main__:main"
+inqtrix-deploy = "inqtrix.deploy.cli:main"
+
+# Single source of truth for the product version: __version__ in src/inqtrix/__init__.py.
+# Hatchling reads it here, so the package version is derived from that one line.
+[tool.hatch.version]
+path = "src/inqtrix/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inqtrix", "src/inqtrix_web_gateway"]
+
+[dependency-groups]
+web-gateway = [
+    "fastapi>=0.135,<1.0",
+    "httpx>=0.28,<1.0",
+    "starlette>=1.0,<2.0",
+    "uvicorn>=0.42,<1.0",
+    "websockets>=15,<16",
+]
+
+[tool.ruff]
+src = ["src"]
+
+# No target-version here on purpose: ruff derives it from requires-python
+# above, so the minimum supported Python is stated exactly once. A second
+# copy would drift, and the rule that catches version-specific syntax is
+# only as good as the version it compares against.
+
+[tool.ruff.lint]
+# Deliberately small and enforceable rather than large and advisory.
+#   F  - pyflakes: undefined names, unused imports, shadowed definitions.
+#   E9 - syntax and IO errors, including syntax valid only on a newer
+#        Python than the project promises to support.
+select = ["F", "E9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "eval: offline evaluation contracts; no semantic quality claim or live provider calls",
+    "replay: provider tests using VCR cassettes or botocore.Stubber (offline-replayable)",
+    "postgres: tests needing a disposable Postgres via INQTRIX_TEST_DATABASE_URL",
+    "qdrant: tests needing a disposable Qdrant via INQTRIX_TEST_QDRANT_URL",
+]

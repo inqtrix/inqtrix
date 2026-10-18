@@ -1,0 +1,37 @@
+# Optional loopback-only ports for host-side development and diagnostics.
+#
+# This file never changes authentication, storage, or service commands. Add it
+# after compose.stack.yaml, or pass ``--dev-ports`` to ``inqtrix-deploy``.
+# Explicit service targets or their normal profiles are still required.
+#
+# The project name below is deliberate: the exposed-port variant is a SEPARATE
+# project, not an overlay on a running stack. Adding this file therefore starts
+# a second set of containers rather than opening ports on the existing ones.
+
+name: inqtrix-dev
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${INQTRIX_PG_PORT:-5432}:5432"
+
+  api:
+    ports:
+      - "127.0.0.1:${INQTRIX_API_PORT:-5100}:5100"
+
+  qdrant:
+    ports:
+      - "127.0.0.1:${INQTRIX_QDRANT_PORT:-6333}:6333"
+      - "127.0.0.1:${INQTRIX_QDRANT_GRPC_PORT:-6334}:6334"
+
+  valkey:
+    ports:
+      - "127.0.0.1:${INQTRIX_VALKEY_PORT:-6379}:6379"
+
+  seaweedfs:
+    ports:
+      - "127.0.0.1:${INQTRIX_S3_PORT:-8333}:8333"
+
+  collaboration:
+    ports:
+      - "127.0.0.1:${INQTRIX_COLLABORATION_PORT:-1234}:1234"

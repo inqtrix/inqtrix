@@ -1,0 +1,8 @@
+{
+  "engine": "OpenAI built-in image generation",
+  "matte_source_brief": "Open rounded-square inquiry mark with an interior thread and a short, horizontal rounded ending. Shallow matte material depth, restrained soft edges, front-on presentation and a continuous paper background. No enclosing border, text, neon, glass glow or people. The exported material reference receives the kit palette through deterministic recoloring.",
+  "ambient_background_brief": "Quiet landscape with deep ink navy, a nearly uniform left area for typography, and a subtle reflected accent wash on the right. Matte satin surface with minimal grain. No logo, text, grids, particles or decorative objects. The current background receives its petrol wash through deterministic continuous tonal mapping.",
+  "app_carrier_brief": "An empty front-on dark ink navy rounded-square desktop tile with a matte satin finish and a subtle bevel. Transparent outside the tile. No logo, text, glass, neon or decorated rims.",
+  "production_derivation": "One alpha contour defines material, inverse, flat and monochrome marks. The thread uses #08686D on light surfaces and #71C8CD on dark surfaces, with bounded material highlights. Native text, fixed layouts and deterministic resampling produce the final PNG exports.",
+  "ui_concept_brief": "Preserve the two-column sign-in layout, English content and full-width notices. Use the kit mark with deep petrol accents on light surfaces and light petrol accents on ink surfaces. Keep an understated background fade, empty inputs and readable controls. These are generated visual concepts."
+}

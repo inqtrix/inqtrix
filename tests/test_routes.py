@@ -1,0 +1,1293 @@
+"""Tests for HTTP routes and request-level safeguards."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from types import SimpleNamespace
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import inqtrix.server.app as app_module
+import inqtrix.research.web_research as web_research_module
+import inqtrix.server.routers.chat as chat_router_module
+from inqtrix import __display_version__, __version__
+from inqtrix.legal import ai_disclosure_metadata, legal_metadata
+from inqtrix.providers.base import ProviderContext
+from inqtrix.search_result import GroundedSearchResult
+from inqtrix.server.app import create_app
+from inqtrix.server.routes import create_router, register_routes
+from inqtrix.settings import AgentSettings, ModelSettings, ServerSettings, Settings
+
+
+class _DummyLLM:
+    def __init__(self, available: bool = True) -> None:
+        self._available = available
+
+    def complete(self, *args, **kwargs):
+        return "ok"
+
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class _DummySearch:
+    def __init__(self, available: bool = True) -> None:
+        self._available = available
+
+    def search(self, *args, **kwargs):
+        return GroundedSearchResult()
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+def _make_app(
+    *,
+    agent_settings: AgentSettings | None = None,
+    llm_available: bool = True,
+    search_available: bool = True,
+    agent_max_total_seconds: int = 300,
+    server_settings: ServerSettings | None = None,
+) -> TestClient:
+    app = FastAPI()
+    router = create_router()
+
+    settings = Settings(
+        models=ModelSettings(),
+        agent=agent_settings or AgentSettings(),
+        server=server_settings or ServerSettings(),
+    )
+    settings.agent.max_total_seconds = agent_max_total_seconds
+    providers = SimpleNamespace(
+        llm=_DummyLLM(available=llm_available),
+        search=_DummySearch(available=search_available),
+    )
+
+    register_routes(
+        router,
+        providers=providers,
+        strategies=SimpleNamespace(),
+        settings=settings,
+        semaphore_factory=lambda: asyncio.Semaphore(1),
+    )
+    app.include_router(router)
+    return TestClient(app)
+
+
+def test_health_reports_provider_aware_status():
+    client = _make_app(llm_available=True, search_available=False)
+
+    response = client.get("/health")
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["status"] == "degraded"
+    assert payload["llm"]["provider"] == "_DummyLLM"
+    assert payload["llm"]["status"] == "ready"
+    assert payload["search"]["provider"] == "_DummySearch"
+    assert payload["search"]["status"] == "unavailable"
+    assert payload["report_profile"] == "compact"
+    assert payload["legal"] == {
+        "project": "Inqtrix",
+        "license": "Apache-2.0",
+        "source_url": "https://github.com/inqtrix/inqtrix",
+        "copyright": "Copyright (c) 2026 Babak Zandi.",
+        "notice": (
+            "Inqtrix - Copyright (c) 2026 Babak Zandi - "
+            "https://github.com/inqtrix/inqtrix"
+        ),
+        "warranty_notice": (
+            "This software is provided without warranties or conditions of any "
+            "kind under Apache-2.0; see LICENSE for details."
+        ),
+    }
+
+
+def test_legal_metadata_includes_warranty_notice():
+    payload = legal_metadata()
+
+    assert payload["license"] == "Apache-2.0"
+    assert payload["warranty_notice"] == (
+        "This software is provided without warranties or conditions of any "
+        "kind under Apache-2.0; see LICENSE for details."
+    )
+
+
+def test_health_exposes_ai_disclosure_beside_legal():
+    client = _make_app(llm_available=True, search_available=True)
+
+    payload = client.get("/health").json()
+
+    assert payload["ai_disclosure"] == ai_disclosure_metadata()
+    assert "ai_disclosure" not in payload["legal"]
+
+
+def test_health_exposes_version_beside_legal():
+    client = _make_app(llm_available=True, search_available=True)
+
+    payload = client.get("/health").json()
+
+    assert payload["version"] == __display_version__
+    assert "version" not in payload["legal"]
+
+
+def test_display_version_extends_the_release_line():
+    """The shown build must stay inside the packaged release line.
+
+    ``__version__`` is what Hatchling, npm, and the eval baselines are pinned
+    to; ``__display_version__`` adds the dev designation the branch carries.
+    Letting them drift apart would make the app report a build that no
+    published artefact corresponds to.
+    """
+    assert __display_version__.startswith(__version__)
+
+
+def test_ai_disclosure_metadata_carries_machine_tokens():
+    payload = ai_disclosure_metadata()
+
+    assert payload["marker"] == "ai-generated"
+    assert payload["producer"] == "Inqtrix"
+    assert payload["system_disclosure"].startswith("Inqtrix is an AI system.")
+    assert payload["content_disclosure"] == (
+        "This text was generated by an AI system (Inqtrix)."
+    )
+
+
+def test_chat_completions_returns_timeout_response(monkeypatch):
+    client = _make_app(agent_max_total_seconds=-29)
+
+    def fake_run(*args, **kwargs):
+        time.sleep(1.2)
+        return {"answer": "Zu spaet", "result_state": {}}
+
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "Hallo"}],
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 504
+    assert response.json()["error"]["type"] == "timeout_error"
+
+
+def test_native_runs_endpoint_returns_events_and_result(monkeypatch):
+    client = _make_app()
+
+    def fake_run(question, **kwargs):
+        event_sink = kwargs["run_event_sink"]
+        assert question == "Was ist neu?"
+        assert kwargs["run_id"].startswith("run_")
+        assert kwargs["settings"].max_rounds == 2
+        event_sink(
+            "inqtrix.node.started",
+            {
+                "node": "classify",
+                "snapshot": {"current_node": "classify", "active_round": 0},
+            },
+        )
+        return {
+            "answer": "Antwort mit Quelle [1].",
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+            "result_state": {
+                "answer": "Antwort mit Quelle [1].",
+                "round": 1,
+                "queries": ["test query"],
+                "all_citations": ["https://example.com/source"],
+                "report_references": [
+                    {"label": "E1", "url": "https://example.com/source", "tier": "unknown"},
+                ],
+                "source_records": {"src_1": {"url": "https://example.com/source"}},
+                "final_confidence": 8,
+                "source_tier_counts": {
+                    "primary": 0,
+                    "mainstream": 0,
+                    "stakeholder": 0,
+                    "unknown": 1,
+                    "low": 0,
+                },
+                "claim_status_counts": {
+                    "verified": 0,
+                    "contested": 0,
+                    "unverified": 0,
+                },
+                "source_quality_score": 0.25,
+                "claim_quality_score": 0.0,
+                "evidence_ledger": [{"id": "ev_1"}],
+                "consolidated_claims": [{"status": "unverified"}],
+                "aspect_coverage": 0.5,
+                "evidence_consistency": 6,
+                "evidence_sufficiency": 7,
+            },
+        }
+
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
+
+    response = client.post(
+        "/v1/runs",
+        json={
+            "question": "Was ist neu?",
+            "agent_overrides": {"max_rounds": 2},
+        },
+    )
+
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    assert response.json()["agent_overrides"] == {"max_rounds": 2}
+
+    deadline = time.time() + 1
+    while time.time() < deadline:
+        summary = client.get(f"/v1/runs/{run_id}").json()
+        if summary["status"] == "completed":
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("native run did not complete")
+
+    result = client.get(f"/v1/runs/{run_id}/result")
+    assert result.status_code == 200
+    payload = result.json()
+    assert payload["answer"] == "Antwort mit Quelle [1]."
+    assert payload["metrics"]["rounds"] == 1
+    assert payload["metrics"]["total_queries"] == 1
+    assert payload["references"] == [
+        {
+            "label": "E1",
+            "url": "https://example.com/source",
+            "tier": "unknown",
+            "tier_reason": "",
+            "role_reason": "",
+            "cited": True,
+            "title": None,
+            "document_id": None,
+            "chunk_index": None,
+            "excerpt": None,
+            "source_text": None,
+            "quotes": [],
+            "grounded_support": None,
+            "provider_snippet": None,
+            "page_number": None,
+            "reference_id": None,
+            "source_id": None,
+            "query_id": None,
+            "query_ids": [],
+            "citation_id": None,
+            "citation_ids": [],
+            "source_run_id": None,
+            "source_run_ids": [],
+            "source_span": None,
+            "revision_id": None,
+            "generation_id": None,
+            "provenance_status": None,
+            "statements": [],
+        }
+    ]
+    assert payload["usage"]["total_tokens"] == 18
+    summary = client.get(f"/v1/runs/{run_id}").json()
+    snapshot = summary["snapshot"]
+    assert snapshot["source_tier_counts"]["unknown"] == 1
+    assert snapshot["source_quality_score"] == 0.25
+    assert snapshot["claim_status_counts"]["unverified"] == 0
+    assert snapshot["claim_quality_score"] == 0.0
+    assert snapshot["evidence_record_count"] == 1
+    assert snapshot["consolidated_claim_count"] == 1
+    assert snapshot["aspect_coverage"] == 0.5
+    assert snapshot["evidence_consistency"] == 6
+    assert snapshot["evidence_sufficiency"] == 7
+
+    with client.stream("GET", f"/v1/runs/{run_id}/events") as stream_response:
+        body = stream_response.read().decode("utf-8")
+
+    assert "event: inqtrix.run.queued" in body
+    assert "event: inqtrix.run.snapshot" in body
+    assert "event: inqtrix.node.started" in body
+    assert "event: inqtrix.output_text.delta" in body
+    assert "event: inqtrix.run.completed" in body
+
+
+def test_completed_result_reload_recovers_safe_knowledge_receipt_from_snapshot():
+    client = _make_app()
+    degradation = {
+        "reason": "vector_overfetch_cap",
+        "retrieval_mode": "hybrid",
+        "stage": "vector_candidate_pool",
+        "requested_candidate_pool": 40,
+        "returned_candidate_pool": 10,
+        "final_top_k": 8,
+        "final_evidence_complete": False,
+        "requested_top_k": 8,
+        "returned_hits": 3,
+        "candidate_cap": 64,
+    }
+
+    imported = client.post(
+        "/v1/runs/import",
+        json={
+            "source_run_id": "client-knowledge-reload",
+            "question": "persisted question",
+            "mode": "knowledge",
+            "result": {
+                "answer": "Persisted answer",
+                "metrics": {},
+                "top_sources": [],
+                "top_claims": [],
+            },
+            "snapshot": {
+                "knowledge_profile": {
+                    "id": "gruendlich",
+                    "requested": "gruendlich",
+                    "auto_selected": False,
+                    "auto_reason": "",
+                    "degraded_stages": ["rerank"],
+                },
+                "knowledge_gate": {
+                    "enabled": True,
+                    "sufficient": False,
+                    "coverage": "partial",
+                    "reason": "private evidence-derived prose",
+                    "rounds_used": 2,
+                    "max_rounds": 2,
+                },
+                "knowledge_grounding": {
+                    "enabled": True,
+                    "quotes": [
+                        {
+                            "label": "K1",
+                            "text": "private document passage",
+                            "verified": True,
+                        }
+                    ],
+                },
+                "knowledge_retrieval": {
+                    "degradations": [degradation, dict(degradation)]
+                },
+                "knowledge_candidates": 10,
+                "knowledge_evidence_used": 3,
+            },
+        },
+    )
+
+    assert imported.status_code == 200
+    run_id = imported.json()["run_id"]
+    summary = client.get(f"/v1/runs/{run_id}").json()
+    reloaded = client.get(f"/v1/runs/{run_id}/result")
+
+    assert reloaded.status_code == 200
+    payload = reloaded.json()
+    assert payload["answer"] == "Persisted answer"
+    assert payload["knowledge_profile"] == {
+        "id": "gruendlich",
+        "requested": "gruendlich",
+        "auto_selected": False,
+        "degraded_stages": ["rerank"],
+    }
+    assert payload["knowledge_gate"]["coverage"] == "partial"
+    assert payload["knowledge_grounding"] == {"enabled": True}
+    assert payload["knowledge_retrieval"] == {
+        "degradations": [degradation]
+    }
+    assert payload["knowledge_candidates"] == 10
+    assert payload["knowledge_evidence_used"] == 3
+    assert "reason" not in summary["snapshot"]["knowledge_gate"]
+    assert "quotes" not in summary["snapshot"]["knowledge_grounding"]
+
+
+def test_native_runs_are_filterable_by_workspace_id(monkeypatch):
+    client = _make_app()
+
+    def fake_run(question, **kwargs):
+        return {
+            "answer": f"Antwort: {question}",
+            "result_state": {
+                "answer": f"Antwort: {question}",
+                "round": 1,
+                "queries": [],
+                "all_citations": [],
+            },
+        }
+
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
+
+    response_a = client.post(
+        "/v1/runs",
+        headers={"X-Inqtrix-Workspace-Id": "ws_browser_a"},
+        json={"question": "Workspace A"},
+    )
+    response_b = client.post(
+        "/v1/runs",
+        headers={"X-Inqtrix-Workspace-Id": "ws_browser_b"},
+        json={"question": "Workspace B"},
+    )
+
+    assert response_a.status_code == 202
+    assert response_b.status_code == 202
+    run_a = response_a.json()["run_id"]
+    run_b = response_b.json()["run_id"]
+
+    visible_a = client.get(
+        "/v1/runs",
+        headers={"X-Inqtrix-Workspace-Id": "ws_browser_a"},
+    )
+    assert visible_a.status_code == 200
+    assert [item["run_id"] for item in visible_a.json()["data"]] == [run_a]
+    assert visible_a.json()["data"][0]["workspace_id"] == "ws_browser_a"
+
+    hidden = client.get(
+        f"/v1/runs/{run_b}",
+        headers={"X-Inqtrix-Workspace-Id": "ws_browser_a"},
+    )
+    assert hidden.status_code == 404
+
+    unscoped = client.get("/v1/runs")
+    assert unscoped.status_code == 200
+    assert {item["run_id"] for item in unscoped.json()["data"]} >= {run_a, run_b}
+
+
+def test_native_runs_reject_invalid_workspace_id():
+    client = _make_app()
+
+    response = client.get(
+        "/v1/runs",
+        headers={"X-Inqtrix-Workspace-Id": "../bad"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+# ------------------------------------------------------------------ #
+# create_app — Baukasten injection and lifespan
+# ------------------------------------------------------------------ #
+
+
+def test_create_app_accepts_provider_injection(monkeypatch):
+    """create_app(providers=...) must reuse the injected pair."""
+    provider_factory_calls: list[str] = []
+
+    def fake_create_providers(*args, **kwargs):
+        provider_factory_calls.append("create_providers")
+        raise AssertionError("create_providers must not run with injected providers")
+
+    monkeypatch.setattr(app_module, "create_providers", fake_create_providers)
+
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["llm"]["provider"] == "_DummyLLM"
+    assert response.json()["search"]["provider"] == "_DummySearch"
+    assert provider_factory_calls == [], (
+        f"Provider auto-create path was reached unexpectedly: {provider_factory_calls}"
+    )
+
+
+def test_create_app_strategies_use_provider_claim_extract_model(monkeypatch):
+    """Bug A regression: strategies must read claim_extract_model from the
+    LLM provider's own ``models`` attribute, not from the global
+    ``settings.models`` block. Otherwise the LiteLLM-flavoured default
+    leaks into Anthropic / Bedrock / Azure providers and breaks claim
+    extraction with HTTP 400/404 on ``claude-opus-4.6-agent``.
+    """
+    captured: dict[str, str] = {}
+
+    real_create_default = app_module.create_default_strategies
+
+    def spy_create_default(settings_arg, **kwargs):  # noqa: ANN001
+        captured["claim_extract_model"] = kwargs.get("claim_extract_model", "")
+        return real_create_default(settings_arg, **kwargs)
+
+    monkeypatch.setattr(app_module, "create_default_strategies", spy_create_default)
+
+    class _LLMWithProviderModel(_DummyLLM):
+        def __init__(self) -> None:
+            super().__init__(available=True)
+            self.models = ModelSettings(
+                reasoning_model="claude-opus-4-6",
+                claim_extract_model="claude-haiku-4-5",
+            )
+
+    providers = ProviderContext(llm=_LLMWithProviderModel(), search=_DummySearch())
+    create_app(settings=Settings(), providers=providers)
+
+    assert captured["claim_extract_model"] == "claude-haiku-4-5", (
+        "Strategies-Layer must use the provider's claim_extract_model "
+        f"(claude-haiku-4-5), not the LiteLLM default; got "
+        f"{captured['claim_extract_model']!r}."
+    )
+
+
+def test_health_models_payload_uses_provider_models():
+    """Bug C regression: /health must show the LLM provider's actual
+    model identifiers, not the global ``settings.models`` defaults.
+    """
+    class _LLMWithProviderModel(_DummyLLM):
+        def __init__(self) -> None:
+            super().__init__(available=True)
+            self.models = ModelSettings(
+                reasoning_model="claude-opus-4-6",
+                claim_extract_model="claude-haiku-4-5",
+            )
+
+    class _SearchWithModel(_DummySearch):
+        def __init__(self) -> None:
+            super().__init__(available=True)
+            # Search providers expose their identifier via
+            # the standardized ``search_model`` property (mirrors the
+            # ``LLMProvider.models`` Constructor-First contract).
+            self.search_model = "sonar-pro"
+
+    app = FastAPI()
+    router = create_router()
+    settings = Settings(
+        models=ModelSettings(),
+        agent=AgentSettings(),
+        server=ServerSettings(),
+    )
+    providers = SimpleNamespace(
+        llm=_LLMWithProviderModel(),
+        search=_SearchWithModel(),
+    )
+    register_routes(
+        router,
+        providers=providers,
+        strategies=SimpleNamespace(),
+        settings=settings,
+        semaphore_factory=lambda: asyncio.Semaphore(1),
+    )
+    app.include_router(router)
+
+    payload = TestClient(app).get("/health").json()
+
+    assert payload["reasoning_model"] == "claude-opus-4-6"
+    assert payload["claim_extract_model"] == "claude-haiku-4-5"
+    # Roles without explicit per-role model fall back to reasoning_model
+    # via the provider's effective_* properties — never to the global
+    # LiteLLM default ``claude-opus-4.6-agent``.
+    assert payload["classify_model"] == "claude-opus-4-6"
+    assert payload["evaluate_model"] == "claude-opus-4-6"
+    assert payload["search_model"] == "sonar-pro"
+
+    # node_models exposes the per-node resolution with provenance, so an
+    # operator can see which call site uses which model and *why*: answer
+    # falls back to reasoning_model (no tier set -> the default grips, and it
+    # says so), while claim_extract is a per-node override.
+    node_models = payload["node_models"]
+    assert node_models["answer"]["model"] == "claude-opus-4-6"
+    assert node_models["answer"]["model_source"] == "reasoning_model_default"
+    assert node_models["claim_extract"]["model"] == "claude-haiku-4-5"
+    assert node_models["claim_extract"]["model_source"] == "per_node_override"
+    chat_options = payload["chat_model_options"]
+    assert [option["tier"] for option in chat_options] == ["high", "mid", "fast"]
+    assert [option["node"] for option in chat_options] == ["direct_chat"] * 3
+    assert chat_options[1]["model"] == "claude-opus-4-6"
+
+
+def test_health_models_payload_respects_model_tier():
+    class _LLMWithTierModels(_DummyLLM):
+        def __init__(self) -> None:
+            super().__init__(available=True)
+            self.models = ModelSettings(
+                reasoning_model="fallback",
+                tier_high_model="high-model",
+                tier_mid_model="mid-model",
+                tier_fast_model="fast-model",
+            )
+
+    app = FastAPI()
+    router = create_router()
+    settings = Settings(
+        models=ModelSettings(),
+        agent=AgentSettings(model_tier="fast"),
+        server=ServerSettings(),
+    )
+    providers = SimpleNamespace(llm=_LLMWithTierModels(), search=_DummySearch())
+    register_routes(
+        router,
+        providers=providers,
+        strategies=SimpleNamespace(),
+        settings=settings,
+        semaphore_factory=lambda: asyncio.Semaphore(1),
+    )
+    app.include_router(router)
+
+    payload = TestClient(app).get("/health").json()
+
+    assert payload["node_models"]["answer"]["model"] == "fast-model"
+    assert payload["node_models"]["answer"]["requested_tier"] == "fast"
+    assert payload["classify_model"] == "fast-model"
+    assert payload["claim_extract_model"] == "fast-model"
+    assert payload["evaluate_model"] == "fast-model"
+    assert [option["model"] for option in payload["chat_model_options"]] == [
+        "high-model",
+        "mid-model",
+        "fast-model",
+    ]
+    assert [option["requested_tier"] for option in payload["chat_model_options"]] == [
+        "high",
+        "mid",
+        "fast",
+    ]
+
+
+def test_health_models_payload_does_not_leak_settings_defaults_without_provider_models():
+    app = FastAPI()
+    router = create_router()
+    settings = Settings(
+        models=ModelSettings(
+            reasoning_model="settings-reasoning",
+            classify_model="settings-classify",
+            claim_extract_model="settings-claim",
+            evaluate_model="settings-evaluate",
+        ),
+        agent=AgentSettings(),
+        server=ServerSettings(),
+    )
+    providers = SimpleNamespace(llm=_DummyLLM(), search=_DummySearch())
+    register_routes(
+        router,
+        providers=providers,
+        strategies=SimpleNamespace(),
+        settings=settings,
+        semaphore_factory=lambda: asyncio.Semaphore(1),
+    )
+    app.include_router(router)
+
+    payload = TestClient(app).get("/health").json()
+
+    assert payload["reasoning_model"] == ""
+    assert payload["classify_model"] == ""
+    assert payload["claim_extract_model"] == ""
+    assert payload["evaluate_model"] == ""
+    assert payload["node_models"]["answer"]["model_source"] == "provider_models_missing"
+    assert payload["node_models"]["answer"]["effort_source"] == "provider_default_unseen"
+    assert all(option["model"] == "" for option in payload["chat_model_options"])
+    assert all(
+        option["model_source"] == "provider_models_missing"
+        for option in payload["chat_model_options"]
+    )
+
+
+def test_health_search_model_uses_provider_property_not_settings_default():
+    """When the search provider exposes a
+    ``search_model`` property it MUST surface in /health verbatim,
+    never the global ``settings.models.search_model`` default: an
+    Azure-only stack must not report another provider's search model.
+    """
+    class _AzureLikeSearch(_DummySearch):
+        def __init__(self) -> None:
+            super().__init__(available=True)
+            # No legacy attribute names (model / _model / agent_name) —
+            # simulates AzureOpenAIWebSearch pre-fix; only the new
+            # standardized property is set.
+            self.search_model = "gpt-4.1+web_search_tool"
+
+    app = FastAPI()
+    router = create_router()
+    settings = Settings(
+        models=ModelSettings(),  # leaves the LiteLLM default search_model
+        agent=AgentSettings(),
+        server=ServerSettings(),
+    )
+    providers = SimpleNamespace(llm=_DummyLLM(), search=_AzureLikeSearch())
+    register_routes(
+        router,
+        providers=providers,
+        strategies=SimpleNamespace(),
+        settings=settings,
+        semaphore_factory=lambda: asyncio.Semaphore(1),
+    )
+    app.include_router(router)
+
+    payload = TestClient(app).get("/health").json()
+    assert payload["search_model"] == "gpt-4.1+web_search_tool", (
+        "Provider-exposed search_model must win over settings.models.search_model"
+    )
+
+
+def test_health_search_model_falls_back_to_settings_when_provider_silent():
+    """When a third-party search provider lacks the ``search_model``
+    property entirely, the helper falls back to ``settings.models.search_model``.
+    This keeps backwards compatibility for code outside the inqtrix
+    repository implementation that lacks the standardized metadata.
+    """
+    class _SilentSearch(_DummySearch):
+        # Inherits no search_model attr; getattr will return "" / falsy
+        pass
+
+    app = FastAPI()
+    router = create_router()
+    settings = Settings(
+        models=ModelSettings(search_model="legacy-default-sentinel"),
+        agent=AgentSettings(),
+        server=ServerSettings(),
+    )
+    providers = SimpleNamespace(llm=_DummyLLM(), search=_SilentSearch())
+    register_routes(
+        router,
+        providers=providers,
+        strategies=SimpleNamespace(),
+        settings=settings,
+        semaphore_factory=lambda: asyncio.Semaphore(1),
+    )
+    app.include_router(router)
+
+    payload = TestClient(app).get("/health").json()
+    assert payload["search_model"] == "legacy-default-sentinel"
+
+
+def test_create_app_lifespan_logs_provider_init(caplog):
+    """ASGI lifespan must emit startup + shutdown logs with provider labels."""
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+
+    # configure_logging() sets propagate=False on the inqtrix logger so the
+    # standard root-handler caplog setup does not see records. Attach the
+    # capture handler directly to the inqtrix logger for this test.
+    inqtrix_logger = logging.getLogger("inqtrix")
+    inqtrix_logger.addHandler(caplog.handler)
+    previous_level = inqtrix_logger.level
+    inqtrix_logger.setLevel(logging.INFO)
+    try:
+        with caplog.at_level(logging.INFO, logger="inqtrix"):
+            with TestClient(app) as client:
+                client.get("/health")
+    finally:
+        inqtrix_logger.removeHandler(caplog.handler)
+        inqtrix_logger.setLevel(previous_level)
+
+    messages = [rec.getMessage() for rec in caplog.records]
+    startup = [m for m in messages if "Inqtrix server starting" in m]
+    shutdown = [m for m in messages if "Inqtrix server stopping" in m]
+    assert startup, f"Startup log not emitted; got: {messages}"
+    assert "_DummyLLM" in startup[0]
+    assert "_DummySearch" in startup[0]
+    assert shutdown, f"Shutdown log not emitted; got: {messages}"
+
+
+def test_upload_reconciler_is_owned_by_restartable_app_lifespan():
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+    reconciler = app.state.container.upload_reconciler
+    assert reconciler is not None
+    assert reconciler.running is False
+
+    with TestClient(app):
+        assert reconciler.running is True
+        reconciler.start()
+        assert reconciler.running is True
+    assert reconciler.running is False
+
+    with TestClient(app):
+        assert reconciler.running is True
+    assert reconciler.running is False
+    reconciler.close()
+    assert reconciler.running is False
+
+
+def test_indexing_auto_resumer_is_owned_by_the_app_lifespan_and_stops_first():
+    """The sweep uses the indexing store, so the lifespan stops it before
+    the store closes; a sweep in flight never meets a closed store."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+    events: list[str] = []
+
+    class Resumer:
+        def start(self) -> None:
+            events.append("resumer.start")
+
+        def close(self) -> None:
+            events.append("resumer.close")
+
+    class JobStore:
+        def close(self) -> None:
+            events.append("store.close")
+
+    app.state.container = replace(
+        app.state.container,
+        indexing_auto_resumer=Resumer(),
+        indexing_service=SimpleNamespace(job_store=JobStore()),
+    )
+
+    with TestClient(app):
+        assert events == ["resumer.start"]
+    assert events == ["resumer.start", "resumer.close", "store.close"]
+
+
+def test_run_retention_sweep_is_owned_by_the_app_lifespan_and_stops_first():
+    """The sweep uses the run store, so the lifespan stops it before the
+    store closes; a pass in flight never meets a closed store."""
+    from dataclasses import replace
+
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+    events: list[str] = []
+
+    class Sweep:
+        def start(self) -> None:
+            events.append("sweep.start")
+
+        def close(self) -> None:
+            events.append("sweep.close")
+
+    class RunStore:
+        def close(self) -> None:
+            events.append("store.close")
+
+    app.state.container = replace(
+        app.state.container,
+        run_retention_sweep=Sweep(),
+        run_store=RunStore(),
+    )
+
+    with TestClient(app):
+        assert events == ["sweep.start"]
+    assert events == ["sweep.start", "sweep.close", "store.close"]
+
+
+def test_the_api_process_sweeps_the_run_store_every_minute():
+    """Retention windows hold while nobody reads the store: the container
+    wires one sweep of the run store, inert until the application lifespan
+    starts it."""
+    import threading
+
+    from inqtrix.periodic_sweep import PeriodicSweep
+    from inqtrix.runs.shared import RETENTION_SWEEP_SECONDS
+
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    container = create_app(settings=Settings(), providers=providers).state.container
+    sweep = container.run_retention_sweep
+
+    assert isinstance(sweep, PeriodicSweep)
+    assert sweep.running is False
+    assert sweep._sweep == container.run_store.sweep
+    assert sweep._label == "Run retention"
+    assert sweep._interval == RETENTION_SWEEP_SECONDS == 60.0
+    sweep.start()
+    try:
+        assert "inqtrix-run-retention" in [
+            thread.name for thread in threading.enumerate()
+        ]
+    finally:
+        sweep.close()
+    assert sweep.running is False
+
+
+# ------------------------------------------------------------------ #
+# Payload caps (ADR-WS DoS guard)
+# ------------------------------------------------------------------ #
+
+
+def test_chat_completions_rejects_too_many_messages():
+    """``max_message_count`` rejects array-bomb payloads with HTTP 413."""
+    server = ServerSettings(INQTRIX_MAX_MESSAGE_COUNT=10)
+    client = _make_app(server_settings=server)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": f"msg {i}"} for i in range(11)
+            ],
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 413
+    payload = response.json()
+    assert payload["error"]["type"] == "payload_too_large"
+    assert "11" in payload["error"]["message"]
+    assert "10" in payload["error"]["message"]
+
+
+def test_chat_completions_rejects_oversized_total_tokens():
+    """``max_total_input_tokens`` rejects oversized direct-chat bodies."""
+    # 10_000 token cap = 40_000 chars at 4 chars per token.
+    server = ServerSettings(INQTRIX_MAX_TOTAL_INPUT_TOKENS=10_000)
+    client = _make_app(server_settings=server)
+
+    huge_content = "x" * 60_000  # ~15_000 tokens — exceeds the cap.
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": huge_content}],
+            "mode": "direct_llm",
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 413
+    payload = response.json()
+    assert payload["error"]["type"] == "payload_too_large"
+    assert "tokens" in payload["error"]["message"].lower()
+
+
+def test_chat_completions_direct_llm_allows_large_embedded_context(monkeypatch):
+    """Direct chat uses the route token cap, not the research question cap."""
+    captured: dict[str, int | bool] = {}
+
+    def fake_run(
+        question,
+        *,
+        history,
+        providers,
+        strategies,
+        settings,
+        cancel_event,
+    ):
+        assert cancel_event is not None and not cancel_event.is_set()
+        captured["question_len"] = len(question)
+        captured["max_question_length"] = settings.max_question_length
+        captured["skip_search"] = settings.skip_search
+        return {
+            "answer": "ok",
+            "result_state": {},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        }
+
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
+
+    client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
+    large_chat_context = "x" * 5_000
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": large_chat_context}],
+            "mode": "direct_llm",
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "question_len": len(large_chat_context),
+        "max_question_length": len(large_chat_context),
+        "skip_search": True,
+    }
+
+
+def test_chat_completions_research_mode_keeps_question_length_limit(monkeypatch):
+    """Research-mode chat still rejects questions above ``max_question_length``."""
+    def fail_run(*args, **kwargs):
+        raise AssertionError("agent_run must not be called")
+
+    monkeypatch.setattr(
+        web_research_module,
+        "run_web_graph",
+        fail_run,
+    )
+
+    client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "x" * 5_000}],
+            "mode": "research",
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert "Question too long" in payload["error"]["message"]
+
+
+def test_native_runs_keep_question_length_limit():
+    """Native research runs keep the character guard even with direct mode."""
+    client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
+
+    response = client.post(
+        "/v1/runs",
+        json={
+            "question": "x" * 5_000,
+            "mode": "direct_llm",
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert "Question too long" in payload["error"]["message"]
+
+
+def test_chat_completions_streaming_direct_llm_uses_expanded_limit(monkeypatch):
+    """Streaming direct chat receives the same request-local settings copy."""
+    captured: dict[str, int | bool] = {}
+
+    async def fake_guarded_stream(question, history, sem, **kwargs):
+        settings = kwargs["settings"]
+        captured["question_len"] = len(question)
+        captured["max_question_length"] = settings.max_question_length
+        captured["skip_search"] = settings.skip_search
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(chat_router_module, "guarded_stream", fake_guarded_stream)
+
+    client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
+    large_chat_context = "x" * 5_000
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": large_chat_context}],
+            "mode": "direct_llm",
+            "stream": True,
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert "data: [DONE]" in body
+    assert captured == {
+        "question_len": len(large_chat_context),
+        "max_question_length": len(large_chat_context),
+        "skip_search": True,
+    }
+
+
+def test_chat_completions_accepts_typical_payload(monkeypatch):
+    """Realistic multi-turn payloads pass the cap unchanged."""
+    monkeypatch.setattr(
+        web_research_module,
+        "run_web_graph",
+        lambda *args, **kwargs: {
+            "answer": "ok",
+            "result_state": {},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        },
+    )
+
+    client = _make_app()  # Defaults: 200 messages, 500k tokens.
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "Question " + str(i) * 200}
+                for i in range(20)
+            ],
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def _fake_quick_run(question, **kwargs):
+    return {
+        "answer": "Fertig.",
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        "result_state": {"answer": "Fertig.", "round": 1},
+    }
+
+
+def _submit_completed_run(client) -> str:
+    response = client.post("/v1/runs", json={"question": "Was ist neu?"})
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        if client.get(f"/v1/runs/{run_id}").json()["status"] == "completed":
+            return run_id
+        time.sleep(0.01)
+    raise AssertionError("native run did not complete")
+
+
+def test_run_children_route_returns_list_envelope_and_404(monkeypatch):
+    client = _make_app()
+    monkeypatch.setattr(web_research_module, "run_web_graph", _fake_quick_run)
+    run_id = _submit_completed_run(client)
+
+    response = client.get(f"/v1/runs/{run_id}/children")
+    assert response.status_code == 200
+    assert response.json() == {"object": "list", "data": []}
+
+    missing = client.get("/v1/runs/run_unbekannt/children")
+    assert missing.status_code == 404
+
+
+def test_run_events_after_filters_replay_and_still_terminates(monkeypatch):
+    client = _make_app()
+    monkeypatch.setattr(web_research_module, "run_web_graph", _fake_quick_run)
+    run_id = _submit_completed_run(client)
+
+    with client.stream("GET", f"/v1/runs/{run_id}/events") as stream:
+        full_body = stream.read().decode("utf-8")
+    sequences = [
+        json.loads(line[len("data: "):])["sequence"]
+        for line in full_body.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert sequences == sorted(sequences)
+    cutoff = sequences[len(sequences) // 2]
+
+    with client.stream(
+        "GET", f"/v1/runs/{run_id}/events?after={cutoff}"
+    ) as stream:
+        filtered_body = stream.read().decode("utf-8")
+    filtered = [
+        json.loads(line[len("data: "):])["sequence"]
+        for line in filtered_body.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert filtered == [seq for seq in sequences if seq > cutoff]
+
+    # after at/past the terminal event: the stream must still END
+    # (empty replay, no live tail on a terminal run) instead of hanging.
+    with client.stream(
+        "GET", f"/v1/runs/{run_id}/events?after={max(sequences)}"
+    ) as stream:
+        empty_body = stream.read().decode("utf-8")
+    assert empty_body == ""
+
+
+def test_run_events_json_format_pages_the_same_replay(monkeypatch):
+    """Polling fallback: ``?format=json`` returns the replay buffer
+    as an immediate JSON page (same events, same ``after`` keyset) with
+    a terminal flag so a poller knows when to stop."""
+    client = _make_app()
+    monkeypatch.setattr(web_research_module, "run_web_graph", _fake_quick_run)
+    run_id = _submit_completed_run(client)
+
+    with client.stream("GET", f"/v1/runs/{run_id}/events") as stream:
+        sse_body = stream.read().decode("utf-8")
+    sse_events = [
+        json.loads(line[len("data: "):])
+        for line in sse_body.splitlines()
+        if line.startswith("data: ")
+    ]
+
+    page = client.get(f"/v1/runs/{run_id}/events?format=json").json()
+    assert page["object"] == "list"
+    assert page["terminal"] is True
+    assert page["data"] == sse_events
+
+    cutoff = sse_events[len(sse_events) // 2]["sequence"]
+    filtered = client.get(
+        f"/v1/runs/{run_id}/events?format=json&after={cutoff}"
+    ).json()
+    assert [event["sequence"] for event in filtered["data"]] == [
+        event["sequence"]
+        for event in sse_events
+        if event["sequence"] > cutoff
+    ]
+    assert filtered["terminal"] is True
+
+
+def test_run_events_after_rejects_non_integer(monkeypatch):
+    client = _make_app()
+    monkeypatch.setattr(web_research_module, "run_web_graph", _fake_quick_run)
+    run_id = _submit_completed_run(client)
+
+    response = client.get(f"/v1/runs/{run_id}/events?after=abc")
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_readyz_is_ready_on_memory_backends():
+    """2.3: the zero-infrastructure default answers ready (route-level)."""
+    client = _make_app()
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["checks"]["database"] == "skipped"
+    assert payload["checks"]["queue"] == "skipped"
+
+
+def _startup_warnings(settings) -> list[str]:
+    """WARNING messages emitted on the inqtrix logger during lifespan.
+
+    The inqtrix logger does not always propagate to root, so caplog must
+    attach its handler directly (repo gotcha #2).
+    """
+    import logging
+
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=settings, providers=providers)
+    logger = logging.getLogger("inqtrix")
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.levelno >= logging.WARNING:
+                records.append(record)
+
+    handler = _Capture()
+    logger.addHandler(handler)
+    try:
+        with TestClient(app):
+            pass
+    finally:
+        logger.removeHandler(handler)
+    return [record.getMessage() for record in records]
+
+
+def test_startup_warns_when_per_user_cap_below_one_agent_wave():
+    """1.3 review fix: a per-user cap below the agent wave width is loud.
+
+    A cap that cannot fit one agent wave silently truncates agent trees;
+    the composition root must warn at startup (No Silent Fallbacks).
+    """
+    settings = Settings()
+    settings.server.run_max_concurrent_per_user = 2
+    settings.agent_platform.max_parallel_children = 3
+    messages = _startup_warnings(settings)
+    assert any(
+        "RUN_MAX_CONCURRENT_PER_USER=2" in message
+        and "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN=3" in message
+        for message in messages
+    )
+
+
+def test_startup_silent_when_per_user_cap_fits_a_wave():
+    settings = Settings()
+    settings.server.run_max_concurrent_per_user = 4
+    settings.agent_platform.max_parallel_children = 3
+    messages = _startup_warnings(settings)
+    assert not any(
+        "RUN_MAX_CONCURRENT_PER_USER" in message for message in messages
+    )
+
+
+def test_upload_reconciler_starts_even_when_database_contract_is_not_ready(
+    monkeypatch,
+):
+    """A database blip during boot must not disable upload recovery for the
+    whole process lifetime: reconciler passes already degrade to a WARNING on
+    storage errors and succeed on their own once the database returns."""
+
+    async def _not_ready(_container) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "inqtrix.services.system_runtime.database_runtime_contract_ready",
+        _not_ready,
+    )
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+    reconciler = app.state.container.upload_reconciler
+    assert reconciler is not None
+    with TestClient(app):
+        assert reconciler.running is True
+    assert reconciler.running is False
+    reconciler.close()

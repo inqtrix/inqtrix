@@ -1,0 +1,318 @@
+{
+ "description": "Hard German retrieval golden set over BSI compliance documents: 111 IT-Grundschutz Bausteine (Edition 2023, per-Baustein PDFs via MarkItDown — the production ingestion path) plus 122 C5:2020 criteria (per-criterion split). Built by build_corpus.py; the corpus is gitignored (BSI terms forbid mirroring). Queries were drafted and adversarially label-verified against the actual corpus text; distractor pressure comes from sibling Bausteine and same-domain criteria. The no_evidence queries are excluded from retrieval metrics by design; they exist for a future BSI answer-eval parametrization (the answer harness currently runs the base set only).",
+ "queries": [
+  {
+   "id": "b01",
+   "query": "Welche drei Punkte muss der Vertrag zwingend regeln, wenn eine Institution die Rolle der oder des Informationssicherheitsbeauftragten an einen externen Dienstleister vergibt?",
+   "relevant": [
+    "gsk-isms-1"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b02",
+   "query": "Duerfen unsere IT-Systeme die Beschaeftigten weiterhin routinemaessig nach Ablauf einer festen Frist zum Passwortwechsel zwingen, oder braucht es dafuer einen Anlass?",
+   "relevant": [
+    "gsk-orp-4"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b03",
+   "query": "Nach welcher Sicherheitsstufe muessen ausgedruckte Unterlagen mit schutzbeduerftigen Informationen mindestens geschreddert werden, und auf welche Norm bezieht sich diese Stufe?",
+   "relevant": [
+    "gsk-con-6"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b04",
+   "query": "Durch welche spezielle Einrichtung sollten USB-Sticks und andere Datentraeger von Geschaeftspartnern geprueft werden, bevor sie an Rechner der Institution angeschlossen werden?",
+   "relevant": [
+    "gsk-ops-1-1-4"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b05",
+   "query": "Wie sind die Dateisysteme zu schuetzen, in denen der Konfigurationsspeicher etcd eines Kubernetes-Clusters seine persistenten Daten ablegt?",
+   "relevant": [
+    "gsk-app-4-4"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b06",
+   "query": "Darf das Schluesselmaterial der in das Apple-Betriebssystem eingebauten Festplattenverschluesselung online beim Hersteller hinterlegt werden, wenn Firmenrechner damit verschluesselt sind?",
+   "relevant": [
+    "gsk-sys-2-4"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b07",
+   "query": "Wie viele Zeichen muss der gemeinsame Schluessel mindestens haben, wenn das Funknetz der Institution mit WPA2-PSK abgesichert wird?",
+   "relevant": [
+    "gsk-net-2-1"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b08",
+   "query": "Innerhalb welcher maximalen Zeitspanne muss in einem Rechenzentrum ohne installierte Loeschanlage auf Meldungen der Brandfrueherkennung mit schadensminimierenden Massnahmen reagiert werden?",
+   "relevant": [
+    "gsk-inf-2"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b09",
+   "query": "Welche spezielle Hardware wird als technisches Hilfsmittel genannt, damit bei der Sicherung digitaler Beweismittel nach einem Sicherheitsvorfall nichts versehentlich auf dem Datentraeger veraendert wird?",
+   "relevant": [
+    "gsk-der-2-2"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b10",
+   "query": "In welcher Norm sind die vier Stufen des Sicherheits-Integritaetslevels definiert, mit dem die Zuverlaessigkeit von Schutzeinrichtungen in Industrieanlagen ausgedrueckt wird?",
+   "relevant": [
+    "gsk-ind-2-7"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b11",
+   "query": "Wie soll ein Cloud-Anbieter fruehzeitig erkennen, dass ihm Personal oder IT-Ressourcen knapp werden, bevor es zu einer Systemueberlastung kommt?",
+   "relevant": [
+    "c5-ops-01"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b12",
+   "query": "Koennen Cloud-Kunden selbst nachpruefen, ob ihre Datensicherungen erfolgreich gelaufen sind, und wo finden sie diese Protokolle?",
+   "relevant": [
+    "c5-ops-07"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b13",
+   "query": "Ein Mitarbeiter eines Cloud-Anbieters ist laenger in Elternzeit und meldet sich monatelang nicht an — nach welcher Zeit wird sein Benutzerzugang gesperrt und wann endgueltig entzogen?",
+   "relevant": [
+    "c5-idm-02"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b14",
+   "query": "Ein Administrator wechselt intern die Abteilung — innerhalb welcher Frist muessen seine privilegierten Zugriffsrechte angepasst oder entzogen werden?",
+   "relevant": [
+    "c5-idm-04"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b15",
+   "query": "Bei der jaehrlichen Ueberpruefung der Zugriffsberechtigungen faellt auf, dass ein Mitarbeiter zu viele Rechte hat — wie schnell muss diese Abweichung korrigiert werden?",
+   "relevant": [
+    "c5-idm-05"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b16",
+   "query": "Wie lange muss ein Cloud-Rechenzentrum bei einem laenger anhaltenden Ausfall der externen Stromversorgung mindestens autark weiterlaufen koennen?",
+   "relevant": [
+    "c5-ps-01"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b17",
+   "query": "Wie lange muessen Tueren und Fenster eines Rechenzentrums einem Einbruchsversuch mindestens standhalten?",
+   "relevant": [
+    "c5-ps-03"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b18",
+   "query": "Wer darf die privaten Schluessel kennen, mit denen die gespeicherten Daten der Cloud-Kunden verschluesselt sind?",
+   "relevant": [
+    "c5-cry-03"
+   ],
+   "category": "fact"
+  },
+  {
+   "id": "b19",
+   "query": "Unsere Firma will ausrangierte Festplatten und alte Papierakten loswerden. Was muessen wir tun, damit hinterher niemand mehr an die Daten herankommt?",
+   "relevant": [
+    "gsk-con-6"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "b20",
+   "query": "Ein externer IT-Dienstleister soll sich uebers Internet auf unsere Server aufschalten, um Stoerungen zu beheben. Was muessen wir vorher technisch und vertraglich regeln?",
+   "relevant": [
+    "gsk-ops-1-2-5"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "b21",
+   "query": "Die Uhren unserer Server laufen auseinander, sodass sich Protokolleintraege verschiedener Systeme zeitlich nicht mehr zuordnen lassen. Wie sorgen wir dafuer, dass ueberall dieselbe Uhrzeit gilt?",
+   "relevant": [
+    "gsk-ops-1-2-6"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "b22",
+   "query": "Unser Vertrag mit dem Cloud-Anbieter endet bald. Was muss vorher schriftlich festgelegt sein, damit wir unsere Daten rechtzeitig und in einem brauchbaren Format zurueckbekommen?",
+   "relevant": [
+    "c5-pi-02"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "b23",
+   "query": "Wie verhindert ein Cloud-Anbieter, dass sich Viren oder Trojaner auf den Systemen einnisten, mit denen er seinen Dienst betreibt?",
+   "relevant": [
+    "c5-ops-04",
+    "c5-ops-05"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "b24",
+   "query": "Ein Administrator beim Cloud-Anbieter kuendigt oder wechselt intern in eine andere Abteilung. Wie schnell muessen seine Zugaenge danach gesperrt oder angepasst sein?",
+   "relevant": [
+    "c5-idm-04"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "b25",
+   "query": "Woher weiss ein Cloud-Anbieter im Voraus, dass ihm bei wachsender Nachfrage nicht ploetzlich Rechenleistung, Speicherplatz oder Personal ausgehen?",
+   "relevant": [
+    "c5-ops-01"
+   ],
+   "category": "paraphrase"
+  },
+  {
+   "id": "b26",
+   "query": "Muessen die Dateisysteme mit den persistenten Daten der Control Plane, insbesondere etcd, verschluesselt werden?",
+   "relevant": [
+    "gsk-app-4-4"
+   ],
+   "category": "exact"
+  },
+  {
+   "id": "b27",
+   "query": "Welche RACF-Attribute muessen restriktiv gehandhabt werden und was gilt fuer die User-ID 0 unter den Unix System Services?",
+   "relevant": [
+    "gsk-sys-1-7"
+   ],
+   "category": "exact"
+  },
+  {
+   "id": "b28",
+   "query": "Zu welchen Wiederanlaufparametern muss der Cloud-Anbieter im Notbetrieb nachvollziehbare und transparente Angaben machen?",
+   "relevant": [
+    "c5-bc-03"
+   ],
+   "category": "exact"
+  },
+  {
+   "id": "b29",
+   "query": "Welche TLS-Versionen gelten in Kombination mit Perfect Forward Secrecy als dem Stand der Technik entsprechend?",
+   "relevant": [
+    "c5-cry-01"
+   ],
+   "category": "exact"
+  },
+  {
+   "id": "b30",
+   "query": "Unsere Backups liegen bisher unverschluesselt vor: Welche Vorgaben machen der C5-Katalog und das IT-Grundschutz-Kompendium jeweils zur Verschluesselung von Datensicherungen und zum Schutz der dabei verwendeten Schluessel?",
+   "relevant": [
+    "gsk-con-3",
+    "c5-ops-06",
+    "c5-ops-09",
+    "gsk-con-1"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "b31",
+   "query": "Ein Mitarbeiter soll kuenftig dauerhaft von zuhause aus arbeiten: Welche Vereinbarungen und Regelungen muss die Firma mit ihm treffen, und wie muss das Arbeitszimmer in der Wohnung gegen den Zugriff Fremder abgesichert werden?",
+   "relevant": [
+    "gsk-ops-1-2-4",
+    "gsk-inf-8"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "b32",
+   "query": "Was muss ueber den gesamten Lebenszyklus kryptografischer Schluessel geregelt werden — von der Erzeugung ueber Speicherung und Wechsel bis zum Umgang mit kompromittierten Schluesseln — laut IT-Grundschutz und laut C5?",
+   "relevant": [
+    "gsk-con-1",
+    "c5-cry-04"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "b33",
+   "query": "Wir geben Dienst-Smartphones an die Belegschaft aus und wollen sie zentral verwalten: Welche Anforderungen gelten fuer die sichere Grundkonfiguration der Geraete selbst und welche fuer die Strategie und den Betrieb der zentralen Verwaltungsloesung?",
+   "relevant": [
+    "gsk-sys-3-2-1",
+    "gsk-sys-3-2-2"
+   ],
+   "category": "multi"
+  },
+  {
+   "id": "b34",
+   "query": "Wie hoch kann das Bussgeld maximal ausfallen, wenn personenbezogene Daten nicht ordnungsgemaess geloescht oder vernichtet werden?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "b35",
+   "query": "Mit welchen Kosten muss ein Cloud-Anbieter fuer die Erlangung eines C5-Testats durch eine Wirtschaftspruefungsgesellschaft rechnen?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "b36",
+   "query": "Wie viele Bit muss ein RSA-Schluessel nach den BSI-Empfehlungen mindestens lang sein?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "b37",
+   "query": "Welches konkrete MDM-Produkt empfiehlt das BSI fuer die Verwaltung von Dienst-Smartphones?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "b38",
+   "query": "Innerhalb welcher Frist muss ein Cloud-Anbieter eine Verletzung des Schutzes personenbezogener Daten an die zustaendige Datenschutz-Aufsichtsbehoerde melden?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "b39",
+   "query": "Bis zu welchem Stichtag mussten bestehende Pruefungen vom alten C5:2016 auf den C5:2020 umgestellt werden?",
+   "relevant": [],
+   "category": "no_evidence"
+  },
+  {
+   "id": "b40",
+   "query": "Welche grossen Cloud-Anbieter verfuegen derzeit ueber ein gueltiges C5-Testat?",
+   "relevant": [],
+   "category": "no_evidence"
+  }
+ ]
+}

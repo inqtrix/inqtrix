@@ -1,0 +1,98 @@
+# Stage-1 CI: offline test suite + frontend build sanity.
+#
+# Deliberately scoped:
+#   * push triggers ONLY on main — local working branches (local/*,
+#     wip/*, private/*) are never built and must never appear here.
+#   * This workflow never publishes. Published releases use the separately
+#     permissioned, SemVer-only release-images workflow.
+#   * The Python suite is fully offline (stubs/cassettes, no API keys).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    name: backend (uv run pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Run offline test suite
+        run: uv run pytest tests/ -q
+
+  node-pnpm:
+    name: node workspaces (pnpm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check editor schema
+        run: |
+          pnpm --filter @inqtrix/editor-schema typecheck
+          pnpm --filter @inqtrix/editor-schema test
+
+      - name: Check collaboration server
+        run: |
+          pnpm --filter @inqtrix/collaboration-server typecheck
+          pnpm --filter @inqtrix/collaboration-server test
+
+      - name: Check research desk
+        run: |
+          pnpm run ui:lint
+          pnpm run ui:typecheck
+          pnpm run ui:test
+          pnpm run ui:build
+
+  node-npm:
+    name: node workspaces (npm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check editor schema
+        run: |
+          npm --workspace @inqtrix/editor-schema run typecheck
+          npm --workspace @inqtrix/editor-schema test
+
+      - name: Check collaboration server
+        run: |
+          npm --workspace @inqtrix/collaboration-server run typecheck
+          npm --workspace @inqtrix/collaboration-server test
+
+      - name: Check research desk
+        run: |
+          npm run ui:lint
+          npm run ui:typecheck
+          npm run ui:test
+          npm run ui:build

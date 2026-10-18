@@ -1,0 +1,109 @@
+Inqtrix release "{{ .Release.Name }}" deployed to namespace "{{ .Release.Namespace }}".
+
+Components:
+  - API:    {{ include "inqtrix.fullname" . }}-api  (port {{ .Values.service.apiPort }})
+  - Web UI: {{ include "inqtrix.fullname" . }}-web  (port {{ .Values.service.webPort }})
+{{- if .Values.worker.enabled }}
+  - Worker: {{ include "inqtrix.fullname" . }}-worker
+{{- end }}
+{{- if .Values.s3.enabled }}
+  - Object store (MinIO): {{ include "inqtrix.fullname" . }}-minio:9000 (bundled S3)
+{{- end }}
+{{- if .Values.migrations.enabled }}
+  - Schema migrations ran automatically as a {{ if .Values.postgres.enabled }}post-install{{ else }}pre-install{{ end }}/pre-upgrade hook (inqtrix-migrate, RLS mode {{ .Values.migrations.rlsMode }}).
+{{- if .Values.migrations.databaseSecret.name }}
+    The direct migration DSN came only from Secret {{ .Values.migrations.databaseSecret.name }}; API/worker did not receive it.
+{{- else }}
+    The hook used the backwards-compatible runtime/bundled database URL. For
+    managed PostgreSQL, configure migrations.databaseSecret.name/key with a
+    dedicated direct migration login.
+{{- end }}
+{{- end }}
+
+Open the Research Desk:
+{{- if .Values.ingress.enabled }}
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}/
+{{- else }}
+  No Ingress or Route is enabled. Port-forward to try it locally:
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "inqtrix.fullname" . }}-web {{ .Values.service.webPort }}:{{ .Values.service.webPort }}
+    then browse to http://127.0.0.1:{{ .Values.service.webPort }}/
+{{- end }}
+
+{{- if and .Values.valkey.enabled (not .Values.worker.enabled) }}
+
+NOTE: valkey.enabled is set but worker.enabled is not, so runs execute
+in-process (the single-pod variant) and the bundled Valkey serves only the
+guest-link password throttle. Set worker.enabled=true to dispatch runs to a
+worker via the queue.
+{{- end }}
+{{- if and .Values.ingress.enabled (not .Values.ingress.annotations) }}
+
+NOTE: ingress.enabled is set with no ingress.annotations. Most controllers'
+defaults break Inqtrix: ingress-nginx caps request bodies at 1m (file uploads
+above 1 MiB fail with a bare 413 before Inqtrix is reached) and cuts responses
+idle for 60s (editor AI and non-streaming chat block far longer). See the
+commented example annotations at ingress.annotations in values.yaml.
+{{- end }}
+{{- if and .Values.secret.existingSecret (or .Values.postgres.enabled .Values.valkey.enabled .Values.s3.enabled .Values.qdrant.enabled) }}
+
+NOTE: secret.existingSecret is set, so the chart uses your user-managed Secret and
+does not render derived bundled-service secret values into the app environment.
+Include the matching keys in {{ .Values.secret.existingSecret }} yourself:
+{{- if .Values.postgres.enabled }}
+  - INQTRIX_DATABASE_URL and INQTRIX_BUNDLED_POSTGRES_PASSWORD; the raw
+    password must match the credential represented in the URL.
+{{- end }}
+{{- if .Values.valkey.enabled }}
+  - INQTRIX_VALKEY_URL and INQTRIX_BUNDLED_VALKEY_PASSWORD; the raw
+    password must match the credential represented in the URL.
+{{- end }}
+{{- if .Values.s3.enabled }}
+  - INQTRIX_S3_ACCESS_KEY and INQTRIX_S3_SECRET_KEY for bundled MinIO.
+{{- end }}
+{{- if .Values.qdrant.enabled }}
+  - INQTRIX_QDRANT_API_KEY for authenticated bundled Qdrant.
+{{- end }}
+After rotating this external Secret, explicitly restart the affected API,
+worker, PgBouncer, Qdrant, Valkey, and/or MinIO workload. Kubernetes does not
+restart Pods merely because an env-backed Secret changed. Chart-managed Secret
+values carry Pod-template checksums and roll automatically, except bundled
+Postgres passwords, which require a real role-password rotation runbook.
+{{- end }}
+{{- if and .Values.persistence.enabled (ne (include "inqtrix.objectStoreBackend" .) "local") }}
+
+NOTE: persistence.enabled keeps the local object-store volume, but the
+{{ include "inqtrix.objectStoreBackend" . }} backend does not read it, and the chart mounts it only with the local
+backend. Copy any objects it still holds into the bucket (see Upgrades in
+docs/deployment/kubernetes.md), then set persistence.enabled=false; disabling
+it deletes the volume.
+{{- end }}
+{{- if not .Values.worker.enabled }}
+
+Single-pod variant (worker.enabled=false): runs, indexing and uploads execute
+in the API process, so keep exactly one API replica. The retention jobs for
+audit, usage and traces run only in the worker and do not run here.
+{{- end }}
+
+Verify the deployment:
+  kubectl -n {{ .Release.Namespace }} wait --for=condition=ready pod -l app.kubernetes.io/instance={{ .Release.Name }} --timeout=5m
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+The Helm test calls /readyz. When S3 is configured it also requires a live
+object-store probe; API readiness remains degraded (HTTP 200) during a temporary
+S3 outage so unrelated product areas stay available.
+{{- if and .Release.IsUpgrade .Values.migrations.maintenanceConfirmed }}
+
+Schema upgrade: maintenanceConfirmed authorized a pre-upgrade hook to
+remove the API HPA, scale API/worker/collaboration and chart-owned PgBouncer to
+zero, and wait for their pods to terminate before migration. The hook revoked
+its temporary RoleBinding
+before exit; when API autoscaling is enabled, the successful release apply
+reactivates the HPA with its positive minReplicas. A failed migration intentionally leaves
+those database clients quiesced; correct or roll back the release before
+restoring traffic. A successful Helm apply restores desired replicas and HPA.
+{{- end }}
+
+Scaling: add API replicas with api.replicaCount or api.autoscaling (this needs
+the worker, which is on by default) and worker replicas with
+worker.replicaCount. The collaboration service stays one replica. See Scaling
+in docs/deployment/kubernetes.md.

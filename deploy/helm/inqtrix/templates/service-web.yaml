@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-web
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "web") | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "inqtrix.selectorLabels" (dict "root" . "component" "web") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.webPort }}
+      targetPort: http
+      protocol: TCP

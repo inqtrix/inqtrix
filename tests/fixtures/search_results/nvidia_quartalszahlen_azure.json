@@ -1,0 +1,36 @@
+{
+  "_capture": "Real AzureFoundryWebSearch.search() GroundedSearchResult captured via scripts/debug_search_dataflow.py (stage_1_grounded_search_result), sanitized with tests/fixtures/sanitize.assert_cassette_clean. Query: 'Welche Quartalszahlen hat NVIDIA zuletzt gemeldet?'. Used by tests/test_pipeline_e2e.py to drive the offline harness with the REAL Azure Foundry search shape (URL-only sources, empty snippets, ([domain](url)) inline answer citations) -- the provider-shape counterpart to nvidia_quartalszahlen.json (Perplexity).",
+  "answer": "NVIDIA hat zuletzt **am 20. Mai 2026** die Zahlen für das **1. Quartal des Geschäftsjahres 2027** gemeldet, für das Quartal **bis 26. April 2026**. ([investor.nvidia.com](https://investor.nvidia.com/home/default.aspx?DocType=Quarterly))\n\nDie wichtigsten gemeldeten Kennzahlen waren:\n\n- **Umsatz:** **81,6 Mrd. US-Dollar**, **+20 %** gegenüber dem Vorquartal und **+85 %** gegenüber dem Vorjahr. ([markets.businessinsider.com](https://markets.businessinsider.com/news/stocks/nvidia-announces-financial-results-for-first-quarter-fiscal-2027-1036180906))\n- **Data-Center-Umsatz:** **75,2 Mrd. US-Dollar**, **+92 %** im Jahresvergleich. ([markets.businessinsider.com](https://markets.businessinsider.com/news/stocks/nvidia-announces-financial-results-for-first-quarter-fiscal-2027-1036180906))\n- **Gewinn je Aktie (EPS):** **1,87 US-Dollar**, über den Analystenschätzungen von etwa **1,76 US-Dollar**. ([marketbeat.com](https://www.marketbeat.com/earnings/reports/2026-5-20-nvidia-co-stock/))\n\nZusätzlich hat NVIDIA dabei angekündigt:\n\n- ein **zusätzliches Aktienrückkaufprogramm über 80 Mrd. US-Dollar**,\n- sowie eine Erhöhung der **Quartalsdividende von 0,01 auf 0,25 US-Dollar je Aktie**. ([markets.businessinsider.com](https://markets.businessinsider.com/news/stocks/nvidia-announces-financial-results-for-first-quarter-fiscal-2027-1036180906))\n\nWenn du willst, kann ich dir auch noch die **Segmentzahlen**, den **Ausblick für das nächste Quartal** oder eine **Einordnung im Vergleich zu den Analystenerwartungen** zusammenfassen.",
+  "sources": [
+    {
+      "url": "https://investor.nvidia.com/home/default.aspx?DocType=Quarterly",
+      "title": "NVIDIA Corporation - Home",
+      "snippet": "",
+      "date": "",
+      "last_updated": "",
+      "rank": 1,
+      "origin": "url_citation"
+    },
+    {
+      "url": "https://markets.businessinsider.com/news/stocks/nvidia-announces-financial-results-for-first-quarter-fiscal-2027-1036180906",
+      "title": "NVIDIA Announces Financial Results for First Quarter Fiscal 2027",
+      "snippet": "",
+      "date": "",
+      "last_updated": "",
+      "rank": 2,
+      "origin": "url_citation"
+    },
+    {
+      "url": "https://www.marketbeat.com/earnings/reports/2026-5-20-nvidia-co-stock/",
+      "title": "NVDA Q1 2027 Earnings Report on 5/20/2026 - MarketBeat",
+      "snippet": "",
+      "date": "",
+      "last_updated": "",
+      "rank": 3,
+      "origin": "url_citation"
+    }
+  ],
+  "related_questions": [],
+  "prompt_tokens": 8474,
+  "completion_tokens": 407
+}

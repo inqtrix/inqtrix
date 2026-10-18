@@ -1,0 +1,398 @@
+{
+  "description": "German retrieval golden set. relevant = corpus doc ids (filename stem); category: fact = direct wording, paraphrase = synonym/reformulated, exact = identifiers and figures, multi = more than one relevant doc, no_evidence = deliberately unanswerable from the corpus (excluded from retrieval metrics; the answer-side harness grades their abstention).",
+  "queries": [
+    {
+      "id": "q01",
+      "query": "Wie ist die Haftung im Rahmenvertrag mit Kunde X geregelt?",
+      "relevant": [
+        "rahmenvertrag-kunde-x"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q02",
+      "query": "Mit welcher Frist kann der Rahmenvertrag beendet werden?",
+      "relevant": [
+        "rahmenvertrag-kunde-x"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q03",
+      "query": "Welcher Gerichtsstand gilt fuer RV-2024-117?",
+      "relevant": [
+        "rahmenvertrag-kunde-x"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "q04",
+      "query": "Haftet der Auftragnehmer fuer entgangenen Gewinn?",
+      "relevant": [
+        "rahmenvertrag-kunde-x"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q05",
+      "query": "Wann werden Kundendaten nach Vertragsende geloescht?",
+      "relevant": [
+        "datenschutzrichtlinie",
+        "kuendigungsprozess-kunden"
+      ],
+      "category": "multi"
+    },
+    {
+      "id": "q06",
+      "query": "Wie schnell muss eine Datenschutzverletzung der Behoerde gemeldet werden?",
+      "relevant": [
+        "datenschutzrichtlinie"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q07",
+      "query": "Wo finde ich die Liste der Auftragsverarbeiter?",
+      "relevant": [
+        "datenschutzrichtlinie"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q08",
+      "query": "Wie lange werden Unterlagen von Bewerberinnen aufbewahrt?",
+      "relevant": [
+        "datenschutzrichtlinie"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q09",
+      "query": "Wie viele Urlaubstage stehen mir pro Jahr zu?",
+      "relevant": [
+        "urlaubsrichtlinie"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q10",
+      "query": "Bis wann muss alter Urlaub aus dem Vorjahr genommen werden?",
+      "relevant": [
+        "urlaubsrichtlinie"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q11",
+      "query": "Wie viel frei bekomme ich fuer meine Hochzeit?",
+      "relevant": [
+        "urlaubsrichtlinie"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q12",
+      "query": "Wie beantrage ich Urlaub?",
+      "relevant": [
+        "urlaubsrichtlinie"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q13",
+      "query": "Welche Anforderungen gelten fuer Passwoerter?",
+      "relevant": [
+        "it-sicherheitsrichtlinie"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q14",
+      "query": "Ist MFA fuer das VPN verpflichtend?",
+      "relevant": [
+        "it-sicherheitsrichtlinie"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "q15",
+      "query": "Darf ich einen privaten USB-Stick am Arbeitsrechner verwenden?",
+      "relevant": [
+        "it-sicherheitsrichtlinie"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q16",
+      "query": "An wen wende ich mich bei einem Hackerangriff?",
+      "relevant": [
+        "it-sicherheitsrichtlinie"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q17",
+      "query": "Ab welcher Fahrtzeit darf ich erste Klasse Bahn fahren?",
+      "relevant": [
+        "reisekostenrichtlinie"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q18",
+      "query": "Was darf ein Hotel im Inland maximal kosten?",
+      "relevant": [
+        "reisekostenrichtlinie"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q19",
+      "query": "Wie hoch ist die Verpflegungspauschale fuer einen vollen Reisetag?",
+      "relevant": [
+        "reisekostenrichtlinie"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "q20",
+      "query": "Bis wann muessen Spesen eingereicht werden?",
+      "relevant": [
+        "reisekostenrichtlinie"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q21",
+      "query": "Welche Verfuegbarkeit garantiert das SLA der Cloudplattform?",
+      "relevant": [
+        "sla-cloudplattform"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q22",
+      "query": "Wie schnell wird bei einem Totalausfall reagiert?",
+      "relevant": [
+        "sla-cloudplattform"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q23",
+      "query": "Wann finden geplante Wartungsfenster statt?",
+      "relevant": [
+        "sla-cloudplattform"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q24",
+      "query": "Wie berechnen sich die Service-Credits bei SLA-Verletzung?",
+      "relevant": [
+        "sla-cloudplattform"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "q25",
+      "query": "Wann und wo melde ich mich am ersten Arbeitstag?",
+      "relevant": [
+        "onboarding-leitfaden"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q26",
+      "query": "Wie lange begleitet mich mein Buddy?",
+      "relevant": [
+        "onboarding-leitfaden"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q27",
+      "query": "Wann ist das erste Feedbackgespraech in der Probezeit?",
+      "relevant": [
+        "onboarding-leitfaden"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q28",
+      "query": "Welche Frist gilt fuer die Kuendigung eines Standardtarifs?",
+      "relevant": [
+        "kuendigungsprozess-kunden"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q29",
+      "query": "Wie lange kann ich meine Daten nach der Kuendigung noch herunterladen?",
+      "relevant": [
+        "kuendigungsprozess-kunden"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q30",
+      "query": "Bekomme ich zu viel gezahltes Geld nach der Kuendigung zurueck?",
+      "relevant": [
+        "kuendigungsprozess-kunden"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q31",
+      "query": "Ab welchem Wert muessen Geschenke genehmigt werden?",
+      "relevant": [
+        "verhaltenskodex-compliance"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q32",
+      "query": "Kann ich einen Compliance-Verstoss anonym melden?",
+      "relevant": [
+        "verhaltenskodex-compliance"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q33",
+      "query": "Was muss ich tun, wenn mein Bruder bei einem Lieferanten arbeitet?",
+      "relevant": [
+        "verhaltenskodex-compliance"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q34",
+      "query": "In welchen Formaten kann ich einen Bericht exportieren?",
+      "relevant": [
+        "produkthandbuch-export"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q35",
+      "query": "Wie viele Seiten darf ein Export maximal haben?",
+      "relevant": [
+        "produkthandbuch-export"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "q36",
+      "query": "Ueber welchen API-Endpunkt starte ich einen Export?",
+      "relevant": [
+        "produkthandbuch-export"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "q37",
+      "query": "Wie viele Exporte pro Stunde sind erlaubt?",
+      "relevant": [
+        "produkthandbuch-export"
+      ],
+      "category": "fact"
+    },
+    {
+      "id": "q38",
+      "query": "Welche Meldewege gibt es fuer Sicherheitsvorfaelle und Datenpannen?",
+      "relevant": [
+        "it-sicherheitsrichtlinie",
+        "datenschutzrichtlinie"
+      ],
+      "category": "multi"
+    },
+    {
+      "id": "q39",
+      "query": "Welche Fristen gelten rund um eine Kundenkuendigung und die anschliessende Datenloeschung?",
+      "relevant": [
+        "kuendigungsprozess-kunden",
+        "datenschutzrichtlinie"
+      ],
+      "category": "multi"
+    },
+    {
+      "id": "q40",
+      "query": "Welche Pflichtschulungen gibt es und wie oft ist die Compliance-Schulung faellig?",
+      "relevant": [
+        "onboarding-leitfaden",
+        "verhaltenskodex-compliance"
+      ],
+      "category": "multi"
+    },
+    {
+      "id": "q41",
+      "query": "Welche Kuendigungsfristen gelten fuer den Rahmenvertrag mit Kunde X und fuer Kundenvertraege?",
+      "relevant": [
+        "rahmenvertrag-kunde-x",
+        "kuendigungsprozess-kunden"
+      ],
+      "category": "multi"
+    },
+    {
+      "id": "q42",
+      "query": "Wie hoch ist das Budget fuer Teamevents pro Person?",
+      "relevant": [],
+      "category": "no_evidence"
+    },
+    {
+      "id": "q43",
+      "query": "Welche Regelung gilt fuer Elternzeit?",
+      "relevant": [],
+      "category": "no_evidence"
+    },
+    {
+      "id": "q44",
+      "query": "Was kostet der Enterprise-Tarif pro Monat?",
+      "relevant": [],
+      "category": "no_evidence"
+    },
+    {
+      "id": "q45",
+      "query": "Welche Programmiersprache verwendet das Backend von Inqtrix?",
+      "relevant": [],
+      "category": "no_evidence"
+    },
+    {
+      "id": "q46",
+      "query": "Wie lautet die Adresse des Berliner Bueros?",
+      "relevant": [],
+      "category": "no_evidence"
+    },
+    {
+      "id": "q47",
+      "query": "Welche Versicherung deckt Dienstraeder ab?",
+      "relevant": [],
+      "category": "no_evidence"
+    },
+    {
+      "id": "q48",
+      "query": "Erste Klasse ab zwei Stunden?",
+      "relevant": [
+        "reisekostenrichtlinie"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "q49",
+      "query": "72 Stunden Meldefrist",
+      "relevant": [
+        "datenschutzrichtlinie"
+      ],
+      "category": "exact"
+    },
+    {
+      "id": "q50",
+      "query": "99,9 Prozent Verfuegbarkeit",
+      "relevant": [
+        "sla-cloudplattform"
+      ],
+      "category": "exact"
+    }
+  ]
+}

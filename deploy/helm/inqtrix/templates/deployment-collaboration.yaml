@@ -1,0 +1,142 @@
+{{- if .Values.collaboration.enabled }}
+{{- $secretKey := required "collaboration.secret.key is required when collaboration.enabled=true" .Values.collaboration.secret.key -}}
+{{- if and (not .Values.collaboration.secret.existingSecret) (not .Values.secret.existingSecret) }}
+{{- if not .Values.secret.create }}
+{{- fail "collaboration.enabled=true requires collaboration.secret.existingSecret, secret.existingSecret, or secret.create=true with the collaboration secret in secret.data" }}
+{{- end }}
+{{- if not (hasKey .Values.secret.data $secretKey) }}
+{{- fail (printf "collaboration.enabled=true requires secret.data.%s with at least 32 characters, or an existing Secret" $secretKey) }}
+{{- end }}
+{{- if lt (len (toString (index .Values.secret.data $secretKey))) 32 }}
+{{- fail (printf "secret.data.%s must contain at least 32 characters" $secretKey) }}
+{{- end }}
+{{- end }}
+{{- $settings := merge (deepCopy .Values.config) .Values.extraConfig -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-collaboration
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "collaboration") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "collaboration") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "collaboration") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "inqtrix.internalServiceAccountName" (dict "root" . "component" "collaboration") }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.podSecurityContext" . | nindent 8 }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: collaboration
+          image: {{ include "inqtrix.image.collaboration" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.collaborationPort }}
+          env:
+            - name: INQTRIX_API_INTERNAL_URL
+              value: "http://{{ include "inqtrix.fullname" . }}-api:{{ .Values.service.apiPort }}"
+            - name: INQTRIX_COLLABORATION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.collaborationSecretName" . }}
+                  key: {{ $secretKey }}
+            - name: INQTRIX_COLLABORATION_BIND_ADDRESS
+              value: "0.0.0.0"
+            - name: INQTRIX_COLLABORATION_PORT
+              value: {{ .Values.service.collaborationPort | quote }}
+            - name: INQTRIX_COLLABORATION_HTTP_TIMEOUT_MS
+              value: {{ default 5000 (index $settings "INQTRIX_COLLABORATION_HTTP_TIMEOUT_MS") | quote }}
+            - name: INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS
+              value: {{ default 15 (index $settings "INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS") | quote }}
+            - name: INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS
+              value: {{ default 5 (index $settings "INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS") | quote }}
+            - name: INQTRIX_COLLABORATION_TENANT_ID
+              value: {{ default "default" (index $settings "INQTRIX_COLLABORATION_TENANT_ID") | quote }}
+            - name: INQTRIX_COLLABORATION_MAINTENANCE_INTERVAL_SECONDS
+              value: {{ default 60 (index $settings "INQTRIX_COLLABORATION_MAINTENANCE_INTERVAL_SECONDS") | quote }}
+            - name: INQTRIX_COLLABORATION_MAX_DOCUMENT_BYTES
+              value: {{ default 10485760 (index $settings "INQTRIX_COLLABORATION_MAX_DOCUMENT_BYTES") | quote }}
+            - name: INQTRIX_COLLABORATION_MAX_FRAME_BYTES
+              value: {{ default 2097152 (index $settings "INQTRIX_COLLABORATION_MAX_FRAME_BYTES") | quote }}
+            - name: INQTRIX_COLLABORATION_MAX_QUEUED_BYTES
+              value: {{ default 8388608 (index $settings "INQTRIX_COLLABORATION_MAX_QUEUED_BYTES") | quote }}
+            - name: INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES
+              value: {{ default 32 (index $settings "INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES") | quote }}
+            - name: INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT
+              value: {{ default 5 (index $settings "INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT") | quote }}
+            - name: INQTRIX_COLLABORATION_POLICY_POLL_MS
+              value: {{ default 2000 (index $settings "INQTRIX_COLLABORATION_POLICY_POLL_MS") | quote }}
+            - name: INQTRIX_COLLABORATION_POLICY_REVALIDATION_TIMEOUT_MS
+              value: {{ default 7500 (index $settings "INQTRIX_COLLABORATION_POLICY_REVALIDATION_TIMEOUT_MS") | quote }}
+            - name: INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS
+              value: {{ default 5 (index $settings "INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS") | quote }}
+            - name: INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS
+              value: {{ default 1000 (index $settings "INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS") | quote }}
+            - name: INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS
+              value: {{ default 30000 (index $settings "INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS") | quote }}
+            - name: INQTRIX_COLLABORATION_SNAPSHOT_UPDATE_COUNT
+              value: {{ default 256 (index $settings "INQTRIX_COLLABORATION_SNAPSHOT_UPDATE_COUNT") | quote }}
+            - name: INQTRIX_COLLABORATION_SNAPSHOT_TAIL_BYTES
+              value: {{ default 1048576 (index $settings "INQTRIX_COLLABORATION_SNAPSHOT_TAIL_BYTES") | quote }}
+            - name: INQTRIX_COLLABORATION_SOCKET_BACKPRESSURE_BYTES
+              value: {{ default 4194304 (index $settings "INQTRIX_COLLABORATION_SOCKET_BACKPRESSURE_BYTES") | quote }}
+            - name: INQTRIX_COLLABORATION_UPDATE_RATE_COUNT
+              value: {{ default 120 (index $settings "INQTRIX_COLLABORATION_UPDATE_RATE_COUNT") | quote }}
+            - name: INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS
+              value: {{ default 10 (index $settings "INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS") | quote }}
+            - name: INQTRIX_COLLABORATION_AWARENESS_RATE_PER_SECOND
+              value: {{ default 20 (index $settings "INQTRIX_COLLABORATION_AWARENESS_RATE_PER_SECOND") | quote }}
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.collaboration.resources | nindent 12 }}
+      {{- with .Values.collaboration.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.collaboration.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.collaboration.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

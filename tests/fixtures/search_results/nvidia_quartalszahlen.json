@@ -1,0 +1,90 @@
+{
+  "_capture": "Real PerplexitySearch.search() GroundedSearchResult captured via scripts/debug_search_dataflow.py (stage_1_grounded_search_result), sanitized with tests/fixtures/sanitize.assert_cassette_clean. Query: 'Welche Quartalszahlen hat NVIDIA zuletzt gemeldet?'. Used by tests/test_pipeline_e2e.py as the real search-shape the offline end-to-end harness drives the graph with.",
+  "answer": "NVIDIA hat zuletzt die Finanzergebnisse für das erste Quartal des Geschäftsjahres 2027 bekannt gegeben, das am 26. April 2026 endete[1][3]. Am 20. Mai 2026 meldete das Unternehmen einen Rekordumsatz von **81,6 Milliarden US-Dollar**[3]. Dies entspricht einem Anstieg von 20 % gegenüber dem Vorquartal und einem Zuwachs von 85 % im Vergleich zum Vorjahr[3].\n\nHier sind die wichtigsten Kennzahlen des Berichts:\n\n- **Umsatz:** 81,6 Mrd. USD (+85 % zum Vorjahr)[3]\n- **Gewinn pro Aktie (EPS):** Über den Erwartungen der Analysten (ein Anstieg von 82 % im Vergleich zum Vorjahreszeitraum wurde bereits für das vorangegangene Quartal verzeichnet)[4][7]\n- **Dividende:** Das Unternehmen zahlt eine vierteljährliche Bardividende von 0,01 USD pro Aktie[9]\n- **Aktienrückkäufe:** NVIDIA verfügt weiterhin über eine Genehmigung für Aktienrückkäufe im Wert von 58,5 Milliarden USD[9]\n\nIm vorangegangenen vierten Quartal des Geschäftsjahres 2026 (beendet am 25. Januar 2026) lag der Umsatz bei **68,1 Milliarden US-Dollar**, was bereits ein deutliches Wachstum gegenüber dem Vorjahr markierte[2][4]. Der Gesamtjahresumsatz für das Geschäftsjahr 2026 belief sich auf 215,9 Milliarden US-Dollar[9].",
+  "sources": [
+    {
+      "url": "https://nvidianews.nvidia.com/news/nvidia-sets-conference-call-for-first-quarter-financial-results-6919947",
+      "title": "NVIDIA Sets Conference Call for First-Quarter Financial Results",
+      "snippet": "NVIDIA will host a conference call on Wednesday, May 20, at 2 p.m.\nPT (5 p.m. ET) to discuss its financial results for the first quarter of fiscal year 2027, which ended April 26, 2026.\n...\nThis material will be posted to investor.nvidia.com immediately after the company’s results are publicly announced at approximately 1:20 p.m.\nPT.",
+      "date": "2026-04-29",
+      "last_updated": "2026-05-16",
+      "rank": 1,
+      "origin": "search_results"
+    },
+    {
+      "url": "http://nvidianews.nvidia.com/news/nvidia-announces-financial-results-for-fourth-quarter-and-fiscal-2026",
+      "title": "NVIDIA Announces Financial Results for Fourth Quarter and Fiscal ...",
+      "snippet": "NVIDIA (NASDAQ: NVDA) today reported record revenue for the fourth quarter ended January 25, 2026, of $68.1 billion, up 20% from the previous quarter and up 73% from a year ago.\n...\nNVIDIA will conduct a conference call with analysts and investors to discuss its fourth quarter and fiscal 2026 financial results and current financial prospects today at 2 p.m.\nPacific time (5 p.m. Eastern time).\nA live webcast (listen-only mode) of the conference call will be accessible at NVIDIA's investor relations website, https://investor.nvidia.com.\nThe webcast will be recorded and available for replay until NVIDIA's conference call to discuss its financial results for its first quarter of fiscal 2027.",
+      "date": "2026-02-25",
+      "last_updated": "2026-05-24",
+      "rank": 2,
+      "origin": "search_results"
+    },
+    {
+      "url": "https://investor.nvidia.com/financial-info/financial-reports/default.aspx",
+      "title": "Financial Reports - NVIDIA Investor Relations",
+      "snippet": "SANTA CLARA, Calif.—May 20, 2026―NVIDIA (NASDAQ: NVDA) today reported record revenue for\nthe first quarter ended April 26, 2026, of $81.6 billion, up 20% from the previous quarter and up 85%\nfrom a year ago.",
+      "date": "",
+      "last_updated": "2026-05-24",
+      "rank": 3,
+      "origin": "search_results"
+    },
+    {
+      "url": "https://www.kiplinger.com/investing/live/nvidia-earnings-live-updates-and-commentary-february-2026",
+      "title": "Nvidia Earnings: Updates and Commentary February 2026 - Kiplinger",
+      "snippet": "**Nvidia** (NVDA) reported fiscal 2026 fourth-quarter earnings of $1.62 per share (+82.0% year over year) on revenue of $68.1 billion (+73.2% YoY) and guided to fiscal 2027 first-quarter revenue of $78.0 billion, plus or minus 2%, as the leader of the AI boom topped Wall Street expectations for all three metrics once more.",
+      "date": "2026-02-26",
+      "last_updated": "2026-05-23",
+      "rank": 4,
+      "origin": "search_results"
+    },
+    {
+      "url": "https://www.investing.com/equities/nvidia-corp-earnings",
+      "title": "NVIDIA (NVDA) Earnings Date & Report - Investing.com",
+      "snippet": "Latest Release\nMay 28, 2025\n...\nNVIDIA will release its next earnings report on Aug 27, 2025.",
+      "date": "2026-05-20",
+      "last_updated": "2026-05-19",
+      "rank": 5,
+      "origin": "search_results"
+    },
+    {
+      "url": "https://www.kiplinger.com/investing/live/nvidia-earnings-live-updates-and-commentary-may-2026",
+      "title": "Nvidia Earnings: Updates and Commentary May 2026 - Kiplinger",
+      "snippet": "**Nvidia **(NVDA) unveiled its fiscal 2027 first-quarter earnings after the close on May 20.",
+      "date": "2026-05-21",
+      "last_updated": "2026-05-24",
+      "rank": 6,
+      "origin": "search_results"
+    },
+    {
+      "url": "https://www.businessinsider.com/nvidia-earnings-stock-price-revenue-eps-q1-2027-2026-5",
+      "title": "Nvidia delivered an earnings beat. See the key numbers.",
+      "snippet": "Nvidia delivered a beat on the top and bottom line when it reported its fiscal first-quarter earnings on Wednesday afternoon.",
+      "date": "2026-05-20",
+      "last_updated": "2026-05-21",
+      "rank": 7,
+      "origin": "search_results"
+    },
+    {
+      "url": "https://www.youtube.com/watch?v=pKR5gTzqL4k",
+      "title": "(LIVE NOW) NVIDIA EARNINGS REPORT 2026 - YouTube",
+      "snippet": "NVIDIA (NVDA) is reporting its Q1 Fiscal Year 2027 earnings on Wednesday, May 20.\nThe highly anticipated report will be released after the stock market closes, typically between 4:20 PM and 4:30 PM Eastern Time.\n1.🚨Investing Pro: https://www.investing-referral.com/ricky/",
+      "date": "2026-05-20",
+      "last_updated": "2026-05-24",
+      "rank": 8,
+      "origin": "search_results"
+    },
+    {
+      "url": "https://www.stocktitan.net/news/NVDA/nvidia-announces-financial-results-for-fourth-quarter-and-fiscal-j0kg9vc0geqr.html",
+      "title": "NVIDIA Announces Financial Results for Fourth Quarter and Fiscal ...",
+      "snippet": "Management announced a Q1 FY27 revenue outlook of **$78.0 billion ±2%**, inclusion of stock-based compensation in non-GAAP measures beginning Q1 FY27, a $0.01 quarterly dividend, and $58.5 billion remaining on its repurchase authorization.\n...\nSANTA CLARA, Calif., Feb. 25, 2026 (GLOBE NEWSWIRE) -- NVIDIA (NASDAQ: NVDA) today reported record revenue for the fourth quarter ended January 25, 2026, of $68.1 billion, up 20% from the previous quarter and up 73% from a year ago.\nFor fiscal 2026, revenue was $215.9 billion, up 65% from a year ago.\n...\nNVIDIA will pay its next quarterly cash dividend of $0.01 per share on April 1, 2026, to all shareholders of record on March 11, 2026.",
+      "date": "2026-02-25",
+      "last_updated": "2026-05-23",
+      "rank": 9,
+      "origin": "search_results"
+    }
+  ],
+  "related_questions": [],
+  "prompt_tokens": 4951,
+  "completion_tokens": 421
+}

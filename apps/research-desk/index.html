@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        const root = document.documentElement
+
+        const readStoredPreference = (key) => {
+          try {
+            return localStorage.getItem(key)
+          } catch {
+            return null
+          }
+        }
+
+        const storedTheme = readStoredPreference('inqtrix.researchDesk.theme')
+        const prefersDark = typeof window.matchMedia === 'function'
+          && window.matchMedia('(prefers-color-scheme: dark)').matches
+        const resolvedTheme = storedTheme === 'dark'
+          || (storedTheme !== 'light' && prefersDark)
+          ? 'dark'
+          : 'light'
+
+        root.classList.toggle('dark', resolvedTheme === 'dark')
+        root.style.colorScheme = resolvedTheme
+
+        const storedPreset = readStoredPreference('inqtrix.researchDesk.themePreset')
+        root.dataset.themePreset = (
+          storedPreset === 'petrol'
+          || storedPreset === 'standard'
+          || storedPreset === 'slate'
+          || storedPreset === 'graphite'
+          || storedPreset === 'sage'
+        )
+          ? storedPreset
+          : 'petrol'
+
+        root.dataset.contrastMode = readStoredPreference('inqtrix.researchDesk.contrastMode') === 'high'
+          ? 'high'
+          : 'standard'
+
+        const storedBubbleTone = readStoredPreference('inqtrix.researchDesk.userBubbleTone')
+        root.dataset.userBubbleTone = (
+          storedBubbleTone === 'mint'
+          || storedBubbleTone === 'orange'
+          || storedBubbleTone === 'sky'
+          || storedBubbleTone === 'violet'
+          || storedBubbleTone === 'ink'
+        )
+          ? storedBubbleTone
+          : 'gray'
+      })()
+    </script>
+    <title>Inqtrix Research Desk</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

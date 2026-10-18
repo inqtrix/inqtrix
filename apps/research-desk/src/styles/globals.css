@@ -1,0 +1,3387 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-subtle: var(--brand-subtle);
+  --color-canvas: var(--canvas);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-disabled: var(--disabled);
+  --color-disabled-foreground: var(--disabled-foreground);
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-surface: var(--surface);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-file: var(--file);
+  --color-file-subtle: var(--file-subtle);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* Font families live in a non-inline @theme so they are emitted as :root
+   custom properties (the inline block above is not emitted). This lets both
+   Tailwind's font-sans/font-mono utilities and the runtime var(--font-sans)/
+   var(--font-mono) references further down resolve to the same self-hosted
+   stack. Inter is bundled via @fontsource-variable/inter (imported in main.tsx)
+   so the UI renders identically regardless of locally installed fonts. */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
+}
+
+:root {
+  --radius: 0.5rem;
+  /* Single source for the sticky Topbar height; AppRail's offset and the
+     full-height workspaces subtract it, so it must only change here. */
+  --header-h: 2.625rem;
+  --background: oklch(0.985 0 0);
+  --brand: oklch(0.5 0.18 262);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-shadow: oklch(0.5 0.18 262 / 14%);
+  --brand-subtle: oklch(0.955 0.03 262);
+  --canvas: oklch(0.971 0.006 255);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  /* AA against both the panel and selected brand-subtle backgrounds. At
+     0.542 the selected explorer timestamp rendered at 4.38:1. */
+  --muted-foreground: oklch(0.535 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --disabled: oklch(0.87 0 0);
+  --disabled-foreground: oklch(0.62 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --shadow-hairline: oklch(0.32 0.02 255 / 8%);
+  --shadow-soft: oklch(0.32 0.02 255 / 12%);
+  /* Semantic foregrounds must remain AA for normal text on both the base and
+     their matching subtle surfaces; they also serve icon-only consumers. */
+  --success: oklch(0.5 0.16 155);
+  --success-subtle: oklch(0.95 0.04 155);
+  --surface: oklch(0.982 0.004 255);
+  --warning: oklch(0.54 0.13 70);
+  --warning-subtle: oklch(0.96 0.04 80);
+  --file: oklch(0.55 0.12 195);
+  --file-subtle: oklch(0.95 0.035 195);
+  /* Chart series for diagrams and data plots: ColorBrewer "Dark2"
+     (Cynthia A. Brewer, Pennsylvania State University, Apache-2.0) — a
+     print palette readable on light and dark ground, so a figure keeps its
+     colours in every theme and when copied out. Consumed by
+     components/markdown/mermaidTheme.ts. */
+  --chart-1: #1b9e77;
+  --chart-2: #d95f02;
+  --chart-3: #7570b3;
+  --chart-4: #e7298a;
+  --chart-5: #66a61e;
+  --chart-6: #e6ab02;
+  --chart-7: #a6761d;
+  --chart-8: #666666;
+}
+
+/* Petrol is additive; the original root palette remains Inqtrix Blue. */
+:root[data-theme-preset="petrol"] {
+  --background: #f7f9f9;
+  --brand: #08686d;
+  --brand-foreground: #ffffff;
+  --brand-shadow: rgb(8 104 109 / 14%);
+  --brand-subtle: #e6f1f1;
+  --canvas: #f0f5f5;
+  --surface: #f4f8f8;
+  --card: #ffffff;
+  --card-foreground: #132536;
+  --popover: #ffffff;
+  --popover-foreground: #132536;
+  --foreground: #132536;
+  --muted-foreground: #52616d;
+  --border: #d6e0e2;
+  --input: #7b8791;
+  /* Like the other presets, the ring is not the brand fill: a focused
+     brand-filled control must look different from an unfocused one. */
+  --ring: oklch(0.62 0.07 200);
+  --shadow-hairline: rgb(19 37 54 / 8%);
+  --shadow-soft: rgb(19 37 54 / 12%);
+}
+
+:root[data-theme-preset="slate"] {
+  --brand: oklch(0.48 0.14 245);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-shadow: oklch(0.48 0.14 245 / 14%);
+  --brand-subtle: oklch(0.955 0.03 245);
+  --canvas: oklch(0.972 0.008 245);
+  --ring: oklch(0.62 0.08 245);
+  --shadow-hairline: oklch(0.32 0.04 245 / 8%);
+  --shadow-soft: oklch(0.32 0.04 245 / 12%);
+  --surface: oklch(0.982 0.006 245);
+}
+
+:root[data-theme-preset="graphite"] {
+  --brand: oklch(0.42 0.025 260);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-shadow: oklch(0.28 0.02 260 / 12%);
+  --brand-subtle: oklch(0.94 0.006 260);
+  --canvas: oklch(0.968 0.002 260);
+  --ring: oklch(0.54 0.02 260);
+  --shadow-hairline: oklch(0.22 0.01 260 / 9%);
+  --shadow-soft: oklch(0.22 0.01 260 / 13%);
+  --surface: oklch(0.98 0.002 260);
+}
+
+:root[data-theme-preset="sage"] {
+  --brand: oklch(0.48 0.11 155);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-shadow: oklch(0.48 0.11 155 / 13%);
+  --brand-subtle: oklch(0.955 0.035 155);
+  --canvas: oklch(0.973 0.008 150);
+  --ring: oklch(0.58 0.08 155);
+  --shadow-hairline: oklch(0.28 0.035 155 / 8%);
+  --shadow-soft: oklch(0.28 0.035 155 / 12%);
+  --surface: oklch(0.982 0.006 150);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --brand: oklch(0.72 0.12 262);
+  --brand-foreground: oklch(0.12 0.02 262);
+  --brand-shadow: oklch(0.72 0.12 262 / 20%);
+  --brand-subtle: oklch(0.25 0.045 262);
+  --canvas: oklch(0.16 0.004 255);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.145 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --disabled: oklch(0.27 0 0);
+  --disabled-foreground: oklch(0.62 0 0);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --shadow-hairline: oklch(0 0 0 / 18%);
+  --shadow-soft: oklch(0 0 0 / 28%);
+  --success: oklch(0.72 0.16 155);
+  --success-subtle: oklch(0.25 0.07 155);
+  --surface: oklch(0.235 0 0);
+  --warning: oklch(0.76 0.13 78);
+  --warning-subtle: oklch(0.28 0.07 78);
+  --file: oklch(0.72 0.12 195);
+  --file-subtle: oklch(0.25 0.05 195);
+}
+
+.dark[data-theme-preset="slate"] {
+  --brand: oklch(0.74 0.11 245);
+  --brand-foreground: oklch(0.12 0.02 245);
+  --brand-shadow: oklch(0.74 0.11 245 / 20%);
+  --brand-subtle: oklch(0.25 0.05 245);
+  --canvas: oklch(0.16 0.008 245);
+  --ring: oklch(0.62 0.08 245);
+  --surface: oklch(0.235 0.01 245);
+}
+
+.dark[data-theme-preset="graphite"] {
+  --brand: oklch(0.78 0.015 260);
+  --brand-foreground: oklch(0.14 0 0);
+  --brand-shadow: oklch(0.78 0.015 260 / 18%);
+  --brand-subtle: oklch(0.27 0.008 260);
+  --canvas: oklch(0.155 0.002 260);
+  --ring: oklch(0.62 0.01 260);
+  --surface: oklch(0.23 0.004 260);
+}
+
+.dark[data-theme-preset="sage"] {
+  --brand: oklch(0.72 0.12 155);
+  --brand-foreground: oklch(0.12 0.02 155);
+  --brand-shadow: oklch(0.72 0.12 155 / 19%);
+  --brand-subtle: oklch(0.25 0.055 155);
+  --canvas: oklch(0.16 0.006 150);
+  --ring: oklch(0.62 0.08 155);
+  --surface: oklch(0.235 0.01 150);
+}
+
+.dark[data-theme-preset="petrol"] {
+  --background: #0b131d;
+  --brand: #71c8cd;
+  --brand-foreground: #132536;
+  --brand-shadow: rgb(113 200 205 / 18%);
+  --brand-subtle: #153a40;
+  --canvas: #0f1924;
+  --surface: #192936;
+  --card: #15202b;
+  --card-foreground: #f4f1ea;
+  --popover: #15202b;
+  --popover-foreground: #f4f1ea;
+  --foreground: #f4f1ea;
+  --muted-foreground: #b6c1cb;
+  --border: #30414e;
+  --input: #6e8492;
+  --ring: oklch(0.62 0.07 200);
+  --shadow-hairline: rgb(0 0 0 / 18%);
+  --shadow-soft: rgb(0 0 0 / 28%);
+}
+
+:root[data-contrast-mode="high"] {
+  --background: oklch(1 0 0);
+  --brand: oklch(0.34 0.22 262);
+  --brand-foreground: oklch(1 0 0);
+  --brand-shadow: oklch(0 0 0 / 28%);
+  --brand-subtle: oklch(0.91 0.055 262);
+  --canvas: oklch(0.98 0 0);
+  --foreground: oklch(0 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0 0 0);
+  --primary: oklch(0 0 0);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.94 0 0);
+  --secondary-foreground: oklch(0 0 0);
+  --muted: oklch(0.94 0 0);
+  --muted-foreground: oklch(0.23 0 0);
+  --accent: oklch(0.9 0 0);
+  --accent-foreground: oklch(0 0 0);
+  --destructive: oklch(0.42 0.24 27);
+  --destructive-subtle: oklch(0.93 0.06 27);
+  --border: oklch(0 0 0);
+  --disabled: oklch(0.82 0 0);
+  --disabled-foreground: oklch(0.27 0 0);
+  --input: oklch(0 0 0);
+  --ring: oklch(0 0 0);
+  --shadow-hairline: oklch(0 0 0 / 28%);
+  --shadow-soft: oklch(0 0 0 / 36%);
+  --success: oklch(0.36 0.14 155);
+  --success-subtle: oklch(0.91 0.06 155);
+  --surface: oklch(0.97 0 0);
+  --warning: oklch(0.38 0.14 70);
+  --warning-subtle: oklch(0.93 0.07 80);
+  --file: oklch(0.38 0.13 195);
+  --file-subtle: oklch(0.92 0.06 195);
+}
+
+.dark[data-contrast-mode="high"] {
+  --background: oklch(0 0 0);
+  --brand: oklch(0.86 0.13 262);
+  --brand-foreground: oklch(0 0 0);
+  --brand-shadow: oklch(1 0 0 / 30%);
+  --brand-subtle: oklch(0.24 0.075 262);
+  --canvas: oklch(0.04 0 0);
+  --foreground: oklch(1 0 0);
+  --card: oklch(0 0 0);
+  --card-foreground: oklch(1 0 0);
+  --popover: oklch(0 0 0);
+  --popover-foreground: oklch(1 0 0);
+  --primary: oklch(1 0 0);
+  --primary-foreground: oklch(0 0 0);
+  --secondary: oklch(0.16 0 0);
+  --secondary-foreground: oklch(1 0 0);
+  --muted: oklch(0.17 0 0);
+  --muted-foreground: oklch(0.88 0 0);
+  --accent: oklch(0.2 0 0);
+  --accent-foreground: oklch(1 0 0);
+  --destructive: oklch(0.8 0.18 27);
+  --destructive-subtle: oklch(0.24 0.08 27);
+  --border: oklch(1 0 0);
+  --disabled: oklch(0.2 0 0);
+  --disabled-foreground: oklch(0.72 0 0);
+  --input: oklch(1 0 0);
+  --ring: oklch(1 0 0);
+  --shadow-hairline: oklch(1 0 0 / 24%);
+  --shadow-soft: oklch(1 0 0 / 32%);
+  --success: oklch(0.82 0.15 155);
+  --success-subtle: oklch(0.22 0.08 155);
+  --surface: oklch(0.08 0 0);
+  --warning: oklch(0.88 0.13 78);
+  --warning-subtle: oklch(0.24 0.08 78);
+  --file: oklch(0.84 0.13 195);
+  --file-subtle: oklch(0.24 0.07 195);
+}
+
+/* Brand artwork follows receiving-surface brightness, never the accent preset. */
+.inqtrix-brand-mark {
+  display: inline-block;
+  vertical-align: middle;
+  aspect-ratio: 1;
+}
+
+.inqtrix-brand-mark img {
+  display: none;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.inqtrix-brand-mark .inqtrix-brand-mark-light,
+.dark .inqtrix-brand-mark .inqtrix-brand-mark-dark {
+  display: block;
+}
+
+.dark .inqtrix-brand-mark .inqtrix-brand-mark-light,
+:root[data-contrast-mode="high"] .inqtrix-brand-mark .inqtrix-brand-mark-light,
+:root[data-contrast-mode="high"] .inqtrix-brand-mark .inqtrix-brand-mark-dark {
+  display: none;
+}
+
+:root[data-contrast-mode="high"] .inqtrix-brand-mark .inqtrix-brand-mark-mono-light {
+  display: block;
+}
+
+.dark[data-contrast-mode="high"] .inqtrix-brand-mark .inqtrix-brand-mark-mono-light {
+  display: none;
+}
+
+.dark[data-contrast-mode="high"] .inqtrix-brand-mark .inqtrix-brand-mark-mono-dark {
+  display: block;
+}
+
+/* Auth-only action tokens preserve neutral --primary consumers such as incognito. */
+.inqtrix-auth-lock {
+  --auth-action: var(--brand);
+  --auth-action-foreground: var(--brand-foreground);
+  --auth-fade-strength: 12%;
+}
+
+.dark .inqtrix-auth-lock {
+  --auth-fade-strength: 18%;
+}
+
+:root[data-theme-preset="petrol"] .inqtrix-auth-lock {
+  --auth-action: #132536;
+  --auth-action-foreground: #f4f1ea;
+}
+
+.dark[data-theme-preset="petrol"] .inqtrix-auth-lock {
+  --auth-action: var(--brand);
+  --auth-action-foreground: var(--brand-foreground);
+}
+
+:root[data-contrast-mode="high"] .inqtrix-auth-lock {
+  --auth-action: var(--primary);
+  --auth-action-foreground: var(--primary-foreground);
+}
+
+.inqtrix-auth-fade {
+  background: radial-gradient(ellipse at 50% 0%, color-mix(in oklch, var(--brand) var(--auth-fade-strength), transparent), transparent 60%);
+}
+
+:root[data-contrast-mode="high"] .inqtrix-auth-fade {
+  background: none;
+}
+
+.inqtrix-auth-action {
+  background-color: var(--auth-action);
+  color: var(--auth-action-foreground);
+}
+
+.inqtrix-auth-action:hover {
+  background-color: color-mix(in oklch, var(--auth-action) 92%, var(--card));
+}
+
+/*
+ * Incognito header surface (chat and Knowledge Desk). The header signals the
+ * incognito state (nothing is saved) by rendering as the inverted neutral
+ * surface: a dark bar in light mode, a light bar in dark mode. Rather than
+ * hardcode an opposite palette (which would miss theme presets and
+ * high-contrast), every token is derived from `--primary` /
+ * `--primary-foreground` — the inverted neutral pair the system already defines
+ * for EVERY mode (root, dark, presets, high-contrast). The header subtree's
+ * utilities (`bg-background`, `text-foreground/75`, `border-border`, `bg-card`,
+ * `bg-surface`, `bg-brand-subtle text-brand`, `shadow-hairline`) then recompute
+ * against this scope automatically, so title, icons, hairlines and active states
+ * all flip and stay mutually consistent; a token left out here keeps the page
+ * colour under the header's text colour. Applied to the header element only, so
+ * the rest of the workspace is untouched. `--destructive` is deliberately NOT
+ * remapped: the danger colour must stay red on either bar (the only destructive
+ * control in the header is disabled in incognito anyway).
+ */
+.inqtrix-chat-header--incognito {
+  --background: var(--primary);
+  --foreground: var(--primary-foreground);
+  --card: var(--primary);
+  --card-foreground: var(--primary-foreground);
+  --accent-foreground: var(--primary-foreground);
+  --brand: var(--primary-foreground);
+  --brand-foreground: var(--primary);
+  --border: color-mix(in oklab, var(--primary-foreground) 22%, transparent);
+  --accent: color-mix(in oklab, var(--primary-foreground) 12%, transparent);
+  --surface: color-mix(in oklab, var(--primary-foreground) 12%, transparent);
+  --muted-foreground: color-mix(in oklab, var(--primary-foreground) 68%, transparent);
+  --brand-subtle: color-mix(in oklab, var(--primary-foreground) 16%, transparent);
+  --ring: color-mix(in oklab, var(--primary-foreground) 55%, transparent);
+  --shadow-hairline: transparent;
+}
+
+:root,
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="gray"] {
+  --user-bubble-bg: oklch(0.955 0 0);
+  --user-bubble-fg: oklch(0.17 0 0);
+  --user-bubble-border: oklch(0.9 0 0);
+  --user-bubble-avatar-bg: oklch(0.965 0 0);
+  --user-bubble-avatar-fg: oklch(0.46 0 0);
+  --user-bubble-avatar-border: oklch(0.88 0 0);
+}
+
+:root[data-user-bubble-tone="mint"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="mint"] {
+  --user-bubble-bg: oklch(0.94 0.045 155);
+  --user-bubble-fg: oklch(0.34 0.13 155);
+  --user-bubble-border: oklch(0.84 0.06 155);
+  --user-bubble-avatar-bg: oklch(0.955 0.035 155);
+  --user-bubble-avatar-fg: oklch(0.43 0.12 155);
+  --user-bubble-avatar-border: oklch(0.82 0.055 155);
+}
+
+:root[data-user-bubble-tone="orange"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="orange"] {
+  --user-bubble-bg: oklch(0.94 0.055 55);
+  --user-bubble-fg: oklch(0.48 0.15 45);
+  --user-bubble-border: oklch(0.85 0.07 55);
+  --user-bubble-avatar-bg: oklch(0.96 0.045 55);
+  --user-bubble-avatar-fg: oklch(0.5 0.15 45);
+  --user-bubble-avatar-border: oklch(0.83 0.07 55);
+}
+
+:root[data-user-bubble-tone="sky"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="sky"] {
+  --user-bubble-bg: oklch(0.94 0.04 225);
+  --user-bubble-fg: oklch(0.38 0.12 235);
+  --user-bubble-border: oklch(0.84 0.055 225);
+  --user-bubble-avatar-bg: oklch(0.96 0.032 225);
+  --user-bubble-avatar-fg: oklch(0.42 0.12 235);
+  --user-bubble-avatar-border: oklch(0.82 0.055 225);
+}
+
+:root[data-user-bubble-tone="violet"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="violet"] {
+  --user-bubble-bg: oklch(0.94 0.045 292);
+  --user-bubble-fg: oklch(0.42 0.15 292);
+  --user-bubble-border: oklch(0.84 0.06 292);
+  --user-bubble-avatar-bg: oklch(0.955 0.035 292);
+  --user-bubble-avatar-fg: oklch(0.46 0.14 292);
+  --user-bubble-avatar-border: oklch(0.82 0.06 292);
+}
+
+:root[data-user-bubble-tone="ink"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="ink"] {
+  --user-bubble-bg: oklch(0.13 0 0);
+  --user-bubble-fg: oklch(0.99 0 0);
+  --user-bubble-border: oklch(0.13 0 0);
+  --user-bubble-avatar-bg: oklch(0.22 0 0);
+  --user-bubble-avatar-fg: oklch(0.96 0 0);
+  --user-bubble-avatar-border: oklch(0.3 0 0);
+}
+
+.dark,
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="gray"] {
+  --user-bubble-bg: oklch(0.28 0 0);
+  --user-bubble-fg: oklch(0.96 0 0);
+  --user-bubble-border: oklch(0.36 0 0);
+  --user-bubble-avatar-bg: oklch(0.24 0 0);
+  --user-bubble-avatar-fg: oklch(0.76 0 0);
+  --user-bubble-avatar-border: oklch(0.36 0 0);
+}
+
+.dark[data-user-bubble-tone="mint"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="mint"] {
+  --user-bubble-bg: oklch(0.25 0.055 155);
+  --user-bubble-fg: oklch(0.84 0.12 155);
+  --user-bubble-border: oklch(0.36 0.075 155);
+  --user-bubble-avatar-bg: oklch(0.23 0.045 155);
+  --user-bubble-avatar-fg: oklch(0.76 0.12 155);
+  --user-bubble-avatar-border: oklch(0.36 0.075 155);
+}
+
+.dark[data-user-bubble-tone="orange"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="orange"] {
+  --user-bubble-bg: oklch(0.27 0.065 55);
+  --user-bubble-fg: oklch(0.86 0.13 55);
+  --user-bubble-border: oklch(0.4 0.09 55);
+  --user-bubble-avatar-bg: oklch(0.24 0.055 55);
+  --user-bubble-avatar-fg: oklch(0.82 0.13 55);
+  --user-bubble-avatar-border: oklch(0.4 0.09 55);
+}
+
+.dark[data-user-bubble-tone="sky"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="sky"] {
+  --user-bubble-bg: oklch(0.25 0.055 235);
+  --user-bubble-fg: oklch(0.84 0.11 225);
+  --user-bubble-border: oklch(0.38 0.08 235);
+  --user-bubble-avatar-bg: oklch(0.23 0.045 235);
+  --user-bubble-avatar-fg: oklch(0.78 0.1 225);
+  --user-bubble-avatar-border: oklch(0.38 0.08 235);
+}
+
+.dark[data-user-bubble-tone="violet"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="violet"] {
+  --user-bubble-bg: oklch(0.26 0.06 292);
+  --user-bubble-fg: oklch(0.86 0.11 292);
+  --user-bubble-border: oklch(0.39 0.085 292);
+  --user-bubble-avatar-bg: oklch(0.24 0.052 292);
+  --user-bubble-avatar-fg: oklch(0.8 0.11 292);
+  --user-bubble-avatar-border: oklch(0.39 0.085 292);
+}
+
+.dark[data-user-bubble-tone="ink"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="ink"] {
+  --user-bubble-bg: oklch(0.04 0 0);
+  --user-bubble-fg: oklch(1 0 0);
+  --user-bubble-border: oklch(0.34 0 0);
+  --user-bubble-avatar-bg: oklch(0.12 0 0);
+  --user-bubble-avatar-fg: oklch(0.94 0 0);
+  --user-bubble-avatar-border: oklch(0.34 0 0);
+}
+
+:root[data-contrast-mode="high"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview {
+  --user-bubble-bg: oklch(0.94 0 0);
+  --user-bubble-fg: oklch(0 0 0);
+  --user-bubble-border: oklch(0 0 0);
+  --user-bubble-avatar-bg: oklch(1 0 0);
+  --user-bubble-avatar-fg: oklch(0 0 0);
+  --user-bubble-avatar-border: oklch(0 0 0);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="ink"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="ink"] {
+  --user-bubble-bg: oklch(0 0 0);
+  --user-bubble-fg: oklch(1 0 0);
+  --user-bubble-border: oklch(0 0 0);
+  --user-bubble-avatar-bg: oklch(0.12 0 0);
+  --user-bubble-avatar-fg: oklch(1 0 0);
+  --user-bubble-avatar-border: oklch(0 0 0);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="mint"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="mint"] {
+  --user-bubble-bg: oklch(0.91 0.07 155);
+  --user-bubble-avatar-bg: oklch(0.96 0.04 155);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="orange"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="orange"] {
+  --user-bubble-bg: oklch(0.91 0.08 55);
+  --user-bubble-avatar-bg: oklch(0.96 0.05 55);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="sky"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="sky"] {
+  --user-bubble-bg: oklch(0.91 0.065 225);
+  --user-bubble-avatar-bg: oklch(0.96 0.04 225);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="violet"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="violet"] {
+  --user-bubble-bg: oklch(0.91 0.065 292);
+  --user-bubble-avatar-bg: oklch(0.96 0.04 292);
+}
+
+.dark[data-contrast-mode="high"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview {
+  --user-bubble-bg: oklch(0.16 0 0);
+  --user-bubble-fg: oklch(1 0 0);
+  --user-bubble-border: oklch(1 0 0);
+  --user-bubble-avatar-bg: oklch(0 0 0);
+  --user-bubble-avatar-fg: oklch(1 0 0);
+  --user-bubble-avatar-border: oklch(1 0 0);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="mint"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="mint"] {
+  --user-bubble-bg: oklch(0.2 0.08 155);
+  --user-bubble-avatar-bg: oklch(0.13 0.06 155);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="orange"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="orange"] {
+  --user-bubble-bg: oklch(0.2 0.09 55);
+  --user-bubble-avatar-bg: oklch(0.13 0.07 55);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="sky"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="sky"] {
+  --user-bubble-bg: oklch(0.2 0.08 225);
+  --user-bubble-avatar-bg: oklch(0.13 0.06 225);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="violet"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="violet"] {
+  --user-bubble-bg: oklch(0.2 0.08 292);
+  --user-bubble-avatar-bg: oklch(0.13 0.06 292);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="ink"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="ink"] {
+  --user-bubble-bg: oklch(0 0 0);
+  --user-bubble-fg: oklch(1 0 0);
+  --user-bubble-border: oklch(1 0 0);
+  --user-bubble-avatar-bg: oklch(0.08 0 0);
+  --user-bubble-avatar-fg: oklch(1 0 0);
+  --user-bubble-avatar-border: oklch(1 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    color-scheme: light;
+    /* Anchor the app shell to the viewport and stop the whole page from
+       rubber-band/overscroll scrolling (notably Safari) — the inner panes are
+       the real scroll containers. This is overscroll containment, NOT a global
+       overflow lock, so fixed auth/onboarding overlays still scroll. */
+    height: 100%;
+    overscroll-behavior: none;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    height: 100%;
+    overscroll-behavior: none;
+    font-family: var(--font-sans);
+  }
+
+  html[data-theme-transition-suppressed],
+  html[data-theme-transition-suppressed] *,
+  html[data-theme-transition-suppressed] *::before,
+  html[data-theme-transition-suppressed] *::after {
+    transition: none !important;
+  }
+
+  html[data-contrast-mode="high"] :where(:focus, :focus-visible, :focus-within) {
+    outline: none !important;
+    box-shadow: none !important;
+  }
+}
+
+@layer components {
+  .inqtrix-editor-topbar {
+    container-name: editor-topbar;
+    container-type: inline-size;
+    grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr);
+  }
+
+  [data-editor-topbar-overflow] {
+    display: inline-flex;
+  }
+
+  [data-editor-mode-icon] {
+    display: none;
+  }
+
+  @container editor-topbar (max-width: 719px) {
+    [data-editor-mode-label] {
+      display: none;
+    }
+
+    [data-editor-mode-icon] {
+      display: block;
+    }
+  }
+
+  @container editor-topbar (max-width: 559px) {
+    [data-editor-status-label] {
+      display: none;
+    }
+  }
+
+  /* Semantic design-language roles — single source of truth. Prefer these
+     over ad-hoc text-[..]/leading-[..]/size-[..] so each UI function has one
+     owner and cannot drift. Values are calibrated to the gold-standard
+     components (MentionMenu, Composer, report Markdown); editing a role here
+     changes it everywhere it is used. Living in @layer components keeps them
+     below utilities, so a one-off utility override still wins. These cover
+     plain UI text only — the Markdown renderers (.editor-prose /
+     .report-markdown / .chat-markdown and MarkdownRenderer.tsx) keep their own
+     dedicated reading scale and are intentionally NOT covered by these roles. */
+
+  /* Typography scale — there is a real size STEP between body and headings, not
+     just a weight change (a same-size heading reads as weak hierarchy). Headings
+     step display 24 > title 16 > card 14; body is 14 at line-height 1.5 (the
+     comfortable body ratio, ~matching the chat reading body). Dense tier 13/12/11
+     for lists, labels and metadata; 10 for eyebrows/hints. Editing a role here
+     changes it everywhere; the Markdown renderers keep their own reading scale. */
+  .t-display { @apply text-2xl font-semibold leading-tight; }   /* 24 — hero / empty-state */
+  .t-title { @apply text-base font-semibold leading-snug; }     /* 16 — whole-PAGE / view title only (e.g. "Prompt Library", "Datenbank", "Einstellungen") */
+  .t-section { @apply text-sm font-semibold leading-snug; }     /* 14 — section / panel / content heading ("Report", "Gespräche", "Dokumente", "Alle Dokumente") */
+  .t-card { @apply text-sm font-semibold leading-snug; }        /* 14 — card / item / row title (shares 14/600 with t-section; the name conveys intent) */
+  .t-body { @apply text-sm leading-normal; }                    /* 14 — reading text + inputs (line-height 1.5, matches chat) */
+  .t-list { @apply text-[13px] font-semibold leading-snug; }    /* 13 — dense list / nav / menu primary label */
+  .t-list-regular { @apply text-[13px] leading-snug; }          /* 13 — dense explorer item label, regular weight */
+  .t-label { @apply text-xs font-semibold; }                    /* 12 — form / control labels, group headers */
+  .t-meta { @apply text-xs; }                                   /* 12 — subtitle / metadata / helper */
+  .t-meta-sm { @apply text-[11px]; }                            /* 11 — dense subtitle / file metadata */
+  .t-caption { @apply text-[10px] font-semibold uppercase tracking-wide; } /* 10 — eyebrows (UPPERCASE) */
+  .t-hint { @apply text-[10px]; }                               /* 10 — counts, timestamps, keyboard legends (non-uppercase) */
+  .t-mono { @apply font-mono text-[11px] font-medium tabular-nums; }       /* 11 — IDs, URLs, numbers */
+
+  /* Icon sizes — 3 tiers, one role per size, so the same function never renders
+     two sizes. (The Button component already forces size-4 on its svg.) */
+  .icon-md { @apply size-4; }     /* 16 — nav rail, toolbars, button glyphs, tone tiles */
+  .icon-sm { @apply size-3.5; }   /* 14 — chat-input footer, file/list leading icons, inline/secondary actions, dense metadata */
+  .icon-xs { @apply size-3; }     /* 12 — status dots, micro affordances */
+
+  .inqtrix-user-bubble {
+    background: var(--user-bubble-bg);
+    border-color: var(--user-bubble-border);
+    color: var(--user-bubble-fg);
+  }
+
+  .inqtrix-explorer-reveal {
+    overflow-anchor: none;
+  }
+
+  .inqtrix-explorer-list {
+    overflow-anchor: none;
+  }
+
+  .inqtrix-user-avatar {
+    background: var(--user-bubble-avatar-bg);
+    border-color: var(--user-bubble-avatar-border);
+    color: var(--user-bubble-avatar-fg);
+  }
+
+  .inqtrix-panel-header {
+    height: var(--header-h);
+    min-height: var(--header-h);
+    flex-shrink: 0;
+  }
+
+  /* Isolates a panel's layout/paint so churn inside it cannot force layout or
+     paint outside it during window/panel resize. NEVER apply to a subtree that
+     renders inline position:fixed elements (they would anchor to the panel
+     instead of the viewport) — Radix portals to body are unaffected. */
+  .inqtrix-contained-panel {
+    contain: layout paint style;
+  }
+
+  .inqtrix-resizable-panel-motion > [data-panel] {
+    transition:
+      flex-grow 260ms cubic-bezier(0.22, 1, 0.36, 1),
+      flex-basis 260ms cubic-bezier(0.22, 1, 0.36, 1),
+      max-width 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .inqtrix-resizable-panel-motion > [data-separator],
+  .inqtrix-resizable-panel-handle {
+    transition:
+      background-color 150ms ease,
+      height 260ms cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      width 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .inqtrix-resizable-panel-motion > [data-panel],
+    .inqtrix-resizable-panel-motion > [data-separator],
+    .inqtrix-resizable-panel-handle {
+      transition: none;
+    }
+  }
+
+  /* Agent Desk composer — source availability, one-message directives and
+     execution settings stay distinct while sharing one compact footer. The
+     container follows the actual timeline width, including a split Canvas. */
+  .agent-composer-container {
+    container: agent-composer / inline-size;
+  }
+
+  .agent-source-toggle {
+    transition:
+      background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-toggle-label {
+    grid-template-columns: 0fr;
+    opacity: 0;
+    transform: translateX(-2px);
+    transition:
+      grid-template-columns 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 120ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-glyph > svg {
+    transform-origin: center;
+    transition:
+      filter 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-glyph-tracer {
+    position: absolute;
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  .agent-source-glyph-web .agent-source-glyph-tracer {
+    inset: -0.125rem;
+    border: 1px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 999px;
+  }
+
+  .agent-source-glyph-knowledge .agent-source-glyph-tracer {
+    right: 0.1rem;
+    bottom: -0.05rem;
+    left: 0.1rem;
+    height: 1px;
+    border-radius: 999px;
+    background: currentColor;
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+
+  .agent-source-toggle:not([aria-disabled='true']):is(:hover, :focus-visible)
+    .agent-source-glyph-web > svg {
+    filter: drop-shadow(0 0 3px color-mix(in oklab, currentColor 28%, transparent));
+    transform: rotate(-8deg) scale(1.04);
+  }
+
+  .agent-source-toggle:not([aria-disabled='true']):is(:hover, :focus-visible)
+    .agent-source-glyph-web .agent-source-glyph-tracer {
+    animation: inqtrix-source-orbit 440ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-toggle:not([aria-disabled='true']):is(:hover, :focus-visible)
+    .agent-source-glyph-knowledge > svg {
+    filter: drop-shadow(0 1px 2px color-mix(in oklab, currentColor 22%, transparent));
+    transform: translateY(-1px) scaleX(1.04);
+  }
+
+  .agent-source-toggle:not([aria-disabled='true']):is(:hover, :focus-visible)
+    .agent-source-glyph-knowledge .agent-source-glyph-tracer {
+    animation: inqtrix-knowledge-scan 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @container agent-composer (min-width: 704px) {
+    .agent-source-toggle:is(:hover, :focus-visible) .agent-source-toggle-label {
+      grid-template-columns: 1fr;
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .agent-source-toggle-on {
+    animation: inqtrix-source-activate 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* OFF reads as a struck-through glyph: one diagonal in the icon's own
+     colour, so the state is visible without hovering for the label. */
+  .agent-source-glyph-off::after {
+    content: '';
+    position: absolute;
+    left: -0.05rem;
+    right: -0.05rem;
+    top: 50%;
+    height: 1.5px;
+    border-radius: 999px;
+    background: currentColor;
+    transform: rotate(-45deg);
+    pointer-events: none;
+  }
+
+  .agent-execution-rail {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 1px;
+    border: 0 !important;
+    background: var(--brand);
+    box-shadow: 0 0 5px color-mix(in oklab, var(--brand) 46%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-72%) scaleX(0.3);
+  }
+
+  .agent-execution-capsule:is(:hover, :focus-within) .agent-execution-rail,
+  .agent-execution-capsule:has([data-state='open']) .agent-execution-rail {
+    animation: inqtrix-execution-route 520ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-route-icon,
+  .agent-model-icon {
+    transform-origin: center;
+    transition:
+      color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      filter 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-run-setup-trigger:is(:hover, :focus-visible, [data-state='open'])
+    .agent-route-icon {
+    color: var(--brand);
+    filter: drop-shadow(0 0 3px color-mix(in oklab, var(--brand) 32%, transparent));
+    transform: translateX(1px) scale(1.06);
+  }
+
+  .agent-model-trigger:is(:hover, :focus-visible, [data-state='open'])
+    .agent-model-icon {
+    color: var(--brand);
+    filter: drop-shadow(0 0 3px color-mix(in oklab, var(--brand) 32%, transparent));
+    transform: rotate(7deg) scale(1.06);
+  }
+
+  @container agent-composer (max-width: 703px) {
+    .agent-run-setup-label,
+    .agent-model-trigger-label,
+    .agent-model-trigger > svg:last-child {
+      display: none;
+    }
+
+    .agent-execution-capsule {
+      flex-shrink: 0;
+    }
+
+    .agent-run-setup-trigger,
+    .agent-model-trigger {
+      width: 1.75rem;
+      min-width: 1.75rem;
+      padding-inline: 0;
+    }
+  }
+
+  @container agent-composer (max-width: 575px) {
+    .agent-composer-footer,
+    .agent-composer-primary,
+    .agent-composer-actions {
+      gap: 0.25rem;
+    }
+
+    .agent-composer-quota .t-mono {
+      display: none;
+    }
+  }
+
+  @keyframes inqtrix-source-activate {
+    0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand) 22%, transparent); }
+    55% { box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 14%, transparent); }
+    100% { box-shadow: 0 1px 2px var(--shadow-hairline); }
+  }
+
+  @keyframes inqtrix-source-orbit {
+    0% { opacity: 0; transform: rotate(-95deg) scale(0.72); }
+    35% { opacity: 0.8; }
+    100% { opacity: 0; transform: rotate(210deg) scale(1.08); }
+  }
+
+  @keyframes inqtrix-knowledge-scan {
+    0% { opacity: 0; transform: translateX(-28%) scaleX(0); }
+    38% { opacity: 0.9; transform: translateX(0) scaleX(0.62); }
+    100% { opacity: 0; transform: translateX(18%) scaleX(1); }
+  }
+
+  @keyframes inqtrix-execution-route {
+    0% { opacity: 0; transform: translateX(-72%) scaleX(0.28); }
+    34% { opacity: 0.9; }
+    100% { opacity: 0; transform: translateX(72%) scaleX(0.38); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .agent-source-toggle,
+    .agent-source-toggle-label {
+      transition: none;
+    }
+
+    .agent-source-toggle-on,
+    .agent-source-glyph-tracer,
+    .agent-execution-rail {
+      animation: none;
+    }
+
+    .agent-source-glyph > svg,
+    .agent-route-icon,
+    .agent-model-icon {
+      transition: none;
+    }
+
+    .agent-source-glyph-tracer,
+    .agent-execution-rail {
+      display: none;
+    }
+
+    .agent-source-glyph > svg,
+    .agent-route-icon,
+    .agent-model-icon {
+      filter: none !important;
+      transform: none !important;
+    }
+  }
+
+  /* Mermaid diagrams are document-native, not card widgets: transparent
+     ground, connectors and arrowheads as body ink at 70 % and one pixel,
+     node corners rounded like the code frame. Mermaid injects per-SVG
+     styles, so these rules use !important. The mermaid-internal classes
+     named here are pinned by MERMAID_STYLED_CLASSES (mermaidTheme.ts) and
+     the browser render probe — keep the two lists identical. */
+  .inqtrix-mermaid svg {
+    background: transparent !important;
+  }
+
+  .inqtrix-mermaid svg :where(
+    .flowchart-link,
+    .messageLine0,
+    .messageLine1,
+    .loopLine,
+    .actor-line,
+    .transition,
+    .relation
+  ) {
+    stroke: color-mix(in oklch, var(--foreground) 70%, transparent) !important;
+    stroke-width: 1px !important;
+  }
+
+  .inqtrix-mermaid svg marker path {
+    fill: color-mix(in oklch, var(--foreground) 70%, transparent) !important;
+    stroke: color-mix(in oklch, var(--foreground) 70%, transparent) !important;
+  }
+
+  .inqtrix-mermaid svg .node rect {
+    rx: 4px;
+    ry: 4px;
+  }
+
+  /* Gantt axes: d3 stamps `currentColor` on the tick group and a 10 px font
+     on the group and every tick label, which beats mermaid's own grid colour
+     and the theme's type scale. */
+  .inqtrix-mermaid svg .grid {
+    color: var(--border);
+  }
+
+  .inqtrix-mermaid svg :where(.grid, .grid text) {
+    font-size: inherit;
+  }
+
+  /* Gantt title: mermaid hardcodes 18 px; every chart title here is one
+     point above the figure type, like the plot and pie titles. */
+  .inqtrix-mermaid svg .titleText {
+    font-size: 14px !important;
+  }
+
+  html[data-contrast-mode="high"] .inqtrix-mermaid svg :where(
+    .flowchart-link,
+    .messageLine0,
+    .messageLine1,
+    .loopLine,
+    .actor-line,
+    .transition,
+    .relation
+  ),
+  html[data-contrast-mode="high"] .inqtrix-mermaid svg marker path {
+    stroke: var(--foreground) !important;
+  }
+
+  html[data-contrast-mode="high"] .inqtrix-mermaid svg marker path {
+    fill: var(--foreground) !important;
+  }
+
+  /* Surface tiers (applied during component migration, kept here as the
+     reference): radius — controls/inputs rounded-md, cards/panels rounded-lg,
+     overlays/composer rounded-xl. Shadow — cards shadow-[0_1px_2px_var(--shadow-hairline)],
+     floating shadow-[0_8px_28px_-12px_var(--shadow-soft)], menus shadow-lg. */
+
+  .chat-markdown pre[data-theme*=" "],
+  .chat-markdown code[data-theme*=" "],
+  .chat-markdown code[data-theme*=" "] span,
+  .report-markdown pre[data-theme*=" "],
+  .report-markdown code[data-theme*=" "],
+  .report-markdown code[data-theme*=" "] span {
+    color: var(--shiki-light);
+    background-color: transparent;
+  }
+
+  .dark .chat-markdown pre[data-theme*=" "],
+  .dark .chat-markdown code[data-theme*=" "],
+  .dark .chat-markdown code[data-theme*=" "] span,
+  .dark .report-markdown pre[data-theme*=" "],
+  .dark .report-markdown code[data-theme*=" "],
+  .dark .report-markdown code[data-theme*=" "] span {
+    color: var(--shiki-dark);
+    background-color: transparent;
+  }
+
+  /* Inline citation markers (#kref-K#) emitted by linkifyCitationLabels: small
+     superscript brand chips with their own horizontal rhythm, so a glued cluster
+     like K6K15 reads as two discrete badges instead of one run-together
+     underlined link. Element style on the markdown surface, which has its own
+     reading scale, NOT a .t-* role. line-height:0 keeps the raised chip from growing the line box. */
+  :where(.chat-markdown, .report-markdown) a[href^="#kref-"] {
+    font-size: 0.72em;
+    font-weight: 600;
+    line-height: 0;
+    vertical-align: super;
+    margin-inline: 0.14em 0.04em;
+    padding: 0.12em 0.34em;
+    border-radius: 4px;
+    text-decoration: none;
+    color: var(--brand);
+    background-color: color-mix(in oklab, var(--brand) 12%, transparent);
+    transition: background-color 0.12s ease;
+  }
+  :where(.chat-markdown, .report-markdown) a[href^="#kref-"]:hover {
+    background-color: color-mix(in oklab, var(--brand) 22%, transparent);
+  }
+
+  /* The same citations while a canvas is edited (citationChips.ts): the
+     reading chip's colour over the raw label, on the text line, so the caret
+     moves through a chip as through any word. */
+  .editor-prose .citation-chip {
+    border-radius: 4px;
+    color: var(--brand);
+    background-color: color-mix(in oklab, var(--brand) 12%, transparent);
+    cursor: pointer;
+    transition: background-color 0.12s ease;
+  }
+  .editor-prose .citation-chip:hover {
+    background-color: color-mix(in oklab, var(--brand) 22%, transparent);
+  }
+
+  html[data-contrast-mode="high"] .chat-markdown pre[data-theme*=" "],
+  html[data-contrast-mode="high"] .chat-markdown code[data-theme*=" "],
+  html[data-contrast-mode="high"] .chat-markdown code[data-theme*=" "] span,
+  html[data-contrast-mode="high"] .report-markdown pre[data-theme*=" "],
+  html[data-contrast-mode="high"] .report-markdown code[data-theme*=" "],
+  html[data-contrast-mode="high"] .report-markdown code[data-theme*=" "] span {
+    background-color: transparent;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-border/"],
+  html[data-contrast-mode="high"] [class*="border-input/"] {
+    border-color: var(--border) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-brand/"] {
+    border-color: var(--brand) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-success/"] {
+    border-color: var(--success) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-warning/"] {
+    border-color: var(--warning) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-file/"] {
+    border-color: var(--file) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-destructive/"] {
+    border-color: var(--destructive) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-background/"] {
+    background-color: var(--background) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-card/"] {
+    background-color: var(--card) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-muted/"] {
+    background-color: var(--muted) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-surface/"] {
+    background-color: var(--surface) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-brand-subtle/"] {
+    background-color: var(--brand-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-success-subtle/"] {
+    background-color: var(--success-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-warning-subtle/"] {
+    background-color: var(--warning-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-file-subtle"] {
+    background-color: var(--file-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-destructive-subtle/"] {
+    background-color: var(--destructive-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="backdrop-blur"] {
+    backdrop-filter: none !important;
+  }
+
+  .chat-markdown [data-line],
+  .report-markdown [data-line] {
+    padding-inline: 0.75rem;
+  }
+
+  .chat-markdown [data-line]:empty::after,
+  .report-markdown [data-line]:empty::after {
+    content: " ";
+  }
+
+  /* Rendered code contains line wrappers; editor highlighting contains tokens. */
+  .chat-markdown:not(.editor-prose) pre code,
+  .report-markdown pre code {
+    display: grid;
+    min-width: max-content;
+  }
+
+  .chat-markdown .katex .fbox,
+  .report-markdown .katex .fbox,
+  .editor-prose .katex .fbox {
+    border-style: none !important;
+    border-width: 0 !important;
+  }
+
+  .chat-markdown .katex .boxpad,
+  .report-markdown .katex .boxpad,
+  .editor-prose .katex .boxpad {
+    padding: 0 !important;
+  }
+
+  /* The review's mark in a reviewed answer (`reviewMarks.ts`): a quiet tint
+     and a bar on each block the review changed. The bar keeps the mark
+     visible without colour perception; the line under the answer says what
+     it means. */
+  .chat-markdown [data-review-changed]:not(tr, pre) {
+    border-inline-start: 2px solid color-mix(in oklab, var(--brand) 55%, transparent);
+    border-radius: 0.22rem;
+    background: color-mix(in oklab, var(--brand-subtle) 85%, transparent);
+    padding-inline-start: 0.4rem;
+  }
+
+  .chat-markdown tr[data-review-changed] > :where(td, th) {
+    background: color-mix(in oklab, var(--brand-subtle) 85%, transparent);
+  }
+
+  .chat-markdown tr[data-review-changed] > :first-child {
+    box-shadow: inset 2px 0 0 color-mix(in oklab, var(--brand) 55%, transparent);
+  }
+
+  .chat-markdown pre[data-review-changed] {
+    outline: 2px solid color-mix(in oklab, var(--brand) 45%, transparent);
+    outline-offset: 2px;
+  }
+
+  /* A statement the review marked as insufficiently supported
+     (`claimMarks.ts`): a quiet dotted underline, kept by its style when
+     colour is not perceived; tapping or focusing it shows its note under
+     the text. */
+  .chat-markdown .claim-mark[data-claim-state] {
+    text-decoration-line: underline;
+    text-decoration-style: dotted;
+    text-decoration-thickness: 1.5px;
+    text-decoration-color: color-mix(in oklab, var(--warning) 75%, transparent);
+    text-underline-offset: 0.22em;
+    cursor: help;
+  }
+
+  .chat-markdown .claim-mark[data-claim-first]:focus-visible {
+    border-radius: 0.15rem;
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+
+  .editor-prose {
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.75rem;
+    overflow-wrap: anywhere;
+  }
+
+  .editor-prose > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-prose > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-prose h1 {
+    margin: 1.5rem 0 0.75rem;
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 2.25rem;
+  }
+
+  .editor-prose > h1:first-child {
+    margin-top: 0;
+  }
+
+  .editor-prose h2 {
+    margin: 1.35rem 0 0.65rem;
+    font-size: 1.25rem;
+    font-weight: 600;
+    line-height: 2rem;
+  }
+
+  .editor-prose h3 {
+    margin: 1.1rem 0 0.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.75rem;
+  }
+
+  .editor-prose h4 {
+    margin: 1rem 0 0.4rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1.75rem;
+  }
+
+  .editor-prose h5 {
+    margin: 0.85rem 0 0.35rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.5rem;
+    text-transform: uppercase;
+  }
+
+  .editor-prose h6 {
+    margin: 0.85rem 0 0.35rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.5rem;
+  }
+
+  .editor-prose hr {
+    margin: 1.1rem 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .editor-prose hr + h1,
+  .editor-prose hr + h2,
+  .editor-prose hr + h3,
+  .editor-prose hr + h4,
+  .editor-prose hr + h5,
+  .editor-prose hr + h6 {
+    margin-top: 1rem;
+  }
+
+  .editor-prose p {
+    margin: 0.75rem 0;
+    line-height: 1.75rem;
+  }
+
+  .editor-prose ul,
+  .editor-prose ol {
+    margin: 0.75rem 0;
+    padding-left: 1.15rem;
+  }
+
+  .editor-prose ul {
+    list-style: disc;
+  }
+
+  .editor-prose ol {
+    list-style: decimal;
+  }
+
+  .editor-prose li {
+    margin: 0.15rem 0;
+    padding-left: 0.15rem;
+    line-height: 1.6rem;
+  }
+
+  .editor-prose li p {
+    margin: 0;
+    line-height: inherit;
+  }
+
+  .editor-prose li p + p {
+    margin-top: 0.35rem;
+  }
+
+  .editor-prose li > ul,
+  .editor-prose li > ol {
+    margin: 0.35rem 0;
+  }
+
+  .editor-prose blockquote {
+    margin: 1rem 0;
+    border-left: 2px solid color-mix(in oklab, var(--brand) 35%, transparent);
+    background: color-mix(in oklab, var(--brand-subtle) 55%, transparent);
+    padding: 0.6rem 1rem;
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.6rem;
+  }
+
+  .editor-prose blockquote > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-prose blockquote > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-prose blockquote p,
+  .editor-prose blockquote ul,
+  .editor-prose blockquote ol {
+    margin: 0.35rem 0;
+    line-height: inherit;
+  }
+
+  .editor-prose blockquote li {
+    line-height: inherit;
+  }
+
+  .editor-prose code {
+    border-radius: 0.25rem;
+    background: var(--muted);
+    padding: 0.1rem 0.3rem;
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+  }
+
+  .editor-prose pre {
+    margin: 1rem 0;
+    overflow-x: auto;
+    border-radius: 0.5rem;
+    background: var(--surface);
+    padding: 1rem;
+  }
+
+  .editor-prose pre code {
+    background: transparent;
+    padding: 0;
+  }
+
+  /* Compact code-block chrome: NO permanent bar — the language pill and
+     the copy icon float in the top-right corner and appear only on
+     hover/focus. The line rhythm follows the body text (line-height 1.6
+     instead of the inherited 2.0, i.e. 22.4px instead of 28px), so a
+     block sits flush in the surrounding text. */
+  .editor-prose .editor-code-block {
+    position: relative;
+    margin: 0.75rem 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+  }
+
+  .editor-prose .editor-code-block pre {
+    margin: 0;
+    border-radius: 0;
+    padding: 0.625rem 0.75rem;
+    line-height: 1.6;
+  }
+
+  .editor-prose .editor-code-block-controls {
+    position: absolute;
+    top: 0.3rem;
+    right: 0.3rem;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+  }
+
+  .editor-prose .editor-code-block:hover .editor-code-block-controls,
+  .editor-prose .editor-code-block:focus-within .editor-code-block-controls {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .editor-prose .editor-code-block-controls {
+      transition: none;
+    }
+  }
+
+  .editor-prose .editor-code-block-language {
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    background: var(--background);
+    padding: 0.06rem 0.3rem;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--muted-foreground);
+    cursor: pointer;
+  }
+
+  .editor-prose .editor-code-block-language:hover {
+    color: var(--foreground);
+  }
+
+  .editor-prose .editor-code-block-language:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .editor-prose .editor-code-block-copy {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    background: var(--background);
+    padding: 0.2rem;
+    color: var(--muted-foreground);
+  }
+
+  .editor-prose .editor-code-block-copy:hover {
+    color: var(--foreground);
+  }
+
+  .editor-prose a {
+    color: var(--brand);
+    position: relative;
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+  }
+
+  .editor-prose a[href]:where(:hover, :focus-visible)::after {
+    position: absolute;
+    z-index: 50;
+    top: calc(100% + 0.35rem);
+    left: 50%;
+    width: max-content;
+    max-width: min(34rem, calc(100vw - 2rem));
+    transform: translateX(-50%);
+    border: 1px solid color-mix(in oklab, var(--border) 40%, transparent);
+    border-radius: 0.375rem;
+    background: var(--foreground);
+    box-shadow: 0 8px 24px var(--shadow-soft);
+    color: var(--background);
+    content: attr(href);
+    overflow: hidden;
+    padding: 0.375rem 0.625rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    line-height: 1rem;
+    pointer-events: none;
+  }
+
+  .editor-prose .tiptap-mathematics-render {
+    border-radius: 0.25rem;
+  }
+
+  .editor-prose .tiptap-mathematics-render[data-type="inline-math"] {
+    display: inline-flex;
+    vertical-align: baseline;
+  }
+
+  .editor-prose .tiptap-mathematics-render[data-type="block-math"] {
+    display: block;
+    margin: 0.4rem 0 0.55rem;
+    overflow-x: auto;
+    padding: 0;
+    text-align: center;
+  }
+
+  .editor-prose .tiptap-mathematics-render[data-type="block-math"] .katex-display {
+    margin: 0;
+  }
+
+  .editor-prose .tiptap-mathematics-render.inline-math-error,
+  .editor-prose .tiptap-mathematics-render.block-math-error {
+    background: var(--destructive-subtle);
+    color: var(--destructive);
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    padding: 0.1rem 0.3rem;
+  }
+
+  .editor-prose .tableWrapper {
+    margin: 1rem 0;
+    max-width: 100%;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--background);
+    scrollbar-width: thin;
+  }
+
+  .editor-prose .tableWrapper:focus-visible {
+    outline: 1px solid var(--ring);
+    outline-offset: 1px;
+  }
+
+  .editor-prose table {
+    margin: 1rem 0;
+    width: 100%;
+    min-width: 560px;
+    border-collapse: collapse;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    font-size: 0.875rem;
+    text-align: left;
+    line-height: 1.4rem;
+  }
+
+  .editor-prose .tableWrapper table {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .editor-prose tbody {
+    border-top: 1px solid var(--border);
+  }
+
+  .editor-prose tr {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .editor-prose tr:last-child {
+    border-bottom: 0;
+  }
+
+  .editor-prose tr:hover {
+    background: color-mix(in oklab, var(--surface) 60%, transparent);
+  }
+
+  .editor-prose th,
+  .editor-prose td {
+    border-right: 1px solid var(--border);
+    padding: 0.45rem 0.75rem;
+    vertical-align: top;
+  }
+
+  .editor-prose th:last-child,
+  .editor-prose td:last-child {
+    border-right: 0;
+  }
+
+  .editor-prose th {
+    background: var(--surface);
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    font-weight: 650;
+    text-transform: uppercase;
+  }
+
+  .editor-prose th p,
+  .editor-prose td p {
+    margin: 0;
+    line-height: 1.4rem;
+  }
+
+  .editor-prose th p + p,
+  .editor-prose td p + p {
+    margin-top: 0.45rem;
+  }
+
+  .editor-prose th ul,
+  .editor-prose th ol,
+  .editor-prose td ul,
+  .editor-prose td ol {
+    margin: 0.25rem 0;
+    padding-left: 1rem;
+  }
+
+  .editor-prose th li,
+  .editor-prose td li {
+    margin: 0.1rem 0;
+    line-height: 1.4rem;
+  }
+
+  .editor-prose ul[data-type="taskList"] {
+    list-style: none;
+    padding-left: 0;
+  }
+
+  .editor-prose ul[data-type="taskList"] li {
+    display: flex;
+    gap: 0.55rem;
+  }
+
+  .editor-prose ul[data-type="taskList"] li > label {
+    flex: 0 0 auto;
+    padding-top: 0.1rem;
+  }
+
+  .editor-prose ul[data-type="taskList"] li > div {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .editor-prose .editor-comment-anchor {
+    border-radius: 0.16rem;
+    cursor: pointer;
+    background: color-mix(in oklab, var(--brand-subtle) 45%, transparent);
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="inline_edit"] {
+    background: color-mix(in oklab, var(--warning-subtle) 42%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="evidence_review"] {
+    background: color-mix(in oklab, var(--success-subtle) 42%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-selected="true"] {
+    background: color-mix(in oklab, var(--brand-subtle) 76%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="inline_edit"][data-editor-comment-selected="true"] {
+    background: color-mix(in oklab, var(--warning-subtle) 74%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="evidence_review"][data-editor-comment-selected="true"] {
+    background: color-mix(in oklab, var(--success-subtle) 74%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-status="stale"] {
+    background: color-mix(in oklab, var(--muted) 50%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="team"] {
+    border-radius: 0;
+    background: transparent;
+    box-shadow: inset 0 -0.12rem 0 color-mix(in oklab, var(--brand) 36%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="team"][data-editor-comment-selected="true"] {
+    background: color-mix(in oklab, var(--brand-subtle) 28%, transparent);
+    box-shadow: inset 0 -0.14rem 0 color-mix(in oklab, var(--brand) 72%, transparent);
+  }
+
+  .editor-prose .editor-team-comment-marker {
+    display: inline-flex;
+    width: 0.85rem;
+    min-width: 0.85rem;
+    height: 0.85rem;
+    margin-inline: 0.12rem;
+    padding-inline: 0;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in oklab, var(--brand) 56%, var(--border));
+    border-radius: 999px;
+    color: var(--brand);
+    cursor: pointer;
+    font-size: 0.42rem;
+    line-height: 1;
+    vertical-align: 0.16rem;
+  }
+
+  .editor-prose .editor-team-comment-marker:not([data-editor-comment-count="1"]) {
+    width: auto;
+    min-width: 1.35rem;
+    height: 1rem;
+    padding-inline: 0.3rem;
+    background: color-mix(in oklab, var(--background) 84%, var(--brand-subtle));
+    font-size: 0.6rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+  }
+
+  /* A single comment's dot is decoration, not information. Inside the
+   * sentence it would sit mid-word whenever the anchor ends mid-word and
+   * read like a typo, so the passage stays merely highlighted and nothing
+   * is put in the text.
+   *
+   * The BOX collapses instead of merely fading: reserving the dot's full
+   * width would leave a gap that splits the word just as visibly, and
+   * animating that width back would make the line jump under the cursor —
+   * worse than the dot it replaces. What remains is the 1px transparent
+   * border on each side, measured at 2px total; it is constant across
+   * every state, so appearing and disappearing costs no reflow at all.
+   * `overflow: visible` lets the glyph paint outside that empty box.
+   *
+   * The element never leaves the DOM: it keeps its role, name, tabIndex
+   * and handlers, so keyboard and screen-reader users keep the
+   * affordance that the eye now only gets on demand. `:focus-visible`
+   * is therefore a first-class reveal, not an afterthought. */
+  .editor-prose .editor-team-comment-marker[data-editor-comment-count="1"] {
+    width: 0;
+    min-width: 0;
+    margin-inline: 0;
+    border-color: transparent;
+    overflow: visible;
+    opacity: 0;
+    transition: opacity var(--motion-fast, 120ms) ease;
+  }
+
+  /* Reading the passage, reaching the marker by keyboard, or having its
+   * thread open — each is a reason to show it. */
+  .editor-prose *:hover > .editor-team-comment-marker[data-editor-comment-count="1"],
+  .editor-prose .editor-team-comment-marker[data-editor-comment-count="1"]:focus-visible,
+  .editor-prose .editor-team-comment-marker[data-editor-comment-count="1"][data-editor-comment-selected="true"] {
+    border-color: color-mix(in oklab, var(--brand) 56%, var(--border));
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .editor-prose .editor-team-comment-marker[data-editor-comment-count="1"] {
+      transition: none;
+    }
+  }
+
+  .editor-prose .editor-team-comment-marker[data-editor-comment-selected="true"] {
+    background: var(--brand);
+    color: var(--brand-foreground);
+  }
+
+  /* Structural proposals keep the original ProseMirror node until review.
+   * The final/simple projections preview the proposed hierarchy without
+   * stacking another full-surface highlight over comments or text changes. */
+  .editor-prose .inqtrix-review-structure {
+    position: relative;
+    border-inline-start: 2px solid transparent;
+    transition:
+      border-color var(--duration-fast) var(--ease-out),
+      box-shadow var(--duration-fast) var(--ease-out);
+  }
+
+  .editor-prose .inqtrix-review-structure-all,
+  .editor-prose .inqtrix-review-structure-simple {
+    border-inline-start-color: color-mix(in oklab, var(--warning) 64%, transparent);
+    padding-inline-start: 0.55rem;
+  }
+
+  .editor-prose .inqtrix-review-structure-active {
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 42%, transparent);
+  }
+
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="heading1"],
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="heading1"] {
+    font-size: 1.8rem;
+    font-weight: 650;
+    line-height: 1.18;
+  }
+
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="heading2"],
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="heading2"] {
+    font-size: 1.45rem;
+    font-weight: 640;
+    line-height: 1.24;
+  }
+
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="heading3"],
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="heading3"] {
+    font-size: 1.2rem;
+    font-weight: 630;
+    line-height: 1.3;
+  }
+
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="blockquote"],
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="blockquote"] {
+    border-inline-start-color: var(--border-strong);
+    color: var(--muted-foreground);
+    padding-inline-start: 0.8rem;
+  }
+
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="bulletList"],
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="orderedList"],
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="taskList"],
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="bulletList"],
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="orderedList"],
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="taskList"] {
+    padding-inline-start: 1.4rem;
+  }
+
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="bulletList"]::before,
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="bulletList"]::before {
+    position: absolute;
+    inset-inline-start: 0.45rem;
+    content: "•";
+  }
+
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="orderedList"]::before,
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="orderedList"]::before {
+    position: absolute;
+    inset-inline-start: 0.25rem;
+    content: "1.";
+  }
+
+  .editor-prose .inqtrix-review-structure-final[data-review-structure-action="taskList"]::before,
+  .editor-prose .inqtrix-review-structure-simple[data-review-structure-action="taskList"]::before {
+    position: absolute;
+    inset-inline-start: 0.25rem;
+    content: "☐";
+  }
+
+  /* Revealed markdown markers: the syntax characters of the formatted span
+     that holds the caret stay visible (click to remove formatting). A
+     separate decoration class leaves the .editor-prose reading styles
+     untouched, like the comment/suggestion decorations. */
+  .editor-prose .editor-syntax-marker {
+    display: inline;
+    font-family: var(--font-mono);
+    font-weight: 400;
+    font-style: normal;
+    text-decoration: none;
+    color: var(--muted-foreground);
+    background: color-mix(in oklab, var(--muted) 70%, transparent);
+    border-radius: 0.16rem;
+    padding: 0 0.1rem;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+
+  .editor-prose .editor-syntax-marker:hover {
+    background: color-mix(in oklab, var(--muted) 100%, transparent);
+    color: var(--foreground);
+  }
+
+  /* Placeholder hint on the current empty line (Tiptap Placeholder extension adds
+     the `is-empty` class + `data-placeholder` attr; muted, non-interactive). */
+  .editor-prose .is-empty::before {
+    content: attr(data-placeholder);
+    color: var(--muted-foreground);
+    opacity: 0.5;
+    float: left;
+    height: 0;
+    pointer-events: none;
+  }
+
+  .editor-prose .suggestion-insert {
+    border-radius: 0.2rem;
+    padding: 0 0.12rem;
+    background: color-mix(in oklab, var(--success-subtle) 78%, transparent);
+    color: var(--success);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--success) 28%, transparent);
+  }
+
+  .editor-prose .suggestion-delete {
+    border-radius: 0.2rem;
+    background: color-mix(in oklab, var(--destructive-subtle) 70%, transparent);
+    color: var(--destructive);
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+  }
+
+  .editor-prose .suggestion-block-original {
+    border-radius: 0.16rem;
+    background: color-mix(in oklab, var(--warning-subtle) 30%, transparent);
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
+  .editor-prose .suggestion-block-original-active {
+    background: color-mix(in oklab, var(--warning-subtle) 48%, transparent);
+  }
+
+  .editor-prose .suggestion-block-card {
+    display: grid;
+    gap: 0.35rem;
+    margin: 0.42rem 0 0.95rem;
+    border: 1px solid color-mix(in oklab, var(--success) 22%, var(--border));
+    border-left: 2px solid color-mix(in oklab, var(--success) 58%, var(--border));
+    border-radius: 0.5rem;
+    background: var(--background);
+    padding: 0.55rem 0.65rem;
+    box-shadow:
+      0 1px 2px var(--shadow-hairline),
+      0 8px 24px color-mix(in oklab, var(--success-subtle) 28%, transparent);
+  }
+
+  .editor-prose .suggestion-block-card-active {
+    border-color: color-mix(in oklab, var(--success) 44%, var(--border));
+    border-left-color: color-mix(in oklab, var(--success) 72%, var(--border));
+    box-shadow:
+      0 1px 2px var(--shadow-hairline),
+      0 0 0 2px color-mix(in oklab, var(--success-subtle) 56%, transparent);
+  }
+
+  .editor-prose .suggestion-block-header {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .editor-prose .suggestion-block-title {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .editor-prose .suggestion-block-label {
+    color: var(--success);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .editor-prose .suggestion-block-revision {
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--success-subtle) 62%, transparent);
+    padding: 0.08rem 0.38rem;
+    color: var(--success);
+    font-size: 0.66rem;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+
+  .editor-prose .suggestion-block-proposed {
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.45rem;
+  }
+
+  .editor-prose .suggestion-markdown {
+    min-width: 0;
+  }
+
+  .editor-prose .suggestion-markdown > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-prose .suggestion-markdown > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-prose .suggestion-markdown-paragraph {
+    margin: 0.45rem 0;
+    line-height: 1.48rem;
+    overflow-wrap: anywhere;
+  }
+
+  .editor-prose .suggestion-markdown-heading {
+    margin: 0.75rem 0 0.35rem;
+    color: var(--foreground);
+    font-weight: 700;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+
+  .editor-prose .suggestion-markdown-heading-1 {
+    font-size: 1.05rem;
+  }
+
+  .editor-prose .suggestion-markdown-heading-2 {
+    font-size: 1rem;
+  }
+
+  .editor-prose .suggestion-markdown-heading-3,
+  .editor-prose .suggestion-markdown-heading-4 {
+    font-size: 0.95rem;
+  }
+
+  .editor-prose .suggestion-markdown-list {
+    margin: 0.45rem 0;
+    padding-left: 1.2rem;
+  }
+
+  .editor-prose .suggestion-markdown-list-unordered {
+    list-style: disc;
+  }
+
+  .editor-prose .suggestion-markdown-list-ordered {
+    list-style: decimal;
+  }
+
+  .editor-prose .suggestion-markdown-list-item {
+    margin: 0.15rem 0;
+    padding-left: 0.15rem;
+    line-height: 1.48rem;
+  }
+
+  .editor-prose .suggestion-markdown-strong {
+    color: var(--foreground);
+    font-weight: 700;
+  }
+
+  .editor-prose .suggestion-markdown-link {
+    color: var(--brand);
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+    overflow-wrap: anywhere;
+  }
+
+  .editor-prose .suggestion-markdown-code {
+    border-radius: 0.25rem;
+    background: var(--muted);
+    padding: 0.05rem 0.25rem;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+    font-size: 0.85em;
+  }
+
+  .editor-prose .suggestion-markdown-pre {
+    margin: 0.55rem 0;
+    overflow-x: auto;
+    border-radius: 0.45rem;
+    background: var(--muted);
+    padding: 0.65rem;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+    font-size: 0.8rem;
+    line-height: 1.35rem;
+    scrollbar-width: thin;
+  }
+
+  .editor-prose .suggestion-markdown-pre .suggestion-markdown-code {
+    background: transparent;
+    padding: 0;
+  }
+
+  .editor-prose .suggestion-markdown-blockquote {
+    margin: 0.6rem 0;
+    border-left: 2px solid color-mix(in oklab, var(--brand) 35%, transparent);
+    background: color-mix(in oklab, var(--brand-subtle) 45%, transparent);
+    padding: 0.45rem 0.7rem;
+  }
+
+  .editor-prose .suggestion-markdown-table-wrap {
+    margin: 0.6rem 0;
+    max-width: 100%;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 0.45rem;
+    scrollbar-width: thin;
+  }
+
+  .editor-prose .suggestion-markdown-table {
+    width: 100%;
+    min-width: 28rem;
+    border-collapse: collapse;
+    text-align: left;
+    font-size: 0.8rem;
+    line-height: 1.35rem;
+  }
+
+  .editor-prose .suggestion-markdown-cell {
+    border-right: 1px solid var(--border);
+    padding: 0.4rem 0.6rem;
+    vertical-align: top;
+  }
+
+  .editor-prose .suggestion-markdown-cell:last-child {
+    border-right: 0;
+  }
+
+  .editor-prose .suggestion-markdown-header-cell {
+    background: var(--surface);
+    color: var(--muted-foreground);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .editor-prose .suggestion-block-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.2rem;
+  }
+
+  .editor-prose .suggestion-block-button {
+    display: inline-flex;
+    width: 1.7rem;
+    height: 1.7rem;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: 0.375rem;
+    background: transparent;
+    padding: 0;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    transition:
+      background-color 140ms ease,
+      color 140ms ease,
+      border-color 140ms ease;
+  }
+
+  .editor-prose .suggestion-block-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  .editor-prose .suggestion-block-button:hover {
+    background: var(--background);
+    color: var(--foreground);
+  }
+
+  .editor-prose .suggestion-block-button-accept {
+    background: var(--brand);
+    border-color: color-mix(in oklab, var(--brand) 75%, transparent);
+    color: white;
+  }
+
+  .editor-prose .suggestion-block-button-accept:hover {
+    background: color-mix(in oklab, var(--brand) 88%, black);
+    color: white;
+  }
+
+  .editor-prose .suggestion-block-icon {
+    width: 0.95rem;
+    height: 0.95rem;
+    flex-shrink: 0;
+    stroke-width: 2.2;
+  }
+
+  .editor-prose .suggestion-block-editor,
+  .editor-prose .suggestion-block-refine {
+    display: grid;
+    gap: 0.4rem;
+  }
+
+  .editor-prose .suggestion-block-refine {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    border-top: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
+    padding-top: 0.35rem;
+  }
+
+  .editor-prose .suggestion-block-input,
+  .editor-prose .suggestion-block-textarea {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 0.42rem;
+    background: var(--background);
+    color: var(--foreground);
+    font: inherit;
+    outline: none;
+  }
+
+  .editor-prose .suggestion-block-input {
+    height: 2rem;
+    padding: 0 0.55rem;
+    font-size: 0.8rem;
+  }
+
+  .editor-prose .suggestion-block-textarea {
+    min-height: 8rem;
+    resize: vertical;
+    padding: 0.55rem 0.65rem;
+    font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+    font-size: 0.84rem;
+    line-height: 1.45rem;
+  }
+
+  .editor-prose .suggestion-block-input:focus,
+  .editor-prose .suggestion-block-textarea:focus {
+    border-color: color-mix(in oklab, var(--brand) 52%, var(--border));
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand-subtle) 70%, transparent);
+  }
+
+  .editor-prose .suggestion-block-inline-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.35rem;
+  }
+
+  .editor-prose .suggestion-block-text-button {
+    height: 1.8rem;
+    border: 1px solid transparent;
+    border-radius: 0.4rem;
+    background: transparent;
+    padding: 0 0.55rem;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .editor-prose .suggestion-block-text-button:hover {
+    background: var(--surface);
+    color: var(--foreground);
+  }
+
+  .editor-prose .suggestion-block-text-button-primary {
+    background: var(--brand);
+    color: white;
+  }
+
+  .editor-prose .suggestion-block-status,
+  .editor-prose .suggestion-block-error {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 0.4rem;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.76rem;
+    font-weight: 650;
+    line-height: 1.1;
+  }
+
+  .editor-prose .suggestion-block-status {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    background: color-mix(in oklab, var(--brand-subtle) 64%, transparent);
+    color: var(--brand);
+  }
+
+  .editor-prose .suggestion-block-status-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+
+  .editor-prose .suggestion-block-error {
+    background: color-mix(in oklab, var(--destructive-subtle) 58%, transparent);
+    color: var(--destructive);
+  }
+
+  .editor-prose .suggestion-block-spinner {
+    animation: spin 900ms linear infinite;
+  }
+
+  .suggestion-scroll-pulse {
+    animation: suggestion-scroll-pulse 900ms ease-out;
+  }
+
+  @keyframes suggestion-scroll-pulse {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand) 34%, transparent);
+    }
+
+    45% {
+      box-shadow: 0 0 0 4px color-mix(in oklab, var(--brand) 18%, transparent);
+    }
+
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+    }
+  }
+
+  .editor-document-diff-body {
+    color: var(--foreground);
+    --document-diff-insert-bg: color-mix(in oklab, var(--success-subtle) 50%, transparent);
+    --document-diff-insert-ink: color-mix(in oklab, var(--success) 70%, var(--foreground));
+    --document-diff-insert-line: color-mix(in oklab, var(--success) 54%, transparent);
+    --document-diff-delete-bg: color-mix(in oklab, var(--destructive-subtle) 48%, transparent);
+    --document-diff-delete-ink: color-mix(in oklab, var(--destructive) 72%, var(--foreground));
+    --document-diff-delete-line: color-mix(in oklab, var(--destructive) 52%, transparent);
+  }
+
+  .editor-document-diff-chunk {
+    padding: 0.04rem 0;
+  }
+
+  .editor-document-diff-chunk > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-document-diff-chunk > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-document-diff-layer,
+  .editor-document-diff-replace {
+    position: relative;
+    margin: 0.28rem 0;
+    border-radius: 0.22rem;
+    padding: 0.16rem 0.45rem 0.16rem 0.72rem;
+  }
+
+  .editor-document-diff-layer::before,
+  .editor-document-diff-replace::before {
+    position: absolute;
+    bottom: 0.36rem;
+    left: 0.25rem;
+    top: 0.36rem;
+    width: 2px;
+    border-radius: 999px;
+    content: "";
+  }
+
+  .editor-document-diff-replace {
+    display: grid;
+    gap: 0.1rem;
+  }
+
+  .editor-document-diff-replace::before {
+    background: linear-gradient(
+      to bottom,
+      var(--document-diff-delete-line) 0 48%,
+      transparent 48% 52%,
+      var(--document-diff-insert-line) 52% 100%
+    );
+  }
+
+  .editor-document-diff-replace-inline {
+    background: transparent;
+    padding-bottom: 0;
+    padding-top: 0;
+  }
+
+  .editor-document-diff-replace-structured {
+    background: transparent;
+    padding-right: 0;
+  }
+
+  .editor-document-diff-replace-inline::before {
+    background: color-mix(in oklab, var(--brand) 34%, transparent);
+  }
+
+  .editor-document-diff-insert {
+    background: var(--document-diff-insert-bg);
+    color: var(--document-diff-insert-ink);
+  }
+
+  .editor-document-diff-insert::before {
+    background: var(--document-diff-insert-line);
+  }
+
+  .editor-document-diff-delete {
+    background: var(--document-diff-delete-bg);
+    color: var(--document-diff-delete-ink);
+  }
+
+  .editor-document-diff-delete::before {
+    background: var(--document-diff-delete-line);
+  }
+
+  .editor-document-diff-layer > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-document-diff-layer > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-document-diff-delete :where(p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, span, strong, em, code) {
+    color: inherit;
+    text-decoration: line-through;
+    text-decoration-thickness: 0.08em;
+  }
+
+  .editor-document-diff-delete a {
+    color: inherit;
+    text-decoration-color: currentcolor;
+  }
+
+  .editor-document-diff-insert :where(p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, span, strong, em, code, a) {
+    color: inherit;
+  }
+
+  .editor-document-diff-inline-row {
+    overflow-wrap: anywhere;
+  }
+
+  .editor-document-diff-token {
+    white-space: pre-wrap;
+  }
+
+  .editor-document-diff-token-insert,
+  .editor-document-diff-token-delete {
+    border-radius: 0.18rem;
+    padding: 0.02rem 0.1rem;
+    text-decoration-thickness: 0.08em;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
+  .editor-document-diff-token-insert {
+    background: var(--document-diff-insert-bg);
+    color: var(--document-diff-insert-ink);
+    text-decoration: none;
+  }
+
+  .editor-document-diff-token-delete {
+    background: var(--document-diff-delete-bg);
+    color: var(--document-diff-delete-ink);
+    text-decoration: line-through;
+  }
+
+  .editor-document-diff-inline-link {
+    color: var(--brand);
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+  }
+
+  .editor-document-diff-inline-code {
+    border-radius: 0.22rem;
+    background: color-mix(in oklab, var(--muted) 72%, transparent);
+    padding: 0.05rem 0.24rem;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+    font-size: 0.86em;
+  }
+
+  @media (max-width: 640px) {
+    .editor-document-diff-layer,
+    .editor-document-diff-replace {
+      padding-left: 0.58rem;
+      padding-right: 0.25rem;
+    }
+
+    .editor-document-diff-layer::before,
+    .editor-document-diff-replace::before {
+      left: 0.12rem;
+    }
+
+    .editor-document-diff-inline-row {
+      overflow-wrap: anywhere;
+    }
+  }
+
+  .editor-prose .suggestion-active {
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 45%, transparent);
+    border-radius: 0.2rem;
+  }
+
+  .editor-prose .ProseMirror-selectednode {
+    outline: 2px solid var(--ring);
+  }
+
+  .inqtrix-thinking-mark {
+    position: relative;
+    display: inline-flex;
+    width: 4.75rem;
+    height: 1.125rem;
+    align-items: center;
+    justify-content: space-between;
+    isolation: isolate;
+  }
+
+  .inqtrix-thinking-mark::before {
+    position: absolute;
+    right: 0.25rem;
+    left: 0.25rem;
+    top: 50%;
+    height: 2px;
+    border-radius: 9999px;
+    content: "";
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in oklab, var(--brand) 22%, transparent),
+      color-mix(in oklab, var(--brand) 46%, transparent),
+      color-mix(in oklab, var(--brand) 22%, transparent),
+      transparent
+    );
+    opacity: 0.68;
+    transform: translateY(-50%);
+  }
+
+  .inqtrix-thinking-mark::after {
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 1.125rem;
+    height: 1.125rem;
+    border-radius: 9999px;
+    content: "";
+    background:
+      radial-gradient(circle, color-mix(in oklab, var(--brand) 78%, white) 0 13%, var(--brand) 14% 27%, transparent 28%),
+      radial-gradient(circle, color-mix(in oklab, var(--brand) 34%, transparent), transparent 70%);
+    opacity: 0.9;
+    transform: translateY(-50%);
+    filter: drop-shadow(0 0 10px var(--brand-shadow));
+    animation: inqtrix-thinking-sweep 1.9s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+  }
+
+  .inqtrix-thinking-node {
+    position: relative;
+    z-index: 1;
+    width: 0.3125rem;
+    height: 0.3125rem;
+    border-radius: 9999px;
+    background: var(--brand);
+    box-shadow:
+      0 0 0 3px color-mix(in oklab, var(--brand-subtle) 68%, transparent),
+      0 0 10px color-mix(in oklab, var(--brand) 24%, transparent);
+    opacity: 0.5;
+    animation: inqtrix-thinking-node 1.9s ease-in-out infinite;
+  }
+
+  .inqtrix-thinking-node:nth-child(2) {
+    animation-delay: 150ms;
+  }
+
+  .inqtrix-thinking-node:nth-child(3) {
+    animation-delay: 300ms;
+  }
+
+  .inqtrix-thinking-node:nth-child(4) {
+    animation-delay: 450ms;
+  }
+
+  .inqtrix-thinking-mark-static::after,
+  .inqtrix-thinking-mark-static .inqtrix-thinking-node {
+    animation: none;
+  }
+
+  .inqtrix-active-node-halo {
+    background:
+      radial-gradient(circle, color-mix(in oklab, var(--brand) 18%, transparent) 0 34%, transparent 72%),
+      radial-gradient(circle, color-mix(in oklab, var(--brand-subtle) 62%, transparent), transparent 76%);
+    filter: blur(0.35rem);
+    opacity: 0.46;
+    transform-origin: center;
+    animation: inqtrix-active-node-halo 2.75s cubic-bezier(0.42, 0, 0.2, 1) infinite;
+    will-change: opacity, transform;
+  }
+
+  .inqtrix-active-node-shell {
+    animation: inqtrix-active-node-shell 2.75s ease-in-out infinite;
+    will-change: filter;
+  }
+
+  .inqtrix-active-node-ring {
+    border: 1.5px solid color-mix(in oklab, var(--brand) 42%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--brand-foreground) 38%, transparent),
+      0 0 14px color-mix(in oklab, var(--brand) 24%, transparent);
+    opacity: 0;
+    transform-origin: center;
+    animation: inqtrix-active-node-ring 2.75s cubic-bezier(0.42, 0, 0.2, 1) infinite;
+    will-change: opacity, transform;
+  }
+
+  .inqtrix-active-node-ring-delayed {
+    border-color: color-mix(in oklab, var(--brand) 28%, transparent);
+    animation-delay: 1.28s;
+  }
+
+  .inqtrix-active-node-core {
+    box-shadow:
+      0 0 0 2px color-mix(in oklab, var(--brand-foreground) 68%, transparent),
+      0 0 10px color-mix(in oklab, var(--brand) 34%, transparent);
+    transform-origin: center;
+    animation: inqtrix-active-node-core 2.75s ease-in-out infinite;
+    will-change: transform;
+  }
+
+  .inqtrix-segment-breathe {
+    animation: inqtrix-segment-breathe 2s ease-in-out infinite;
+    will-change: opacity;
+  }
+
+  .inqtrix-running-dot {
+    transform-origin: center;
+    animation: inqtrix-running-dot 2s ease-in-out infinite;
+    will-change: opacity, transform;
+  }
+
+  .inqtrix-metric-flash {
+    animation: inqtrix-metric-flash 600ms ease-out;
+  }
+
+  /* Agent pulse track: a light packet drifts along the connector between
+   * the last completed station and the active one — the Agent Desk's
+   * "working" signature. Loop = working signal only; the base color IS
+   * the visible reduced-motion end-state. */
+  .inqtrix-agent-flow {
+    background-color: color-mix(in oklab, var(--brand) 22%, transparent);
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in oklab, var(--brand) 72%, transparent) 50%,
+      transparent 100%
+    );
+    background-repeat: no-repeat;
+    background-size: 45% 100%;
+    animation: inqtrix-agent-flow 2.4s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+    will-change: background-position;
+  }
+
+  .inqtrix-rag-island::before {
+    animation: inqtrix-rag-island-sheen 900ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+    background:
+      linear-gradient(
+        112deg,
+        transparent 0%,
+        transparent 38%,
+        color-mix(in oklab, var(--brand) 12%, transparent) 50%,
+        color-mix(in oklab, var(--foreground) 5%, transparent) 54%,
+        transparent 68%,
+        transparent 100%
+      );
+    content: "";
+    inset: 0;
+    opacity: 0.46;
+    pointer-events: none;
+    position: absolute;
+    transform: translateX(-112%);
+  }
+
+  .inqtrix-step-viewport-shell {
+    position: relative;
+  }
+
+  .inqtrix-step-viewport-shell-overflowing::before,
+  .inqtrix-step-viewport-shell-overflowing::after {
+    content: "";
+    left: 0;
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+    z-index: 20;
+  }
+
+  .inqtrix-step-viewport-shell-overflowing::before {
+    backdrop-filter: blur(2px);
+    background: linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--card) 86%, transparent),
+      color-mix(in oklab, var(--card) 42%, transparent) 56%,
+      transparent
+    );
+    height: 2.1rem;
+    top: 0;
+  }
+
+  .inqtrix-step-viewport-shell-overflowing::after {
+    background: linear-gradient(
+      to top,
+      color-mix(in oklab, var(--card) 72%, transparent),
+      transparent
+    );
+    bottom: 0;
+    height: 1.2rem;
+  }
+
+  .inqtrix-step-viewport {
+    max-height: min(18rem, 38vh);
+    overflow: hidden;
+    will-change: height;
+  }
+
+  .inqtrix-step-viewport-shell-overflowing .inqtrix-step-viewport {
+    mask-image: linear-gradient(
+      to bottom,
+      transparent,
+      black 1.45rem,
+      black calc(100% - 1.1rem),
+      transparent
+    );
+  }
+
+  .inqtrix-step-list-live {
+    --inqtrix-step-marker-col: 1.5rem;
+    --inqtrix-step-axis: calc(var(--inqtrix-step-marker-col) / 2);
+    --inqtrix-step-safe-bottom: 1.75rem;
+    list-style: none;
+    will-change: transform;
+  }
+
+  .inqtrix-step-tail {
+    height: var(--inqtrix-step-safe-bottom);
+  }
+
+  .inqtrix-step-row-live {
+    grid-template-columns: var(--inqtrix-step-marker-col) minmax(0, 1fr);
+  }
+
+  .inqtrix-step-spine {
+    background: color-mix(in oklab, var(--border) 82%, transparent);
+    bottom: calc(var(--inqtrix-step-safe-bottom) + 0.85rem);
+    left: var(--inqtrix-step-axis);
+    position: absolute;
+    top: 0.85rem;
+    transform: translateX(-0.5px);
+    width: 1px;
+  }
+
+  .inqtrix-step-running-shell {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--brand) 8%, transparent),
+      0 0 14px color-mix(in oklab, var(--brand) 13%, transparent);
+  }
+
+  .inqtrix-step-complete {
+    background: color-mix(in oklab, var(--brand-subtle) 78%, var(--card));
+    border-color: color-mix(in oklab, var(--brand) 42%, transparent);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in oklab, var(--brand) 8%, transparent),
+      0 0 10px color-mix(in oklab, var(--brand) 8%, transparent);
+    color: var(--brand);
+    position: relative;
+  }
+
+  .inqtrix-step-complete-motion {
+    animation: inqtrix-step-complete-shell 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    position: relative;
+  }
+
+  .inqtrix-step-complete-motion::before {
+    animation: inqtrix-step-complete-glint 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    border-radius: inherit;
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand) 28%, transparent);
+    content: "";
+    inset: -0.125rem;
+    opacity: 0;
+    position: absolute;
+  }
+
+  .inqtrix-step-complete-check {
+    color: var(--brand);
+  }
+
+  .inqtrix-step-complete-check-motion path {
+    animation: inqtrix-step-check-draw 380ms cubic-bezier(0.22, 1, 0.36, 1) 100ms both;
+    stroke-dasharray: 22;
+    stroke-dashoffset: 22;
+  }
+
+  .inqtrix-knowledge-answer-entry {
+    animation: inqtrix-knowledge-answer-entry 920ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    border-radius: 0.5rem;
+    position: relative;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .inqtrix-thinking-mark::after,
+    .inqtrix-thinking-node,
+    .inqtrix-active-node-shell,
+    .inqtrix-active-node-halo,
+    .inqtrix-active-node-ring,
+    .inqtrix-active-node-core,
+    .inqtrix-segment-breathe,
+    .inqtrix-running-dot,
+    .inqtrix-metric-flash,
+    .inqtrix-agent-flow,
+    .inqtrix-step-complete-motion,
+    .inqtrix-step-complete-motion::before,
+    .inqtrix-step-complete-check-motion path,
+    .inqtrix-knowledge-answer-entry,
+    .inqtrix-rag-island::before {
+      animation: none;
+    }
+
+    .inqtrix-step-complete-check-motion path {
+      stroke-dashoffset: 0;
+    }
+
+    .inqtrix-segment-breathe {
+      opacity: 1;
+    }
+  }
+}
+
+@keyframes inqtrix-thinking-sweep {
+  0% {
+    opacity: 0;
+    transform: translate(-0.125rem, -50%) scale(0.68);
+  }
+
+  18% {
+    opacity: 0.92;
+  }
+
+  82% {
+    opacity: 0.92;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(3.75rem, -50%) scale(0.78);
+  }
+}
+
+@keyframes inqtrix-thinking-node {
+  0%,
+  100% {
+    opacity: 0.46;
+    transform: scale(0.86);
+  }
+
+  42%,
+  58% {
+    opacity: 1;
+    transform: scale(1.24);
+  }
+}
+
+@keyframes inqtrix-active-node-halo {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: scale(0.92);
+  }
+
+  46% {
+    opacity: 0.58;
+    transform: scale(1.06);
+  }
+
+  72% {
+    opacity: 0.38;
+    transform: scale(1.01);
+  }
+}
+
+@keyframes inqtrix-active-node-shell {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 1px color-mix(in oklab, var(--brand) 10%, transparent));
+  }
+
+  46% {
+    filter: drop-shadow(0 0 7px color-mix(in oklab, var(--brand) 24%, transparent));
+  }
+}
+
+@keyframes inqtrix-active-node-ring {
+  0% {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+
+  14% {
+    opacity: 0.46;
+  }
+
+  58% {
+    opacity: 0.14;
+  }
+
+  82% {
+    opacity: 0;
+    transform: scale(1.85);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.85);
+  }
+}
+
+@keyframes inqtrix-active-node-core {
+  0%,
+  100% {
+    transform: scale(0.96);
+  }
+
+  46% {
+    transform: scale(1.08);
+  }
+}
+
+/* Active phase segment: calm opacity breathe (no blink, no slide). */
+@keyframes inqtrix-segment-breathe {
+  0%,
+  100% {
+    opacity: 0.42;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Status dots (active phase, live indicator): soft breathing pulse. */
+@keyframes inqtrix-running-dot {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Metric value flash on count-up; re-mount via key={value} replays it. */
+@keyframes inqtrix-metric-flash {
+  0% {
+    color: var(--brand);
+  }
+
+  100% {
+    color: var(--foreground);
+  }
+}
+
+/* Agent pulse track: one light packet travels the connector, rests, repeats. */
+@keyframes inqtrix-agent-flow {
+  0% {
+    background-position: -45% 0;
+  }
+
+  70%,
+  100% {
+    background-position: 145% 0;
+  }
+}
+
+@keyframes inqtrix-rag-island-sheen {
+  0%,
+  36% {
+    transform: translateX(-112%);
+  }
+
+  66%,
+  100% {
+    transform: translateX(112%);
+  }
+}
+
+@keyframes inqtrix-step-complete-shell {
+  0% {
+    border-color: color-mix(in oklab, var(--brand) 18%, transparent);
+    transform: scale(0.82);
+  }
+
+  46% {
+    border-color: color-mix(in oklab, var(--brand) 46%, transparent);
+    color: var(--brand);
+    transform: scale(1.05);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes inqtrix-step-complete-glint {
+  0%,
+  28% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+
+  52% {
+    opacity: 0.72;
+    transform: scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.28);
+  }
+}
+
+@keyframes inqtrix-step-check-draw {
+  0% {
+    opacity: 0;
+    stroke-dashoffset: 22;
+  }
+
+  34% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes inqtrix-knowledge-answer-entry {
+  0% {
+    background: color-mix(in oklab, var(--brand-subtle) 58%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--brand) 22%, transparent),
+      0 18px 34px -28px var(--brand);
+  }
+
+  42% {
+    background: color-mix(in oklab, var(--brand-subtle) 34%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--brand) 14%, transparent),
+      0 16px 30px -28px var(--brand);
+  }
+
+  100% {
+    background: transparent;
+    box-shadow:
+      0 0 0 0 color-mix(in oklab, var(--brand) 0%, transparent),
+      0 0 0 0 color-mix(in oklab, var(--brand) 0%, transparent);
+  }
+}
+
+/* Keep markdown rhythm shared across Tiptap and rendered markdown surfaces. */
+:where(.editor-prose, .report-markdown, .chat-markdown) > *:first-child {
+  margin-top: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) > *:last-child {
+  margin-bottom: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h1,
+:where(.editor-prose, .report-markdown, .chat-markdown) h2 {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h1 {
+  margin: 1.5rem 0 0.75rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h2 {
+  margin: 1.35rem 0 0.65rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h3 {
+  margin: 1.1rem 0 0.5rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h4 {
+  margin: 1rem 0 0.4rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h5,
+:where(.editor-prose, .report-markdown, .chat-markdown) h6 {
+  margin: 0.85rem 0 0.35rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) hr {
+  margin: 1.1rem 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) hr + :where(h1, h2, h3, h4, h5, h6) {
+  margin-top: 1rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) p {
+  margin: 0.75rem 0;
+}
+
+:where(.editor-prose, .report-markdown) p {
+  line-height: 1.6;
+}
+
+/* Chat, Agent Canvas and its embedded editor share one reading scale.
+   The standalone editor and Research reports retain their document scale. */
+.editor-prose.chat-markdown { @apply text-sm leading-snug; }
+.chat-markdown h1 { @apply text-lg leading-7; }
+.chat-markdown h2 { @apply text-base leading-7; }
+.chat-markdown h3 { @apply text-[15px] leading-6; }
+.chat-markdown h4 { @apply text-sm leading-6; }
+.chat-markdown h5,
+.chat-markdown h6 { @apply text-xs; }
+.chat-markdown p { line-height: 1.42; }
+.chat-markdown li p { line-height: inherit; }
+.chat-markdown table { @apply text-xs; line-height: 1.4; }
+.chat-markdown :where(th, td) p { line-height: inherit; }
+.editor-prose.chat-markdown th { text-transform: none; letter-spacing: normal; }
+
+.editor-math-content { display: inline-flex; flex-direction: column; max-width: 100%; }
+.editor-math-content-block { display: flex; width: 100%; }
+.editor-math-preview { cursor: pointer; text-align: inherit; }
+.editor-math-preview:disabled { cursor: default; }
+.editor-math-preview:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.editor-math-source {
+  @apply flex min-w-0 items-start gap-1;
+}
+.editor-math-source textarea { flex: 1; min-width: 0; }
+
+:where(.editor-prose, .report-markdown, .chat-markdown) ul,
+:where(.editor-prose, .report-markdown, .chat-markdown) ol {
+  margin: 0.75rem 0;
+  padding-left: 1.15rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) li {
+  margin: 0.15rem 0;
+  padding-left: 0.15rem;
+  line-height: 1.6;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) li p {
+  margin: 0;
+  line-height: inherit;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) li p + p {
+  margin-top: 0.35rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) li > :where(ul, ol) {
+  margin: 0.35rem 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) blockquote {
+  margin: 1rem 0;
+  padding: 0.6rem 1rem;
+  line-height: 1.6;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) blockquote > *:first-child {
+  margin-top: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) blockquote > *:last-child {
+  margin-bottom: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) blockquote :where(p, ul, ol) {
+  margin: 0.35rem 0;
+  line-height: inherit;
+}
+
+:where(.editor-prose) :where(.tableWrapper, div:has(> table)),
+:where(.report-markdown, .chat-markdown) .inqtrix-markdown-table {
+  margin: 1rem 0;
+  border-radius: 0.5rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) table {
+  margin: 1rem 0;
+  line-height: 1.4;
+}
+
+:where(.editor-prose) :where(.tableWrapper, div:has(> table)) > table,
+:where(.report-markdown, .chat-markdown) .inqtrix-markdown-table table {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.inqtrix-markdown-block-actions {
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.inqtrix-markdown-block:hover > .inqtrix-markdown-block-actions,
+.inqtrix-markdown-block:focus-within > .inqtrix-markdown-block-actions {
+  pointer-events: auto;
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .inqtrix-markdown-block-actions {
+    pointer-events: auto;
+    opacity: 1;
+  }
+}
+
+@media print {
+  .inqtrix-markdown-block-actions {
+    display: none;
+  }
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) {
+  padding: 0.45rem 0.75rem;
+  vertical-align: top;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) p {
+  margin: 0;
+  line-height: 1.4;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) p + p {
+  margin-top: 0.45rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) :where(ul, ol) {
+  margin: 0.25rem 0;
+  padding-left: 1rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) li {
+  margin: 0.1rem 0;
+  line-height: 1.4;
+}
+
+@media (forced-colors: active) {
+  body {
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  * {
+    border-color: CanvasText;
+  }
+
+  :focus-visible {
+    outline: 2px solid Highlight !important;
+    outline-offset: 2px;
+  }
+
+  a,
+  .chat-markdown a,
+  .report-markdown a {
+    color: LinkText;
+  }
+
+  button,
+  input,
+  textarea,
+  [role="button"],
+  [role="menuitem"],
+  [role="tab"] {
+    border-color: ButtonText;
+  }
+}
+
+/* Pending canvas-comment anchors stay visibly highlighted until
+   they travel with the next submission. Painted via the CSS Custom Highlight API — browsers
+   without it simply show no highlight (visual enhancement only). */
+::highlight(inqtrix-canvas-comment) {
+  background-color: color-mix(in srgb, var(--brand) 26%, transparent);
+}
+
+/* The entry currently being edited stands out from its pending
+   siblings. */
+::highlight(inqtrix-canvas-comment-active) {
+  background-color: color-mix(in srgb, var(--brand) 45%, transparent);
+}
+
+/* The agent composer's inline surface. The pills are atomic nodes INSIDE the
+   prose, so this is a real editor, not a textarea — placeholder and growth
+   therefore live here instead of on an element attribute. */
+.agent-inline-input-shell .agent-inline-input {
+  max-height: 12rem;
+  min-height: 2.5rem;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+.agent-inline-input-shell .agent-inline-input p {
+  margin: 0;
+}

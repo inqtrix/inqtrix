@@ -1,0 +1,10 @@
+{
+  "_inqtrix_version": "0.2.0",
+  "_context": "Tuning-tier baseline over 18 retrieval queries; 8 stratified queries form the separate golden_dora_holdout tier. Metrics come from subset aggregation of the same captured qdrant hybrid + Cohere-rerank-v4.0-pro + contextual-retrieval result as the holdout tier, so both tiers share one measurement. The single miss is d20, the hard vocabulary-mismatch paraphrase ('beauftragte Hacker simulieren echten Angriff' for 'bedrohungsorientierte Penetrationstests', Art. 26) outside top-5: the measured target of the vocabulary bridge (gruendlich/tief profiles). multi_complete is 1.0 because all aggregation queries resolve.",
+  "recall_at_1": 0.9444,
+  "recall_at_3": 0.9444,
+  "recall_at_5": 0.9444,
+  "mrr": 0.9444,
+  "ndcg_at_5": 0.9317,
+  "multi_complete_at_5": 1.0
+}

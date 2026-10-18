@@ -1,0 +1,94 @@
+# Optional second measurement override: replace real providers with a stand-in.
+#
+# Apply ON TOP of compose.loadtest.yaml, never instead of it. Measuring against
+# REAL providers is the primary method and carries no fidelity question. This
+# override exists for the repeated sweeps — worker concurrency, executor width,
+# replica count — where each arm would otherwise re-pay the full provider bill
+# while the variable under test has nothing to do with the provider.
+#
+# It is only trustworthy once a real run has been measured alongside it and the
+# two agree on call fan-out and run wall clock. Treat a number produced here
+# and never anchored against a real run as a hypothesis, not a result.
+#
+# See tests/load/mock-providers/README.md for how the stand-in is calibrated
+# and what it deliberately does not reproduce.
+#
+# Usage:
+#
+#   INQTRIX_WEB_PORT=8081 \
+#   podman compose -f deploy/compose/compose.stack.yaml \
+#     -f deploy/compose/compose.loadtest.yaml \
+#     -f deploy/compose/compose.loadtest-providers.yaml \
+#     --env-file <secrets-file> --env-file <config-file> \
+#     --profile knowledge --profile s3 --profile workers --profile collaboration \
+#     up -d --build
+
+services:
+  mock-providers:
+    # Reuses the API image: FastAPI and uvicorn are already core dependencies,
+    # so the stand-in needs no image of its own. The source is mounted rather
+    # than copied in, so recalibrating does not require a rebuild.
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    command: ["python", "/opt/loadtest/mock_providers.py"]
+    environment:
+      INQTRIX_MOCK_PORT: "9300"
+      INQTRIX_MOCK_PROFILE: /opt/loadtest/profiles/azure-calibrated.json
+      INQTRIX_MOCK_CORPUS: /opt/loadtest/corpus
+      # Must equal the embedding width of the collections under measurement;
+      # a mismatch is rejected before a run produces any number.
+      INQTRIX_MOCK_EMBEDDING_DIM: ${INQTRIX_MOCK_EMBEDDING_DIM:-3072}
+      INQTRIX_MOCK_SEARCH_RESULTS: ${INQTRIX_MOCK_SEARCH_RESULTS:-8}
+      INQTRIX_MOCK_SEED: ${INQTRIX_MOCK_SEED:-1}
+      # 1.0 reproduces real provider latency. Lower it only to rehearse the
+      # harness -- it makes wall clock incomparable and unusable as a result.
+      INQTRIX_MOCK_LATENCY_SCALE: ${INQTRIX_MOCK_LATENCY_SCALE:-1.0}
+      # Holds run depth constant when two configurations are compared. Unset,
+      # replies follow the captured distribution -- which includes a classify
+      # answer that decides against searching and collapses the run.
+      INQTRIX_MOCK_SELECT: ${INQTRIX_MOCK_SELECT:-}
+    volumes:
+      - ../../tests/load/mock-providers:/opt/loadtest:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:9300/healthz', timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    depends_on:
+      mock-providers:
+        condition: service_healthy
+    environment: &stand_in_providers
+      # Chat completions. The stand-in ignores the key; the application still
+      # requires one to be present.
+      AZURE_OPENAI_ENDPOINT: http://mock-providers:9300/azure
+      AZURE_OPENAI_API_KEY: loadtest-placeholder
+      INQTRIX_LLM_PROVIDER: azure
+      # Entra is only chosen when the key is empty; clearing the service
+      # principal keeps the key path selected regardless of the env files.
+      AZURE_TENANT_ID: ""
+      AZURE_CLIENT_ID: ""
+      AZURE_CLIENT_SECRET: ""
+      # Web search. No /v1 here: the client appends /v1/responses to the base.
+      INQTRIX_SEARCH_PROVIDER: perplexity
+      PERPLEXITY_BASE_URL: http://mock-providers:9300/perplexity
+      PERPLEXITY_API_KEY: loadtest-placeholder
+      # Embeddings.
+      INQTRIX_EMBEDDING_PROVIDER: azure
+      INQTRIX_EMBEDDING_AZURE_ENDPOINT: http://mock-providers:9300/azure-embeddings
+      INQTRIX_EMBEDDING_AZURE_API_KEY: loadtest-placeholder
+
+  worker:
+    depends_on:
+      mock-providers:
+        condition: service_healthy
+    environment:
+      <<: *stand_in_providers

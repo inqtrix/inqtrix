@@ -1,0 +1,26 @@
+# In-process override: run the API without the queue broker. The paired
+# stack env may pin INQTRIX_QUEUE_BACKEND=valkey for worker deployments;
+# merely omitting `--profile workers` would keep that value and leave the
+# API enqueueing into a broker that never starts (accepted runs then sit
+# queued with nobody consuming them). This override restores the
+# in-process execution mode of a worker-less deployment.
+#
+# Usage (note: NO `--profile workers`):
+#   podman compose -f deploy/compose/compose.stack.yaml \
+#     -f deploy/compose/compose.noqueue.yaml \
+#     --env-file <secrets-file> --env-file <config-file> \
+#     --profile knowledge --profile s3 --profile collaboration \
+#     up -d --build
+#
+# Notes:
+# - Optional features with their own Valkey dependency (editor guest-link
+#   rate limiting) are independent of the queue backend and still require
+#   a reachable INQTRIX_VALKEY_URL when enabled.
+name: inqtrix
+
+services:
+  api:
+    environment:
+      # `environment:` wins over `env_file:` inside the container, so this
+      # single key flips the API to in-process run execution.
+      INQTRIX_QUEUE_BACKEND: memory

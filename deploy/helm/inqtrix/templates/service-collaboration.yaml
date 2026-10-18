@@ -1,0 +1,17 @@
+{{- if .Values.collaboration.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-collaboration
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "collaboration") | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.service.collaborationPort }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "inqtrix.selectorLabels" (dict "root" . "component" "collaboration") | nindent 4 }}
+{{- end }}
