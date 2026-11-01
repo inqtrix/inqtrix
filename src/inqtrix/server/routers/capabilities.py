@@ -162,6 +162,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         web_source_available = "web.search.instant" in capability_ids
         knowledge_source_available = "knowledge.search" in capability_ids
         collaboration_service = container.editor_collaboration_service
+        offered_autonomy_modes = (
+            ("strict", "balanced", "autonomous")
+            if settings.agent_platform.allow_autonomous
+            else ("strict", "balanced")
+        )
         sharing_settings = getattr(settings, "sharing", None)
         guest_link_settings = getattr(settings, "editor_guest_links", None)
         sharing_available = bool(container.share_service is not None)
@@ -415,7 +420,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             # The desk reads workspace-agent limits and vocabulary from
             # this contract instead of hardcoding them.
             "agent": {
-                "autonomy_modes": ["strict", "balanced", "autonomous"],
+                "autonomy_modes": list(offered_autonomy_modes),
                 "default_autonomy": settings.agent_platform.default_autonomy,
                 # The effective desk default publishes the configured
                 # kernel default only once the
@@ -433,8 +438,12 @@ def build_router(container: "AppContainer") -> APIRouter:
                 # UNCHANGED wire vocabulary above. advanced_autonomy=True
                 # republishes the legacy three-way control instead.
                 "mode_presets": [
-                    {"id": "standard", "autonomy": "balanced"},
-                    {"id": "auto", "autonomy": "autonomous"},
+                    preset
+                    for preset in (
+                        {"id": "standard", "autonomy": "balanced"},
+                        {"id": "auto", "autonomy": "autonomous"},
+                    )
+                    if preset["autonomy"] in offered_autonomy_modes
                 ],
                 # Thoroughness is orthogonal to the permission mode; the
                 # composer renders the toggle only when the
@@ -538,7 +547,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 # runtime or promise what the runtime does not do.
                 "permission_modes": {
                     mode: _permission_mode_entry(mode)
-                    for mode in ("strict", "balanced", "autonomous")
+                    for mode in offered_autonomy_modes
                 },
                 # Only skill limits are exposed here. The skill list itself
                 # comes from the authenticated GET /v1/skills — this

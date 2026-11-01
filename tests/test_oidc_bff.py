@@ -13,6 +13,7 @@ rejected, API CSRF enforced on unsafe methods, group allowlist enforced.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -33,6 +34,7 @@ from inqtrix.auth.lifecycle import (
     MemoryUserLifecycleTransaction,
     UserLifecycleService,
 )
+from inqtrix.auth.mapping import ClaimMappingConfig
 from inqtrix.auth.oidc import (
     OidcAuthProvider,
     OidcClient,
@@ -390,6 +392,118 @@ def test_explicit_email_verified_skip_accepts_unverified_claim(
     assert "email_verified check is explicitly disabled" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("registration", "domains", "invite_sentence", "domain_sentence"),
+    [
+        ("invite", frozenset(), True, False),
+        ("open", frozenset(), False, False),
+        ("open", frozenset({"example.com"}), False, True),
+    ],
+    ids=["invite", "open", "domains"],
+)
+def test_the_switch_warning_names_its_consequences_in_one_line(
+    registration, domains, invite_sentence, domain_sentence, caplog
+):
+    from inqtrix.auth.identity_memory import MemoryIdentityStore
+    from inqtrix.auth.invitations import MemoryInvitationStore, RegistrationGate
+
+    users = MemoryUserDirectory()
+    gate = RegistrationGate(
+        invitations=MemoryInvitationStore(MemoryIdentityStore()),
+        users=users,
+        registration=registration,
+    )
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        make_provider(
+            FakeIdp(),
+            users=users,
+            skip_email_verified=True,
+            registration_gate=gate,
+            claim_mapping=ClaimMappingConfig(allowed_domains=domains),
+        )
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "email_verified check is explicitly disabled" in record.getMessage()
+    ]
+    assert len(lines) == 1
+    assert ("INQTRIX_REGISTRATION=invite then admits" in lines[0]) is invite_sentence
+    assert ("INQTRIX_OIDC_ALLOWED_DOMAINS then checks" in lines[0]) is domain_sentence
+
+
+def test_the_oidc_provider_maps_claims_from_the_shared_settings_builder() -> None:
+    from inqtrix.auth.api_key import build_oidc_provider, claim_mapping_from_settings
+    from inqtrix.settings import AuthSettings, Settings
+
+    settings = Settings(
+        auth=AuthSettings(
+            mode="oidc",
+            session_secret="s" * 32,
+            pat_pepper="p" * 32,
+            pseudonym_pepper="q" * 32,
+            oidc_discovery_url=f"{ISSUER}/.well-known/openid-configuration",
+            oidc_client_id=CLIENT_ID,
+            oidc_client_secret="secret",
+            oidc_redirect_url=REDIRECT,
+            oidc_allowed_domains="Corp.Example",
+            oidc_email_claim="upn",
+        )
+    )
+
+    provider = build_oidc_provider(settings)
+
+    assert provider.claim_mapping == claim_mapping_from_settings(settings.auth)
+    assert provider.claim_mapping.allowed_domains == frozenset({"corp.example"})
+
+
+def _oidc_settings(**overrides):
+    from inqtrix.settings import AuthSettings, Settings
+
+    values = {
+        "mode": "oidc",
+        "session_secret": "s" * 32,
+        "pat_pepper": "p" * 32,
+        "pseudonym_pepper": "q" * 32,
+        "oidc_issuer": ISSUER,
+        "oidc_client_id": CLIENT_ID,
+        "oidc_client_secret": "secret",
+        "oidc_redirect_url": REDIRECT,
+        **overrides,
+    }
+    return Settings(auth=AuthSettings(**values))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "variable"),
+    [
+        ({"oidc_issuer": "http://idp.example/dex"}, "INQTRIX_OIDC_ISSUER"),
+        (
+            {"oidc_discovery_url": "http://idp.example/dex/.well-known/openid-configuration"},
+            "INQTRIX_OIDC_DISCOVERY_URL",
+        ),
+    ],
+    ids=["issuer", "discovery"],
+)
+def test_signing_keys_without_tls_warn_at_build(overrides, variable, caplog) -> None:
+    # The keys that prove every sign-in come through these addresses.
+    from inqtrix.auth.api_key import build_oidc_provider
+
+    with caplog.at_level(logging.WARNING, logger="inqtrix.auth.api_key"):
+        build_oidc_provider(_oidc_settings(**overrides))
+
+    assert f"{variable} does not use https" in caplog.text
+
+
+def test_signing_keys_with_tls_build_without_that_warning(caplog) -> None:
+    from inqtrix.auth.api_key import build_oidc_provider
+
+    with caplog.at_level(logging.WARNING, logger="inqtrix.auth.api_key"):
+        build_oidc_provider(_oidc_settings())
+
+    assert "does not use https" not in caplog.text
+
+
 def test_replayed_state_is_rejected():
     idp = FakeIdp()
     provider, _users = make_provider(idp)
@@ -432,7 +546,7 @@ def test_callback_without_flow_cookie_is_login_csrf():
 def test_group_allowlist_gates_logins():
     idp = FakeIdp()
     provider, _users = make_provider(
-        idp, allowed_groups=frozenset({"platform-admins"})
+        idp, claim_mapping=ClaimMappingConfig(allowed_groups=frozenset({"platform-admins"}))
     )
     client = make_app(provider)
     callback = run_login(client, idp)
@@ -443,7 +557,7 @@ def test_group_allowlist_gates_logins():
 def test_email_domain_allowlist_gates_logins():
     idp = FakeIdp()
     provider, _users = make_provider(
-        idp, allowed_domains=frozenset({"corp.example"})
+        idp, claim_mapping=ClaimMappingConfig(allowed_domains=frozenset({"corp.example"}))
     )
     client = make_app(provider)
     # The default token email is alice@example.com, not in the allowlist.
@@ -456,7 +570,7 @@ def test_admin_role_claim_grants_instance_admin():
     idp = FakeIdp()
     provider, users = make_provider(
         idp,
-        admin_roles=frozenset({"inqtrix-admin"}),
+        claim_mapping=ClaimMappingConfig(admin_roles=frozenset({"inqtrix-admin"})),
         userinfo_fallback=False,
     )
     client = make_app(provider)
@@ -493,7 +607,7 @@ def test_roles_claim_fetches_userinfo_when_elevation_configured():
     # DOES pull userinfo so the elevation decision sees the roles.
     idp = FakeIdp()
     provider, _users = make_provider(
-        idp, admin_roles=frozenset({"inqtrix-admin"})
+        idp, claim_mapping=ClaimMappingConfig(admin_roles=frozenset({"inqtrix-admin"}))
     )
     client = make_app(provider)
     run_login(client, idp)
@@ -543,6 +657,42 @@ def test_token_endpoint_failure_is_a_visible_error():
     assert "Token endpoint returned status 500" in callback.json()["error"]["message"]
 
 
+def test_a_login_without_a_name_claim_keeps_the_stored_name():
+    """A token without a username claim leaves a stored name in place; the
+    fallback to the email fills only an empty name (login provisioning)."""
+    idp = FakeIdp()
+    provider, users = make_provider(idp)
+    asyncio.run(
+        users.record_login(
+            tenant_id="default",
+            issuer=ISSUER,
+            subject="user-1234",
+            email="alice@example.com",
+            email_verified=True,
+            display_name="Alice Example",
+        )
+    )
+    idp.omit_claims.add("preferred_username")
+    client = make_app(provider)
+
+    assert run_login(client, idp).status_code == 303
+
+    info = client.get("/api/auth/session").json()
+    assert info["user"]["display_name"] == "Alice Example"
+
+
+def test_a_first_login_without_a_name_claim_is_named_by_its_email():
+    idp = FakeIdp()
+    provider, _users = make_provider(idp)
+    idp.omit_claims.add("preferred_username")
+    client = make_app(provider)
+
+    assert run_login(client, idp).status_code == 303
+
+    info = client.get("/api/auth/session").json()
+    assert info["user"]["display_name"] == "alice@example.com"
+
+
 def test_resolve_identity_requires_a_subject():
     idp = FakeIdp()
     provider, _users = make_provider(idp)
@@ -588,7 +738,7 @@ def test_userinfo_fallback_merges_thin_tokens_but_rejects_foreign_sub():
     # Thin token: no groups claim in the id_token.
     idp.claims_override = {"groups": None}
     provider, _users = make_provider(
-        idp, allowed_groups=frozenset({"team-a"})
+        idp, claim_mapping=ClaimMappingConfig(allowed_groups=frozenset({"team-a"}))
     )
     client = make_app(provider)
     # userinfo (FakeIdp) returns groups=["team-a"] for the same sub,
@@ -601,7 +751,7 @@ def test_userinfo_fallback_merges_thin_tokens_but_rejects_foreign_sub():
     idp2 = FakeIdp()
     idp2.claims_override = {"groups": None, "sub": "user-9999"}
     provider2, _ = make_provider(
-        idp2, allowed_groups=frozenset({"team-a"})
+        idp2, claim_mapping=ClaimMappingConfig(allowed_groups=frozenset({"team-a"}))
     )
     client2 = make_app(provider2)
     rejected = run_login(client2, idp2)

@@ -1,21 +1,26 @@
 """Protocol-level request parsing shared by the HTTP routers.
 
 History formatting, OpenAI-content flattening, question/messages
-normalization with payload caps, the client workspace namespace parser,
-and the OpenAI-style error envelope. Status codes, English diagnostics
+normalization with payload caps, the project namespace of reads and
+writes, and the OpenAI-style error envelope. Status codes, English diagnostics
 and cap calculations are covered by ``tests/contract``.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any
+import uuid
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from inqtrix.constants import REQUEST_WAIT_MARGIN_SECONDS
 from inqtrix.settings import AgentSettings, ServerSettings
+
+if TYPE_CHECKING:
+    from inqtrix.auth.directory import UserDirectory
+    from inqtrix.auth.principal import Principal
 
 WORKSPACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
 WORKSPACE_ID_HEADER = "x-inqtrix-workspace-id"
@@ -87,13 +92,14 @@ def workspace_id_from_request(
     req: Request,
     body: dict[str, Any] | None = None,
 ) -> str | None:
-    """Resolve and validate the optional browser/project workspace namespace.
+    """Resolve and validate the optional project namespace a request names.
 
-    This value is a CLIENT-SUPPLIED UI namespace used to filter run
-    listings per browser profile — it is not, and must never become,
-    an authorization input. The authorization workspace (a server-side
-    membership fact) is a separate concept resolved from the verified
-    principal.
+    This value is a CLIENT-SUPPLIED namespace: a read uses it to filter
+    listings and stays unscoped without it. It is not, and must never
+    become, an authorization input. The authorization workspace (a
+    server-side membership fact) is a separate concept resolved from the
+    verified principal. Writes resolve their namespace through
+    ``workspace_id_for_write``.
     """
     body_workspace_id = body.get("workspace_id") if isinstance(body, dict) else None
     raw = (
@@ -112,6 +118,35 @@ def workspace_id_from_request(
             }},
         )
     return raw
+
+
+async def workspace_id_for_write(
+    req: Request,
+    principal: "Principal",
+    users: "UserDirectory | None",
+    body: dict[str, Any] | None = None,
+) -> str | None:
+    """The project namespace a new row is stored with.
+
+    An explicit namespace (header, query or body) wins and is validated as
+    for reads. Without one, a signed-in user writes into their canonical
+    project namespace, claimed once through the user directory when none
+    exists yet, the same claim a first session start makes; so a row a script
+    writes with a personal access token appears in that person's UI. A
+    principal without a user (modes ``apikey`` and ``none``) keeps no
+    namespace. Reads without a namespace stay unscoped: they use
+    ``workspace_id_from_request``.
+    """
+    explicit = workspace_id_from_request(req, body)
+    if explicit is not None:
+        return explicit
+    if principal.user_id is None or users is None:
+        return None
+    return await users.resolve_default_workspace(
+        tenant_id=principal.tenant_id,
+        user_id=principal.user_id,
+        candidate=f"ws_{uuid.uuid4().hex}",
+    )
 
 
 def incognito_from_request(body: dict[str, Any]) -> bool:

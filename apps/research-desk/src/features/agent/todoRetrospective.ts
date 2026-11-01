@@ -41,5 +41,5 @@ export function todoStepText(
     stats.steps,
     t.agent.timeline.todoStepsOne,
     t.agent.timeline.todoSteps,
-  ).replace('{duration}', duration)
+  ).replace('{duration}', () => duration)
 }

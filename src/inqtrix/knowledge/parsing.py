@@ -29,7 +29,7 @@ from typing import Any, Iterable
 
 from inqtrix.knowledge.page_mapping import extract_pdf_page_texts
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class DocumentParseError(RuntimeError):

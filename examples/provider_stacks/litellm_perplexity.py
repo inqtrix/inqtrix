@@ -47,28 +47,22 @@ from rich.panel import Panel
 load_dotenv()
 
 # ── Logging ──────────────────────────────────────────────────────────
-# File-based logging with automatic secret redaction.  Controlled via
-# environment variables so the example stays quiet unless requested:
+# Logging with automatic secret redaction. Controlled via environment
+# variables so the example stays quiet unless requested:
 #
-#   INQTRIX_LOG_ENABLED=true   — write logs to logs/inqtrix_*.log
+#   INQTRIX_LOG_TARGET=file    — console, file (logs/inqtrix-script.log) or both
 #   INQTRIX_LOG_LEVEL=DEBUG    — DEBUG / INFO / WARNING (default: INFO)
-#   INQTRIX_LOG_CONSOLE=true   — also print WARNING+ to stderr
-#   OBSERVABILITY_PROFILE=forensic — lineage EVENT JSON in the same log file; requires
-#     INQTRIX_LOG_LEVEL=DEBUG. docs/observability/logging.md,
-#     docs/observability/forensic-cookbook.md
+#   INQTRIX_LOG_FORMAT=text    — json (default) or text
+#   See docs/observability/logging.md.
 from inqtrix.logging_config import configure_logging
 
-LOG_ENABLED = os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true"
-LOG_LEVEL = os.getenv("INQTRIX_LOG_LEVEL", "INFO")
-LOG_TO_CONSOLE = os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true"
-
-_log_path = configure_logging(
-    enabled=LOG_ENABLED,
-    level=LOG_LEVEL,
-    console=LOG_TO_CONSOLE,
+# Examples keep the terminal for their own output: logs appear only when
+# INQTRIX_LOG_TARGET is set (console, file or both).
+_logging = configure_logging(
+    service="script", target=os.environ.get("INQTRIX_LOG_TARGET") or "none"
 )
-if _log_path:
-    print(f"Logging to {_log_path}")
+if _logging.file_path:
+    print(f"Logging to {_logging.file_path}")
 
 QUESTION = "Was ist der aktuelle Stand der GKV-Reform?"
 

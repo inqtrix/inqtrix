@@ -35,7 +35,7 @@ from inqtrix.services.session_titler import (
 )
 from inqtrix.services.workspace_guard import deny_cross_workspace
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class TitleTarget(BaseModel):

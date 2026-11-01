@@ -178,7 +178,7 @@ export function SharingPanel({
                 />
               }
               title={share.resource_title}
-              subtitle={`${kindLabel(t, locale, share.resource_type)} · ${t.sharingManagement.sharedBy.replace('{name}', grantorName(share))} · ${permissionLabel(t, locale, share.permission)}`}
+              subtitle={`${kindLabel(t, locale, share.resource_type)} · ${t.sharingManagement.sharedBy.replace('{name}', () => grantorName(share))} · ${permissionLabel(t, locale, share.permission)}`}
               trailing={
                 <>
                   <StatusBadge
@@ -225,7 +225,7 @@ export function SharingPanel({
                 />
               }
               title={share.resource_title}
-              subtitle={`${kindLabel(t, locale, share.resource_type)} · ${t.sharingManagement.sharedBy.replace('{name}', grantorName(share))} · ${permissionLabel(t, locale, share.permission)}`}
+              subtitle={`${kindLabel(t, locale, share.resource_type)} · ${t.sharingManagement.sharedBy.replace('{name}', () => grantorName(share))} · ${permissionLabel(t, locale, share.permission)}`}
               trailing={
                 <>
                   <StatusBadge
@@ -304,6 +304,7 @@ export function SharingPanel({
       </SettingsSection>
 
       <Dialog
+        closeLabel={t.common.close}
         description={
           confirm?.mode === 'leave'
             ? t.sharingManagement.leaveBody

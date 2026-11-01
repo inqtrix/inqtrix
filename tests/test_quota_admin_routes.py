@@ -220,13 +220,8 @@ def test_guard_logs_authenticated_non_admin_denial(caplog):
         session=_StubSession(ADMIN_USER_ID),
         mirror=_mirror("user"),
     )
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            _resolved, error = _resolve(provider)
-    finally:
-        logger.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        _resolved, error = _resolve(provider)
     assert error.status_code == 404
     messages = [
         record.getMessage()

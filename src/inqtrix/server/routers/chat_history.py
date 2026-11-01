@@ -43,6 +43,7 @@ from inqtrix.services.chat_history_service import ChatValidationError
 from inqtrix.project.session_titles import SessionTitleConflict, parse_title_intent
 from inqtrix.services.request_parsing import (
     error_response,
+    workspace_id_for_write,
     workspace_id_from_request,
 )
 
@@ -107,6 +108,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
     router = APIRouter()
     principal_dep = container.principal_dependency
+    users = getattr(container.auth_provider, "users", None)
     user_context_dep = container.user_context_dependency
 
     # -- threads ---------------------------------------------------------- #
@@ -185,7 +187,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 created_at=float(created_at),
                 updated_at=float(updated_at),
                 caller_user_id=_caller_user_id(principal),
-                workspace_id=workspace_id_from_request(req),
+                workspace_id=await workspace_id_for_write(req, principal, users),
                 visible_to=visible_to,
                 model_selection=model_selection,
                 title_revision=title_revision, title_source=title_source,
@@ -196,6 +198,8 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(409, str(exc), "session_title_conflict")
         except ThreadNotFound:
             return error_response(404, "Thread not found", "not_found")
+        except ThreadGroupNotFound:
+            return error_response(404, "Group not found", "not_found")
         payload = _thread_payload(thread)
         payload["title_preserved"] = thread.title != str(body.get("title", "")) or (title_revision is not None and thread.title_source != title_source)
         return payload
@@ -338,7 +342,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 created_at=float(created_at),
                 updated_at=float(updated_at),
                 caller_user_id=_caller_user_id(principal),
-                workspace_id=workspace_id_from_request(req),
+                workspace_id=await workspace_id_for_write(req, principal, users),
                 visible_to=visible_to,
             )
         except ThreadGroupNotFound:

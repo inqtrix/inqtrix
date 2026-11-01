@@ -143,3 +143,80 @@ class TestSanitizeLogMessage:
         result = sanitize_log_message(msg)
         assert "pplx-realLookingPplxKeyHere1234567890" not in result
         assert "[KEY]" in result
+
+
+class TestCredentialShapes:
+    """Secret shapes found in connection strings and configuration dumps."""
+
+    @pytest.mark.parametrize(
+        ("text", "secret", "kept"),
+        [
+            (
+                "connect to postgresql://app:Se/cr3tPw@db:5432/inqtrix failed",
+                "cr3tPw",
+                "@db:5432/inqtrix",
+            ),
+            (
+                "connect to postgresql+asyncpg://app:p@ss/w0rd@db/inqtrix failed",
+                "w0rd",
+                "@db/inqtrix",
+            ),
+            (
+                "redis://:Se/cr3tPw@valkey:6379/0 refused",
+                "cr3tPw",
+                "@valkey:6379/0",
+            ),
+        ],
+    )
+    def test_url_password_with_slash_or_at_is_redacted(
+        self, text: str, secret: str, kept: str
+    ) -> None:
+        result = sanitize_log_message(text)
+
+        assert secret not in result
+        assert kept in result
+
+    @pytest.mark.parametrize(
+        ("text", "secret"),
+        [
+            ("host=db port=5432 user=app password=Secr3tPw dbname=inqtrix", "Secr3tPw"),
+            ("host=db password='Se cr3t Pw' dbname=inqtrix", "cr3t"),
+            ('dsn: host=db PASSWORD="Secr3tPw" dbname=inqtrix', "Secr3tPw"),
+        ],
+    )
+    def test_keyword_dsn_password_is_redacted(self, text: str, secret: str) -> None:
+        result = sanitize_log_message(text)
+
+        assert secret not in result
+        assert "dbname=inqtrix" in result
+
+    @pytest.mark.parametrize(
+        ("text", "secret"),
+        [
+            ("INQTRIX_SESSION_SECRET=Secr3tValue123", "Secr3tValue123"),
+            ("AZURE_OPENAI_API_KEY: abcdef0123456789", "abcdef0123456789"),
+            ("INQTRIX_PSEUDONYM_PEPPER='pepper value 42'", "pepper value 42"),
+            ("GITHUB_TOKEN=ghx0123456789abcdef", "ghx0123456789abcdef"),
+            ("INQTRIX_PG_PASSWORD=Secr3tPw", "Secr3tPw"),
+        ],
+    )
+    def test_secret_assignment_is_redacted(self, text: str, secret: str) -> None:
+        result = sanitize_log_message(text)
+
+        assert secret not in result
+        assert text.split("=")[0].split(":")[0] in result
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "RUN start: default_max_tokens=8192 max_rounds=4",
+            "MAX_TOKENS=4096 and tokens=12",
+            "Package at https://registry.npmjs.org/@scope/pkg is cached",
+            "Profile https://mastodon.social/@user was linked",
+            "Archived at https://web.archive.org/web/2020/https://mastodon.social/@user today",
+            "the password field is required",
+            "INQTRIX_PSEUDONYM_PEPPER is unset; log pseudonyms are stable only within this process.",
+        ],
+    )
+    def test_benign_text_is_unchanged(self, text: str) -> None:
+        assert sanitize_log_message(text) == text

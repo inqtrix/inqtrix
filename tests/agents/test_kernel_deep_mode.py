@@ -1760,13 +1760,8 @@ def test_a_draft_that_fails_its_citation_check_is_not_shown(monkeypatch, caplog)
 
     monkeypatch.setattr(kernel_algorithm, "_validate_kernel_answer_citations", fail_the_first)
     llm = StructuredScriptedLLM([_text_turn("Erste Antwort.")], [dict(PASSING_VERDICT)])
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            events, _ = _deep_chat_run(llm)
-    finally:
-        logger.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        events, _ = _deep_chat_run(llm)
     assert (_drafts(events), _published(events), checked) == (
         [], "Erste Antwort.", ["Erste Antwort.", "Erste Antwort."],
     )

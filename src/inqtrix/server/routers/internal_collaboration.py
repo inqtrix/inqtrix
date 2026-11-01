@@ -40,7 +40,7 @@ from inqtrix.services.request_parsing import error_response
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _ACTOR_KINDS = frozenset({"human", "guest", "assistant", "agent", "system"})
 _CHANGE_KINDS = frozenset({"direct", "suggestion", "decision", "system"})
@@ -49,6 +49,10 @@ _DECISION_OUTCOMES = frozenset({"accepted", "rejected"})
 _SUGGESTION_KINDS = frozenset(
     {"insertion", "deletion", "replacement", "format", "structure"}
 )
+
+
+class _RefusedRequest(ValueError):
+    """A refusal of this router; its text is a fixed code, fit to be a ``reason``."""
 
 
 def build_router(container: "AppContainer") -> APIRouter:
@@ -198,7 +202,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             if not hmac.compare_digest(
                 hashlib.sha256(update_bytes).hexdigest(), update_hash
             ):
-                raise ValueError("update_hash_mismatch")
+                raise _RefusedRequest("update_hash_mismatch")
             actor_kind = _enum(body, "actor_kind", _ACTOR_KINDS)
             change_kind = _enum(body, "change_kind", _CHANGE_KINDS)
             suggestion_ids = _uuid_strings(body, "suggestion_ids", maximum=1000)
@@ -223,7 +227,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 )
                 or (decision is None and decision_outcome is not None)
             ):
-                raise ValueError("invalid_decision_outcome")
+                raise _RefusedRequest("invalid_decision_outcome")
             command_id = _optional_uuid(body, "command_id")
             command_payload_hash = _optional_sha256(
                 body, "command_payload_hash"
@@ -388,7 +392,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             if not hmac.compare_digest(
                 hashlib.sha256(state_update).hexdigest(), state_hash
             ):
-                raise ValueError("state_hash_mismatch")
+                raise _RefusedRequest("state_hash_mismatch")
             snapshot = CollaborationSnapshot(
                 document_id=document_id,
                 tenant_id=tenant_id,
@@ -413,7 +417,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 hashlib.sha256(projection_markdown.encode("utf-8")).hexdigest(),
                 snapshot.projection_hash,
             ):
-                raise ValueError("projection_hash_mismatch")
+                raise _RefusedRequest("projection_hash_mismatch")
             await service.store_snapshot(
                 snapshot=snapshot,
                 projection_markdown=projection_markdown,
@@ -441,7 +445,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             cursor = int(raw_cursor)
             limit = int(raw_limit)
             if cursor < 0 or limit < 1 or limit > 500:
-                raise ValueError("invalid_policy_event_cursor")
+                raise _RefusedRequest("invalid_policy_event_cursor")
             return await service.policy_events(
                 tenant_id=_bounded_query_string(
                     request, "tenant_id", maximum=160
@@ -475,7 +479,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         if generation is not None:
             try:
                 generation = _positive_int(body, "generation")
-            except ValueError as exc:
+            except _RefusedRequest as exc:
                 return _invalid(str(exc))
         try:
             return await service.run_maintenance(
@@ -545,9 +549,12 @@ def _internal_error(exc: Exception):
             "payload_too_large",
             reason="payload_too_large",
         )
+    if isinstance(exc, _RefusedRequest):
+        return _invalid(str(exc))
     if isinstance(exc, (ValueError, TypeError, binascii.Error)):
-        reason = str(exc) if str(exc) else "invalid_request"
-        return _invalid(reason)
+        # The text of an exception from further down can quote its input, and
+        # the sidecar logs a reason it can read.
+        return _invalid("invalid_request")
     return None
 
 
@@ -598,7 +605,7 @@ def _bounded_string(
 ) -> str:
     value = body.get(field)
     if not isinstance(value, str) or not value or len(value) > maximum:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return value
 
 
@@ -607,7 +614,7 @@ def _bounded_query_string(
 ) -> str:
     value = request.query_params.get(field)
     if value is None:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return _bounded_string({field: value}, field, maximum=maximum)
 
 
@@ -616,21 +623,21 @@ def _bounded_text(
 ) -> str:
     value = body.get(field)
     if not isinstance(value, str) or len(value.encode("utf-8")) > maximum_bytes:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return value
 
 
 def _positive_int(body: dict[str, Any], field: str) -> int:
     value = body.get(field)
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return value
 
 
 def _non_negative_int(body: dict[str, Any], field: str) -> int:
     value = body.get(field)
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return value
 
 
@@ -647,9 +654,9 @@ def _positive_query_int(request: Request, field: str) -> int:
     try:
         parsed = int(value) if value is not None else 0
     except ValueError as exc:
-        raise ValueError(f"invalid_{field}") from exc
+        raise _RefusedRequest(f"invalid_{field}") from exc
     if parsed < 1:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return parsed
 
 
@@ -661,7 +668,7 @@ def _positive_number(body: dict[str, Any], field: str) -> float:
         or not math.isfinite(float(value))
         or float(value) <= 0
     ):
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return float(value)
 
 
@@ -673,7 +680,7 @@ def _non_negative_number(body: dict[str, Any], field: str) -> float:
         or not math.isfinite(float(value))
         or float(value) < 0
     ):
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return float(value)
 
 
@@ -682,7 +689,7 @@ def _uuid(body: dict[str, Any], field: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
     except (TypeError, ValueError, AttributeError) as exc:
-        raise ValueError(f"invalid_{field}") from exc
+        raise _RefusedRequest(f"invalid_{field}") from exc
 
 
 def _optional_uuid(body: dict[str, Any], field: str) -> uuid.UUID | None:
@@ -696,10 +703,10 @@ def _uuid_strings(
 ) -> tuple[str, ...]:
     value = body.get(field)
     if not isinstance(value, list) or len(value) > maximum:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     parsed = tuple(str(_uuid({field: item}, field)) for item in value)
     if len(set(parsed)) != len(parsed):
-        raise ValueError(f"duplicate_{field}")
+        raise _RefusedRequest(f"duplicate_{field}")
     return parsed
 
 
@@ -708,7 +715,7 @@ def _enum(
 ) -> str:
     value = body.get(field)
     if not isinstance(value, str) or value not in allowed:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return value
 
 
@@ -725,11 +732,11 @@ def _suggestions(
 ) -> tuple[CollaborationSuggestion, ...]:
     raw = body.get("suggestions")
     if not isinstance(raw, list) or len(raw) > 1000:
-        raise ValueError("invalid_suggestions")
+        raise _RefusedRequest("invalid_suggestions")
     suggestions: list[CollaborationSuggestion] = []
     for item in raw:
         if not isinstance(item, dict):
-            raise ValueError("invalid_suggestions")
+            raise _RefusedRequest("invalid_suggestions")
         suggestions.append(
             CollaborationSuggestion(
                 suggestion_id=str(_uuid(item, "suggestion_id")),
@@ -750,7 +757,7 @@ def _suggestions(
         )
     ids = [item.suggestion_id for item in suggestions]
     if len(ids) != len(set(ids)):
-        raise ValueError("duplicate_suggestions")
+        raise _RefusedRequest("duplicate_suggestions")
     return tuple(suggestions)
 
 
@@ -759,14 +766,14 @@ def _patch_states(
 ) -> tuple[CollaborationPatchState, ...]:
     raw = body.get("patches")
     if not isinstance(raw, list) or len(raw) > 1000:
-        raise ValueError("invalid_patches")
+        raise _RefusedRequest("invalid_patches")
     patches: list[CollaborationPatchState] = []
     for item in raw:
         if not isinstance(item, dict):
-            raise ValueError("invalid_patches")
+            raise _RefusedRequest("invalid_patches")
         kinds_raw = item.get("kinds")
         if not isinstance(kinds_raw, list) or len(kinds_raw) > 5:
-            raise ValueError("invalid_patch_kinds")
+            raise _RefusedRequest("invalid_patch_kinds")
         kinds = tuple(
             cast(
                 Literal[
@@ -781,7 +788,7 @@ def _patch_states(
             for kind in kinds_raw
         )
         if len(kinds) != len(set(kinds)):
-            raise ValueError("duplicate_patch_kinds")
+            raise _RefusedRequest("duplicate_patch_kinds")
         patches.append(
             CollaborationPatchState(
                 patch_id=str(_uuid(item, "patch_id")),
@@ -804,7 +811,7 @@ def _patch_states(
         )
     ids = [item.patch_id for item in patches]
     if len(ids) != len(set(ids)):
-        raise ValueError("duplicate_patches")
+        raise _RefusedRequest("duplicate_patches")
     return tuple(patches)
 
 
@@ -832,10 +839,10 @@ def _change_summary(body: dict[str, Any]) -> dict[str, Any]:
     """
     value = body.get("change_summary")
     if not isinstance(value, dict):
-        raise ValueError("invalid_change_summary")
+        raise _RefusedRequest("invalid_change_summary")
     reports_change = "changes_document" in value
     if reports_change and not isinstance(value["changes_document"], bool):
-        raise ValueError("invalid_change_summary")
+        raise _RefusedRequest("invalid_change_summary")
     raw_edits = value.get("edits")
     omitted = value.get("omitted_edit_count")
     if (
@@ -845,12 +852,12 @@ def _change_summary(body: dict[str, Any]) -> dict[str, Any]:
         or isinstance(omitted, bool)
         or omitted < 0
     ):
-        raise ValueError("invalid_change_summary")
+        raise _RefusedRequest("invalid_change_summary")
     edits: list[dict[str, Any]] = []
     allowed_kinds = _SUGGESTION_KINDS | {"direct"}
     for item in raw_edits:
         if not isinstance(item, dict):
-            raise ValueError("invalid_change_summary")
+            raise _RefusedRequest("invalid_change_summary")
         before = item.get("before")
         after = item.get("after")
         position = item.get("position")
@@ -866,7 +873,7 @@ def _change_summary(body: dict[str, Any]) -> dict[str, Any]:
             or not isinstance(kind, str)
             or kind not in allowed_kinds
         ):
-            raise ValueError("invalid_change_summary")
+            raise _RefusedRequest("invalid_change_summary")
         edits.append(
             {
                 "before": before,
@@ -888,7 +895,7 @@ def _sha256(body: dict[str, Any], field: str) -> str:
         or len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
     ):
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     return value
 
 
@@ -903,23 +910,23 @@ def _sha256_strings(
 ) -> tuple[str, ...]:
     value = body.get(field)
     if not isinstance(value, list) or len(value) > maximum:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     parsed = tuple(_sha256({field: item}, field) for item in value)
     if len(set(parsed)) != len(parsed):
-        raise ValueError(f"duplicate_{field}")
+        raise _RefusedRequest(f"duplicate_{field}")
     return parsed
 
 
 def _canonical_base64(body: dict[str, Any], field: str) -> bytes:
     value = body.get(field)
     if not isinstance(value, str) or len(value) > 32 * 1_048_576:
-        raise ValueError(f"invalid_{field}")
+        raise _RefusedRequest(f"invalid_{field}")
     try:
         decoded = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise ValueError(f"invalid_{field}") from exc
+        raise _RefusedRequest(f"invalid_{field}") from exc
     if _base64(decoded) != value:
-        raise ValueError(f"non_canonical_{field}")
+        raise _RefusedRequest(f"non_canonical_{field}")
     return decoded
 
 

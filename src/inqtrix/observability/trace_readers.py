@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class TraceExportUnavailable(Exception):

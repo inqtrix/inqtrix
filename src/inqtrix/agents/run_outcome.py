@@ -47,7 +47,7 @@ from inqtrix.exceptions import AgentCancelled, AgentTokenBudgetExceeded
 from inqtrix.i18n import t, t_count
 from inqtrix.runs.shared import OUTCOME_EVENT
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 REPORT_FACTS = ("round", "revision", "accounting")
 """The review report's own facts the record reads; a report without them

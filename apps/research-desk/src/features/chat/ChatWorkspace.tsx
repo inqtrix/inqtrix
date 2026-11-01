@@ -2847,7 +2847,7 @@ const ChatChainTrace = memo(function ChatChainTrace({ steps }: { steps: ChatChai
             const label = t.chat.chainStepLabel
               .replace('{n}', String(index + 1))
               .replace('{total}', String(steps.length))
-              .replace('{label}', step.label)
+              .replace('{label}', () => step.label)
             return (
               <div className="border-b border-border/40 py-1 last:border-0" key={index}>
                 <button

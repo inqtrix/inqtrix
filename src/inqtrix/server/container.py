@@ -54,7 +54,7 @@ from inqtrix.services.knowledge_service import KnowledgeService
 from inqtrix.services.run_service import RunService
 from inqtrix.settings import Settings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -1743,7 +1743,9 @@ def build_container(
         from inqtrix.auth.principal import resolve_auth_mode
 
         deployment_auth_mode = resolve_auth_mode(
-            settings.auth, settings.server
+            settings.auth,
+            settings.server,
+            storage_backend=settings.storage.backend,
         )
     cookie_auth_available = auth_provider.mode in COOKIE_SESSION_MODES or (
         platform_persistence_null_pool
@@ -1775,8 +1777,8 @@ def build_container(
             and deployment_auth_mode not in COOKIE_SESSION_MODES
         ):
             raise RuntimeError(
-                "INQTRIX_COLLABORATION_ENABLED=true requires cookie-based "
-                "OIDC or local authentication."
+                "INQTRIX_COLLABORATION_ENABLED=true requires a cookie-session "
+                "auth mode (local, oidc or gateway)."
             )
         if bundle is None or bundle.session_factory is None:
             raise RuntimeError(
@@ -1827,7 +1829,7 @@ def build_container(
     )
     share_service = None
     # Sharing needs scoped principals + a user mirror — every cookie-session
-    # mode qualifies (oidc/local), not just oidc. Serving processes use
+    # mode qualifies (local, oidc, gateway), not just oidc. Serving processes use
     # their auth provider's directory; the non-serving worker uses the
     # canonical NullPool directory selected above. The single-operator
     # none/apikey modes remain excluded: their unscoped principal has no
@@ -1988,8 +1990,8 @@ def build_container(
             )
         if share_service is None:
             raise RuntimeError(
-                "INQTRIX_EDITOR_GUEST_LINKS_ENABLED=true requires cookie-based "
-                "OIDC or local authentication and direct sharing."
+                "INQTRIX_EDITOR_GUEST_LINKS_ENABLED=true requires a cookie-session "
+                "auth mode (local, oidc or gateway) and direct sharing."
             )
         if not settings.queue.valkey_url.strip():
             raise RuntimeError(
@@ -2041,7 +2043,7 @@ def build_container(
             app_role=settings.storage.app_role,
         )
     # Quota service: only when enabled AND a multi-user mode
-    # (oidc/local). The single-operator none/apikey/demo modes are
+    # (local, oidc, gateway). The single-operator none/apikey/demo modes are
     # never metered — unscoped principals would bypass anyway, and not
     # constructing it keeps them byte-identical. Store mirrors the backend.
     quota_service = None

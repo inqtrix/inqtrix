@@ -18,7 +18,7 @@ from inqtrix.i18n import t
 from inqtrix.prompt_language import resolve_answer_language
 from inqtrix.untrusted_content import untrusted_fence
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 TOOL_LIMIT_REACHED_EVENT = "inqtrix.agent.tool_limit.reached"
 SKILL_INPUTS_RESOLVED_MARKER = "[skill_inputs_resolved]"

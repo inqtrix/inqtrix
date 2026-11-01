@@ -21,11 +21,17 @@ import {
   collaborationReviewAllowsTransaction,
   collaborationEditRefusal,
   collaborationReviewPluginKey,
+  collaborationReviewUpdateChangesState,
   collaborationSuggestionCollisionEvent,
   collaborationSuggestionErrorEvent,
   detectForeignSuggestionCollision,
   suggestModeDeletionRange,
 } from './tiptap'
+import {
+  applyCollaborationEditorPolicy,
+  collaborationEditorPolicyUpdate,
+  type CollaborationEditorPolicyInput,
+} from './inspector/editorPolicy'
 
 describe('collaboration transaction policy', () => {
   it('blocks local document mutations for view and comment modes', () => {
@@ -1574,5 +1580,188 @@ describe('suggest-mode deletion at the caret', () => {
     const state = stateWith(marked, 2)
     const selected = state.apply(state.tr.setSelection(TextSelection.create(state.doc, 2, 4)))
     expect(suggestModeDeletionRange(selected, 'backward')).toBeNull()
+  })
+})
+
+describe('applyCollaborationEditorPolicy', () => {
+  const change = (id: string, ...suggestionIds: string[]) => ({ id, suggestionIds }) as never
+  const input = (overrides: Partial<CollaborationEditorPolicyInput> = {}): CollaborationEditorPolicyInput => ({
+    changesView: 'open',
+    collaboration: true,
+    display: 'all',
+    documentId: 'document-1',
+    inspectorTab: 'changes',
+    selectedChangeId: null,
+    visibleChanges: [change('c1', 's1')],
+    writeAuthorId: 'user-1',
+    writeMode: 'edit',
+    ...overrides,
+  })
+
+  function openEditor() {
+    const editor = {
+      dispatched: 0,
+      isDestroyed: false,
+      state: reviewExtension('edit').state,
+      view: {
+        dispatch(transaction: Transaction) {
+          editor.dispatched += 1
+          editor.state = editor.state.apply(transaction)
+        },
+      },
+    }
+    applyCollaborationEditorPolicy(editor as never, input())
+    editor.dispatched = 0
+    return editor
+  }
+
+  it('sends nothing when a renewed list asks for the same overlay', () => {
+    const editor = openEditor()
+    const before = collaborationReviewPluginKey.getState(editor.state)
+    applyCollaborationEditorPolicy(editor as never, input({ visibleChanges: [change('c1', 's1')] }))
+    expect(editor.dispatched).toBe(0)
+    expect(collaborationReviewPluginKey.getState(editor.state)).toBe(before)
+  })
+
+  it.each<[string, { collaboration?: boolean; enabled?: boolean }]>([
+    ['collaboration', { collaboration: false }],
+    ['enabled', { enabled: false }],
+  ])('counts the %s switch as a change on its own', (_name, overrides) => {
+    const editor = openEditor()
+    const current = collaborationReviewPluginKey.getState(editor.state)!
+    const update = collaborationEditorPolicyUpdate(input())
+    expect(collaborationReviewUpdateChangesState(current, update)).toBe(false)
+    expect(collaborationReviewUpdateChangesState(current, { ...update, ...overrides })).toBe(true)
+  })
+
+  it('tells a list of visible suggestions from no list at all', () => {
+    const editor = openEditor()
+    const current = collaborationReviewPluginKey.getState(editor.state)!
+    const update = collaborationEditorPolicyUpdate(input())
+    expect(collaborationReviewUpdateChangesState(current, { ...update, visibleSuggestionIds: undefined })).toBe(true)
+  })
+
+  it.each<[string, Partial<CollaborationEditorPolicyInput>]>([
+    ['the visible suggestions', { visibleChanges: [change('c1', 's1'), change('c2', 's2')] }],
+    ['a visible suggestion swapped for another', { visibleChanges: [change('c1', 's9')] }],
+    ['the selected suggestion', { selectedChangeId: 'c1' }],
+    ['the display', { display: 'original' }],
+    ['the write mode', { writeMode: 'suggest' }],
+    ['the writing author', { writeAuthorId: 'user-2' }],
+    ['the document', { documentId: 'document-2' }],
+    ['the collaboration switch', { collaboration: false }],
+    ['the changes tab being left', { inspectorTab: 'assistant' }],
+  ])('sends the update when %s change', (_name, overrides) => {
+    const editor = openEditor()
+    applyCollaborationEditorPolicy(editor as never, input(overrides))
+    expect(editor.dispatched).toBe(1)
+    // And once it holds that state, sending it again is no change either.
+    applyCollaborationEditorPolicy(editor as never, input(overrides))
+    expect(editor.dispatched).toBe(1)
+  })
+})
+
+describe('a click whose caret a change of another person wrote back', () => {
+  const click = (overrides: Partial<MouseEvent> = {}) => ({
+    altKey: false,
+    button: 0,
+    ctrlKey: false,
+    detail: 1,
+    metaKey: false,
+    shiftKey: false,
+    target: { closest: () => null },
+    ...overrides,
+  }) as unknown as MouseEvent
+
+  function openEditor(options: { editable?: boolean; collaboration?: boolean } = {}) {
+    const { plugins, state } = reviewExtension('edit')
+    const paragraphs = ['First paragraph of text', 'Second paragraph of text'].map((text) => (
+      state.schema.nodes.paragraph!.create(null, state.schema.text(text))
+    ))
+    const started = EditorState.create({
+      doc: state.schema.nodes.doc!.create(null, paragraphs),
+      plugins,
+    })
+    const view = {
+      dispatched: [] as Transaction[],
+      dispatch(transaction: Transaction) {
+        view.dispatched.push(transaction)
+        view.state = view.state.apply(transaction)
+      },
+      editable: options.editable ?? true,
+      state: options.collaboration === false
+        ? started.apply(started.tr.setMeta(collaborationReviewPluginKey, {
+            collaboration: false,
+            display: 'final',
+            enabled: false,
+          }))
+        : started,
+    }
+    const plugin = plugins.find((candidate) => candidate.spec.key === collaborationReviewPluginKey)!
+    const handleClick = (pos: number, event: MouseEvent) => (
+      plugin.props.handleClick!.call(plugin, view as never, pos, event)
+    )
+    return { handleClick, view }
+  }
+
+  const inSecondParagraph = 30
+
+  it('places the caret where the click went, and leaves the click to the editor', () => {
+    const { handleClick, view } = openEditor()
+    expect(view.state.selection.head).toBe(1)
+
+    expect(handleClick(inSecondParagraph, click())).toBe(false)
+
+    expect(view.state.selection.head).toBe(inSecondParagraph)
+    expect(view.state.selection.empty).toBe(true)
+    expect(view.dispatched[0]?.getMeta('pointer')).toBe(true)
+  })
+
+  it.each<[string, Partial<MouseEvent>]>([
+    ['with shift, which extends the selection', { shiftKey: true }],
+    ['with the control key', { ctrlKey: true }],
+    ['with the command key', { metaKey: true }],
+    ['with the alt key', { altKey: true }],
+    ['with another button', { button: 2 }],
+    ['that is part of a double click', { detail: 2 }],
+    ['on something inside the text that cannot be edited', {
+      target: { closest: (selector: string) => selector.includes('contenteditable') ? {} : null },
+    } as unknown as Partial<MouseEvent>],
+  ])('leaves a click alone %s', (_name, overrides) => {
+    const { handleClick, view } = openEditor()
+    handleClick(inSecondParagraph, click(overrides))
+    expect(view.dispatched).toHaveLength(0)
+  })
+
+  it('leaves a caret alone that is where the click went', () => {
+    const { handleClick, view } = openEditor()
+    handleClick(1, click())
+    handleClick(2, click())
+    expect(view.dispatched).toHaveLength(0)
+  })
+
+  it('leaves a selection alone', () => {
+    const { handleClick, view } = openEditor()
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 1, 5)))
+    view.dispatched.length = 0
+    handleClick(inSecondParagraph, click())
+    expect(view.dispatched).toHaveLength(0)
+  })
+
+  it('leaves a position between blocks alone', () => {
+    const { handleClick, view } = openEditor()
+    const betweenBlocks = view.state.doc.child(0).nodeSize
+    handleClick(betweenBlocks, click())
+    expect(view.dispatched).toHaveLength(0)
+  })
+
+  it('does nothing in a read-only editor or outside collaboration', () => {
+    const readOnly = openEditor({ editable: false })
+    readOnly.handleClick(inSecondParagraph, click())
+    expect(readOnly.view.dispatched).toHaveLength(0)
+
+    const alone = openEditor({ collaboration: false })
+    alone.handleClick(inSecondParagraph, click())
+    expect(alone.view.dispatched).toHaveLength(0)
   })
 })

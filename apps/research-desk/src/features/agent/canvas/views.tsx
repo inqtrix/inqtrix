@@ -124,6 +124,7 @@ import {
 } from '../evidenceProvenance'
 import { WebEvidenceSourceRow } from '../WebEvidenceSourceRow'
 import { activityText, RunOutcomeLine } from '../timeline/AgentTimeline'
+import { agentRunFailureText } from '../runFailure'
 import { artifactClaimMarks, documentOutcome } from '../runPresentation'
 import { ClaimNote, useClaimNote } from '../claimNote'
 import {
@@ -1901,6 +1902,7 @@ function RunOverview({
     (task) => effectiveAgentTaskStatus(task, run.taskStates[task.taskId]) === 'completed',
   ).length
   const transportDegraded = context.pollingRunIds.includes(run.runId)
+  const failureText = agentRunFailureText(run.error ?? '', t, run.errorCode)
   const groups = agentTaskGroups(tasks, run.taskStates)
   // Idle prefetch: settled task results of the OPEN run view warm before
   // the click (hover covers pointer users; this covers touch/keyboard
@@ -1944,8 +1946,8 @@ function RunOverview({
             {t.agent.timeline.transportDegraded}
           </p>
         )}
-        {run.error && (
-          <p className="break-words t-meta-sm text-destructive">{run.error}</p>
+        {failureText && (
+          <p className="break-words t-meta-sm text-destructive">{failureText}</p>
         )}
         {tasks.length > 0 && (
           <div>
@@ -2194,7 +2196,7 @@ export function TaskWorkUnit({
               ? ''
               : t.agent.canvas.child.lastUpdate.replace(
                 '{time}',
-                new Date(updatedAt * 1000).toLocaleTimeString([], {
+                () => new Date(updatedAt * 1000).toLocaleTimeString([], {
                   hour: '2-digit',
                   minute: '2-digit',
                   second: '2-digit',
@@ -2237,7 +2239,7 @@ function TaskDetailView({
   const [history, setHistory] = useState<ChildProgressHistory>({ messages: [], dropped: 0 })
   const messages = history.messages
   const [transport, setTransport] = useState<
-    'connecting' | 'error' | 'idle' | 'polling' | 'settled' | 'sse'
+    'connecting' | 'error' | 'idle' | 'parked' | 'polling' | 'settled' | 'sse'
   >(childRunId ? 'connecting' : 'idle')
   const [transportError, setTransportError] = useState<string | null>(null)
   const [taskResult, setTaskResult] = useState<AgentTaskResultWire | null>(null)
@@ -2890,10 +2892,10 @@ function childEventSnapshot(event: ResearchRunEvent): ResearchRunSnapshot | unde
 }
 
 function childTransportLabel(
-  transport: 'connecting' | 'error' | 'idle' | 'polling' | 'settled' | 'sse',
+  transport: 'connecting' | 'error' | 'idle' | 'parked' | 'polling' | 'settled' | 'sse',
   t: ReturnType<typeof useLocale>['t'],
 ): string {
-  if (transport === 'sse') return t.agent.canvas.child.connectionLive
+  if (transport === 'sse' || transport === 'parked') return t.agent.canvas.child.connectionLive
   if (transport === 'polling') return t.agent.canvas.child.connectionPolling
   if (transport === 'error') return t.agent.canvas.child.connectionError
   if (transport === 'settled') return t.agent.canvas.child.connectionSettled

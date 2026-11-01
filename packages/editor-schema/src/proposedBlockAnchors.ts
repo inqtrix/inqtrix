@@ -23,10 +23,19 @@ export function proposedBlockAnchorPositions(
   document: ProseMirrorNode,
   isTarget: (suggestionId: string) => boolean = () => true,
 ): number[] {
-  const blocks: Array<{ node: ProseMirrorNode; start: number }> = []
+  const blocks: Array<{
+    afterLeaf: boolean
+    node: ProseMirrorNode
+    start: number
+  }> = []
+  let afterLeaf = false
   document.descendants((node, position) => {
-    if (!node.isTextblock) return true
-    blocks.push({ node, start: position + 1 })
+    if (!node.isTextblock) {
+      afterLeaf ||= node.isLeaf
+      return true
+    }
+    blocks.push({ afterLeaf, node, start: position + 1 })
+    afterLeaf = false
     return false
   })
   const insertionId = (node: ProseMirrorNode | null): string | null => {
@@ -40,7 +49,7 @@ export function proposedBlockAnchorPositions(
     const left = blocks[index]!
     const right = blocks[index + 1]!
     const leftEnd = left.start + left.node.content.size
-    if (!onlyNodeBoundariesBetween(document, leftEnd, right.start)) continue
+    if (right.afterLeaf) continue
     const id = insertionId(left.node.lastChild)
     if (!id || insertionId(right.node.firstChild) !== id) continue
 
@@ -80,18 +89,4 @@ export function addProposedBlockAnchorCleanup(
     transaction.delete(position, position + 1)
   }
   return transaction
-}
-
-function onlyNodeBoundariesBetween(
-  document: ProseMirrorNode,
-  from: number,
-  to: number,
-): boolean {
-  let leaf = false
-  document.nodesBetween(from, to, (node, position) => {
-    if (leaf) return false
-    if (position >= from && node.isLeaf) leaf = true
-    return !leaf
-  })
-  return !leaf
 }

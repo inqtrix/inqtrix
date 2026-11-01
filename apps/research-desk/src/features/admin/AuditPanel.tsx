@@ -262,7 +262,9 @@ export function AuditPanel({
                     />
                   </TableCell>
                   <TableCell className="t-mono text-muted-foreground">
-                    {row.actor_pseudonym ?? t.adminAudit.anonymous}
+                    {row.actor_type === 'provisioning'
+                      ? t.adminAudit.provisioningActor
+                      : row.actor_pseudonym ?? t.adminAudit.anonymous}
                   </TableCell>
                   <TableCell>
                     <span className="t-meta text-muted-foreground">

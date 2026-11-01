@@ -29,7 +29,7 @@ from inqtrix.user_events import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # The newest event of each waiting user: one backward probe of
 # ix_user_events_tenant_target_id per user, whatever the streams' cursors.

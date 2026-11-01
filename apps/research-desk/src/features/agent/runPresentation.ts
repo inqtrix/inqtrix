@@ -100,7 +100,7 @@ export function runClockParts(
     : (age >= RUN_CLOCK_STALE_SECONDS
       ? t.agent.timeline.noNewProgress
       : t.agent.timeline.lastProgressAgo
-    ).replace('{duration}', formatDuration(age))
+    ).replace('{duration}', () => formatDuration(age))
   return { elapsed: formatDuration(Math.max(0, elapsed)), note }
 }
 
@@ -245,7 +245,7 @@ export function runSettingsSummary(
   const effort = execution?.reasoningEffort ?? run.modelResolution?.effort
   if (effort) {
     parts.push(
-      t.agent.timeline.recapEffort.replace('{level}', effortLevelLabel(effort)),
+      t.agent.timeline.recapEffort.replace('{level}', () => effortLevelLabel(effort)),
     )
   }
   if (!execution) return parts
@@ -309,12 +309,12 @@ function webSearchesLabel(
     )
   }
   return t.agent.timeline.recapWebResearch
-    .replace('{research}', countLabel(
+    .replace('{research}', () => countLabel(
       research.length,
       t.agent.timeline.recapResearchOne,
       t.agent.timeline.recapResearches,
     ))
-    .replace('{searches}', countLabel(
+    .replace('{searches}', () => countLabel(
       searches,
       t.agent.timeline.recapSearchOne,
       t.agent.timeline.recapSearches,

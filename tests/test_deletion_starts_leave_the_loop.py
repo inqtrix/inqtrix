@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from inqtrix.auth.lifecycle import AdminActor
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.runs.deletion_operations import (
     DeletionOperationStore,
@@ -110,7 +111,10 @@ STARTS = {
         "ks_1", principal=PRINCIPAL, visible_to=VISIBLE, workspace_id="ws-1"
     ),
     DeletionTargetKind.USER: lambda s: s.start_user_erasure(
-        uuid.uuid4(), principal=PRINCIPAL, operation_id="del_probe"
+        uuid.uuid4(),
+        actor=AdminActor(PRINCIPAL.user_id),
+        tenant_id=PRINCIPAL.tenant_id,
+        operation_id="del_probe",
     ),
     DeletionTargetKind.SOURCE: lambda s: s.start_orphaned_source(
         "document:orphan", principal=PRINCIPAL, workspace_id=None

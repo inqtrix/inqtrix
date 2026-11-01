@@ -49,7 +49,7 @@ import {
 } from './collaborationCrypto'
 import { messageFromError } from '@/api/requestErrorText'
 
-export const COLLABORATION_UPDATE_BATCH_MS = 50
+export const COLLABORATION_UPDATE_BATCH_MS = 10
 const COLLABORATION_ACK_DELAY_MS = 10_000
 /** A connect attempt must bring the service's first message within this
  * long, or it is given up and retried on the reconnect ladder. The first
@@ -2012,6 +2012,12 @@ export class CollaborationDocumentController {
       this.enterIncompatible(versionMismatch
         ? COLLABORATION_NOTICES.protocol_or_schema_incompatible
         : COLLABORATION_NOTICES.session_ended)
+      return
+    }
+    // A guest link whose owner is not active answers 423: it may work again,
+    // so access ends with that notice instead of reconnecting against it.
+    if (status === 423) {
+      this.enterAccessRevoked(COLLABORATION_NOTICES.link_unavailable)
       return
     }
     if (status === 403 || status === 404 || reason === 'access_revoked') {

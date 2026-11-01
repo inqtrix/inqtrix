@@ -844,7 +844,7 @@ export function PromptLibraryWorkspace({
                         id="prompt-library-prompt"
                         onChange={(event) => updateDraft({ contentMarkdown: event.target.value })}
                         placeholder={draft.category === 'context'
-                          ? t.promptLibrary.contextPromptPlaceholder.replace('{placeholder}', contextPackPlaceholder)
+                          ? t.promptLibrary.contextPromptPlaceholder.replace('{placeholder}', () => contextPackPlaceholder)
                           : t.promptLibrary.promptPlaceholder}
                         value={draft.contentMarkdown}
                       />
@@ -924,8 +924,8 @@ function PromptUsageHint({ draft }: { draft: PromptDraft }) {
   const shortcutLabel = normalizeRuleLabel(draft.label) || t.promptLibrary.labelPlaceholder
   const shortcut = `@rules:${shortcutLabel}`
   const usage = categoryUsage(draft.category, t)
-    .replace('{mention}', shortcut)
-    .replace('{placeholder}', contextPackPlaceholder)
+    .replace('{mention}', () => shortcut)
+    .replace('{placeholder}', () => contextPackPlaceholder)
 
   return (
     <div className="min-w-0 space-y-0.5">
@@ -1426,8 +1426,8 @@ function promptImprovementGuidance(draft: PromptDraft, t: ReturnType<typeof useL
   const label = normalizeRuleLabel(draft.label) || 'draft-label'
   const category = promptImprovementCategory(draft.category)
   const usage = categoryUsage(draft.category, t)
-    .replace('{mention}', `@rules:${label}`)
-    .replace('{placeholder}', contextPackPlaceholder)
+    .replace('{mention}', () => `@rules:${label}`)
+    .replace('{placeholder}', () => contextPackPlaceholder)
 
   return [
     `Prompt Library category: ${category.name}.`,

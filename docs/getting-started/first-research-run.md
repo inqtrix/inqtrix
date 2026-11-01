@@ -108,7 +108,7 @@ If you see confidence pinned at 8 with open sub-questions, that is the coverage 
 
 ## What to do when the answer looks wrong
 
-- Turn on logging: `INQTRIX_LOG_ENABLED=true`, `INQTRIX_LOG_LEVEL=INFO`. Use `OBSERVABILITY_PROFILE=forensic` for protected source/citation/claim/answer audit lineage; `INQTRIX_LOG_LEVEL=DEBUG` mirrors only its content-minimized IDs, states and metrics into the ordinary log. See [Logging](../observability/logging.md).
+- Read the log: the server and worker log INFO as JSON on stdout by default; `INQTRIX_LOG_TARGET=both` adds a file under `logs/`, `INQTRIX_LOG_FORMAT=text` gives readable lines. Use `OBSERVABILITY_PROFILE=forensic` with `INQTRIX_TRACING=file` or `otlp` for the protected source/citation/claim/answer lineage; it is recorded on the trace, never in the log. See [Logging](../observability/logging.md).
 - Read the iteration log for the run (testing mode) — the markers explain every decision. See [Iteration log](../observability/iteration-log.md).
 - Look for provider errors in the log (`AnthropicAPIError`, `AzureOpenAIAPIError`). Perplexity raises no error class of its own: it logs `Perplexity-WebSearch fehlgeschlagen (status=…, type=…)`, records a non-fatal notice and returns an empty result. See [Debugging runs](../observability/forensic-cookbook.md#debugging-runs).
 - Re-run with a different stack (for example `examples/webserver_stacks/bedrock_perplexity.py`) to isolate whether the problem is provider-specific.

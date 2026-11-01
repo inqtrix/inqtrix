@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import {
   fixtureIsInsidePrivateRunDirectory,
   normalizeSystemSmokeBaseURL,
+  SYSTEM_SMOKE_LOCALE,
 } from './collaboration-system-smoke.mjs'
 import { writePrivateJsonFixture } from './private-json.mjs'
 import { assertVerificationRunId } from './run-scope.mjs'
@@ -96,7 +97,7 @@ export function buildGeneratedFaultInjectionFixture({
       runId,
       transport: GENERATED_FAULT_INJECTION_TRANSPORT,
     },
-    locale: 'de',
+    locale: SYSTEM_SMOKE_LOCALE,
     privateAnchors: normalizedPrivateAnchors,
     transports: {
       [GENERATED_FAULT_INJECTION_TRANSPORT]: {

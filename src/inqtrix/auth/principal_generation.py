@@ -7,7 +7,11 @@ from typing import Callable, cast
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from inqtrix.auth.principal import Principal, resolve_live_principal
+from inqtrix.auth.principal import (
+    Principal,
+    resolve_live_principal,
+    resolve_request_principal,
+)
 from inqtrix.services.request_parsing import error_response
 
 EXPECTED_USER_ID_HEADER = "x-inqtrix-expected-user-id"
@@ -42,19 +46,26 @@ def bind_principal_generation(
 ) -> Callable[..., Principal]:
     """Wrap one principal dependency with the optional browser generation.
 
-    FastAPI resolves the original dependency only once per request. Long-lived
-    streams receive a matching live resolver so revocation and identity-switch
-    checks keep using the provider's canonical credential path.
+    FastAPI resolves the original dependency only once per request. A route
+    that calls the guard itself, or resolves it with
+    :func:`~inqtrix.auth.principal.resolve_request_principal`, gets the
+    provider's full request check. Long-lived streams receive a matching live
+    resolver so revocation and identity-switch checks keep using the
+    provider's canonical credential path.
     """
 
     injected_principal = Depends(dependency)
+
+    async def resolve_expected_request(request: Request) -> Principal:
+        principal = await resolve_request_principal(dependency, request)
+        return _require_expected_principal(request, principal)
 
     async def expected_principal(
         request: Request,
         principal: Principal = cast(Principal, injected_principal),
     ) -> Principal:
         if principal is injected_principal:
-            principal = await resolve_live_principal(dependency, request)
+            return await resolve_expected_request(request)
         return _require_expected_principal(request, principal)
 
     async def resolve_expected_live(request: Request) -> Principal:
@@ -65,6 +76,11 @@ def bind_principal_generation(
         expected_principal,
         "__inqtrix_live_resolver__",
         resolve_expected_live,
+    )
+    setattr(
+        expected_principal,
+        "__inqtrix_request_resolver__",
+        resolve_expected_request,
     )
     return expected_principal
 

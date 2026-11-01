@@ -56,33 +56,23 @@ def test_sanitize_assigns_positional_ids_deterministically():
 
 
 def test_sanitize_caps_questions_and_options(caplog):
-    handler_target = logging.getLogger("inqtrix")
-    handler_target.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            questions = sanitize_questions(
-                [
-                    _question(labels=("A", "B", "C", "D", "E", "F")),
-                    _question("F2?"),
-                    _question("F3?"),
-                    _question("F4?"),
-                ]
-            )
-    finally:
-        handler_target.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        questions = sanitize_questions(
+            [
+                _question(labels=("A", "B", "C", "D", "E", "F")),
+                _question("F2?"),
+                _question("F3?"),
+                _question("F4?"),
+            ]
+        )
     assert len(questions) == MAX_QUESTIONS_PER_ROUND
     assert len(questions[0]["options"]) == MAX_OPTIONS_PER_QUESTION
     assert any("capped at" in record.message for record in caplog.records)
 
 
 def test_sanitize_degrades_single_option_to_free_text(caplog):
-    handler_target = logging.getLogger("inqtrix")
-    handler_target.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            questions = sanitize_questions([_question(labels=("Europa",))])
-    finally:
-        handler_target.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        questions = sanitize_questions([_question(labels=("Europa",))])
     # The question survives WITHOUT chips (free text always works).
     assert len(questions) == 1
     assert questions[0]["options"] == []
@@ -91,13 +81,8 @@ def test_sanitize_degrades_single_option_to_free_text(caplog):
 
 
 def test_sanitize_drops_empty_prompt_loudly(caplog):
-    handler_target = logging.getLogger("inqtrix")
-    handler_target.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            questions = sanitize_questions([_question(prompt="   ")])
-    finally:
-        handler_target.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        questions = sanitize_questions([_question(prompt="   ")])
     assert questions == []
     assert any("question text discarded" in record.message for record in caplog.records)
 
@@ -141,13 +126,8 @@ def test_sanitize_keeps_a_long_option_description_whole():
 
 def test_sanitize_warns_when_a_label_exceeds_the_display_guidance(caplog):
     long_label = "Nur Quellen aus der Sammlung zum EU AI Act, ohne Websuche und ohne Anhänge"
-    handler_target = logging.getLogger("inqtrix")
-    handler_target.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            sanitize_questions([_question(labels=("Europa", long_label))])
-    finally:
-        handler_target.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        sanitize_questions([_question(labels=("Europa", long_label))])
     assert any(
         "display guidance" in record.message and "kept in full" in record.message
         for record in caplog.records

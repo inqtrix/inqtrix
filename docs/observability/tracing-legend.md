@@ -544,6 +544,21 @@ content and always rides the `knowledge.search` capability span:
 and `inqtrix.knowledge.collection_count`, or `unbounded` for an unscoped
 principal searching its whole tenant — no ids, no count).
 
+## Knowledge grounding span
+
+A Knowledge answer with grounding opens one `knowledge.grounding` span per
+checked answer attempt. It carries counts and the verdict, never quote or source
+text: `inqtrix.grounding.attempt`, `inqtrix.grounding.status` (`verified`,
+`rejected_format`, `rejected_quote`, or `no_evidence` when the answer
+declares that no excerpt answers the question),
+`inqtrix.grounding.quotes_total`, `inqtrix.grounding.quotes_verified`,
+`inqtrix.grounding.quotes_artifact_tolerated`,
+`inqtrix.grounding.format_repaired` and, for a rejection,
+`inqtrix.grounding.failure_code`. The run's `knowledge_grounding` receipt
+names a `no_evidence` outcome by the marker `_knowledge_grounding_no_evidence`
+with an empty status. A `no_evidence` regeneration after an unverifiable
+quote leaves the first attempt's verdict as the run's outcome.
+
 ## Document analysis spans
 
 A mission `file_analysis` task opens one `agent.document_analysis` span under

@@ -55,7 +55,7 @@ from inqtrix.citation_labels import (
 )
 from inqtrix.strategies._claim_values import claim_values, content_words, page_states_claim
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 STATES: tuple[str, ...] = ("verified", "source_text", "attributed", "insufficient")
 """Every state a statement can have, in the order a summary counts them."""

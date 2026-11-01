@@ -49,6 +49,42 @@ test('lock screen stays usable in each authentication mode, language and viewpor
   }
 })
 
+test('gateway states replace every form and stay usable in each language and viewport', async ({ page }, testInfo) => {
+  test.setTimeout(120_000)
+  // A state with a reload, one that only informs, and the signed-out page.
+  for (const [state, outcome, action] of [
+    ['signInFailed', 'expired', true],
+    ['notProvisioned', 'not_provisioned', false],
+    ['signedOut', '', true],
+  ] as const) {
+    for (const locale of ['en', 'de']) {
+      for (const theme of ['light', 'dark']) {
+        const mobile = (theme === 'dark') !== (locale === 'de')
+        await page.setViewportSize({ width: mobile ? 390 : 1440, height: 900 })
+        await page.goto(`${fixture}?mode=gateway&state=${state}&outcome=${outcome}&locale=${locale}&theme=${theme}`)
+        const dialog = page.getByRole('dialog')
+        await expect(dialog).toBeVisible()
+        await expect(page.locator(`[data-gateway-state="${state}"]`)).toBeVisible()
+        await expect(page.locator('form')).toHaveCount(0)
+        await expect(page.locator('#inqtrix-auth-token')).toHaveCount(0)
+        if (outcome) await expect(dialog.getByText(outcome, { exact: true })).toBeVisible()
+        expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+        const button = page.locator('.inqtrix-auth-action')
+        await expect(button).toHaveCount(action ? 1 : 0)
+        if (action) await expect(button).toHaveCSS('height', '44px')
+        await page.addScriptTag({ content: axe.source })
+        const violations = await page.evaluate(async () => (
+          await window.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa'] } })
+        ).violations)
+        expect(violations).toEqual([])
+        if (testInfo.project.name === 'chromium') {
+          await page.screenshot({ path: testInfo.outputPath(`auth-gateway-${state}-${locale}-${theme}.png`), fullPage: true })
+        }
+      }
+    }
+  }
+})
+
 test('keyboard focus stays visible on brand-filled lock screen controls in every preset', async ({ browserName, page }) => {
   test.setTimeout(90_000)
   // WebKit on macOS moves Tab focus only between text fields; Alt adds buttons.

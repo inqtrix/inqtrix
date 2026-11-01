@@ -69,6 +69,7 @@ from inqtrix.services.knowledge_service import (
 from inqtrix.services.file_preparation import PreparationError, canonical_preparation
 from inqtrix.services.request_parsing import (
     error_response,
+    workspace_id_for_write,
     workspace_id_from_request,
 )
 from inqtrix.source_authority import SourceScope
@@ -76,7 +77,7 @@ from inqtrix.source_authority import SourceScope
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 def _collection_payload(
@@ -174,6 +175,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
     router = APIRouter()
     principal_dep = container.principal_dependency
+    users = getattr(container.auth_provider, "users", None)
     user_context_dep = container.user_context_dependency
     file_service = container.file_service
     asset_service = container.asset_records_service
@@ -397,7 +399,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         if denied is not None:
             return denied
         try:
-            workspace_id = workspace_id_from_request(req, body)
+            workspace_id = await workspace_id_for_write(req, principal, users, body)
             prepared_title = str(body.get("title", ""))
             prepared_text = str(body.get("text", ""))
             prepared_metadata = dict(metadata or {})

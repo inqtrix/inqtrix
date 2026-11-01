@@ -103,15 +103,15 @@ export function childProgressLine(
       ? formatDuration(child.updatedAt - child.startedAt)
       : ''
     return t.agent.timeline.childSummary
-      .replace('{tasks}', countLabel(started, t.agent.timeline.taskCountOne, t.agent.timeline.taskCount))
+      .replace('{tasks}', () => countLabel(started, t.agent.timeline.taskCountOne, t.agent.timeline.taskCount))
       .replace('{done}', String(done))
       .replace('{failed}', String(failed))
-      .replace('{sections}', countLabel(
+      .replace('{sections}', () => countLabel(
         child.sectionsDone ?? 0,
         t.agent.timeline.sectionCountOne,
         t.agent.timeline.sectionCount,
       ))
-      .replace('{elapsed}', elapsed)
+      .replace('{elapsed}', () => elapsed)
       .replace(/ · $/, '')
   }
   const brokenOff = BROKEN_OFF[status]
@@ -138,7 +138,7 @@ export function childProgressLine(
       countLabel(child.toolCalls, t.agent.timeline.childToolStepsOne, t.agent.timeline.childToolSteps),
     )
     if (child.startedAt !== undefined) {
-      parts.push(t.agent.timeline.childRunningSince.replace('{time}', formatClockTime(child.startedAt, locale)))
+      parts.push(t.agent.timeline.childRunningSince.replace('{time}', () => formatClockTime(child.startedAt!, locale)))
     }
   } else {
     // `agent.activity`, not `agent.stations`: the line says what the
@@ -170,7 +170,7 @@ export function childProgressLine(
       title
         ? t.agent.timeline.childTaskTitled
           .replace('{number}', String(open[0] + 1))
-          .replace('{title}', title)
+          .replace('{title}', () => title)
         : t.agent.timeline.childTask.replace('{number}', String(open[0] + 1)),
     )
   }
@@ -185,7 +185,7 @@ export function childProgressLine(
     const query = child.lastQuery?.trim()
     if (query) {
       parts.push(
-        t.agent.timeline.childSearch.replace('{query}', queryPreview(query)),
+        t.agent.timeline.childSearch.replace('{query}', () => queryPreview(query)),
       )
     }
     const done = child.searchesDone ?? 0
@@ -232,7 +232,7 @@ export function childProgressLine(
     if (child.startedAt === undefined) return null
     parts.push(
       t.agent.timeline.childWorking,
-      t.agent.timeline.childRunningSince.replace('{time}', formatClockTime(child.startedAt, locale)),
+      t.agent.timeline.childRunningSince.replace('{time}', () => formatClockTime(child.startedAt!, locale)),
     )
   }
   return `${t.agent.timeline.childRun} · ${parts.join(' · ')}`

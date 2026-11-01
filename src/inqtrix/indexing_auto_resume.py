@@ -23,7 +23,7 @@ from inqtrix.contextualization_circuit import (
     ContextualizationCircuitView,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # A pause at an open circuit made no provider call: the resume that led to it
 # waited for the circuit and does not count against the job.

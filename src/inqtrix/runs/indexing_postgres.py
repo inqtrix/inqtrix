@@ -128,7 +128,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.principal import UserContext
     from inqtrix.runs.indexing_queue import ValkeyIndexingQueue
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _TERMINAL_VALUES = tuple(status.value for status in TERMINAL_INDEXING_STATUSES)
 _ACTIVE_VALUES = ACTIVE_INDEXING_STATUS_VALUES

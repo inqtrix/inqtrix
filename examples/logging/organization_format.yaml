@@ -1,0 +1,24 @@
+# Organization log format for Inqtrix services.
+#
+# Point INQTRIX_LOG_CONFIG at this file (or pass the same mapping as
+# configure_logging(service=..., config=...)). It replaces the built-in
+# logging setup completely, so no other INQTRIX_LOG_* value may be set.
+# Inqtrix attaches its content filter to every handler below, and the
+# correlation fields are available to formatters as record attributes:
+# %(service)s, %(request_id)s, %(run_id)s, %(user)s, %(tenant)s,
+# %(trace_id)s, %(span_id)s (None when not bound).
+version: 1
+formatters:
+  org:
+    format: "%(asctime)s %(levelname)s service=%(service)s request_id=%(request_id)s logger=%(name)s %(message)s"
+handlers:
+  stdout:
+    class: logging.StreamHandler
+    stream: ext://sys.stdout
+    formatter: org
+root:
+  level: WARNING
+  handlers: [stdout]
+loggers:
+  inqtrix:
+    level: INFO

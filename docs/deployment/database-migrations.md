@@ -204,8 +204,11 @@ Two consequences for anyone writing their own values file or chart:
 - With an external database, `postgres.auth.*` is **ignored**. The chart reads
   it only when `postgres.enabled=true`; changing the username there does not
   rename anything in your managed database.
-- If readiness reports *"PostgreSQL runtime session login must be LOGIN
-  NOSUPERUSER NOBYPASSRLS …"*, the fix is a restricted runtime login — **not**
+- If `/readyz` reports `"database_contract": "violation"` and the worker
+  stops with *"Unhandled exception; the process stops: RuntimeError: Worker
+  database runtime contract failed before queue claims: PostgreSQL runtime
+  session login must be LOGIN NOSUPERUSER NOBYPASSRLS …"*, the fix is a
+  restricted runtime login — **not**
   setting `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=bundled_legacy`. That override
   does take effect (explicit config wins over the derived value) and it accepts
   a session login with full database authority. Tenant isolation still holds
@@ -514,6 +517,105 @@ state. Production rollback follows the established contract: stop new
 binaries, restore the verified pre-upgrade database backup, then start the
 matching old binaries.
 
+### SCIM provisioning state (`0097_scim_users`)
+
+Revision `0097_scim_users` stores the state of SCIM 2.0 user provisioning,
+which runs only in `INQTRIX_AUTH_MODE=gateway` with `INQTRIX_SCIM_ENABLED=true`
+([Settings: Gateway mode](../configuration/settings-and-env.md#gateway-mode),
+[Create and manage users: Administration in `gateway` mode](create-and-manage-users.md#administration-in-gateway-mode)).
+It adds four nullable columns to `users`. Every existing account takes NULL,
+so nothing is backfilled:
+
+| Column | Type | Holds |
+|---|---|---|
+| `scim_user_name` | `TEXT` | The SCIM `userName`. |
+| `scim_name` | `JSONB` | The SCIM `name` object (`givenName`, `familyName`, `formatted`). |
+| `scim_deleted_at` | `TIMESTAMPTZ` | A tombstone: the identity system deleted the account, and neither a sign-in nor provisioning brings it back. |
+| `disabled_source` | `TEXT`, check constraint `ck_users_disabled_source` | Who disabled the account: `admin` or `provisioning`. NULL counts as `admin`, because every disable before this revision came from an administrator. |
+
+It also creates the partial unique index `uq_users_scim_user_name` on
+`(tenant_id, issuer, lower(scim_user_name)) WHERE scim_user_name IS NOT NULL`:
+a `userName` is unique per tenant and issuer without regard to case, and
+accounts SCIM never bound stay out of the index.
+
+**Downgrade.** A downgrade below this revision is lossless only without SCIM
+state. It first counts, across all tenants, the accounts with a
+`scim_user_name`, with a `scim_name`, with a tombstone and with
+`disabled_source = 'provisioning'`. While any count is above zero it refuses
+with the four counts alone, never a value, and the schema stays at
+`0097_scim_users`:
+
+```text
+SCIM users downgrade blocked: scim_user_names=2 scim_names=2 tombstones=0 provisioning_disables=1. Dropping this state would change how accounts map to identities. Restore the matching pre-upgrade database backup instead.
+```
+
+Otherwise it drops the index, the check constraint and the four columns. An
+account an administrator disabled (`disabled_source = 'admin'`) does not
+block it: dropping the column leaves NULL, which means the same. The refusal
+protects the mapping of accounts to identities. Dropping SCIM state would let
+provisioning adopt a former tombstone after a later upgrade, and would turn a
+disable by provisioning into one the identity system can no longer lift.
+
+So the revision is reversible without loss for every installation that never
+wrote SCIM state. After the first SCIM write it is one-way: the way back to
+an Inqtrix version from before `0097_scim_users` is restoring the database
+backup taken before the upgrade, as for the one-way revisions above, and
+everything written after that backup is lost. Switching `INQTRIX_AUTH_MODE`
+back to another mode needs no schema change; see
+[Switching an existing deployment](auth-modes.md#switching-an-existing-deployment).
+
+### Project namespaces of script rows (`0098_project_namespace_backfill`)
+
+A signed-in client that wrote without the `X-Inqtrix-Workspace-Id` header, for
+example a script with a personal access token, stored its rows without a
+project namespace (`workspace_id` NULL). The UI lists by the person's canonical
+project namespace (`users.default_workspace_id`), so these rows never appeared
+there. From this version on, such a write takes the writer's canonical
+namespace ([Build a UI on Inqtrix](../extending/ui.md)). Revision
+`0098_project_namespace_backfill` moves the rows written before, once:
+
+1. An owner of such rows without a canonical namespace gets one of the form the
+   browser creates (`ws_` and 32 hex digits); the next session start returns it.
+2. A prepared asset section (roles `temporary`, `library`, `project_sources`)
+   without a namespace whose twin of the same role already exists in the
+   owner's namespace is merged into the twin: its groups and assets move there,
+   and the empty duplicate is deleted.
+3. Every owned row without a namespace moves into its owner's namespace: editor
+   documents and folders, chat threads and their groups, agent and knowledge
+   sessions and their groups, asset sections, groups and records, files,
+   vector indexes, runs, indexing jobs, upload and deletion operations, and
+   source lifecycles together with their key. A knowledge document indexed from
+   an asset takes the asset's new namespace as its source namespace.
+
+What stays as it is, and why:
+
+- rows without an owner, written in modes `apikey` and `none`;
+- the usage ledger `llm_usage`, a historical record;
+- knowledge sources managed through the API, bound to their collection;
+- a twinned prepared section that a queued or running deletion reaches (the
+  section, a group or an asset of it), with its groups, assets and the
+  operations on them, so the deletion finishes what was asked;
+- a queued or running upload or deletion operation, or a source lifecycle,
+  whose target already has one in the owner's namespace.
+
+The migration job logs one `INFO` line per step with the number of rows it
+moved, and one `WARNING` with the count for everything it leaves out:
+
+```text
+Rows moved into their owner's project namespace in editor_documents: 3.
+Asset sections left without a project namespace because a running deletion reaches them while a twin of the same role exists: 1.
+```
+
+Without such rows the revision changes nothing. After the upgrade, script data
+appears in its owner's UI, and runs a script started appear in the owner's run
+list. During a rolling update, pods of the old version can still write a few
+rows without a namespace until they stop.
+
+**Downgrade.** The downgrade changes nothing: which rows had no namespace is
+not recorded, so the move cannot be undone. The way back to an Inqtrix
+version from before this revision is the database backup taken before the
+upgrade, as for the one-way revisions above.
+
 ## Readiness and incident diagnosis
 
 Runtime readiness validates more than `SELECT 1`: the database must be at the
@@ -539,8 +641,11 @@ mismatch is `not_ready`; workers do not take new jobs. This turns an incomplete
 rollout into one deployment error instead of unrelated 500 responses from runs,
 preferences, skills and files.
 
-The characteristic managed-PostgreSQL failure is SQLSTATE `28000`, often shown
-as `InvalidAuthorizationSpecificationError` with:
+The characteristic managed-PostgreSQL failure is SQLSTATE `28000`. The
+migration job stops with a `CRITICAL` line whose chain of causes names
+`InvalidAuthorizationSpecificationError[sqlstate=28000]`; the job's log shows
+driver errors only by type and code, because their messages can quote values.
+The database's own message for this failure is in the PostgreSQL server log:
 
 ```text
 inqtrix.tenant_id is not set; refusing the tenant-scoped query (use tenant_session)

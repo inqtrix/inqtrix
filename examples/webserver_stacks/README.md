@@ -170,12 +170,11 @@ stack is registered only when its required vars are present, so
 
 | Variable | Required | Default | Effect |
 |---|---|---|---|
-| `INQTRIX_LOG_ENABLED` | no | `false` | Activates file logging with secret redaction in `logs/inqtrix_<timestamp>.log`. One file per server process. When `false`, the inqtrix logger stays silent (only `INQTRIX_LOG_CONSOLE` may surface output). |
-| `INQTRIX_LOG_LEVEL` | no | `INFO` | Level for the **inqtrix** logger (`DEBUG` / `INFO` / `WARNING`). Controls how verbose the agent algorithm trace (`RUN start`, `TRACE plan: round=N`, `_classify_fallback`, ...) is. |
-| `INQTRIX_LOG_CONSOLE` | no | `false` | Independently mirrors WARNING+ records of the inqtrix logger to stderr. Useful for live monitoring during tests; orthogonal to `INQTRIX_LOG_ENABLED`. |
-| `INQTRIX_LOG_INCLUDE_WEB` | no | `true` | When file logging is enabled, also routes uvicorn (`Started server process`, `Application startup complete`, access lines `127.0.0.1 - "GET /health" 200`) and FastAPI logs into the same file via uvicorn's `log_config` parameter. Set to `false` when uvicorn already streams to a structured-logging sink and the duplication would be noise. |
-| `INQTRIX_LOG_WEB_LEVEL` | no | `INFO` | Level for the uvicorn / FastAPI loggers in the generated `log_config` (`DEBUG` / `INFO` / `WARNING`). Independent from `INQTRIX_LOG_LEVEL` because uvicorn-DEBUG is network-verbose (HTTP frames, ASGI receive events) while inqtrix-DEBUG is algorithm-oriented — different debugging scenarios. |
-| `OBSERVABILITY_PROFILE` | no | `summary` | `summary`, `debug`, or `forensic`. When set to `forensic`, the agent emits structured lineage events (`query_record`, `source_record`, `claim_merge`, `answer_claim_binding`, …) through the same `inqtrix` logger. Those lines are emitted at **DEBUG** level, so pair `forensic` with `INQTRIX_LOG_LEVEL=DEBUG` (and `INQTRIX_LOG_ENABLED=true`) to see them in `logs/inqtrix_<timestamp>.log`. Operator recipes: [`docs/observability/forensic-cookbook.md`](../../docs/observability/forensic-cookbook.md). |
+| `INQTRIX_LOG_TARGET` | no | `console` | `console` (stdout), `file` (rotating `logs/inqtrix-api.log`), `both` or `none`. |
+| `INQTRIX_LOG_LEVEL` | no | `INFO` | Level for the **inqtrix** loggers (`DEBUG` / `INFO` / `WARNING` / `ERROR`). Controls how verbose the agent algorithm trace (`RUN start`, `TRACE plan: round=N`, `_classify_fallback`, ...) is. |
+| `INQTRIX_LOG_FORMAT` | no | `json` | `json` (one object per line) or `text` (one readable line per record). |
+| `INQTRIX_LOG_WEB_LEVEL` | no | follows `INQTRIX_LOG_LEVEL`, at least `INFO` | `INFO`, `WARNING` or `ERROR` for the uvicorn and FastAPI loggers. |
+| `OBSERVABILITY_PROFILE` | no | `summary` | `summary`, `debug`, or `forensic`. With `forensic` the agent records structured lineage events (`query_record`, `source_record`, `claim_merge`, `answer_claim_binding`, …) on the run's trace, never in the log. Operator recipes: [`docs/observability/forensic-cookbook.md`](../../docs/observability/forensic-cookbook.md). |
 | `INQTRIX_SERVER_HOST` | no | `0.0.0.0` | uvicorn bind address |
 | `INQTRIX_SERVER_PORT` | no | `5100` | uvicorn port |
 | `MAX_CONCURRENT` | no | `100` | Maximum active `/v1/chat/completions` requests. Native runs reuse this value only when `RUN_MAX_CONCURRENT` is unset. |
@@ -189,76 +188,53 @@ stack is registered only when its required vars are present, so
 | `INQTRIX_SERVER_CORS_ORIGINS` | no | `""` | Comma-separated origin whitelist; activates `CORSMiddleware` |
 | `INQTRIX_DEFAULT_STACK` | no (multi-stack only) | first registered stack | Picks which stack `multi_stack.py` uses when a request omits the `"stack"` body field. Must match a registered stack name. |
 
-### Logging behaviour matrix
+### Logging
 
-The four logging variables are intentionally orthogonal so that
-"file vs. terminal" and "inqtrix vs. uvicorn" can be steered
-independently. The matrix below covers the relevant combinations:
+The servers configure logging like `python -m inqtrix`: one configuration for
+the whole process at the start of `main()`, uvicorn included
+(`log_config=None`), and one status line at startup that names what applies.
+The default is `INFO` as JSON on stdout. All variables, the line fields and
+your own log format: [Logging](../../docs/observability/logging.md).
 
-| `INQTRIX_LOG_ENABLED` | `INQTRIX_LOG_CONSOLE` | `INQTRIX_LOG_INCLUDE_WEB` | inqtrix records | uvicorn / FastAPI records |
-|---|---|---|---|---|
-| `false` | `false` | any | silent (NullHandler) | terminal only (uvicorn defaults — stderr/stdout) |
-| `false` | `true`  | any | stderr WARNING+ only | terminal only |
-| `true`  | `false` | `true` (default) | file (`logs/inqtrix_<ts>.log`) | file + terminal (single file, unified format) |
-| `true`  | `false` | `false` | file only | terminal only |
-| `true`  | `true`  | `true` (default) | file + stderr WARNING+ | file + terminal |
+- uvicorn's startup and access lines go through the same handlers, filter and
+  format as the agent's lines. Access lines show `-` instead of the client
+  address and the path without its query string.
+- `INQTRIX_LOG_LEVEL=DEBUG` adds the SDK-side DEBUG lines of the provider
+  adapters; the per-round `TRACE ...` lines of the research loop are already
+  `INFO`. Use it for algorithm debugging, not for routine operation.
+- Foreign libraries never appear below `WARNING`, whatever level is set.
+- `INQTRIX_LOG_ENABLED`, `INQTRIX_LOG_CONSOLE` and `INQTRIX_LOG_INCLUDE_WEB`
+  are retired: the server does not start while one of them is set.
 
-A few practical consequences:
-
-- One server process produces exactly one `logs/inqtrix_<timestamp>.log`.
-  Multiple chat-completion calls during the same process lifetime all
-  append to that file — that is by design and makes per-run
-  correlation trivial.
-- When `INQTRIX_LOG_ENABLED=false`, `INQTRIX_LOG_INCLUDE_WEB` becomes
-  effectively a no-op (there is no file to mirror into) — uvicorn
-  keeps its own stderr/stdout defaults.
-- `INQTRIX_LOG_LEVEL=DEBUG` floods the file with the agent's
-  iteration trace (per-round plan/search/evaluate JSON dumps). Use
-  for algorithm debugging, not for routine operation. With
-  `OBSERVABILITY_PROFILE=forensic`, the same file also receives
-  structured `EVENT <name>: {…}` JSON lines for source/claim/answer
-  lineage (see the forensic cookbook linked in the table above).
-- `INQTRIX_LOG_WEB_LEVEL=DEBUG` adds uvicorn HTTP-level diagnostics
-  (frame parsing, connection-pool decisions, ASGI receive events)
-  — useful when investigating SSE-disconnect oddities or reverse-proxy
-  buffering, less useful for steady-state operation.
-- File records use a unified format
-  (`asctime | levelname | thread | logger | message`) regardless of
-  origin (inqtrix / uvicorn.error / uvicorn.access / fastapi), so a
-  single `grep` / `tail -f` over the file reads cleanly.
-
-Recipe — debug a sticky algorithmic run with full trace:
+For readable lines on the terminal plus a log file:
 
 ```bash
-INQTRIX_LOG_ENABLED=true \
-INQTRIX_LOG_LEVEL=DEBUG \
-INQTRIX_LOG_WEB_LEVEL=INFO \
+INQTRIX_LOG_TARGET=both \
+INQTRIX_LOG_FORMAT=text \
 python examples/webserver_stacks/anthropic_perplexity.py
 ```
 
-Recipe — forensic lineage (query/source/claim/answer IDs in the same log file):
+To debug a sticky algorithmic run:
 
 ```bash
-INQTRIX_LOG_ENABLED=true \
 INQTRIX_LOG_LEVEL=DEBUG \
-INQTRIX_LOG_WEB_LEVEL=INFO \
+INQTRIX_LOG_FORMAT=text \
+python examples/webserver_stacks/anthropic_perplexity.py
+```
+
+To record forensic lineage (query/source/claim/answer IDs on the trace):
+
+```bash
 OBSERVABILITY_PROFILE=forensic \
+INQTRIX_TRACING=file \
 python examples/webserver_stacks/anthropic_perplexity.py
 ```
 
-Recipe — investigate a reverse-proxy / disconnect issue:
+To show only warnings and errors:
 
 ```bash
-INQTRIX_LOG_ENABLED=true \
-INQTRIX_LOG_LEVEL=INFO \
-INQTRIX_LOG_WEB_LEVEL=DEBUG \
-python examples/webserver_stacks/anthropic_perplexity.py
-```
-
-Recipe — silent mode (only WARNING+ to terminal, no file):
-
-```bash
-INQTRIX_LOG_CONSOLE=true \
+INQTRIX_LOG_LEVEL=WARNING \
+INQTRIX_LOG_WEB_LEVEL=WARNING \
 python examples/webserver_stacks/anthropic_perplexity.py
 ```
 

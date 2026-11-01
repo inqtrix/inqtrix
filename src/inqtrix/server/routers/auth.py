@@ -1,6 +1,9 @@
-"""OIDC BFF routes (``/api/auth/*``) — mounted only in oidc mode.
+"""Auth routes (``/api/auth/*``) of the cookie-session modes.
 
-The browser never sees a token: ``/login`` redirects to the IdP with
+The OIDC mode mounts the BFF flow, the local mode the password routes,
+and the gateway mode only the session start from the gateway's
+assertion, the logout and the token routes. In the OIDC flow the browser
+never sees a token: ``/login`` redirects to the IdP with
 PKCE S256 + state + nonce, ``/callback`` exchanges the code
 server-side, validates the id_token, and sets the opaque session
 cookie; ``/session`` bootstraps the SPA (identity + CSRF token);
@@ -27,7 +30,8 @@ from inqtrix.auth.log_redaction import (
     stable_pseudonym,
 )
 from inqtrix.auth.lifecycle import LoginCommand, UserDisabledError
-from inqtrix.auth.oidc import OidcExchangeError, make_pkce_pair
+from inqtrix.auth.mapping import OidcExchangeError, email_is_confirmed
+from inqtrix.auth.oidc import make_pkce_pair
 from inqtrix.auth.sessions import (
     FLOW_TTL_SECONDS,
     AuthSession,
@@ -37,12 +41,13 @@ from inqtrix.auth.sessions import (
 from inqtrix.services.request_parsing import error_response
 
 if TYPE_CHECKING:
+    from inqtrix.auth.gateway import GatewayAuthProvider
     from inqtrix.auth.oidc import OidcAuthProvider
     from inqtrix.auth.permissions import AuditSink
     from inqtrix.auth.principal import Principal
     from inqtrix.services.audit_service import AuditService
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 def _login_audit(audit: "AuditSink | None"):
@@ -82,6 +87,59 @@ _FLOW_COOKIE_SECURE = "__Host-inqtrix_oidc"
 _FLOW_COOKIE_DEV = "inqtrix_oidc"
 
 
+async def _no_store(response: Response) -> None:
+    # The auth surface emits identity facts and the CSRF token: never
+    # cacheable, declared at the source instead of relying on every
+    # intermediary's defaults.
+    response.headers["Cache-Control"] = "no-store"
+
+
+def _set_cookie(
+    response: Response,
+    provider: "OidcAuthProvider",
+    name: str,
+    value: str,
+    *,
+    http_only: bool,
+    max_age: int | None = None,
+) -> None:
+    response.set_cookie(
+        name,
+        value,
+        httponly=http_only,
+        secure=provider.secure_cookies,
+        samesite="lax",
+        path="/",
+        max_age=max_age,
+    )
+
+
+def _clear_cookie(
+    response: Response, provider: "OidcAuthProvider", name: str
+) -> None:
+    response.delete_cookie(name, path="/", secure=provider.secure_cookies)
+
+
+def _set_session_cookies(
+    response: Response, provider: "OidcAuthProvider", session: AuthSession
+) -> None:
+    """The opaque session cookie and the readable double-submit cookie."""
+    from inqtrix.auth.oidc import make_csrf_token
+
+    _set_cookie(
+        response, provider, provider.session_cookie, session.id, http_only=True
+    )
+    _set_cookie(
+        response,
+        provider,
+        provider.csrf_cookie,
+        make_csrf_token(
+            provider.session_secret, session.id, session.csrf_random
+        ),
+        http_only=False,
+    )
+
+
 def build_auth_router(
     provider: "OidcAuthProvider",
     principal_dependency: Callable[..., "Principal"] | None = None,
@@ -93,7 +151,9 @@ def build_auth_router(
     first-run setup + password login routes. The session / logout / PAT
     routes are identical across modes (local sessions are the same
     cookie-session ``kind`` as OIDC), so password modes route
-    through :func:`_build_password_auth_router`. Workspaces are not
+    through :func:`_build_password_auth_router`. The gateway mode starts
+    its sessions from the gateway's assertion instead of a login route
+    (:func:`_build_gateway_auth_router`). Workspaces are not
     bootstrapped on login: workspace management is an explicit instance-admin
     action (``/v1/admin/workspaces``), so the owner setup mints only the
     instance admin and the first workspace is created deliberately.
@@ -110,42 +170,17 @@ def build_auth_router(
         return _build_password_auth_router(
             provider, principal_dependency, audit=audit
         )
+    if provider.mode == "gateway":
+        return _build_gateway_auth_router(
+            provider, principal_dependency, audit=audit
+        )
 
-    async def no_store(response: Response) -> None:
-        # The auth surface emits identity facts and the CSRF token —
-        # never cacheable, declared at the source instead of relying
-        # on every intermediary's defaults.
-        response.headers["Cache-Control"] = "no-store"
-
-    router = APIRouter(dependencies=[Depends(no_store)])
+    router = APIRouter(dependencies=[Depends(_no_store)])
     users = provider.users
     auditor = _login_audit(audit)
     flow_cookie = (
         _FLOW_COOKIE_SECURE if provider.secure_cookies else _FLOW_COOKIE_DEV
     )
-
-    def _set_cookie(
-        response: Response,
-        name: str,
-        value: str,
-        *,
-        http_only: bool,
-        max_age: int | None = None,
-    ) -> None:
-        response.set_cookie(
-            name,
-            value,
-            httponly=http_only,
-            secure=provider.secure_cookies,
-            samesite="lax",
-            path="/",
-            max_age=max_age,
-        )
-
-    def _clear_cookie(response: Response, name: str) -> None:
-        response.delete_cookie(
-            name, path="/", secure=provider.secure_cookies
-        )
 
     @router.get("/api/auth/login")
     async def login(request: Request, next: str = "/"):
@@ -169,6 +204,7 @@ def build_auth_router(
         response = RedirectResponse(url, status_code=302)
         _set_cookie(
             response,
+            provider,
             flow_cookie,
             state,
             http_only=True,
@@ -228,9 +264,10 @@ def build_auth_router(
             return error_response(403, str(exc), "oidc_error")
 
         issuer = str(claims.get("iss", ""))
+        email_confirmed = email_is_confirmed(claims, provider.claim_mapping)
         if provider.registration_gate is not None:
             # Admission BEFORE any user record or session exists: a
-            # rejected stranger leaves no trace beyond the audit entry.
+            # rejected stranger leaves no user record and no session.
             from inqtrix.auth.invitations import RegistrationDenied
 
             try:
@@ -239,10 +276,12 @@ def build_auth_router(
                     issuer=issuer,
                     sub=subject,
                     email=email or "",
+                    email_verified=email_confirmed,
                 )
             except RegistrationDenied as exc:
                 log.warning(
-                    "Registration rejected: kind=oidc_session reason=invite"
+                    "Registration rejected: kind=oidc_session reason=%s",
+                    exc.reason,
                 )
                 return error_response(403, str(exc), "registration_denied")
         if users is None:
@@ -274,7 +313,7 @@ def build_auth_router(
                     issuer=issuer,
                     subject=subject,
                     email=email or "",
-                    email_verified=claims.get("email_verified") is True,
+                    email_verified=email_confirmed,
                     display_name=display_name,
                     session=session,
                     is_admin=provider.map_admin(claims, groups),
@@ -287,7 +326,8 @@ def build_auth_router(
             )
         except RegistrationDenied as exc:
             log.warning(
-                "Registration rejected atomically: kind=oidc_session reason=invite"
+                "Registration rejected atomically: kind=oidc_session reason=%s",
+                exc.reason,
             )
             return error_response(403, str(exc), "registration_denied")
         except UserDisabledError:
@@ -301,20 +341,8 @@ def build_auth_router(
             pseudonymous_log_reference("usr", admitted_user.user_id),
         )
         response = RedirectResponse(flow.next_path, status_code=303)
-        _set_cookie(
-            response, provider.session_cookie, session.id, http_only=True
-        )
-        from inqtrix.auth.oidc import make_csrf_token
-
-        _set_cookie(
-            response,
-            provider.csrf_cookie,
-            make_csrf_token(
-                provider.session_secret, session.id, session.csrf_random
-            ),
-            http_only=False,
-        )
-        _clear_cookie(response, flow_cookie)
+        _set_session_cookies(response, provider, session)
+        _clear_cookie(response, provider, flow_cookie)
         return response
 
     @router.get("/api/auth/session")
@@ -333,6 +361,7 @@ def build_auth_router(
         if payload.get("authenticated") is True and isinstance(csrf_token, str):
             _set_cookie(
                 response,
+                provider,
                 provider.csrf_cookie,
                 csrf_token,
                 http_only=False,
@@ -345,8 +374,8 @@ def build_auth_router(
         principal = await principal_dependency(request)
         await _destroy_session_with_audit(provider, auditor, principal)
         response = JSONResponse({"logged_out": True})
-        _clear_cookie(response, provider.session_cookie)
-        _clear_cookie(response, provider.csrf_cookie)
+        _clear_cookie(response, provider, provider.session_cookie)
+        _clear_cookie(response, provider, provider.csrf_cookie)
         return response
 
     if provider.pat_service is not None:
@@ -411,12 +440,7 @@ def _build_password_auth_router(
     import secrets as _secrets
     import time as _time
 
-    from inqtrix.auth.oidc import make_csrf_token
-
-    async def no_store(response: Response) -> None:
-        response.headers["Cache-Control"] = "no-store"
-
-    router = APIRouter(dependencies=[Depends(no_store)])
+    router = APIRouter(dependencies=[Depends(_no_store)])
     users = provider.users
     auditor = _login_audit(audit)
 
@@ -450,23 +474,6 @@ def _build_password_auth_router(
                 origin={"auth_method": mode},
             )
 
-    def _set_cookie(
-        response: Response, name: str, value: str, *, http_only: bool
-    ) -> None:
-        response.set_cookie(
-            name,
-            value,
-            httponly=http_only,
-            secure=provider.secure_cookies,
-            samesite="lax",
-            path="/",
-        )
-
-    def _clear_cookie(response: Response, name: str) -> None:
-        response.delete_cookie(
-            name, path="/", secure=provider.secure_cookies
-        )
-
     def _new_session(
         *,
         user_id: uuid.UUID,
@@ -492,17 +499,7 @@ def _build_password_auth_router(
         session: AuthSession, *, status_code: int = 200
     ) -> JSONResponse:
         response = JSONResponse({"authenticated": True}, status_code=status_code)
-        _set_cookie(
-            response, provider.session_cookie, session.id, http_only=True
-        )
-        _set_cookie(
-            response,
-            provider.csrf_cookie,
-            make_csrf_token(
-                provider.session_secret, session.id, session.csrf_random
-            ),
-            http_only=False,
-        )
+        _set_session_cookies(response, provider, session)
         return response
 
     if provider.mode == "local":
@@ -722,6 +719,7 @@ def _build_password_auth_router(
         if payload.get("authenticated") is True and isinstance(csrf_token, str):
             _set_cookie(
                 response,
+                provider,
                 provider.csrf_cookie,
                 csrf_token,
                 http_only=False,
@@ -734,8 +732,66 @@ def _build_password_auth_router(
         principal = await principal_dependency(request)
         await _destroy_session_with_audit(provider, auditor, principal)
         response = JSONResponse({"logged_out": True})
-        _clear_cookie(response, provider.session_cookie)
-        _clear_cookie(response, provider.csrf_cookie)
+        _clear_cookie(response, provider, provider.session_cookie)
+        _clear_cookie(response, provider, provider.csrf_cookie)
+        return response
+
+    if provider.pat_service is not None:
+        _register_token_routes(router, provider, principal_dependency)
+
+    return router
+
+
+def _build_gateway_auth_router(
+    provider: "GatewayAuthProvider",
+    principal_dependency: Callable[..., "Principal"],
+    audit: "AuditSink | None" = None,
+) -> APIRouter:
+    """Routes of the gateway mode: session start, logout and tokens.
+
+    There is no login route: the gateway signs the user in, and a session
+    starts only in ``GET /api/auth/session`` from the gateway's assertion
+    (:meth:`~inqtrix.auth.gateway.GatewayAuthProvider.start_session`).
+    """
+    from inqtrix.auth.gateway import GatewayRejected
+
+    router = APIRouter(dependencies=[Depends(_no_store)])
+    auditor = _login_audit(audit)
+
+    @router.get("/api/auth/session")
+    async def session_start(request: Request):
+        """Start or resume the session for the gateway's assertion."""
+        try:
+            started = await provider.start_session(request)
+        except GatewayRejected as rejected:
+            return error_response(
+                rejected.status, rejected.message, rejected.outcome
+            )
+        response = JSONResponse(started.payload)
+        if started.new_session is not None:
+            _set_session_cookies(response, provider, started.new_session)
+        else:
+            csrf_token = started.payload.get("csrf_token")
+            if isinstance(csrf_token, str):
+                _set_cookie(
+                    response,
+                    provider,
+                    provider.csrf_cookie,
+                    csrf_token,
+                    http_only=False,
+                )
+        return response
+
+    @router.post("/api/auth/logout")
+    async def logout(request: Request):
+        """Destroy the session (CSRF-protected); name where to sign out next."""
+        principal = await principal_dependency(request)
+        await _destroy_session_with_audit(provider, auditor, principal)
+        response = JSONResponse(
+            {"logged_out": True, "redirect_url": provider.logout_url or None}
+        )
+        _clear_cookie(response, provider, provider.session_cookie)
+        _clear_cookie(response, provider, provider.csrf_cookie)
         return response
 
     if provider.pat_service is not None:
@@ -788,7 +844,7 @@ def _register_token_routes(
     already covers it, and the one-time plaintext emission must never
     be cacheable.
     """
-    from inqtrix.auth.pat import PatLimitExceeded
+    from inqtrix.auth.pat import PatLimitExceeded, PatTtlExceedsCap
 
     @router.post("/api/auth/tokens", status_code=201)
     async def create_token(request: Request):
@@ -837,6 +893,13 @@ def _register_token_routes(
                 f'Maximum number of access tokens reached ({exc})',
                 "pat_limit",
             )
+        except PatTtlExceedsCap as exc:
+            return error_response(
+                400,
+                f"Field 'expires_in_days' exceeds the longest token "
+                f"lifetime of {exc} days",
+                "pat_ttl_exceeds_cap",
+            )
         payload = _token_payload(minted.record)
         # The ONE plaintext emission — shown here, never stored,
         # never logged, never retrievable again.
@@ -882,7 +945,7 @@ async def _maybe_merge_userinfo(
     provider: "OidcAuthProvider", claims: dict, tokens: dict
 ) -> dict:
     """Merge userinfo claims when the id_token is thin (opt-in)."""
-    from inqtrix.auth.oidc import claim_path
+    from inqtrix.auth.mapping import claim_path
 
     needed = [
         provider.username_claim,

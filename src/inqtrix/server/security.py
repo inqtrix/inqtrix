@@ -30,7 +30,7 @@ from fastapi import Request
 from inqtrix.auth.api_key import build_bearer_guard
 from inqtrix.settings import ServerSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 def resolve_tls_paths(server: ServerSettings) -> tuple[str, str] | None:

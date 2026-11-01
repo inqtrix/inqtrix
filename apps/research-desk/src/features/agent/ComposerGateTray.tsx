@@ -350,7 +350,7 @@ function ChildGateContext({
 }) {
   return (
     <p className="mb-1 break-words t-hint text-muted-foreground">
-      {t.agent.tray.childGateContext.replace('{label}', label)}
+      {t.agent.tray.childGateContext.replace('{label}', () => label)}
     </p>
   )
 }
@@ -644,7 +644,7 @@ function PlanGate({
   // approve before the primary action even exists.
   const summary = t.agent.tray.planSummary
     .replace('{version}', String(run.plan?.version ?? 1))
-    .replace('{tasks}', countLabel(tasks.length, t.agent.timeline.taskCountOne, t.agent.timeline.taskCount))
+    .replace('{tasks}', () => countLabel(tasks.length, t.agent.timeline.taskCountOne, t.agent.timeline.taskCount))
     .replace('{internal}', String(counts.internal))
     .replace('{web}', String(counts.web))
     .replace('{synthesis}', String(counts.synthesis))

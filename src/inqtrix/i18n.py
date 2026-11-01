@@ -2116,8 +2116,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "## Next debugging step",
     },
     "research_algofail_next_step_text": {
-        "de": "Bitte das Forensic-Log mit `uv run python scripts/debug_research_log.py <logfile>` auswerten. Der finale Bericht wurde absichtlich nicht formuliert, damit ein Algorithmusfehler nicht wie ein erfolgreicher degradierter Normalpfad wirkt.",
-        "en": "Evaluate the forensic log with `uv run python scripts/debug_research_log.py <logfile>`. The final report was deliberately not written, so that an algorithm failure cannot look like a successful degraded normal path.",
+        "de": "Bitte im Serverprotokoll die `ALGO-FAIL`-Zeilen dieses Laufs prüfen; mit `OBSERVABILITY_PROFILE=forensic` und einer Trace-Senke (`INQTRIX_TRACING=file` oder `otlp`) trägt der Trace des Laufs auch die `algorithm_failure`-Ereignisse mit ihren Einzelheiten. Der finale Bericht wurde absichtlich nicht formuliert, damit ein Algorithmusfehler nicht wie ein erfolgreicher degradierter Normalpfad wirkt.",
+        "en": "Look for this run's `ALGO-FAIL` lines in the server log; with `OBSERVABILITY_PROFILE=forensic` and a trace sink (`INQTRIX_TRACING=file` or `otlp`), the run's trace also carries the `algorithm_failure` events with their details. The final report was deliberately not written, so that an algorithm failure cannot look like a successful degraded normal path.",
     },
     "research_answer_fallback_warning": {
         "de": "> [!WARNING] Antwort-Synthese-Fallback aktiv\n> {reason}\n> Die folgende Antwort enthält **keine LLM-synthetisierte** Zusammenfassung, sondern den bisherigen Recherche-Kontext in Rohform. Iteration-Marker `_answer_fallback=true`.",
@@ -2353,45 +2353,45 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "nicht zuordenbare Grundlage", "en": "unassignable basis",
     },
     "review_unavailable_generic": {
-        "de": "Die Prüfung lieferte kein Urteil; die Einzelheiten stehen im "
+        "de": "Die Prüfung lieferte kein Urteil; der Grund steht im "
               "Serverprotokoll.",
-        "en": "The review delivered no verdict; the details are in the "
+        "en": "The review delivered no verdict; the reason is in the "
               "server log.",
     },
     "review_unavailable_failed": {
         "de": "Die Prüfung brach ab, bevor sie ein Urteil abgeben konnte; "
-              "die Einzelheiten stehen im Serverprotokoll.",
+              "der Grund steht im Serverprotokoll.",
         "en": "The review broke off before it could deliver a verdict; the "
-              "details are in the server log.",
+              "reason is in the server log.",
     },
     "review_unavailable_result_missing": {
         "de": "Die Prüfung lief zu Ende, gab aber kein typisiertes Urteil "
-              "ab; die Einzelheiten stehen im Serverprotokoll.",
+              "ab; der Grund steht im Serverprotokoll.",
         "en": "The review ran to the end but delivered no typed verdict; "
-              "the details are in the server log.",
+              "the reason is in the server log.",
     },
     "review_unavailable_context": {
-        "de": "Das Prüfmaterial passt in kein Modellfenster; die "
-              "Einzelheiten stehen im Serverprotokoll.",
-        "en": "The review material fits no model window; the details are in "
+        "de": "Das Prüfmaterial passt in kein Modellfenster; der "
+              "Grund steht im Serverprotokoll.",
+        "en": "The review material fits no model window; the reason is in "
               "the server log.",
     },
     "review_unavailable_unchanged_store_error": {
-        "de": "Das Prüfergebnis ließ sich nicht speichern; die Einzelheiten "
-              "stehen im Serverprotokoll.",
-        "en": "The review result could not be stored; the details are in "
+        "de": "Das Prüfergebnis ließ sich nicht speichern; der Grund "
+              "steht im Serverprotokoll.",
+        "en": "The review result could not be stored; the reason is in "
               "the server log.",
     },
     "review_unavailable_budget_exhausted": {
         "de": "Die Prüfung erreichte ihr Budget, bevor sie ein Urteil "
-              "abgeben konnte; die Einzelheiten stehen im Serverprotokoll.",
+              "abgeben konnte; der Grund steht im Serverprotokoll.",
         "en": "The review reached its budget before it could deliver a "
-              "verdict; the details are in the server log.",
+              "verdict; the reason is in the server log.",
     },
     "review_unavailable_schema_invalid": {
-        "de": "Die Prüfung lieferte kein auswertbares Ergebnis; der Rohtext "
+        "de": "Die Prüfung lieferte kein auswertbares Ergebnis; der Grund "
               "steht im Serverprotokoll.",
-        "en": "The review returned no readable result; the raw text is in the "
+        "en": "The review returned no readable result; the reason is in the "
               "server log.",
     },
     "review_basis_unconfirmed": {

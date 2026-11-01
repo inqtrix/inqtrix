@@ -102,6 +102,90 @@ action converts the document Markdown to a styled `.docx` entirely client-side
 -- no server round-trip; math degrades to its LaTeX source text and raw HTML is
 skipped.
 
+### Export into a Word template
+
+**Export with Word template ...**, below **Export to Word** in the document menu
+(`...`), writes the document into a Word file of your own. Your cover, headers,
+footers, page setup and styles stay, and the document's text goes where you marked
+it. It runs entirely in the browser: the template is read for this one export and
+is neither uploaded nor kept, and the server needs no setting for it.
+
+**What you need** is an ordinary Word file, `.docx` or `.dotx`, with a marker typed
+where the text belongs. A letterhead or a report template you already use works. To
+prepare one in Word:
+
+1. Open that file, or start a new document.
+2. Type `{{content}}` in a paragraph of its own where the document's text belongs.
+3. Type `{{title}}` and `{{date}}` wherever the title and the date should appear,
+   also in the header and the footer.
+4. Give the text its look: in the styles pane, change the styles in the table below
+   (right-click, **Modify**). Word saves a style in the file only once you changed
+   or used it, so a heading you never touched is not in the template yet.
+5. Save as **Word Document** (`.docx`) or **Word Template** (`.dotx`).
+6. In Inqtrix, open the document in the Editor, open the document menu (`...`),
+   choose **Export with Word template ...** and select the file. The finished `.docx`
+   downloads, and a bar above the document says if something could not be applied.
+
+A template can look like this:
+
+```text
+Header:      Example Ltd, {{title}}
+Footer:      Confidential, {{date}}
+
+Cover page:  {{title}}
+             Status: {{date}}
+             (section or page break)
+
+Main text:   {{content}}
+
+             Annex
+             Fixed text of the template stays after the document's text.
+```
+
+The three markers:
+
+| Marker | Where it may stand | What it becomes |
+| --- | --- | --- |
+| `{{content}}` | Once, alone in its own paragraph of the main text | The document's text, in place of that paragraph |
+| `{{title}}` | Anywhere, as often as needed, also in headers and footers | The document title, in the formatting of the marker |
+| `{{date}}` | Anywhere, as often as needed, also in headers and footers | The date of the export, in the language of the interface |
+
+Without `{{content}}` the text goes to the end of the template and a notice says
+so, which makes a plain letterhead work as it is. A `{{content}}` in a header or
+footer, a second one, or one beside other text or an image in its paragraph is
+refused with a message, because the text would land in the wrong place or the
+rest of the paragraph would be lost. `{{...}}` in the document's own text stays
+as it is written.
+
+The styles the text takes. They are found by the name Word stores, which is the same
+in every language of Word, so a German template works like an English one:
+
+| Markdown | Style in the template | Shown in a German Word | Without that style |
+| --- | --- | --- | --- |
+| Heading 1 to 6 | `heading 1` to `heading 6` | Überschrift 1 to 6 | The nearest heading that exists, keeping the outline level, with a notice. Without any heading style: bold and larger, with a notice |
+| List | `List Paragraph` | Listenabsatz | A plain `List Paragraph` is added |
+| Quote | `Quote` | Zitat | Indented |
+| Link | `Hyperlink` | Hyperlink | Blue and underlined |
+| Table | `Inqtrix Table`, otherwise `Table Grid` | Tabellenraster for `Table Grid` | Horizontal rules, as in the normal export |
+| Code block | `Inqtrix Code` | Inqtrix Code | Monospace with a light grey background |
+
+`Inqtrix Table` and `Inqtrix Code` are styles you create yourself under exactly these
+names, for example to give tables the design of your organization.
+
+What this export leaves out:
+
+- The template is chosen for each export, not stored per workspace.
+- Lists use a neutral bullet and number definition in the template's font, not a
+  list scheme of the template.
+- File properties such as title and author stay those of the template.
+- A table of contents in the template is updated when Word is asked to.
+- Images in the Markdown are written as `[alt text]`, as in the normal export.
+- `{{title}}` or `{{date}}` in a tracked change, a link or a content control
+  inside a paragraph stay visible, and a notice names them. Accepting the change
+  or typing the marker outside the control solves it.
+- Templates with macros (`.docm`, `.dotm`), files saved as Strict Open XML, files
+  with a password and files above 32 MB are refused with a message.
+
 The editor assistant endpoints preserve Markdown as the editing format. Links,
 citation labels, URLs, and LaTeX should remain Markdown-compatible across
 suggestions. Document diff mode compares the active document against the saved
@@ -325,7 +409,7 @@ keeps the browser on one origin and routes `/api/*`, `/v1/*`, `/health`, and
 | Situation | Selection |
 |---|---|
 | Default Compose, Kubernetes, bare-metal Python, or local production-build verification | Packaged Python gateway |
-| Your own reverse proxy in front (nginx, Traefik, HAProxy) | Keep the Python gateway; set `INQTRIX_PUBLIC_BASE_URL`, `INQTRIX_EXTERNAL_SCHEME` and `INQTRIX_TRUSTED_PROXY_HOPS` |
+| Your own reverse proxy in front (nginx, Traefik, HAProxy) | Keep the Python gateway; set `INQTRIX_PUBLIC_BASE_URL` ([one rule for scheme and host](auth-modes.md#scheme-behind-a-tls-proxy)) and `INQTRIX_TRUSTED_PROXY_HOPS`; `INQTRIX_EXTERNAL_SCHEME=https` also adds `Strict-Transport-Security` |
 | Static CDN that cannot proxy | Split-origin build with `VITE_INQTRIX_API_BASE_URL`; configure backend CORS |
 
 ### Standard: packaged Python web gateway
@@ -410,8 +494,10 @@ The browser observes the same contract in either packaging:
 - Proxied requests replace client-supplied forwarded Host/Proto metadata with
   the configured `INQTRIX_PUBLIC_BASE_URL`, the optional matching scheme
   override, or the gateway connection as the documented fallback.
-  `X-Forwarded-For` remains append-only and `X-Real-IP` records the immediate
-  peer, so per-client login rate limiting keeps distinct buckets. The raw
+  `X-Forwarded-For` gets the peer appended (in mode `gateway`, a peer in the
+  web gateway's trusted list passes its chain unchanged, and any other peer
+  replaces the chain with its own address), and `X-Real-IP` records the
+  immediate peer, so per-client login rate limiting keeps distinct buckets. The raw
   request target is forwarded byte-identically (encoded path segments and
   repeated query keys survive).
 - `/collaboration` preserves the public Host, Origin, cookies, raw query, binary
@@ -442,10 +528,13 @@ and the TLS certificate/key pair before accepting traffic.
 | `INQTRIX_BACKEND_URL` | `http://localhost:5100` | Origin the gateway proxies `/v1/*`, `/api/*`, `/health`, and `/collaboration` to. |
 | `INQTRIX_PUBLIC_BASE_URL` | unset | Explicit browser origin when a trusted reverse proxy terminates TLS before the gateway; pins the forwarded scheme AND host. |
 | `INQTRIX_EXTERNAL_SCHEME` | unset | Optional scheme-only override: pins `X-Forwarded-Proto` while the forwarded host follows the request. If `INQTRIX_PUBLIC_BASE_URL` is also set, both schemes must match or startup fails. |
-| `INQTRIX_MAX_UPSTREAM_CONNECTIONS` | `512` | Per-worker ceiling for pooled backend connections; each browser tab holds one long-lived SSE stream. Sized against the API's own admission caps: chat and native runs each admit up to 100, and every open event stream holds a connection for the run's whole duration on top of that. Exhaustion is a `503` with a warning naming this variable, never a silent wait. Connections open on demand, so the ceiling costs nothing until the load arrives.  Helm: set via `web.maxUpstreamConnections`; the web pod has no `envFrom`, so `config:` entries never reach it. |
+| `INQTRIX_GATEWAY_*_HEADER`, `INQTRIX_GATEWAY_RESOLVER_HEADERS`, `INQTRIX_GATEWAY_TRUSTED_PROXIES` | unset | Mode `gateway` only: the identity header names and this process's own peer list; see [Gateway mode: web gateway variables](../configuration/settings-and-env.md#gateway-mode-web-gateway-variables). |
+| `INQTRIX_MAX_UPSTREAM_CONNECTIONS` | `512` | Per-worker ceiling for pooled backend connections; each browser tab holds one long-lived SSE stream. Sized against the API's own admission caps: chat and native runs each admit up to 100, and every open event stream holds a connection for the run's whole duration on top of that. Exhaustion is a `503` with a warning naming this variable, never a silent wait. Connections open on demand, so the ceiling costs nothing until the load arrives.  Helm: set via `web.maxUpstreamConnections`; the web pod has no `envFrom`, so `config:` reaches it only for the keys the chart re-emits (the identity header names of gateway mode among them). |
 | `INQTRIX_PROXY_MAX_BODY_BYTES` | derived | Explicit request-body cap in bytes. Unset derives `INQTRIX_MAX_FILE_BYTES` + 10 MiB; mirror the backend variable in split-container setups or the gateway warns and uses the packaged default. |
 | `INQTRIX_DIST_DIR` | `<repo>/apps/research-desk/dist` | Override when serving a `dist/` from a release artifact path. |
 | `INQTRIX_COLLABORATION_MAX_FRAME_BYTES` / `INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES` | `2097152` / `32` | Collaboration relay frame-size and queue-depth limits; keep in sync with the collaboration service. |
+
+**Stopping.** On `SIGTERM` the gateway stops accepting connections, closes WebSocket relays at once and gives open requests up to 8 seconds to finish. The browser's event streams (at least one per open tab) never end on their own and are cancelled after that, so a stop with the user interface open takes a little over 8 seconds and ends before the 10-second stop timeout of Docker and Podman; keep the stop timeout at 10 seconds or more. In Kubernetes the pod's grace period (30 seconds by default) is longer, but open requests are still cancelled after 8 seconds. The browser reconnects when the gateway is back.
 
 If the resolved `dist/` directory or `index.html` does not exist, startup fails
 loudly and names the resolved path; run `npm run ui:build` first or point

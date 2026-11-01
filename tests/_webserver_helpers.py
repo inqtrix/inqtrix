@@ -121,6 +121,7 @@ _MIN_ENV_BY_STACK: dict[str, dict[str, str]] = {
     "litellm_perplexity": {
         "LITELLM_API_KEY": "test-key",
         "LITELLM_BASE_URL": "http://localhost:4000/v1",
+        "PERPLEXITY_API_KEY": "test-perplexity-key",
     },
     "anthropic_perplexity": {
         "ANTHROPIC_API_KEY": "test-anthropic-key",

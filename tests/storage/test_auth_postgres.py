@@ -15,16 +15,14 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from inqtrix.auth.sessions import AuthSession, LoginFlow
 from inqtrix.storage.auth_postgres import (
     PostgresFlowStore,
     PostgresSessionStore,
-    PostgresUserDirectory,
 )
 from inqtrix.storage.db import build_engine, build_session_factory
-from inqtrix.storage.identity_orm import users
 from inqtrix.storage.migrate import run_migrations
 from tests.storage._canonical_users import (
     canonical_user_id,
@@ -163,70 +161,3 @@ async def test_expired_flows_cannot_be_consumed(session_factory):
     )
     await store.put(make_flow("state-old", ttl=-1))
     assert await store.consume("state-old") is None
-
-
-@pytest.mark.asyncio
-async def test_user_mirror_upserts_on_the_issuer_subject_anchor(
-    session_factory,
-):
-    directory = PostgresUserDirectory(
-        session_factory=session_factory, app_role=APP_ROLE
-    )
-    await directory.record_login(
-        tenant_id="default",
-        issuer="http://idp.example",
-        subject="user-1",
-        email="old@example.com",
-        email_verified=False,
-        display_name="Old Name",
-    )
-    # Same anchor, new profile data: must UPDATE, not duplicate.
-    await directory.record_login(
-        tenant_id="default",
-        issuer="http://idp.example",
-        subject="user-1",
-        email="new@example.com",
-        email_verified=True,
-        display_name="New Name",
-    )
-    # Same subject under a DIFFERENT issuer: a separate identity.
-    await directory.record_login(
-        tenant_id="default",
-        issuer="http://other-idp.example",
-        subject="user-1",
-        email="other@example.com",
-        email_verified=True,
-        display_name="Other",
-    )
-
-    from inqtrix.storage.db import tenant_session
-
-    async with tenant_session(
-        session_factory, tenant_id="default", app_role=APP_ROLE
-    ) as session:
-        rows = (
-            (
-                await session.execute(
-                    select(
-                        users.c.issuer,
-                        users.c.email,
-                        users.c.display_name,
-                        users.c.last_login_at,
-                    ).where(
-                        users.c.subject == "user-1",
-                        users.c.issuer.in_(
-                            (
-                                "http://idp.example",
-                                "http://other-idp.example",
-                            )
-                        ),
-                    )
-                )
-            )
-            .all()
-        )
-    assert len(rows) == 2
-    by_issuer = {row[0]: row for row in rows}
-    assert by_issuer["http://idp.example"][1] == "new@example.com"
-    assert by_issuer["http://idp.example"][2] == "New Name"
-    assert by_issuer["http://idp.example"][3] is not None

@@ -51,6 +51,7 @@ import {
   CloseCodes,
   CollaborationError,
   isDocumentRemoved,
+  quietHooks,
 } from './errors'
 import { hasBearerSecret, InternalHttpRouter } from './httpRouter'
 import { InstanceLeaseManager, reportingFencedAnswers } from './instanceLease'
@@ -562,7 +563,9 @@ export class CollaborationSidecar {
   }
 
   private createHocuspocus(): Hocuspocus<HocuspocusContext> {
-    return new Hocuspocus<HocuspocusContext>({
+    // Refusals are logged as JSON and reach Hocuspocus without a message: it
+    // prints each message to the console, outside the JSON log.
+    return new Hocuspocus<HocuspocusContext>(quietHooks({
       debounce: this.settings.snapshotIdleMs,
       maxDebounce: Math.max(this.settings.snapshotIdleMs, 60_000),
       maxPendingDocuments: 8,
@@ -859,7 +862,7 @@ export class CollaborationSidecar {
         this.discardHeldOutbound(documentName)
         this.coordinator.markUnloaded(documentName)
       },
-    })
+    }, this.logger))
   }
 
   private async acquireOperationDocument(

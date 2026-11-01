@@ -517,18 +517,13 @@ def main() -> None:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    os.environ.setdefault("INQTRIX_LOG_ENABLED", "true")
-    os.environ.setdefault("INQTRIX_LOG_LEVEL", "DEBUG")
-    os.environ.setdefault("INQTRIX_LOG_CONSOLE", "false")
-    os.environ.setdefault("INQTRIX_LOG_DIR", str(out_dir / "logs"))
-    os.environ.setdefault("INQTRIX_OBSERVABILITY_PROFILE", "forensic")
     if args.load_dotenv:
         load_dotenv()
     configure_logging(
-        enabled=True,
+        service="script",
+        target="file",
         level="DEBUG",
-        console=False,
-        log_dir=str(Path(os.environ["INQTRIX_LOG_DIR"])),
+        log_dir=str(out_dir / "logs"),
     )
 
     perplexity_key = os.getenv("PERPLEXITY_API_KEY")
@@ -538,7 +533,8 @@ def main() -> None:
             "This debug harness does not read .env files."
         )
 
-    aws_profile = os.getenv("AWS_PROFILE", "papillon-bedrock")
+    # Unset: boto3 resolves credentials through its default chain.
+    aws_profile = os.getenv("AWS_PROFILE") or None
     thinking = (
         {"type": "adaptive"}
         if args.bedrock_thinking == "adaptive"

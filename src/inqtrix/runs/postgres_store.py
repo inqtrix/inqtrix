@@ -130,7 +130,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.permissions import AuditSink
     from inqtrix.runs.valkey_queue import ValkeyRunQueue
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _TERMINAL_VALUES = tuple(status.value for status in TERMINAL_RUN_STATUSES)
 
@@ -1178,6 +1178,9 @@ class PostgresRunStore(DurableJobStoreBase):
                             if ids
                             else false_condition
                         ),
+                        # Deletion ends a share by revoking it and keeps the
+                        # row, so only a share still in force is residue.
+                        resource_shares.c.revoked_at.is_(None),
                     ),
                 ),
             }

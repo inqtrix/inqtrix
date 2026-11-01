@@ -6,6 +6,9 @@ import { writePrivateJsonFixture } from './private-json.mjs'
 export const GENERATED_SYSTEM_SMOKE_CONTRACT =
   'inqtrix-generated-system-smoke-v1'
 export const GENERATED_SYSTEM_SMOKE_TRANSPORT = 'python-gateway'
+/** The interface language of the smoke's pages; the engines save it on the
+ * accounts they create and require it of the accounts they borrow. */
+export const SYSTEM_SMOKE_LOCALE = 'de'
 
 export function normalizeSystemSmokeBaseURL(value) {
   let parsed
@@ -112,7 +115,7 @@ export function buildGeneratedSystemSmokeFixture({
       runId,
       transport: GENERATED_SYSTEM_SMOKE_TRANSPORT,
     },
-    locale: 'de',
+    locale: SYSTEM_SMOKE_LOCALE,
     transports: {
       [GENERATED_SYSTEM_SMOKE_TRANSPORT]: {
         baseURL: normalizeSystemSmokeBaseURL(baseURL),

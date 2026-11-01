@@ -33,7 +33,7 @@ from typing import IO, Iterator, Literal
 
 from inqtrix.urls import sanitize_log_message
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _STREAM_CHUNK_BYTES = 1024 * 1024
 
@@ -569,7 +569,12 @@ class S3ObjectStore(ObjectStore):
             ) from exc
 
     def list_keys(self, prefix: str) -> Iterator[tuple[str, float]]:
-        """Stream the bucket inventory under *prefix* via pagination."""
+        """Stream the bucket inventory under *prefix* via pagination.
+
+        A bucket the first upload would create is empty, not unlistable.
+        """
+        from botocore.exceptions import ClientError
+
         try:
             paginator = self._s3().get_paginator("list_objects_v2")
             for page in paginator.paginate(
@@ -577,6 +582,15 @@ class S3ObjectStore(ObjectStore):
             ):
                 for entry in page.get("Contents", ()):
                     yield entry["Key"], entry["LastModified"].timestamp()
+        except ClientError as exc:
+            status = exc.response.get("ResponseMetadata", {}).get(
+                "HTTPStatusCode"
+            )
+            if status == 404 and self._bucket_provisioning != "existing":
+                return
+            raise _s3_operation_error(
+                "list", target=f"prefix {prefix!r}", cause=exc
+            ) from exc
         except Exception as exc:
             raise _s3_operation_error(
                 "list", target=f"prefix {prefix!r}", cause=exc

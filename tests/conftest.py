@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
-import logging
 import os
+
+# A dependency that loads a ``.env`` when it is imported (magika does) must
+# not reach the tests, wherever the checkout lies. python-dotenv honours this
+# switch in every ``load_dotenv`` call; set before anything imports one.
+os.environ["PYTHON_DOTENV_DISABLED"] = "1"
+
+import logging
+import sys
+import threading
+import warnings
 
 import pytest
 
-from inqtrix.logging_config import _WEB_LOGGER_NAMES
+from inqtrix import settings as settings_module
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.settings import Settings
 from inqtrix.strategies import (
@@ -15,6 +24,19 @@ from inqtrix.strategies import (
     DefaultSourceTiering,
     KeywordRiskScorer,
 )
+from tests._hermetic import (
+    hide_machine_aws_setup,
+    restore_loggers,
+    shield_settings_from_dotenv,
+    snapshot_loggers,
+)
+
+# The settings read a ``.env`` in the working folder; some are built while
+# the tests are collected, so they ignore it from here on. Nor does the
+# machine's AWS setup reach a test: an AWS client is built the same way
+# everywhere and can never reach an account.
+shield_settings_from_dotenv()
+hide_machine_aws_setup()
 
 
 INTEGRATION_MARKERS = {
@@ -69,65 +91,74 @@ class _StubSearch:
         return False
 
 
+_PROCESS_LOGGERS = (
+    "inqtrix",
+    "inqtrix.web_gateway",
+    "uvicorn",
+    "uvicorn.error",
+    "uvicorn.access",
+    "fastapi",
+    "alembic",
+    "alembic.runtime.migration",
+    "httpx",
+    "httpcore",
+    "websockets",
+    "openai",
+    "asyncio",
+    "py.warnings",
+    "opentelemetry.exporter.otlp.proto.http.trace_exporter",
+    "opentelemetry.sdk.trace.export",
+)
+# These switch on the debug logging of the OpenAI and Anthropic SDKs.
+_SDK_DEBUG_SWITCHES = frozenset({"OPENAI_LOG", "ANTHROPIC_LOG"})
+
+
 @pytest.fixture(autouse=True)
-def reset_inqtrix_logger():
-    """Isolate inqtrix logger state around every test.
+def reset_inqtrix_logger(monkeypatch):
+    """Isolate the process logging state around every test.
 
-    ``create_app`` (and the example/server tests that build it) calls
-    ``configure_logging``, which sets ``propagate=False`` and attaches
-    handlers on ``logging.getLogger("inqtrix")``. Without a reset that leaks
-    into whatever test runs next; in default (alphabetical) collection order
-    a ``create_app`` test can precede a ``caplog``-based test and silently
-    break it because ``caplog`` relies on propagation to the root logger.
-    Restoring handlers/level/propagate here keeps the leak from crossing test
-    boundaries (Gotcha #1 / Test-Order-Hygiene). Web-server loggers that the
-    uvicorn ``dictConfig`` tests reconfigure are restored for the same reason.
+    ``configure_logging`` configures the root logger, the product and web
+    loggers and the warning and exception hooks of the whole process. Without
+    a reset that state leaks into whatever test runs next. Every test starts
+    with a neutral, root-capturable ``inqtrix`` logger, and the previous state
+    is restored afterwards. Every other logger of the ``inqtrix.`` tree loses
+    the level, handlers and switches the test gave it, so a level set for one
+    area ends with the test.
+
+    The developer's logging configuration never reaches a test: no
+    ``INQTRIX_LOG_*``, retired variable or SDK debug switch from the process
+    environment, and no ``.env`` file (kept out of the session at the top of
+    this module). A service ``main()`` under test therefore starts the same on
+    every machine.
     """
+    retired_names = {entry.name for entry in settings_module.RETIRED_SETTINGS}
+    for name in list(os.environ):
+        if name.startswith("INQTRIX_LOG_") or name in retired_names | _SDK_DEBUG_SWITCHES:
+            monkeypatch.delenv(name, raising=False)
+    root = logging.getLogger()
+    root_state = (list(root.handlers), root.level)
+    logger_state = snapshot_loggers(_PROCESS_LOGGERS)
+    hooks = (sys.excepthook, threading.excepthook, warnings.showwarning)
+
     inqtrix_logger = logging.getLogger("inqtrix")
-    previous_handlers = list(inqtrix_logger.handlers)
-    previous_level = inqtrix_logger.level
-    previous_propagate = inqtrix_logger.propagate
-
-    web_state = {
-        name: (
-            list(logging.getLogger(name).handlers),
-            logging.getLogger(name).level,
-            logging.getLogger(name).propagate,
-        )
-        for name in _WEB_LOGGER_NAMES
-    }
-
     for handler in list(inqtrix_logger.handlers):
         inqtrix_logger.removeHandler(handler)
-    # Collection can import ``inqtrix.__main__`` before the first fixture is
-    # entered. That module configures the product logger with
-    # ``propagate=False``. Merely removing its handlers therefore still makes
-    # caplog-based tests silent for the whole run. Give every test a neutral,
-    # root-capturable logger and restore the collection-time state afterwards.
     inqtrix_logger.setLevel(logging.NOTSET)
     inqtrix_logger.propagate = True
 
     yield
 
-    for handler in list(inqtrix_logger.handlers):
-        inqtrix_logger.removeHandler(handler)
-        handler.close()
-
-    inqtrix_logger.setLevel(previous_level)
-    inqtrix_logger.propagate = previous_propagate
-    for handler in previous_handlers:
-        inqtrix_logger.addHandler(handler)
-
-    for name, (handlers, level, propagate) in web_state.items():
-        web_logger = logging.getLogger(name)
-        for handler in list(web_logger.handlers):
-            web_logger.removeHandler(handler)
-            if isinstance(handler, logging.FileHandler):
-                handler.close()
-        for handler in handlers:
-            web_logger.addHandler(handler)
-        web_logger.setLevel(level)
-        web_logger.propagate = propagate
+    for handler in list(root.handlers):
+        if handler not in root_state[0]:
+            root.removeHandler(handler)
+            handler.close()
+    for handler in root_state[0]:
+        if handler not in root.handlers:
+            root.addHandler(handler)
+    root.setLevel(root_state[1])
+    restore_loggers(logger_state)
+    logging.captureWarnings(False)
+    sys.excepthook, threading.excepthook, warnings.showwarning = hooks
 
 
 @pytest.fixture()

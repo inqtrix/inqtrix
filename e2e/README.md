@@ -54,6 +54,14 @@ The six engines remain focused adapters. Profiles own selection, preflight,
 run identity, reporting, and cleanup instead of each engine claiming an
 independent completion status.
 
+The live browser engines look for German labels. Account pages show the
+account's saved interface language or English, never the browser language.
+The engines therefore save German on the temporary accounts they create and
+require it of the admin and tester accounts, whose preferences they only read
+because a save replaces the whole preference row: a borrowed account without
+German as its saved interface language stops the run right after login,
+before any paid step.
+
 ## npm integration contract
 
 The root `package.json` exposes these stable integration points:
@@ -298,7 +306,10 @@ Every execution has a machine-readable `inqv-…` Run ID. The orchestrator:
 2. runs every selected adapter preflight before starting any engine;
 3. records child processes or exact run-labelled container resources
    immediately in a cleanup ledger;
-4. executes adapters in the profile's declared order;
+4. executes adapters in the profile's declared order; a red adapter does not
+   stop the later ones, and before each later adapter the ledger cleans what
+   the earlier ones left open, ending the run as `cleanup_failed` instead of
+   starting the next adapter when that cleanup fails;
 5. accepts product-resource registrations from a live child over a private IPC
    channel and acknowledges them only after the ledger has been flushed;
 6. terminates registered processes on interruption or failure;
@@ -327,7 +338,8 @@ The CLI summary prints the same Inqtrix version. Scenario records use exactly:
 
 An exit code of zero without complete explicit scenario results is converted to
 an execution failure. Missing results are never inferred as passed, and
-scenarios after an early failure remain `not_run`.
+scenarios after an early failure inside an adapter remain `not_run`; the later
+adapters of the profile still run.
 
 Reports never contain
 environment dumps, command arguments, fixtures, browser storage state,
@@ -343,9 +355,10 @@ Final statuses are unambiguous:
 - `preflight_passed`: `--preflight-only` completed and no engine ran;
 - `blocked`: a prerequisite failed before execution;
 - `passed`: every selected adapter passed and cleanup completed;
-- `failed`: an adapter failed;
+- `failed`: an adapter failed, also when the run was interrupted afterwards;
 - `cleanup_failed`: cleanup failed, regardless of the engine result;
-- `interrupted`: the run received an interrupt or termination signal.
+- `interrupted`: the run received an interrupt or termination signal before
+  any adapter failed.
 
 Exit codes are `0` for `passed`/`preflight_passed`, `2` for `blocked`, `3` for
 `cleanup_failed`, `130` for `interrupted`, and `1` for execution failure.
@@ -420,6 +433,10 @@ replace the mandatory real-Safari smoke gate for a supported Safari release.
 
 Without `--fixture`, `system-smoke` creates its own active-gateway fixture and
 `fault-injection` does the same when an explicit container engine is selected.
+Both save German on the generated collaborator and require it of the owner
+(see "Profiles and engines"); the scenarios read labels only once the page's
+`lang` attribute shows the run's language, because a fresh browser paints
+English until the saved account language arrives.
 The generated fault controller binds only to `127.0.0.1`, requires both an
 ephemeral bearer and the exact Run ID, and can target only the run's declared
 documents and the label-verified `web` and `collaboration` services of the
@@ -476,6 +493,10 @@ INQTRIX_E2E_BASE_URL             optional; defaults to http://127.0.0.1:8080
 PLAYWRIGHT_EXECUTABLE_PATH       optional; Playwright resolves its browser otherwise
 INQTRIX_E2E_REQUIRE_GUEST_LINKS  optional strict capability requirement
 ```
+
+The engine saves German on its four temporary accounts and requires it of the
+admin and tester accounts before any scenario starts (see "Profiles and
+engines").
 
 The engine closes pages and contexts, deletes run documents, erases temporary
 users, logs out normal account sessions, and closes the browser in `finally`.

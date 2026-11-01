@@ -55,6 +55,55 @@ export async function ensureTemporaryUsers({
   return rows
 }
 
+/**
+ * Save the interface language of an account this run created.
+ *
+ * An account without a saved language shows the product default, while the
+ * run's pages look for their labels in the run's language. The save replaces
+ * the whole preference row (theme, contrast, agent memory and model tiers
+ * included), so only accounts the run created are written; the row goes
+ * with the account when the run erases it.
+ */
+export async function setAccountLocale(actor, locale, { now = Date.now } = {}) {
+  await fetchActorJson(actor, 'PUT', '/v1/account/preferences', {
+    data: { locale, updated_at: Math.floor(now() / 1000) },
+  })
+  const saved = await savedAccountLocale(actor)
+  assertFixture(
+    saved === locale,
+    `${actor.label} kept ${describeLocale(saved)} after saving '${locale}'.`,
+  )
+}
+
+/**
+ * Stop the run when an account has another saved interface language than
+ * the run's.
+ *
+ * A borrowed account, such as the operator's admin, is only read: writing
+ * would replace its other preferences as well.
+ */
+export async function requireAccountLocale(actor, locale) {
+  const saved = await savedAccountLocale(actor)
+  assertFixture(
+    saved === locale,
+    `${actor.label} has ${describeLocale(saved)}; the run expects '${locale}'. `
+      + "Set it in that account's settings.",
+  )
+}
+
+async function savedAccountLocale(actor) {
+  const saved = await fetchActorJson(actor, 'GET', '/v1/account/preferences', {
+    expected: [200, 404],
+  })
+  return typeof saved?.locale === 'string' ? saved.locale : null
+}
+
+function describeLocale(saved) {
+  return saved === null
+    ? 'no saved interface language'
+    : `the interface language '${saved}'`
+}
+
 /** An erasure waits for a deletion worker; a short wait would report a
  * temporary account as cleaned while it still exists. */
 const ERASURE_TIMEOUT_MS = 120_000

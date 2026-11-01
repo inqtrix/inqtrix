@@ -72,8 +72,8 @@ const labels = {
     showMore: 'Mehr anzeigen',
     showTree: 'Dateibaum einblenden',
     simple: 'Einfach',
-    source: 'Source',
-    sourceEditor: 'Markdown Source',
+    source: 'Quelltext',
+    sourceEditor: 'Markdown-Quelltext',
     sourceReadOnly: 'Quelltext ist in der Zusammenarbeit schreibgeschützt.',
     suggest: 'Vorschlagen',
     type: 'Art',
@@ -1848,6 +1848,9 @@ test.describe('two-user editor collaboration', () => {
     await waitForConnected(ownerPage, stack.locale)
     const marker = uniqueMarker('detached-transfer')
     await appendMarker(editor(ownerPage), marker)
+    // Typed text is checked before the export relies on it: a lost marker
+    // fails here, not later in the cleanup, which would replace the error.
+    await expectTextOccurrences(editor(ownerPage), marker, 1)
     try {
       await requireProjectionFlush(ownerPage, documentId)
       await forceDownloadProjectPicker(ownerPage)
@@ -1910,6 +1913,7 @@ test.describe('two-user editor collaboration', () => {
         await expect(
           detachedPage.getByRole('button', { name: 'Editor', exact: true }),
         ).toBeVisible({ timeout: 20_000 })
+        await expectPageLocale(detachedPage, stack.locale)
         await forceDownloadProjectPicker(detachedPage)
         const preImportDocumentIds = await captureOwnedDocumentIds(detachedPage)
 
@@ -2265,7 +2269,7 @@ test.describe('two-user editor collaboration', () => {
     const { ownerPage, stack } = requireCollaboration(collaboration)
     await openDocument(ownerPage, stack.documents.mobileDrawers, stack.locale)
 
-    await ownerPage.getByRole('button', { name: labels[stack.locale].showTree }).click()
+    await ownerPage.getByRole('button', { exact: true, name: labels[stack.locale].showTree }).click()
     const treeDrawer = ownerPage.locator('#editor-file-tree-panel[role="dialog"]')
     await expect(treeDrawer).toBeVisible()
     await expect(ownerPage.locator('#editor-comments-panel[role="dialog"]')).toHaveCount(0)
@@ -2318,6 +2322,12 @@ function requireFixtureControls(
   throw new Error('Playwright did not stop a test skipped for missing fixture.controls.')
 }
 
+/** A fresh browser paints English until the saved account language arrives;
+ * labels are read only once the page shows the run's language. */
+async function expectPageLocale(page: Page, locale: 'de' | 'en'): Promise<void> {
+  await expect(page.locator('html')).toHaveAttribute('lang', locale)
+}
+
 async function openDocument(
   page: Page,
   documentId: string,
@@ -2333,6 +2343,7 @@ async function openDocument(
   }
   const editorNavigation = page.getByRole('button', { name: 'Editor', exact: true })
   await expect(editorNavigation).toBeVisible({ timeout: 20_000 })
+  await expectPageLocale(page, locale)
   let navigationReanchored = false
   await editorNavigation.click()
   const initialNavigationActivated = await expect(editorNavigation)
@@ -2348,12 +2359,8 @@ async function openDocument(
   }
 
   const documentRow = page.locator(`[data-editor-document-id="${documentId}"]`).first()
-  const revealDocumentTree = async () => {
-    if (await documentRow.isVisible().catch(() => false)) return
-    const showTree = page.getByRole('button', { name: labels[locale].showTree })
-    if (await showTree.isVisible().catch(() => false)) await showTree.click()
-  }
-  await revealDocumentTree()
+  const showTree = page.getByRole('button', { exact: true, name: labels[locale].showTree })
+  let treeToggleClicked = false
   const documentLists = page.locator(
     '[data-editor-shared-documents], [data-editor-owned-documents]',
   )
@@ -2363,24 +2370,34 @@ async function openDocument(
   })
   const waitForDocumentTree = async (allowNavigationReanchor: boolean) => {
     let navigationLost = false
-    await expect.poll(
-      async () => {
-        if (await editorNavigation.getAttribute('aria-pressed') !== 'true') {
-          navigationLost = true
-          return allowNavigationReanchor
-        }
-        return (
-          await documentRow.isVisible().catch(() => false)
-          || await showMoreControls.count() > 0
-        )
-      },
-      {
-        message: allowNavigationReanchor
-          ? 'The document tree must load or report that initial hydration replaced the requested view.'
-          : 'The document tree must load the target row or a reveal control while Editor remains active.',
-        timeout: 20_000,
-      },
-    ).toBe(true)
+    const message = allowNavigationReanchor
+      ? 'The document tree must load or report that initial hydration replaced the requested view.'
+      : 'The document tree must load the target row or a reveal control while Editor remains active.'
+    try {
+      await expect.poll(
+        async () => {
+          if (await editorNavigation.getAttribute('aria-pressed') !== 'true') {
+            navigationLost = true
+            return allowNavigationReanchor
+          }
+          if (
+            await documentRow.isVisible().catch(() => false)
+            || await showMoreControls.count() > 0
+          ) return true
+          // On narrow screens the tree is closed and its toggle renders a
+          // moment after the Editor view opens: it is clicked once, when it
+          // is there, not decided by a single early look.
+          if (!treeToggleClicked && await showTree.isVisible().catch(() => false)) {
+            treeToggleClicked = true
+            await showTree.click()
+          }
+          return false
+        },
+        { message, timeout: 20_000 },
+      ).toBe(true)
+    } catch (error) {
+      throw new Error(`${message} Tree toggle clicked: ${treeToggleClicked}.`, { cause: error })
+    }
     return navigationLost
   }
 
@@ -2388,7 +2405,7 @@ async function openDocument(
     navigationReanchored = true
     await editorNavigation.click()
     await expect(editorNavigation).toHaveAttribute('aria-pressed', 'true')
-    await revealDocumentTree()
+    treeToggleClicked = false
     expect(await waitForDocumentTree(false)).toBe(false)
   }
 
@@ -2413,13 +2430,45 @@ async function openDocument(
     if (!expandedDocumentList) break
   }
   await expect(documentRow).toBeVisible({ timeout: 20_000 })
-  await documentRow.click()
   const mobileTree = page.locator('#editor-file-tree-panel[role="dialog"]')
+  const chosenInDrawer = await mobileTree.isVisible().catch(() => false)
+  await documentRow.click()
+  // While the page starts up the click takes effect a moment later. Until then
+  // the document restored from the last visit is on screen with its own saved
+  // status, and typing would go to the row that holds the focus.
+  const chosenRow = documentRow.getByRole('button', { pressed: true }).first()
+  await expect.poll(async () => (
+    await chosenRow.isVisible().catch(() => false)
+    || (chosenInDrawer && !await mobileTree.isVisible().catch(() => false))
+  )).toBe(true)
   if (await mobileTree.isVisible().catch(() => false)) {
     await page.keyboard.press('Escape')
     await expect(mobileTree).toHaveCount(0)
   }
   await expect(editor(page)).toBeVisible({ timeout: 20_000 })
+}
+
+/** The document search of the tree. On narrow screens the tree is closed and
+ * its toggle renders a moment after the Editor view opens, so the choice
+ * waits until the search or the toggle is there. */
+async function openDocumentSearch(page: Page, locale: 'de' | 'en'): Promise<Locator> {
+  const showTree = page.getByRole('button', { exact: true, name: labels[locale].showTree })
+  const search = page.getByRole('searchbox', {
+    name: labels[locale].searchDocuments,
+  })
+  await expect.poll(
+    async () => (
+      await search.isVisible().catch(() => false)
+      || await showTree.isVisible().catch(() => false)
+    ),
+    {
+      message: 'The editor must show the document search or the tree toggle.',
+      timeout: 20_000,
+    },
+  ).toBe(true)
+  if (!await search.isVisible().catch(() => false)) await showTree.click()
+  await expect(search).toBeVisible({ timeout: 20_000 })
+  return search
 }
 
 async function captureActiveImportedDocument(
@@ -2432,13 +2481,7 @@ async function captureActiveImportedDocument(
   await expect(editorNavigation).toBeVisible({ timeout: 20_000 })
   await editorNavigation.click()
 
-  const showTree = page.getByRole('button', { name: labels[locale].showTree })
-  if (await showTree.isVisible().catch(() => false)) await showTree.click()
-
-  const search = page.getByRole('searchbox', {
-    name: labels[locale].searchDocuments,
-  })
-  await expect(search).toBeVisible({ timeout: 20_000 })
+  const search = await openDocumentSearch(page, locale)
   await search.fill(importedDocumentTitle)
   const importedRows = page.locator('[data-editor-document-id]', {
     has: page.getByText(importedDocumentTitle, { exact: true }),
@@ -2489,13 +2532,7 @@ async function captureVisibleImportedDocumentOrder(
   await expect(editorNavigation).toBeVisible({ timeout: 20_000 })
   await editorNavigation.click()
 
-  const showTree = page.getByRole('button', { name: labels[locale].showTree })
-  if (await showTree.isVisible().catch(() => false)) await showTree.click()
-
-  const search = page.getByRole('searchbox', {
-    name: labels[locale].searchDocuments,
-  })
-  await expect(search).toBeVisible({ timeout: 20_000 })
+  const search = await openDocumentSearch(page, locale)
   await search.fill('.md')
   const importedIdSet = new Set(importedDocumentIds)
   const rows = page.locator('[data-editor-document-id]')
@@ -2944,6 +2981,7 @@ async function focusEditorEnd(surface: Locator): Promise<void> {
     selection?.addRange(range)
     document.dispatchEvent(new Event('selectionchange'))
   })
+  await expect(surface).toBeFocused()
 }
 
 /** Wie oft die Marke auf einer Flaeche steht -- und dass sie DORT BLEIBT.

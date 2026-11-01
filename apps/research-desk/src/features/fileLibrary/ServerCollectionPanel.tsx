@@ -395,7 +395,7 @@ export function ServerCollectionPanel({
       if (result.skippedFiles.length > 0) {
         setError(t.vectorIndex.serverSkippedDocuments.replace(
           '{names}',
-          result.skippedFiles.join(', '),
+          () => result.skippedFiles.join(', '),
         ))
       }
     } catch (cause) {

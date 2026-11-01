@@ -17,6 +17,7 @@ describe('a failed guest unlock names the cause it was actually given', () => {
     [401, 'unlockFailed'],
     [400, 'unlockFailed'],
     [404, 'invalid'],
+    [423, 'linkUnavailable'],
   ])('maps %i to its own sentence', (status, key) => {
     expect(guestUnlockErrorKey(httpError(status))).toBe(key)
   })
@@ -35,10 +36,10 @@ describe('a failed guest unlock names the cause it was actually given', () => {
     expect(guestUnlockErrorKey(undefined)).toBe('unlockUnavailable')
   })
 
-  it('separates the five outcomes into four distinct sentences', () => {
+  it('separates the six outcomes into five distinct sentences', () => {
     const keys = new Set(
-      [400, 401, 403, 404, 429].map(s => guestUnlockErrorKey(httpError(s))),
+      [400, 401, 403, 404, 423, 429].map(s => guestUnlockErrorKey(httpError(s))),
     )
-    expect(keys.size).toBe(4)
+    expect(keys.size).toBe(5)
   })
 })

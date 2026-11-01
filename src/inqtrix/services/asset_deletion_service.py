@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from inqtrix.auth.lifecycle import AdminActor
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.content.ports import FileNotFound
 from inqtrix.execution_failures import RunExecutionFailure
@@ -31,6 +32,7 @@ from inqtrix.project.asset_records_ports import (
 from inqtrix.project.scoped_upsert import ResourceScope
 from inqtrix.project.vector_index_ports import VectorIndexNotFound
 from inqtrix.quota.models import QuotaDimension, QuotaSubject, file_stock_key
+from inqtrix.runs.deletion_execution import operation_principal
 from inqtrix.runs.deletion_operations import (
     DeletionAttemptSuperseded,
     DeletionJobHandle,
@@ -47,6 +49,7 @@ from inqtrix.sync_bridge import run_coro_sync
 from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
+    from inqtrix.auth.lifecycle import LifecycleActor
     from inqtrix.runs.deletion_operations import DeletionOperationStore
     from inqtrix.services.asset_records_service import AssetRecordsService
     from inqtrix.services.file_service import FileService
@@ -57,7 +60,7 @@ if TYPE_CHECKING:
     from inqtrix.services.upload_operation_service import UploadOperationService
     from inqtrix.services.vector_index_service import VectorIndexService
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 MAX_BULK_DELETE_ASSETS = 200
 
@@ -78,6 +81,11 @@ def asset_source_id(asset_id: str) -> str:
     """Stable source identity shared by upload, indexing, and deletion."""
 
     return f"asset:{asset_id}"
+
+
+def _erasure_owner(actor: "LifecycleActor") -> uuid.UUID | None:
+    """The owner of an account erasure: its administrator, or nobody."""
+    return actor.user_id if isinstance(actor, AdminActor) else None
 
 
 class AssetDeletionService:
@@ -158,18 +166,24 @@ class AssetDeletionService:
         self,
         user_id: uuid.UUID,
         *,
-        principal: Principal,
+        actor: "LifecycleActor",
+        tenant_id: str,
         operation_id: str,
     ) -> dict[str, Any]:
         """Register and dispatch the erasure of one account.
 
-        The operation belongs to the administrator (``principal``); its
-        target is the account. ``operation_id`` is the id the account was
-        already marked with when it was cut off.
+        The operation belongs to the administrator who started it, or to
+        nobody when provisioning started it -- then every active
+        administrator may follow and repeat it. Its target is the account;
+        ``operation_id`` is the id the account was already marked with when
+        it was cut off. Another owner's operation on the account is a
+        :class:`DeletionOperationConflict`.
         """
 
         if self._user_erasure is None:
             raise RuntimeError("account erasure is not wired")
+        created_by_user_id = _erasure_owner(actor)
+        principal = operation_principal(tenant_id, created_by_user_id)
 
         def _work(handle: DeletionJobHandle) -> None:
             self.execute(
@@ -187,12 +201,26 @@ class AssetDeletionService:
             target_kind=DeletionTargetKind.USER,
             target_id=str(user_id),
             manifest=(),
-            tenant_id=principal.tenant_id,
-            created_by_user_id=principal.user_id,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
             workspace_id=None,
             work=_work,
             total_items=2,
             operation_id=operation_id,
+        )
+
+    async def retry_user_erasure(
+        self,
+        operation_id: str,
+        *,
+        actor: "LifecycleActor",
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        """Reopen a failed account erasure of the owner *actor* names."""
+        return await self.retry(
+            operation_id,
+            principal=operation_principal(tenant_id, _erasure_owner(actor)),
+            workspace_id=None,
         )
 
     def assert_upload_allowed(

@@ -78,7 +78,7 @@ def extract_context(payload: Mapping[str, Any] | None) -> Any | None:
         # setup cannot turn this guard into a second failure.
         import logging
 
-        logging.getLogger("inqtrix").warning(
+        logging.getLogger(__name__).warning(
             "Invalid trace context in run payload; starting a root span.",
             exc_info=True,
         )

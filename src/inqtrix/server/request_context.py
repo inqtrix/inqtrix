@@ -54,7 +54,7 @@ from inqtrix.auth.request_origin import (
 from inqtrix.observability.context import bind_log_context, reset_log_context
 from inqtrix.urls import sanitize_log_message
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # Conservative charset/length: anything else is replaced, never echoed.
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")

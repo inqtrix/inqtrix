@@ -28,7 +28,7 @@ from inqtrix.urls import (
     scrub_credential_urls,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _SENSITIVE_EVENT_KEYS = frozenset({
     "access_token",
@@ -1456,12 +1456,13 @@ def log_run_end(
 
 
 def log_iteration_entry(entry: dict[str, Any]) -> None:
-    """Write the non-content operational projection to DEBUG logs.
+    """Record the non-content operational projection as a span event.
 
     ``entry`` itself is the protected audit representation and is not mutated.
-    Exact queries, provider prose, source/claim/evidence text, prompt views and
-    URLs therefore remain available to the authorized run result while never
-    being mirrored into ordinary container or file logs.
+    :func:`emit_runtime_event` attaches the projection to the current span;
+    nothing reaches the log stream. Exact queries, provider prose,
+    source/claim/evidence text, prompt views and URLs therefore remain
+    available to the authorized run result only.
     """
     console_entry = _console_iteration_projection(entry)
     event = str(console_entry.get("event", "iteration_summary"))

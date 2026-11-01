@@ -24,7 +24,7 @@ from inqtrix.services.overrides import (
 )
 from inqtrix.settings import AgentSettings, Settings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from inqtrix.core.algorithms import AlgorithmRegistry

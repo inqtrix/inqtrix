@@ -341,13 +341,8 @@ def test_perplexity_failure_does_not_copy_query_or_provider_error_to_logs(
     search, _ = _agent_search(
         side_effect=APIError(provider_secret, request=req, body=None)
     )
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.ERROR, logger="inqtrix"):
-            search.search(query_secret)
-    finally:
-        logger.removeHandler(caplog.handler)
+    with caplog.at_level(logging.ERROR, logger="inqtrix"):
+        search.search(query_secret)
 
     notice = search.consume_nonfatal_notice()
     assert query_secret not in caplog.text

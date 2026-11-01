@@ -23,6 +23,9 @@ import {
   isExpectedBrowserRequestAbort,
 } from '../../tests/verification/fixtures/api.mjs'
 import {
+  requireAccountLocale,
+} from '../../tests/verification/fixtures/accounts.mjs'
+import {
   assertVerificationRunId,
 } from '../../tests/verification/fixtures/run-scope.mjs'
 import {
@@ -49,7 +52,9 @@ const lifecycle = new VerificationLifecycleClient({
   runId: runKey,
 })
 
-// German UI anchors — loginActor pins locale de-DE for every context.
+// German UI anchors: the page shows the tester's saved interface language,
+// which the run requires after login.
+const INTERFACE_LOCALE = 'de'
 const COMPOSER_LABEL = 'Nachricht an das Modell... @ für Kontext'
 const SEND_LABEL = 'Nachricht senden'
 const MODEL_PICKER_LABEL = 'Chatmodell auswählen'
@@ -149,6 +154,7 @@ async function runBrowserPass(target) {
       `ChatPrompt-${target.name}`,
       'user',
     )
+    await requireAccountLocale(tester, INTERFACE_LOCALE)
     tester.page.on('response', (response) => {
       if (response.status() >= 500) {
         const finding = `http:${response.status()}:${new URL(response.url()).pathname}`

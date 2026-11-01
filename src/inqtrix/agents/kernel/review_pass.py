@@ -112,7 +112,7 @@ from inqtrix.exceptions import AgentCancelled
 from inqtrix.i18n import MESSAGES, t, t_count
 from inqtrix.knowledge.grounding import quote_is_verbatim
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 REVIEW_ROLE_ORIGIN = "role-review"
 """Idempotency key of a run's review role child. It doubles as the invocation
@@ -845,14 +845,15 @@ def _without_stray_ids(text: str, language: str) -> str:
     and may name a basis inside it that it never declared. That id belongs
     to no record, so nothing can be looked up for it; leaving it in the
     sentence would send the reader after an identifier this run cannot
-    resolve. Each affected text logs the tokens it carried.
+    resolve. Each affected text logs how many such ids it carried.
     """
     strays = _STRAY_ID.findall(text)
     if not strays:
         return text
+    # The ids are model text: the line counts them.
     log.warning(
-        "Review prose names %d basis id(s) it never declared: %s.",
-        len(strays), ", ".join(dict.fromkeys(strays)),
+        "Review prose names %d basis id(s) it never declared.",
+        len(dict.fromkeys(strays)),
     )
     return _STRAY_ID.sub(_unassignable(language), text)
 
@@ -1628,9 +1629,10 @@ def reader_detail(review: Review, language: str) -> str:
     No reason carries a reader detail of its own. Whatever a review leaves
     behind instead of a verdict is runtime text in the runtime's language —
     model debris, half a schema, an exception class, the limit a budget
-    hit. Each reason therefore has ONE sentence, and the raw text goes to
-    the log where it can be diagnosed. Both engines read this, so neither
-    can show the debris the other hides.
+    hit. Each reason therefore has ONE sentence. The log gets the reason,
+    the transport and the length of that text, never the text: it can be
+    model output. Both engines read this, so neither can show the debris
+    the other hides.
 
     A reason without a sentence is a defect, not a case to fall through:
     the fall-through was how the runtime's English reached a German reader
@@ -1643,16 +1645,19 @@ def reader_detail(review: Review, language: str) -> str:
     if key not in MESSAGES:
         log.warning(
             "A review failed with the reason %r, for which no reader "
-            "sentence exists; the reader gets the generic one. Raw detail: %s",
+            "sentence exists; the reader gets the generic one "
+            "(transport=%s, detail_chars=%d).",
             review.reason,
-            _clip(review.detail, 2_000),
+            review.transport,
+            len(review.detail or ""),
         )
         return t(words, "review_unavailable_generic")
     if review.detail:
         log.warning(
-            "Review unavailable (%s); raw detail: %s",
+            "Review unavailable (reason=%s, transport=%s, detail_chars=%d).",
             review.reason,
-            _clip(review.detail, 2_000),
+            review.transport,
+            len(review.detail),
         )
     return t(words, key)
 

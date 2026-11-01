@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 TextImprovementContext = Literal["chat_input", "prompt_template"]
 TextImprovementLocale = Literal["de", "en"]

@@ -2,10 +2,12 @@ import { useEffect, useState } from 'react'
 import {
   fetchAuthSession,
   hasHttpStatus,
+  reloadAfterUnauthorized,
   streamUserEvents,
   type AuthSessionInfo,
   type UserEvent,
 } from '@/api/inqtrixClient'
+import { gatewaySignOutStored, readGatewaySignedOut } from '@/features/auth/useAuthSession'
 
 export type UserEventAction = 'consume' | 'ignore' | 'refetch' | 'reload'
 
@@ -178,7 +180,9 @@ export type UserIdentityVerifier = {
  * Probes the canonical session and acts on the answer. A confirmed identity
  * change reloads the page. An answer that proves nothing keeps the page,
  * reports why and probes again after a bounded, growing delay until the
- * identity is confirmed or changed; nothing is read meanwhile.
+ * identity is confirmed or changed; nothing is read meanwhile. With
+ * `signedOut` (gateway mode) a sign-out of this browser reloads the page
+ * instead of a probe: there a probe starts the next session at once.
  */
 export function createUserIdentityVerifier({
   cancelTimer,
@@ -188,6 +192,7 @@ export function createUserIdentityVerifier({
   probe,
   reload,
   scheduleTimer,
+  signedOut,
 }: {
   cancelTimer: (timer: ReturnType<typeof setTimeout>) => void
   expectedUserId: string
@@ -196,6 +201,7 @@ export function createUserIdentityVerifier({
   probe: () => Promise<AuthSessionInfo>
   reload: () => void
   scheduleTimer: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>
+  signedOut?: () => boolean
 }): UserIdentityVerifier {
   let generation = 0
   let retryAttempt = 0
@@ -211,6 +217,11 @@ export function createUserIdentityVerifier({
   const verify = async (): Promise<void> => {
     if (stopped) return
     clearRetry()
+    if (signedOut?.()) {
+      stopped = true
+      reload()
+      return
+    }
     generation += 1
     const current = generation
     const verification = await verifyLatestUserIdentity({
@@ -257,13 +268,17 @@ export function createUserIdentityVerifier({
  * Maintain the one user-scoped invalidation stream. Its only output is how
  * often each list was told to refresh (by scope, or everything): consumers
  * re-read their authoritative list endpoints. No resource content is ever
- * trusted or patched from SSE.
+ * trusted or patched from SSE. In gateway mode a sign-out of this browser,
+ * here or in another tab, reloads the page into the signed-out page before
+ * any probe can start the next session.
  */
 export function useUserInvalidationEvents({
   enabled,
+  gateway = false,
   userId,
 }: {
   enabled: boolean
+  gateway?: boolean
   userId: string | null
 }): { error: string | null; refresh: RefreshState } {
   const [refresh, setRefresh] = useState<RefreshState>({ all: 0, byScope: {} })
@@ -329,6 +344,7 @@ export function useUserInvalidationEvents({
         window.location.reload()
       },
       scheduleTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+      signedOut: gateway ? () => readGatewaySignedOut() : undefined,
     })
     const verifyIdentityAndWake = () => identity.verify()
 
@@ -336,8 +352,16 @@ export function useUserInvalidationEvents({
       if (document.visibilityState === 'visible') void verifyIdentityAndWake()
     }
     const handleOnline = () => void verifyIdentityAndWake()
+    // Another tab signed out: reload into the signed-out page at once.
+    const handleStorage = (event: StorageEvent) => {
+      if (stopped || !gatewaySignOutStored(event)) return
+      stopped = true
+      controller.abort()
+      window.location.reload()
+    }
     window.addEventListener('focus', handleFocus)
     window.addEventListener('online', handleOnline)
+    if (gateway) window.addEventListener('storage', handleStorage)
 
     const connect = async () => {
       if (stopped || controller.signal.aborted) return
@@ -396,7 +420,7 @@ export function useUserInvalidationEvents({
         if (hasHttpStatus(error, 401) || hasHttpStatus(error, 403)) {
           stopped = true
           controller.abort()
-          window.location.reload()
+          reloadAfterUnauthorized(error)
           return
         }
         setError(error instanceof Error ? error.message : String(error))
@@ -418,8 +442,9 @@ export function useUserInvalidationEvents({
       identity.stop()
       window.removeEventListener('focus', handleFocus)
       window.removeEventListener('online', handleOnline)
+      window.removeEventListener('storage', handleStorage)
     }
-  }, [enabled, userId])
+  }, [enabled, gateway, userId])
 
   return { error, refresh }
 }

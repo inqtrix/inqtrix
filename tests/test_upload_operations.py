@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import uuid
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ import pytest
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.content.memory import MemoryFileRegistry
 from inqtrix.knowledge.parsing import DocumentParseError
+from inqtrix.logging_config import InqtrixLogFilter
 from inqtrix.project.asset_records_memory import MemoryAssetStore
 from inqtrix.project.scoped_upsert import ResourceScope
 from inqtrix.quota.models import QuotaDimension, StockLifecycleState
@@ -799,7 +801,7 @@ def test_file_lifecycle_cleanup_removes_blob_without_registry_row(
     asyncio.run(scenario())
 
 
-def test_reconciler_stops_on_schema_head_mismatch_instead_of_retrying():
+def test_reconciler_stops_on_schema_head_mismatch_instead_of_retrying(caplog):
     """A fence hit is fatal for THIS process's reconciler, not a warning.
 
     The expected schema head is a code constant, so a mismatch can never
@@ -824,7 +826,7 @@ def test_reconciler_stops_on_schema_head_mismatch_instead_of_retrying():
                 # (no timeout plugin runs in this suite). Bound it so the
                 # test FAILS on the call count instead of hanging.
                 stop.set()
-            raise SchemaHeadMismatch("Schema-Kopf bewegt: 0079 statt 0078")
+            raise SchemaHeadMismatch(installed="0079", expected="0078")
 
     service = Mock()
     service.operations = FencedOperations()
@@ -834,6 +836,16 @@ def test_reconciler_stops_on_schema_head_mismatch_instead_of_retrying():
     reconciler._run(stop)
 
     assert calls == [30.0], "exactly one pass, then a hard stop"
+    # After the log filter, which shows an exception only by its type.
+    log_filter = InqtrixLogFilter(service="worker")
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    for record in errors:
+        log_filter.filter(record)
+    assert [record.getMessage() for record in errors] == [
+        "Upload reconciler: schema head changed under this process; the "
+        "reconciler is stopping so an updated process can take over "
+        "(installed=0079, expected=0078)."
+    ]
 
 
 def _with_parser(harness: _Harness, parser, tmp_path: Path) -> UploadOperationService:

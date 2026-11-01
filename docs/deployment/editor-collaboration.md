@@ -8,7 +8,9 @@ retention, security limits, and the read-only kill switch. It covers the
 bundled Compose and Helm paths plus host development. It does not describe
 end-user review controls or claim horizontal availability or offline writes;
 account-less guest links are a separate opt-in module documented in
-[Settings and environment variables](../configuration/settings-and-env.md#editor-guest-links-editorguestlinksettings)
+[Settings and environment variables](../configuration/settings-and-env.md#editor-guest-links-editorguestlinksettings),
+with the steps to switch them on in
+[Switching guest links on](../configuration/settings-and-env.md#switching-guest-links-on),
 and are not covered here.
 
 ## Prerequisites
@@ -21,7 +23,7 @@ following:
   `SCHEMA_HEAD_REVISION` in `src/inqtrix/storage/migration_contract.py` — and
   readiness compares the installed revision against it. A number written into
   prose here would go stale with the next migration;
-- cookie-session authentication: `INQTRIX_AUTH_MODE=local` or `oidc`;
+- cookie-session authentication: `INQTRIX_AUTH_MODE=local`, `oidc` or `gateway`;
 - the canonical PostgreSQL session/user stores used by those auth modes;
 - the private Node HTTP and WebSocket URLs;
 - an independent `INQTRIX_COLLABORATION_SECRET` of at least 32 UTF-8 bytes,
@@ -120,17 +122,14 @@ is false. The Node container has a read-only root filesystem, drops Linux
 capabilities, runs non-root, and publishes no host port.
 
 The loopback stack defaults to HTTP. When a reverse proxy terminates TLS in
-front of Compose, set both values in the stack environment and preserve the
-public Host at that proxy:
-
-```text
-INQTRIX_PUBLIC_BASE_URL=https://desk.example
-INQTRIX_EXTERNAL_SCHEME=https
-```
-
-The API consumes the full public origin; the web container consumes the scheme
-and overwrites any client-supplied forwarding value. A mismatch fails
-collaboration origin validation rather than falling back to HTTP.
+front of Compose, scheme and host follow
+[one rule](auth-modes.md#scheme-behind-a-tls-proxy). In this stack the
+`INQTRIX_PUBLIC_BASE_URL` of the stack environment reaches the API, the
+worker and the web container. The web container forwards the scheme and host
+of that URL and overwrites any client-supplied forwarding value; it refuses to
+start when a set `INQTRIX_EXTERNAL_SCHEME` names another scheme. A browser origin other
+than that URL fails the collaboration origin validation rather than falling
+back to HTTP.
 
 Do not start the profile without `INQTRIX_COLLABORATION_ENABLED=true`, or set
 the feature flag without starting Node. Both are visible misconfigurations:
@@ -162,7 +161,9 @@ Deployment with `Recreate`, a private ClusterIP Service, and no HPA, PDB, or
 PVC. The chart derives the private HTTP/WS URLs and feature flag. An enabled
 Ingress also derives `INQTRIX_PUBLIC_BASE_URL` and the web gateway's external scheme
 from its host/TLS settings; an explicit `config.INQTRIX_PUBLIC_BASE_URL` keeps
-precedence. Do not change the replica count: version 1 has a database fencing
+precedence. Behind a TLS terminator the chart does not own, see
+[TLS in front of the web Service](kubernetes.md#edge-timeouts-and-body-size).
+Do not change the replica count: version 1 has a database fencing
 lease for fail-safe replacement, not multi-replica fan-out. Size the service's
 memory and CPU (`collaboration.resources`) with
 [Collaboration service](kubernetes.md#collaboration-service); every change
@@ -262,7 +263,7 @@ unloads once it is empty.
 
 ## Kill switch and maintenance
 
-Set `INQTRIX_COLLABORATION_ENABLED=false` and restart FastAPI to disable public
+Set `INQTRIX_COLLABORATION_ENABLED=false` and re-create FastAPI (Compose: `up -d`, because a `restart` keeps the old environment) to disable public
 sessions, internal APIs, and the WebSocket gateway. Then stop Node. This is a
 read-only kill switch, not a conversion or deletion:
 
@@ -281,7 +282,8 @@ and resynchronizes the room without a page reload.
 
 - Terminate TLS at the public proxy so browsers use `wss://`.
 - Keep `INQTRIX_PUBLIC_BASE_URL`, the public proxy host, and its TLS mode
-  aligned. FastAPI accepts forwarded same-origin only when browser Origin,
+  aligned ([Scheme behind a TLS proxy](auth-modes.md#scheme-behind-a-tls-proxy)).
+  FastAPI accepts forwarded same-origin only when browser Origin,
   sanitized forwarded proto/host, and that configured public origin all match.
 - Keep Node and `/metrics` private; expose only the selected web adapter (the
   Python gateway, unless another is explicitly selected) and FastAPI's
@@ -385,7 +387,9 @@ not a collaboration deployment shape of their own: they are a separate opt-in
 module (`INQTRIX_EDITOR_GUEST_LINKS_ENABLED`) that requires this collaboration
 service, an independent token secret, Valkey, and an HTTPS public base URL, and
 it is configured in
-[Settings and environment variables](../configuration/settings-and-env.md#editor-guest-links-editorguestlinksettings).
+[Settings and environment variables](../configuration/settings-and-env.md#editor-guest-links-editorguestlinksettings),
+step by step in
+[Switching guest links on](../configuration/settings-and-env.md#switching-guest-links-on).
 The Redis extension would distribute live state but would not replace
 PostgreSQL persistence. Do not add a second replica until a separately designed
 HA mode defines fan-out, leader/fencing behavior, rolling schema compatibility,

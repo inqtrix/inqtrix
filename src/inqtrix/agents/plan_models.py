@@ -9,6 +9,8 @@ tool and a retrieval profile matched to the evidence gap.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
@@ -110,6 +112,19 @@ class PlanTaskParams(BaseModel):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+
+_LOGGABLE_TASK_ID = re.compile(r"(?:t\d{1,3}|s)")
+
+
+def loggable_task_id(task_id: str) -> str:
+    """*task_id* for a log line: as is in the planner's form, else ``<task>``.
+
+    The planner asks for ``t1``, ``t2``, … and ``s``; the model may still
+    choose another id, and that is model text. The run's trace keeps the raw
+    id for correlation.
+    """
+    return task_id if _LOGGABLE_TASK_ID.fullmatch(task_id or "") else "<task>"
 
 
 class PlanTaskModel(BaseModel):

@@ -729,6 +729,44 @@
     }
   }
 
+  /* One row needs about 440 px: the padding, the two fixed middle tracks and
+     two outer tracks of equal width, each as wide as the wider outer content.
+     Below that the outer cells would shrink under their content and paint
+     over their neighbours, so under 460 px the bar wraps into two rows: file
+     tree and title across, actions at the end; history first, write mode and
+     status across the rest. The frame around the bar is the container. */
+  [data-editor-topbar-frame] {
+    container-name: editor-topbar-frame;
+    container-type: inline-size;
+  }
+
+  @container editor-topbar-frame (max-width: 459px) {
+    .inqtrix-editor-topbar.inqtrix-panel-header {
+      height: auto;
+      padding-block: 0.375rem;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas:
+        'leading leading actions'
+        'toolbar primary primary';
+    }
+
+    [data-editor-topbar-leading] {
+      grid-area: leading;
+    }
+
+    [data-editor-topbar-toolbar] {
+      grid-area: toolbar;
+    }
+
+    [data-editor-topbar-primary] {
+      grid-area: primary;
+    }
+
+    [data-editor-topbar-actions] {
+      grid-area: actions;
+    }
+  }
+
   /* Semantic design-language roles — single source of truth. Prefer these
      over ad-hoc text-[..]/leading-[..]/size-[..] so each UI function has one
      owner and cannot drift. Values are calibrated to the gold-standard

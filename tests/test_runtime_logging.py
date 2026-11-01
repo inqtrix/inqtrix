@@ -29,28 +29,6 @@ from inqtrix.state import append_iteration_log, emit_run_event, initial_state
 from inqtrix.strategies import StrategyContext, create_default_strategies
 
 
-@pytest.fixture(autouse=True)
-def reset_inqtrix_logger():
-    logger = logging.getLogger("inqtrix")
-    previous_handlers = list(logger.handlers)
-    previous_level = logger.level
-    previous_propagate = logger.propagate
-
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-
-    yield
-
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-        handler.close()
-
-    logger.setLevel(previous_level)
-    logger.propagate = previous_propagate
-    for handler in previous_handlers:
-        logger.addHandler(handler)
-
-
 class AzureOpenAILLM:
     def __init__(self) -> None:
         self.models = SimpleNamespace(
@@ -82,18 +60,19 @@ class AzureFoundryWebSearch:
 
 
 def _flush_inqtrix_handlers() -> None:
-    logger = logging.getLogger("inqtrix")
-    for handler in logger.handlers:
+    for handler in logging.getLogger().handlers:
         if hasattr(handler, "flush"):
             handler.flush()
 
 
 def test_run_event_sink_failure_logs_type_without_exception_message(tmp_path):
     log_path = configure_logging(
-        enabled=True,
+        service="api",
+        target="file",
         level="DEBUG",
+        format="text",
         log_dir=str(tmp_path / "logs"),
-    )
+    ).file_path
 
     def _broken_sink(_event_type, _payload):
         raise RuntimeError("PRIVATE_SINK_EXCEPTION_MESSAGE")
@@ -114,10 +93,12 @@ def test_run_event_sink_failure_logs_type_without_exception_message(tmp_path):
 
 def test_run_end_banner_rejects_free_form_reason_text(tmp_path):
     log_path = configure_logging(
-        enabled=True,
+        service="api",
+        target="file",
         level="DEBUG",
+        format="text",
         log_dir=str(tmp_path / "logs"),
-    )
+    ).file_path
 
     log_run_end(
         run_id="run_safe_123",
@@ -137,7 +118,13 @@ def test_run_end_banner_rejects_free_form_reason_text(tmp_path):
 
 
 def test_run_logs_start_metadata_banner(tmp_path, monkeypatch):
-    log_path = configure_logging(enabled=True, level="DEBUG", log_dir=str(tmp_path / "logs"))
+    log_path = configure_logging(
+        service="api",
+        target="file",
+        level="DEBUG",
+        format="text",
+        log_dir=str(tmp_path / "logs"),
+    ).file_path
 
     class _StubAgent:
         def invoke(self, state):
@@ -1241,7 +1228,13 @@ def test_audit_previews_remain_bounded_and_redacted():
 
 
 def test_append_iteration_log_sanitizes_iteration_logs_export_for_testing_mode(tmp_path):
-    log_path = configure_logging(enabled=True, level="DEBUG", log_dir=str(tmp_path / "logs"))
+    log_path = configure_logging(
+        service="api",
+        target="file",
+        level="DEBUG",
+        format="text",
+        log_dir=str(tmp_path / "logs"),
+    ).file_path
     state = {"_run_id": "run_abc", "iteration_logs": []}
 
     append_iteration_log(

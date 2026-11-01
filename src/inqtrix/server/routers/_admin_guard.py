@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.principal import Principal
     from inqtrix.auth.sessions import AuthSession
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 TENANT = "default"
 
@@ -49,8 +49,8 @@ async def require_instance_admin(
     """Resolve a session principal and require instance admin.
 
     Args:
-        provider: The active cookie-session auth provider (oidc/local;
-            local subclasses the oidc provider). It must expose
+        provider: The active cookie-session auth provider (local, oidc or
+            gateway; local and gateway subclass the oidc provider). It must expose
             ``users``, ``sessions``, and ``build_principal_dependency()``.
         request: The incoming request to authenticate.
         principal_dependency: Bound application dependency. Production routers

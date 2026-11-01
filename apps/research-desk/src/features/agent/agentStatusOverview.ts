@@ -194,6 +194,18 @@ export function effectiveAgentDepth(
   return capabilityDefault === 'deep' ? 'deep' : 'normal'
 }
 
+/** The permission mode a run starts in: the selection while the server still
+ * offers it, otherwise the server's default. A selection can outlive the offer
+ * when an operator turns a mode off while the desk stays open. */
+export function effectiveAgentAutonomy(
+  selected: string | null | undefined,
+  agent: { autonomy_modes?: string[]; default_autonomy?: string } | null | undefined,
+): string {
+  const fallback = agent?.default_autonomy ?? 'balanced'
+  if (!selected) return fallback
+  return !agent?.autonomy_modes || agent.autonomy_modes.includes(selected) ? selected : fallback
+}
+
 /** The engine a fresh composer starts on: the server's published default,
  * but ONLY when the kernel feature flag confirms it is registered — a
  * default the server cannot run must never preselect. */

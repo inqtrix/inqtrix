@@ -10,7 +10,7 @@ Centralises:
   the suite into a 30-second wait.
 * An ``autouse`` env-isolation fixture that strips provider-related
   ``*_API_KEY`` / ``*_ENDPOINT`` variables before every test, preventing
-  a developer's local ``.env`` from accidentally turning a replay test
+  a key exported in the shell from accidentally turning a replay test
   into a live call.
 
 Recording workflow (an explicit maintainer operation, deliberately controlled
@@ -64,15 +64,11 @@ _PROVIDER_ENV_VARS: tuple[str, ...] = (
     "AZURE_TENANT_ID",
     "AZURE_CLIENT_ID",
     "AZURE_CLIENT_SECRET",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_PROFILE",
     "WEB_SEARCH_AGENT_NAME",
     # ServerSettings fields. Not used by any current replay test, but
     # stripped defensively so a future test cannot accidentally pull a
-    # real LITELLM_API_KEY out of a developer's .env via Settings() /
-    # ServerSettings() instantiation.
+    # real LITELLM_API_KEY from the shell into Settings() /
+    # ServerSettings().
     "LITELLM_API_KEY",
     "LITELLM_BASE_URL",
 )
@@ -150,50 +146,15 @@ def disable_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
 def isolate_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove provider env-vars before every replay test.
 
-    Without this guard, a developer's local ``.env`` (or an exported
-    real API key) could turn a ``record_mode="none"`` test into a live
-    call the moment any cassette goes missing. Stripping the vars
-    forces every replay test to rely exclusively on its cassette / stub.
-
-    Note: this only strips ``os.environ``. Pydantic-settings classes
-    (``Settings``, ``ServerSettings``, ``AgentSettings``, ``ModelSettings``)
-    can still read ``.env`` via their ``model_config["env_file"]``
-    binding when explicitly instantiated. Replay tests therefore must
-    construct providers with explicit constructor args (which take
-    precedence over both env vars and ``.env`` per pydantic-settings
-    rules) and avoid instantiating ``Settings``/``ServerSettings``
-    directly. The ``forbid_dotenv_loading`` fixture below verifies the
-    second contract at runtime.
+    Without this guard, an exported real API key could turn a
+    ``record_mode="none"`` test into a live call the moment any cassette
+    goes missing. Stripping the vars forces every replay test to rely
+    exclusively on its cassette / stub. ``.env`` files never reach the
+    session: the root ``conftest.py`` keeps them out of the environment
+    and out of the settings classes.
     """
     for name in _PROVIDER_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-
-
-@pytest.fixture(autouse=True)
-def forbid_dotenv_loading(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hard-fail if a replay test causes pydantic-settings to read ``.env``.
-
-    The replay-test contract is: providers are constructed with
-    explicit constructor args; nobody instantiates ``Settings`` or
-    ``ServerSettings`` here. To enforce this, we point the relative
-    ``env_file`` lookup at a guaranteed-non-existent path inside
-    ``tmp_path``. Pydantic-settings handles a missing file silently
-    (env_file is optional), so this neither breaks well-behaved tests
-    nor leaks anything. If a future replay test DOES try to read
-    ``.env`` it will simply not see the developer's real ``.env`` —
-    the worst-case outcome is a blank Settings field, never a leaked
-    secret.
-    """
-    # Redirect any cwd-relative .env lookup to a path that cannot
-    # contain the developer's real .env. We chdir into a freshly-
-    # created tmp directory; pydantic-settings' relative ``env_file=".env"``
-    # lookup then resolves to a non-existent file inside that tmp dir.
-    # All cassette/fixture paths in our replay tests are absolute
-    # (``pathlib.Path(__file__).resolve().parent.parent / ...``), so
-    # changing cwd does not break test discovery or fixture loading.
-    import tempfile
-    tmp_dir = tempfile.mkdtemp(prefix="inqtrix-replay-cwd-")
-    monkeypatch.chdir(tmp_dir)
 
 
 _CASSETTE_ROOT = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "cassettes"

@@ -4,7 +4,26 @@ import { describe, expect, it } from 'vitest'
 
 import { readFileSync } from 'node:fs'
 
-import { EXPLORER_SECTION_REVEAL_STEP, ExplorerHistoryRow } from './explorer-list'
+import { EXPLORER_SECTION_REVEAL_STEP, ExplorerHistoryRow, isRepeatPress } from './explorer-list'
+
+describe('isRepeatPress', () => {
+  it('names the second press of a double click and only that', () => {
+    expect(isRepeatPress({ detail: 2 })).toBe(true)
+    expect(isRepeatPress({ detail: 3 })).toBe(true)
+    expect(isRepeatPress({ detail: 1 })).toBe(false)
+  })
+
+  it('leaves a keyboard activation alone', () => {
+    expect(isRepeatPress({ detail: 0 })).toBe(false)
+  })
+
+  // The row below moves up under the pointer once the first press removed
+  // its own, so a double click would delete a second, paid item.
+  it('holds back a destructive row action, and only a destructive one', () => {
+    const source = readFileSync(new URL('./explorer-list.tsx', import.meta.url), 'utf8')
+    expect(source).toContain('if (action.destructive && isRepeatPress(event)) return')
+  })
+})
 
 function renderRow(labels: string[]): string {
   return renderToStaticMarkup(

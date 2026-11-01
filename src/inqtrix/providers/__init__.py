@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from inqtrix.providers.base import LLMProvider, ProviderContext, SearchProvider
     from inqtrix.settings import ProviderSettings, Settings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 def create_providers(settings: "Settings") -> "ProviderContext":

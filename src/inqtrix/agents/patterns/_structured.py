@@ -31,7 +31,7 @@ from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.observability.context import bind_purpose
 from inqtrix.providers.base import observe_provider_retries
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
 

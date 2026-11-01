@@ -1,24 +1,11 @@
 """Entry point: ``python -m inqtrix``.
 
 Starts the FastAPI server on port 5100 (override via
-``INQTRIX_SERVER_PORT``). Logging is driven by the same environment
-variables documented for the webserver-stack examples so both entry
-points behave consistently:
-
-- ``INQTRIX_LOG_ENABLED`` — ``true`` to activate file logging.
-- ``INQTRIX_LOG_LEVEL``   — ``DEBUG`` / ``INFO`` / ``WARNING`` (default
-  ``INFO``).
-- ``INQTRIX_LOG_CONSOLE`` — ``true`` to mirror WARNING+ records onto
-  stderr.
-- ``INQTRIX_LOG_INCLUDE_WEB`` — when file logging is enabled, also
-  route uvicorn / FastAPI logs into the same file (default ``true``).
-- ``INQTRIX_LOG_WEB_LEVEL`` — level for the uvicorn / FastAPI loggers
-  (default ``INFO``).
-
-Regardless of these flags, the server prints a terminal banner at
-startup describing the active logging configuration (file path if
-any, level, console mirror, web-log mirror) so operators can confirm
-the setup at a glance.
+``INQTRIX_SERVER_PORT``). Logging is configured first, from the
+``INQTRIX_LOG_*`` variables (see :func:`inqtrix.logging_config.configure_logging`):
+by default INFO as JSON on stdout. Uvicorn runs without its own logging
+configuration, so its startup and access lines go through the same root
+handlers, filter and format as every application record.
 """
 
 from __future__ import annotations
@@ -28,43 +15,39 @@ from typing import Any
 
 import uvicorn
 
-from inqtrix.logging_config import (
-    build_uvicorn_log_config,
-    configure_logging,
-    read_logging_env,
-)
+from inqtrix.logging_config import configure_logging, log_status_line
 from inqtrix.server import create_app
-from inqtrix.settings import Settings
+from inqtrix.settings import Settings, check_retired_settings
 
 
-_LOGGING_ENV = read_logging_env()
-_INQTRIX_LOG_PATH = configure_logging(
-    enabled=_LOGGING_ENV.enabled,
-    level=_LOGGING_ENV.level,
-    console=_LOGGING_ENV.console,
-    json_format=_LOGGING_ENV.json_format,
-)
-
-_SETTINGS = Settings()
-app = create_app(settings=_SETTINGS)
+def _server_port() -> int:
+    """``INQTRIX_SERVER_PORT`` as a number, or a start error that names it."""
+    try:
+        return int(os.getenv("INQTRIX_SERVER_PORT", "5100"))
+    except ValueError:
+        # ``int()`` quotes the value; the name is what the operator needs.
+        raise RuntimeError("INQTRIX_SERVER_PORT must be an integer.") from None
 
 
 def main() -> None:
-    """Start uvicorn with env-driven bind + logging configuration."""
+    """Configure logging, then build the app and start uvicorn."""
+    resolved = configure_logging(service="api")
+    retired = check_retired_settings()
+    log_status_line(resolved, retired=retired)
+    settings = Settings()
+    app = create_app(settings=settings)
     uvicorn_kwargs: dict[str, Any] = dict(
         host=os.getenv("INQTRIX_SERVER_HOST", "0.0.0.0"),
-        port=int(os.getenv("INQTRIX_SERVER_PORT", "5100")),
+        port=_server_port(),
         workers=1,
         timeout_keep_alive=300,
-        ws_max_size=_SETTINGS.collaboration.max_frame_bytes,
-        ws_max_queue=_SETTINGS.collaboration.max_queued_frames,
+        ws_max_size=settings.collaboration.max_frame_bytes,
+        ws_max_queue=settings.collaboration.max_queued_frames,
+        log_config=None,
+        # Inqtrix reads X-Forwarded-For itself (INQTRIX_TRUSTED_PROXY_HOPS);
+        # uvicorn must not replace the socket peer or the scheme from it.
+        proxy_headers=False,
     )
-    if _LOGGING_ENV.include_web:
-        uvicorn_kwargs["log_config"] = build_uvicorn_log_config(
-            _INQTRIX_LOG_PATH,
-            web_level=_LOGGING_ENV.web_level,
-            json_format=_LOGGING_ENV.json_format,
-        )
     uvicorn.run(app, **uvicorn_kwargs)
 
 

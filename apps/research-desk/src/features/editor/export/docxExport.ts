@@ -31,7 +31,7 @@ import {
   UnderlineType,
   WidthType,
 } from 'docx'
-import type { IPropertiesOptions } from 'docx'
+import type { IParagraphOptions, IPropertiesOptions, IRunOptions, ITableCellOptions } from 'docx'
 import type * as md from 'mdast'
 import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
@@ -50,7 +50,7 @@ import {
 import { fileNameTimestamp } from './fileNameTimestamp'
 import { aiDisclosureDocumentProperties } from '@/lib/aiDisclosure'
 
-const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+export const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
 /** AI-generation disclosure for an export of model-generated content. The
  * sentence is passed in already localized: this module never imports the
@@ -94,71 +94,35 @@ export function docxFileName(title: string, date: Date): string {
   return `${slug || 'dokument'}-${fileNameTimestamp(date)}.docx`
 }
 
-type Marks = {
+export type Marks = {
   bold?: boolean
   italics?: boolean
   strike?: boolean
   code?: boolean
   link?: boolean
+  size?: number
 }
 
-function makeRun(text: string, marks: Marks): TextRun {
-  return new TextRun({
-    text,
-    bold: marks.bold,
-    italics: marks.italics,
-    strike: marks.strike,
-    font: marks.code ? MONO_FONT : undefined,
-    color: marks.link ? '0563C1' : undefined,
-    underline: marks.link ? { type: UnderlineType.SINGLE } : undefined,
-    shading: marks.code ? { type: ShadingType.CLEAR, color: 'auto', fill: CODE_FILL } : undefined,
-  })
-}
+export type ParagraphDress = Omit<IParagraphOptions, 'children'>
+export type RunDress = Pick<IRunOptions, 'color' | 'font' | 'shading' | 'style' | 'underline'>
 
-function inlineToRuns(nodes: md.PhrasingContent[], marks: Marks = {}): (TextRun | ExternalHyperlink)[] {
-  const runs: (TextRun | ExternalHyperlink)[] = []
-  for (const node of nodes) {
-    switch (node.type) {
-      case 'text':
-        runs.push(makeRun(degradeMathDelimiters(node.value), marks))
-        break
-      case 'strong':
-        runs.push(...inlineToRuns(node.children, { ...marks, bold: true }))
-        break
-      case 'emphasis':
-        runs.push(...inlineToRuns(node.children, { ...marks, italics: true }))
-        break
-      case 'delete':
-        runs.push(...inlineToRuns(node.children, { ...marks, strike: true }))
-        break
-      case 'inlineCode':
-        runs.push(makeRun(node.value, { ...marks, code: true }))
-        break
-      case 'break':
-        runs.push(new TextRun({ break: 1 }))
-        break
-      case 'link': {
-        const childRuns = inlineToRuns(node.children, { ...marks, link: true }).filter(
-          (run): run is TextRun => run instanceof TextRun,
-        )
-        runs.push(new ExternalHyperlink({ link: node.url, children: childRuns }))
-        break
-      }
-      case 'image':
-        runs.push(makeRun(`[${node.alt?.trim() || 'Bild'}]`, { ...marks, italics: true }))
-        break
-      case 'html':
-        break
-      default:
-        if ('children' in node && Array.isArray((node as { children?: unknown }).children)) {
-          runs.push(...inlineToRuns((node as unknown as { children: md.PhrasingContent[] }).children, marks))
-        } else if ('value' in node && typeof (node as { value?: unknown }).value === 'string') {
-          runs.push(makeRun((node as unknown as { value: string }).value, marks))
-        }
-        break
-    }
-  }
-  return runs
+/**
+ * What a block or a span looks like in the file. The walk over the Markdown is
+ * one, so a report and an export into a Word template keep the same content;
+ * only the dress differs.
+ */
+export type DocxLook = {
+  heading: (depth: number) => { paragraph: ParagraphDress; marks?: Marks }
+  listItem: ParagraphDress
+  listContinuation: (level: number) => ParagraphDress
+  codeLine: { paragraph: ParagraphDress; run: RunDress }
+  quote: ParagraphDress
+  inlineCode: RunDress
+  link: RunDress
+  thematicBreak: ParagraphDress
+  tableCell: (isHeader: boolean) => Pick<ITableCellOptions, 'borders' | 'margins'>
+  tableCellParagraph: ParagraphDress
+  table: (rows: TableRow[]) => Table
 }
 
 const HEADING_LEVELS = [
@@ -170,20 +134,127 @@ const HEADING_LEVELS = [
   HeadingLevel.HEADING_6,
 ] as const
 
-function headingToDocx(node: md.Heading): Paragraph {
-  const depth = Math.min(Math.max(node.depth, 1), 6)
-  const children = inlineToRuns(node.children)
-  if (depth <= 4) {
-    return new Paragraph({
-      heading: HEADING_LEVELS[depth - 1],
-      numbering: { reference: HEADING_NUMBERING_REF, level: depth - 1 },
-      children,
-    })
-  }
-  return new Paragraph({ heading: HEADING_LEVELS[depth - 1], children })
+/** The professional LaTeX-report look of {@link ./latexReportStyle}. */
+export const reportLook: DocxLook = {
+  heading: (depth) => ({
+    paragraph: depth <= 4
+      ? {
+          heading: HEADING_LEVELS[depth - 1],
+          numbering: { reference: HEADING_NUMBERING_REF, level: depth - 1 },
+        }
+      : { heading: HEADING_LEVELS[depth - 1] },
+  }),
+  listItem: { alignment: AlignmentType.LEFT, spacing: { after: 0, line: LINE_SPACING } },
+  listContinuation: (level) => ({
+    alignment: AlignmentType.LEFT,
+    spacing: { after: 0, line: LINE_SPACING },
+    indent: { firstLine: 0, left: convertMillimetersToTwip(8 * (level + 1)) },
+  }),
+  codeLine: { paragraph: { style: 'InqtrixCode' }, run: {} },
+  quote: { style: 'InqtrixQuote' },
+  inlineCode: {
+    font: MONO_FONT,
+    shading: { type: ShadingType.CLEAR, color: 'auto', fill: CODE_FILL },
+  },
+  link: { color: '0563C1', underline: { type: UnderlineType.SINGLE } },
+  // A markdown `---` is a section separator, not a rule: render it as a clean
+  // vertical gap with no border line (the numbered headings already structure
+  // the report). Avoids stray separator lines in the exported document.
+  thematicBreak: { indent: { firstLine: 0 }, spacing: { before: 120, after: 120 } },
+  tableCell: (isHeader) => ({
+    margins: { top: 40, bottom: 40, left: 80, right: 80 },
+    borders: isHeader
+      ? { bottom: { style: BorderStyle.SINGLE, size: 6, color: '000000' } }
+      : undefined,
+  }),
+  tableCellParagraph: {
+    alignment: AlignmentType.LEFT,
+    indent: { firstLine: 0 },
+    spacing: { after: 0, line: LINE_SPACING },
+  },
+  table: (rows) => new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    borders: {
+      top: { style: BorderStyle.SINGLE, size: 8, color: '000000' },
+      bottom: { style: BorderStyle.SINGLE, size: 8, color: '000000' },
+      left: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+      right: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+      insideHorizontal: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+      insideVertical: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+    },
+    rows,
+  }),
 }
 
-type WalkContext = { orderedInstance: number }
+function makeRun(text: string, marks: Marks, look: DocxLook): TextRun {
+  return new TextRun({
+    text,
+    bold: marks.bold,
+    italics: marks.italics,
+    strike: marks.strike,
+    size: marks.size,
+    ...(marks.code ? look.inlineCode : undefined),
+    ...(marks.link ? look.link : undefined),
+  })
+}
+
+function inlineToRuns(
+  nodes: md.PhrasingContent[],
+  look: DocxLook,
+  marks: Marks = {},
+): (TextRun | ExternalHyperlink)[] {
+  const runs: (TextRun | ExternalHyperlink)[] = []
+  for (const node of nodes) {
+    switch (node.type) {
+      case 'text':
+        runs.push(makeRun(degradeMathDelimiters(node.value), marks, look))
+        break
+      case 'strong':
+        runs.push(...inlineToRuns(node.children, look, { ...marks, bold: true }))
+        break
+      case 'emphasis':
+        runs.push(...inlineToRuns(node.children, look, { ...marks, italics: true }))
+        break
+      case 'delete':
+        runs.push(...inlineToRuns(node.children, look, { ...marks, strike: true }))
+        break
+      case 'inlineCode':
+        runs.push(makeRun(node.value, { ...marks, code: true }, look))
+        break
+      case 'break':
+        runs.push(new TextRun({ break: 1 }))
+        break
+      case 'link': {
+        const childRuns = inlineToRuns(node.children, look, { ...marks, link: true }).filter(
+          (run): run is TextRun => run instanceof TextRun,
+        )
+        runs.push(new ExternalHyperlink({ link: node.url, children: childRuns }))
+        break
+      }
+      case 'image':
+        runs.push(makeRun(`[${node.alt?.trim() || 'Bild'}]`, { ...marks, italics: true }, look))
+        break
+      case 'html':
+        break
+      default:
+        if ('children' in node && Array.isArray((node as { children?: unknown }).children)) {
+          runs.push(...inlineToRuns((node as unknown as { children: md.PhrasingContent[] }).children, look, marks))
+        } else if ('value' in node && typeof (node as { value?: unknown }).value === 'string') {
+          runs.push(makeRun((node as unknown as { value: string }).value, marks, look))
+        }
+        break
+    }
+  }
+  return runs
+}
+
+type WalkContext = { orderedInstance: number; look: DocxLook }
+
+function headingToDocx(node: md.Heading, look: DocxLook): Paragraph {
+  const depth = Math.min(Math.max(node.depth, 1), 6)
+  const dress = look.heading(depth)
+  return new Paragraph({ ...dress.paragraph, children: inlineToRuns(node.children, look, dress.marks) })
+}
 
 function appendListItem(
   item: md.ListItem,
@@ -201,18 +272,12 @@ function appendListItem(
       continue
     }
     if (child.type === 'paragraph') {
-      const children = inlineToRuns(child.children)
+      const children = inlineToRuns(child.children, ctx.look)
       if (markerUsed) {
-        out.push(new Paragraph({
-          alignment: AlignmentType.LEFT,
-          spacing: { after: 0, line: LINE_SPACING },
-          indent: { firstLine: 0, left: convertMillimetersToTwip(8 * (level + 1)) },
-          children,
-        }))
+        out.push(new Paragraph({ ...ctx.look.listContinuation(level), children }))
       } else {
         out.push(new Paragraph({
-          alignment: AlignmentType.LEFT,
-          spacing: { after: 0, line: LINE_SPACING },
+          ...ctx.look.listItem,
           numbering: ordered
             ? { reference: ORDERED_LIST_REF, level, instance }
             : { reference: BULLET_LIST_REF, level },
@@ -223,11 +288,11 @@ function appendListItem(
       continue
     }
     if (child.type === 'code') {
-      out.push(...codeToParagraphs(child))
+      out.push(...codeToParagraphs(child, ctx.look))
       continue
     }
     if (child.type === 'blockquote') {
-      out.push(...blockquoteToParagraphs(child))
+      out.push(...blockquoteToParagraphs(child, ctx))
     }
   }
 }
@@ -242,64 +307,40 @@ function listToParagraphs(node: md.List, ctx: WalkContext, depth: number): Parag
   return out
 }
 
-function codeToParagraphs(node: md.Code): Paragraph[] {
+function codeToParagraphs(node: md.Code, look: DocxLook): Paragraph[] {
   return node.value.split('\n').map((line) => new Paragraph({
-    style: 'InqtrixCode',
-    children: [new TextRun({ text: line.length > 0 ? line : ' ' })],
+    ...look.codeLine.paragraph,
+    children: [new TextRun({ ...look.codeLine.run, text: line.length > 0 ? line : ' ' })],
   }))
 }
 
-function blockquoteToParagraphs(node: md.Blockquote): Paragraph[] {
+function blockquoteToParagraphs(node: md.Blockquote, ctx: WalkContext): Paragraph[] {
   const out: Paragraph[] = []
   for (const child of node.children) {
     if (child.type === 'paragraph') {
-      out.push(new Paragraph({ style: 'InqtrixQuote', children: inlineToRuns(child.children) }))
+      out.push(new Paragraph({ ...ctx.look.quote, children: inlineToRuns(child.children, ctx.look) }))
     } else if (child.type === 'blockquote') {
-      out.push(...blockquoteToParagraphs(child))
+      out.push(...blockquoteToParagraphs(child, ctx))
     } else if (child.type === 'list') {
-      out.push(...listToParagraphs(child, { orderedInstance: 0 }, 0))
+      out.push(...listToParagraphs(child, ctx, 0))
     } else if (child.type === 'code') {
-      out.push(...codeToParagraphs(child))
+      out.push(...codeToParagraphs(child, ctx.look))
     }
   }
   return out
 }
 
-function tableToDocx(node: md.Table): Table {
-  const rows = node.children.map((row, rowIndex) => new TableRow({
+function tableToDocx(node: md.Table, look: DocxLook): Table {
+  return look.table(node.children.map((row, rowIndex) => new TableRow({
     tableHeader: rowIndex === 0,
     children: row.children.map((cell) => new TableCell({
-      margins: { top: 40, bottom: 40, left: 80, right: 80 },
-      borders: rowIndex === 0
-        ? { bottom: { style: BorderStyle.SINGLE, size: 6, color: '000000' } }
-        : undefined,
+      ...look.tableCell(rowIndex === 0),
       children: [new Paragraph({
-        alignment: AlignmentType.LEFT,
-        indent: { firstLine: 0 },
-        spacing: { after: 0, line: LINE_SPACING },
-        children: inlineToRuns(cell.children, rowIndex === 0 ? { bold: true } : {}),
+        ...look.tableCellParagraph,
+        children: inlineToRuns(cell.children, look, rowIndex === 0 ? { bold: true } : {}),
       })],
     })),
-  }))
-  return new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    borders: {
-      top: { style: BorderStyle.SINGLE, size: 8, color: '000000' },
-      bottom: { style: BorderStyle.SINGLE, size: 8, color: '000000' },
-      left: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-      right: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-      insideHorizontal: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-      insideVertical: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-    },
-    rows,
-  })
-}
-
-function thematicBreakParagraph(): Paragraph {
-  // A markdown `---` is a section separator, not a rule: render it as a clean
-  // vertical gap with no border line (the numbered headings already structure
-  // the report). Avoids stray separator lines in the exported document.
-  return new Paragraph({ indent: { firstLine: 0 }, spacing: { before: 120, after: 120 }, children: [] })
+  })))
 }
 
 function blocksToDocx(nodes: md.RootContent[], ctx: WalkContext): (Paragraph | Table)[] {
@@ -307,25 +348,25 @@ function blocksToDocx(nodes: md.RootContent[], ctx: WalkContext): (Paragraph | T
   for (const node of nodes) {
     switch (node.type) {
       case 'heading':
-        out.push(headingToDocx(node))
+        out.push(headingToDocx(node, ctx.look))
         break
       case 'paragraph':
-        out.push(new Paragraph({ children: inlineToRuns(node.children) }))
+        out.push(new Paragraph({ children: inlineToRuns(node.children, ctx.look) }))
         break
       case 'list':
         out.push(...listToParagraphs(node, ctx, 0))
         break
       case 'code':
-        out.push(...codeToParagraphs(node))
+        out.push(...codeToParagraphs(node, ctx.look))
         break
       case 'blockquote':
-        out.push(...blockquoteToParagraphs(node))
+        out.push(...blockquoteToParagraphs(node, ctx))
         break
       case 'table':
-        out.push(tableToDocx(node))
+        out.push(tableToDocx(node, ctx.look))
         break
       case 'thematicBreak':
-        out.push(thematicBreakParagraph())
+        out.push(new Paragraph({ ...ctx.look.thematicBreak, children: [] }))
         break
       default:
         // html / definition / yaml / footnoteDefinition → intentionally skipped.
@@ -339,20 +380,24 @@ function blocksToDocx(nodes: md.RootContent[], ctx: WalkContext): (Paragraph | T
  * Parse markdown and map it to an array of top-level docx blocks
  * (`Paragraph`/`Table`). Pure and DOM-free — the unit-tested entry point.
  */
-export function markdownToDocxBlocks(markdown: string): (Paragraph | Table)[] {
+export function markdownToDocxBlocks(markdown: string, look: DocxLook = reportLook): (Paragraph | Table)[] {
   const tree = unified().use(remarkParse).use(remarkGfm).parse(markdown) as md.Root
-  return blocksToDocx(tree.children, { orderedInstance: 0 })
+  return blocksToDocx(tree.children, { orderedInstance: 0, look })
+}
+
+/** A document without a title still names itself in the file. */
+export function exportTitle(title: string): string {
+  return title.trim() || 'Dokument'
 }
 
 function buildTitleBlock(title: string): Paragraph[] {
-  const safeTitle = title.trim() || 'Dokument'
   return [
-    new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(safeTitle)] }),
+    new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(exportTitle(title))] }),
     new Paragraph({ style: 'InqtrixSubtitle', children: [new TextRun(new Date().toLocaleDateString())] }),
   ]
 }
 
-function downloadDocxBlob(blob: Blob, fileName: string): void {
+export function downloadDocxBlob(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url

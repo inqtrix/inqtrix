@@ -50,8 +50,9 @@ export type InqtrixHealth = {
   auth_required: boolean
   /** Active auth mode; absent on older servers (then `auth_required`
    * implies `apikey`). `oidc` switches the UI to the SSO login;
-   * `local` switches it to the credential form + owner setup. */
-  auth_mode?: 'none' | 'apikey' | 'oidc' | 'local'
+   * `local` switches it to the credential form + owner setup; `gateway`
+   * shows the state of the sign-in a gateway in front of Inqtrix made. */
+  auth_mode?: 'none' | 'apikey' | 'oidc' | 'local' | 'gateway'
   classify_model?: string
   chat_model_options?: ChatModelOption[]
   models_catalog?: ModelCatalogEntry[]

@@ -26,7 +26,7 @@ from typing import Any
 from inqtrix.server.text_improvements import text_looks_sensitive
 from inqtrix.untrusted_content import untrusted_fence
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 DEFAULT_MAX_REFERENCE_DOCS = 20
 """Maximum reference documents accepted per request.

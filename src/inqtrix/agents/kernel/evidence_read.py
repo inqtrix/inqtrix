@@ -37,7 +37,7 @@ from inqtrix.knowledge.retrieval_warnings import (
 if TYPE_CHECKING:
     from inqtrix.agents.kernel.deps import KernelDeps
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 EVIDENCE_READ_WINDOW_CHARS = 20_000
 """Material characters per explicit evidence read, independent of bulk offload.

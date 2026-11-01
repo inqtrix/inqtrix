@@ -28,7 +28,7 @@ from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
 from inqtrix.auth.log_redaction import pseudonymous_log_reference
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 LOCAL_ISSUER = "local"
 """Synthetic issuer that anchors local accounts in the ``(issuer,

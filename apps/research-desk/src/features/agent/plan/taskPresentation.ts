@@ -124,7 +124,7 @@ export function agentTaskExecutionLabel(
         semantics.queryCount,
         t.agent.task.researchOne,
         t.agent.task.research,
-      ).replace('{profile}', researchProfileLabel(semantics.profile, t))
+      ).replace('{profile}', () => researchProfileLabel(semantics.profile, t))
     case 'knowledge':
       return countLabel(
         semantics.requestCount,

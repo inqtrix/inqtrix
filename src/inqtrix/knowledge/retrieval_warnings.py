@@ -28,7 +28,7 @@ from typing import Any, Iterable, Literal
 from inqtrix.i18n import t, t_count
 from inqtrix.knowledge.stores.ports import RetrievalExclusion
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

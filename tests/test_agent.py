@@ -608,7 +608,12 @@ class TestResearchAgentConstruction:
 
     def test_default_initialisation_reads_dotenv(self, tmp_path, monkeypatch):
         import inqtrix.providers as providers_module
+        from tests._hermetic import PRODUCT_ENV_FILES
 
+        # The session ignores ``.env`` files; this test reads one as the
+        # product does.
+        for settings_class, env_file in PRODUCT_ENV_FILES.items():
+            monkeypatch.setitem(settings_class.model_config, "env_file", env_file)
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("MAX_ROUNDS", raising=False)
         monkeypatch.delenv("REASONING_MODEL", raising=False)

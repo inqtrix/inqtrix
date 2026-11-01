@@ -1,7 +1,7 @@
 import { getSchema } from '@tiptap/core'
 import { splitListItem } from '@tiptap/pm/schema-list'
 import { EditorState, TextSelection, type Transaction } from '@tiptap/pm/state'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   createEditorSchemaExtensions,
   parseEditorMarkdown,
@@ -122,6 +122,24 @@ const cases: Array<[string, string, (state: EditorState) => EditorState, number]
 ]
 
 describe('proposed block anchors', () => {
+  it('walk a long document once, not once per pair of blocks', () => {
+    const markdown = Array.from({ length: 200 }, (_, index) => `Absatz ${index + 1}.`).join('\n\n')
+    const document = stateFor(markdown).doc
+    const walk = vi.spyOn(document, 'nodesBetween')
+    expect(proposedBlockAnchorPositions(document)).toEqual([])
+    expect(walk.mock.calls.length).toBeLessThanOrEqual(1)
+  })
+
+  it('do not join two text blocks across a leaf between them', () => {
+    const left = stateFor('Links')
+    const split = suggest(left, left.tr.setSelection(TextSelection.atEnd(left.doc)).split(left.doc.content.size - 1))
+    expect(proposedBlockAnchorPositions(split.doc).length).toBeGreaterThan(0)
+    const rule = schema.nodes.horizontalRule!.create()
+    const boundary = split.doc.child(0).nodeSize
+    const separated = split.apply(split.tr.insert(boundary, rule))
+    expect(proposedBlockAnchorPositions(separated.doc)).toEqual([])
+  })
+
   it.each(cases)('are absent from the final projection: %s', (_name, markdown, build, typedOnPurpose) => {
     const state = stateFor(markdown)
     const proposed = build(state)

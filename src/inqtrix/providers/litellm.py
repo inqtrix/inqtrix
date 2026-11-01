@@ -41,7 +41,7 @@ from inqtrix.providers._schema import strictify_json_schema
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):

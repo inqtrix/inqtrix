@@ -42,26 +42,6 @@ _STACKS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def _reset_inqtrix_logger():
-    """Reset inqtrix logger handlers between tests to avoid pollution.
-
-    ``configure_logging(...)`` runs inside ``create_app(...)`` and
-    re-attaches handlers; without this fixture pytest-caplog and
-    other logging-sensitive tests downstream can see stale state.
-    """
-    import logging
-
-    yield
-    inqtrix_logger = logging.getLogger("inqtrix")
-    for handler in list(inqtrix_logger.handlers):
-        inqtrix_logger.removeHandler(handler)
-        try:
-            handler.close()
-        except Exception:  # noqa: BLE001
-            pass
-
-
 @pytest.fixture
 def fake_agent_run(monkeypatch: pytest.MonkeyPatch):
     """Replace ``agent_run`` with a deterministic stub for chat completions."""

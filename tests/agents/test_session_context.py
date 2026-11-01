@@ -638,23 +638,18 @@ def test_control_store_outage_keeps_the_run_history(caplog):
         async def list_approvals(self, run_id: str):
             raise RuntimeError("control down")
 
-    handler_target = logging.getLogger("inqtrix")
-    handler_target.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            pack = build_session_context(
-                "sess-1",
-                run_store=FakeRunStore(
-                    [_summary("run_1", "Frage eins.")],
-                    {"run_1": {"answer": "Antwort eins."}},
-                ),
-                control=BrokenControl(),  # type: ignore[arg-type]
-                run_async=asyncio.run,
-                visible_to=None,
-                current_run_id="run_x",
-            )
-    finally:
-        handler_target.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        pack = build_session_context(
+            "sess-1",
+            run_store=FakeRunStore(
+                [_summary("run_1", "Frage eins.")],
+                {"run_1": {"answer": "Antwort eins."}},
+            ),
+            control=BrokenControl(),  # type: ignore[arg-type]
+            run_async=asyncio.run,
+            visible_to=None,
+            current_run_id="run_x",
+        )
     assert "User: Frage eins." in pack.history_block
     assert "Agent: Antwort eins." in pack.history_block
     assert pack.artifact_registry == ()
@@ -668,20 +663,15 @@ def test_builder_never_raises(caplog):
         def list_session_runs(self, *args: Any, **kwargs: Any):
             raise RuntimeError("kaputt")
 
-    handler_target = logging.getLogger("inqtrix")
-    handler_target.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            pack = build_session_context(
-                "sess-1",
-                run_store=BrokenStore(),
-                control=MemoryAgentControlStore(),
-                run_async=asyncio.run,
-                visible_to=None,
-                current_run_id="run_x",
-            )
-    finally:
-        handler_target.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        pack = build_session_context(
+            "sess-1",
+            run_store=BrokenStore(),
+            control=MemoryAgentControlStore(),
+            run_async=asyncio.run,
+            visible_to=None,
+            current_run_id="run_x",
+        )
     assert pack == SessionContextPack()
     assert any(
         "Session context" in record.message for record in caplog.records

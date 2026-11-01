@@ -569,7 +569,7 @@ function PlanTaskRow({
       )}
       {liveState?.status === 'failed' && liveState.error && (
         <p className="mt-0.5 pl-6 t-meta-sm text-destructive">
-          {t.agent.timeline.taskFailed.replace('{error}', liveState.error)}
+          {t.agent.timeline.taskFailed.replace('{error}', () => liveState.error!)}
         </p>
       )}
       {status === 'insufficient_evidence' && (

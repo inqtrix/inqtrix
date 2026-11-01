@@ -2,6 +2,7 @@ import type { Editor } from '@tiptap/react'
 
 import {
   collaborationReviewPluginKey,
+  collaborationReviewUpdateChangesState,
   type CollaborationReviewDisplay,
   type CollaborationReviewOverlayUpdate,
 } from '../tiptap'
@@ -58,7 +59,12 @@ export function applyCollaborationEditorPolicy(
   input: CollaborationEditorPolicyInput,
 ): void {
   if (!editor || editor.isDestroyed) return
-  editor.view.dispatch(
-    editor.state.tr.setMeta(collaborationReviewPluginKey, collaborationEditorPolicyUpdate(input)),
-  )
+  const update = collaborationEditorPolicyUpdate(input)
+  const current = collaborationReviewPluginKey.getState(editor.state)
+  // Another person's change renews the list of visible changes on every
+  // keystroke without asking anything new of the overlay. A transaction for
+  // that costs a whole view update, and in WebKit it can write the old
+  // selection back over a click that is just landing.
+  if (current && !collaborationReviewUpdateChangesState(current, update)) return
+  editor.view.dispatch(editor.state.tr.setMeta(collaborationReviewPluginKey, update))
 }

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _PAGE_LIMIT = 100
 _DELETE_BATCH = 100

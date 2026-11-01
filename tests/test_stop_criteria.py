@@ -143,7 +143,6 @@ def test_extract_competing_events_keeps_model_text_out_of_operational_logs(caplo
     strategy = MultiSignalStopCriteria(AgentSettings())
     logger = logging.getLogger("inqtrix")
     previous_level = logger.level
-    logger.addHandler(caplog.handler)
     logger.setLevel(logging.INFO)
 
     private_event = "PRIVATE_COMPETING_EVENT_TEXT"
@@ -160,7 +159,6 @@ def test_extract_competing_events_keeps_model_text_out_of_operational_logs(caplo
             conf=5,
         )
     finally:
-        logger.removeHandler(caplog.handler)
         logger.setLevel(previous_level)
 
     assert state["competing_events"] == private_event

@@ -55,6 +55,10 @@ spec:
             - name: INQTRIX_MIGRATION_DATABASE_URL
               value: ""
           {{- include "inqtrix.observabilityEnv" . | nindent 12 }}
+          {{- if .Values.api.resolverVolume }}
+            - name: PYTHONPATH
+              value: /opt/inqtrix-plugins
+          {{- end }}
           {{- if .Values.collaboration.enabled }}
             - name: INQTRIX_COLLABORATION_SECRET
               valueFrom:
@@ -93,9 +97,18 @@ spec:
           volumeMounts:
             {{- include "inqtrix.appWritableVolumeMounts" . | nindent 12 }}
             {{- include "inqtrix.traceSpoolVolumeMount" . | nindent 12 }}
+            {{- if .Values.api.resolverVolume }}
+            - name: gateway-resolver
+              mountPath: /opt/inqtrix-plugins
+              readOnly: true
+            {{- end }}
       volumes:
         {{- include "inqtrix.appWritableVolumes" . | nindent 8 }}
         {{- include "inqtrix.traceSpoolVolume" . | nindent 8 }}
+        {{- with .Values.api.resolverVolume }}
+        - name: gateway-resolver
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
       {{- with .Values.api.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -18,7 +18,7 @@ import httpx
 from inqtrix.observability.context import current_log_context
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class CollaborationServiceUnavailable(RuntimeError):

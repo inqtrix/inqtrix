@@ -10,7 +10,7 @@ import Collaboration from '@tiptap/extension-collaboration'
 import type { Extensions } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { EditorContent, useEditor, type Editor } from '@tiptap/react'
-import { BubbleMenu } from '@tiptap/react/menus'
+import { BubbleMenu, type BubbleMenuProps } from '@tiptap/react/menus'
 import { EDITOR_YJS_FRAGMENT } from '@inqtrix/editor-schema'
 import { useReducedMotion } from 'motion/react'
 import { AtSign, Check, CornerDownLeft, X } from '@/components/icons'
@@ -59,7 +59,7 @@ import {
   shouldParsePastedMarkdown,
 } from '../anchoring'
 import { AUTHORED_COMMENT_KIND, isAuthoredComment } from '../commentKinds'
-import type { EditorCopy } from '../editorCopy'
+import { taskCheckboxLabelFor, type EditorCopy } from '../editorCopy'
 import { hasCollaborationRelativeAnchor } from '../inspector/relativeAnchors'
 import {
   applyScrollableTableSemantics,
@@ -603,6 +603,7 @@ export function MarkdownEditorSurface({
         done: copy.mathDone,
         unavailable: copy.mathUnavailable,
       },
+      taskCheckboxLabel: taskCheckboxLabelFor(copy),
       onClick: (commentId) => {
         if (teamCommentIdsRef.current.has(commentId)) {
           onSelectTeamCommentRef.current?.(commentId)
@@ -1069,6 +1070,22 @@ function resolveSuggestionDecorationTarget(
   return { from: target.at, to: target.at, widgetAt: target.at }
 }
 
+// The library sends one transaction per render as soon as one of these props
+// is a new object, and this component renders on every change of another
+// person. So they stay the same objects from render to render.
+const BUBBLE_MENU_OPTIONS = {
+  flip: { padding: { bottom: 132, left: 12, right: 12, top: 12 } },
+  inline: true,
+  offset: 8,
+  placement: 'top-start',
+  shift: { padding: { bottom: 132, left: 12, right: 12, top: 12 } },
+  strategy: 'fixed',
+} as const
+
+function bubbleMenuContainer() {
+  return globalThis.document.body
+}
+
 function EditorBubbleMenu({
   commentOnly,
   copy,
@@ -1113,6 +1130,13 @@ function EditorBubbleMenu({
   // Keeps the bubble open while the "Turn into" dropdown is open (a transaction
   // could otherwise re-run shouldShow and hide it mid-interaction).
   const toolbarInteractingRef = useRef(false)
+  const shouldShowBubbleMenu = useCallback<NonNullable<BubbleMenuProps['shouldShow']>>(
+    ({ editor: currentEditor, state }) => {
+      const { empty } = state.selection
+      return currentEditor.isEditable && (!empty || toolbarInteractingRef.current)
+    },
+    [],
+  )
   const commentTextImprove = useTextImprovement({
     ...textImprovement,
     locale,
@@ -1224,19 +1248,9 @@ function EditorBubbleMenu({
   return (
     <BubbleMenu
       editor={editor}
-      appendTo={() => globalThis.document.body}
-      options={{
-        flip: { padding: { bottom: 132, left: 12, right: 12, top: 12 } },
-        inline: true,
-        offset: 8,
-        placement: 'top-start',
-        shift: { padding: { bottom: 132, left: 12, right: 12, top: 12 } },
-        strategy: 'fixed',
-      }}
-      shouldShow={({ editor: currentEditor, state }) => {
-        const { empty } = state.selection
-        return currentEditor.isEditable && (!empty || toolbarInteractingRef.current)
-      }}
+      appendTo={bubbleMenuContainer}
+      options={BUBBLE_MENU_OPTIONS}
+      shouldShow={shouldShowBubbleMenu}
     >
       <div className="z-50 flex min-w-0 items-center gap-1 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg">
         {isCommenting ? (
@@ -1293,6 +1307,7 @@ function EditorBubbleMenu({
               <div className="absolute inset-y-0 right-1.5 z-10 flex items-start gap-0.5 py-1">
                 {commentVisibility === 'team' ? (
                   <TeamMentionPicker
+                    label={copy.mentionPerson}
                     onChange={setMentionUserIds}
                     participants={teamCommentParticipants}
                     selected={mentionUserIds}
@@ -1401,10 +1416,12 @@ function EditorBubbleMenu({
 }
 
 function TeamMentionPicker({
+  label,
   onChange,
   participants,
   selected,
 }: {
+  label: string
   onChange: (selected: string[]) => void
   participants: readonly EditorCollaborationCommentActor[]
   selected: readonly string[]
@@ -1413,7 +1430,7 @@ function TeamMentionPicker({
     <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
-            aria-label="@Mention"
+            aria-label={label}
             className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
             size="icon"
             type="button"

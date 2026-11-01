@@ -51,3 +51,47 @@ describe('AuditPanel session resources', () => {
     expect(markup).not.toContain(formerCredential)
   })
 })
+
+describe('AuditPanel actors', () => {
+  it('names the identity provider for what provisioning did, never "anonymous"', () => {
+    const event: AdminAuditEvent = {
+      id: 2,
+      occurred_at: 1_774_800_000,
+      action: 'user.deprovisioned',
+      resource_type: 'user',
+      resource_id: 'usr_0123456789abcdef',
+      actor_pseudonym: null,
+      actor_type: 'provisioning',
+      outcome: 'success',
+      workspace_id: null,
+      detail: {},
+      origin: {},
+      correlation: {},
+    }
+    const audit: ReturnType<typeof useAdminAudit> = {
+      available: true,
+      demo: false,
+      events: [event],
+      nextCursor: null,
+      status: 'ready',
+      error: null,
+      reload: () => undefined,
+      loadMore: () => undefined,
+    }
+
+    const markup = renderToStaticMarkup(
+      <LocaleProvider initialLocale="de">
+        <AuditPanel
+          audit={audit}
+          demo={false}
+          filters={{ limit: 50 }}
+          onFiltersChange={() => undefined}
+          traceUiConfigured={false}
+        />
+      </LocaleProvider>,
+    )
+
+    expect(markup).toContain('Identitätsanbieter (Bereitstellung)')
+    expect(markup).not.toContain('>anonym<')
+  })
+})

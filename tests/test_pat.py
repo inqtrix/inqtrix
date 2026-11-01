@@ -19,6 +19,7 @@ from inqtrix.auth.pat import (
     MemoryPatStore,
     PatLimitExceeded,
     PatService,
+    PatTtlExceedsCap,
     PatVerifier,
     format_pat,
     hash_pat_secret,
@@ -405,3 +406,181 @@ async def test_rejection_logs_use_resource_references(
     assert messages == [expected[rejection]]
     assert token_id not in messages[0]
     assert bearer not in messages[0]
+
+
+# Bounds of a gateway deployment without SCIM: nothing tells Inqtrix that a
+# person left the identity provider, so a token never outlives a cap, also
+# one minted before the cap, and lapses when its owner stopped starting
+# gateway sessions.
+
+DAY = 86_400.0
+
+
+SOURCE_ISSUER = "gateway:corp-sso"
+
+
+class OwnerLookup:
+    """The owner with a configurable last gateway sign-in and issuer."""
+
+    def __init__(self, last_login_at: float | None, issuer: str = SOURCE_ISSUER) -> None:
+        self.last_login_at = last_login_at
+        self.issuer = issuer
+
+    async def find_by_user_id(self, *, tenant_id, user_id):
+        if tenant_id == "default" and user_id == USER_ID:
+            return SimpleNamespace(
+                disabled_at=None, last_login_at=self.last_login_at, issuer=self.issuer
+            )
+        return None
+
+
+def bounded_verifier(
+    store: MemoryPatStore,
+    *,
+    audit: RecordingAudit | None = None,
+    last_login_at: float | None = None,
+    max_ttl_seconds: float = 0,
+    owner_inactive_seconds: float = 0,
+    issuer: str = SOURCE_ISSUER,
+    source_issuer: str | None = None,
+) -> PatVerifier:
+    return PatVerifier(
+        store=store,
+        pepper=PEPPER,
+        user_lookup=OwnerLookup(
+            last_login_at if last_login_at is not None else time.time(), issuer
+        ),
+        audit=audit,
+        max_ttl_seconds=max_ttl_seconds,
+        owner_inactive_seconds=owner_inactive_seconds,
+        source_issuer=source_issuer,
+    )
+
+
+class TestGatewayBounds:
+    @pytest.mark.asyncio
+    async def test_the_cap_applies_to_a_token_minted_before_it(self, monkeypatch):
+        store = MemoryPatStore()
+        minted = await mint(make_service(store))  # no expiry: the old default
+        audit = RecordingAudit()
+        verifier = bounded_verifier(store, audit=audit, max_ttl_seconds=90 * DAY)
+        assert (await verifier.verify(minted.plaintext)).kind == "pat"
+
+        monkeypatch.setattr(time, "time", lambda: minted.record.created_at + 90 * DAY)
+
+        await TestVerifyMatrix().assert_uniform_401(verifier, minted.plaintext)
+        assert [entry.detail for entry in audit.entries if entry.action == "pat.rejected"] == [
+            {"reason": "ttl_cap"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_token_lapses_when_its_owner_stopped_signing_in(self, monkeypatch):
+        store = MemoryPatStore()
+        minted = await mint(make_service(store))
+        signed_in = minted.record.created_at
+        audit = RecordingAudit()
+        verifier = bounded_verifier(
+            store, audit=audit, last_login_at=signed_in, owner_inactive_seconds=30 * DAY
+        )
+        monkeypatch.setattr(time, "time", lambda: signed_in + 29 * DAY)
+        assert (await verifier.verify(minted.plaintext)).kind == "pat"
+
+        monkeypatch.setattr(time, "time", lambda: signed_in + 30 * DAY)
+
+        await TestVerifyMatrix().assert_uniform_401(verifier, minted.plaintext)
+        assert [entry.detail for entry in audit.entries if entry.action == "pat.rejected"] == [
+            {"reason": "owner_inactive"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_inactivity_counts_from_the_last_sign_in_not_from_minting(self, monkeypatch):
+        # An old token of an active owner stays valid; a recent sign-in counts.
+        store = MemoryPatStore()
+        minted = await mint(make_service(store))
+        verifier = bounded_verifier(
+            store,
+            last_login_at=minted.record.created_at + 60 * DAY,
+            owner_inactive_seconds=30 * DAY,
+        )
+        monkeypatch.setattr(time, "time", lambda: minted.record.created_at + 80 * DAY)
+
+        assert (await verifier.verify(minted.plaintext)).kind == "pat"
+
+    @pytest.mark.asyncio
+    async def test_a_token_of_another_identity_source_is_refused(self):
+        # The owner cannot sign in through the gateway, and provisioning
+        # never reaches it; its tokens stop at the gateway.
+        store = MemoryPatStore()
+        minted = await mint(make_service(store))
+        audit = RecordingAudit()
+        own = bounded_verifier(store, source_issuer=SOURCE_ISSUER)
+        foreign = bounded_verifier(
+            store, audit=audit, issuer="local", source_issuer=SOURCE_ISSUER
+        )
+        anywhere = bounded_verifier(store, issuer="local")
+
+        assert (await own.verify(minted.plaintext)).kind == "pat"
+        assert (await anywhere.verify(minted.plaintext)).kind == "pat"
+        await TestVerifyMatrix().assert_uniform_401(foreign, minted.plaintext)
+        assert [entry.detail for entry in audit.entries if entry.action == "pat.rejected"] == [
+            {"reason": "foreign_issuer"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_inactive_owner_of_another_source_gets_the_issuer_reason(
+        self, monkeypatch
+    ):
+        store = MemoryPatStore()
+        minted = await mint(make_service(store))
+        audit = RecordingAudit()
+        verifier = bounded_verifier(
+            store,
+            audit=audit,
+            last_login_at=minted.record.created_at,
+            owner_inactive_seconds=30 * DAY,
+            issuer="local",
+            source_issuer=SOURCE_ISSUER,
+        )
+        monkeypatch.setattr(time, "time", lambda: minted.record.created_at + 31 * DAY)
+
+        await TestVerifyMatrix().assert_uniform_401(verifier, minted.plaintext)
+        assert [entry.detail for entry in audit.entries if entry.action == "pat.rejected"] == [
+            {"reason": "foreign_issuer"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_without_bounds_nothing_changes(self, monkeypatch):
+        store = MemoryPatStore()
+        minted = await mint(make_service(store))
+        verifier = bounded_verifier(store, last_login_at=minted.record.created_at)
+        monkeypatch.setattr(time, "time", lambda: minted.record.created_at + 3650 * DAY)
+
+        assert (await verifier.verify(minted.plaintext)).kind == "pat"
+
+    @pytest.mark.asyncio
+    async def test_minting_without_expiry_takes_the_cap(self):
+        minted = await mint(make_service(max_ttl_days=90))
+
+        assert minted.record.expires_at == pytest.approx(
+            minted.record.created_at + 90 * DAY, abs=5
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_default_beyond_the_cap_is_capped(self):
+        minted = await mint(make_service(max_ttl_days=90, default_ttl_days=365))
+
+        assert minted.record.expires_at == pytest.approx(
+            minted.record.created_at + 90 * DAY, abs=5
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_expiry_beyond_the_cap_is_refused(self):
+        service = make_service(max_ttl_days=90)
+
+        with pytest.raises(PatTtlExceedsCap):
+            await mint(service, expires_in_days=91)
+        within = await mint(service, expires_in_days=30)
+
+        assert within.record.expires_at == pytest.approx(
+            within.record.created_at + 30 * DAY, abs=5
+        )

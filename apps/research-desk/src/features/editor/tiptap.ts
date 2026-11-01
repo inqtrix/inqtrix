@@ -78,6 +78,9 @@ type CommentDecorationOptions = {
   codeBlockLabels?: import('./codeBlockView').CodeBlockViewLabels
   /** Browser-only source controls for the existing inline and block math nodes. */
   mathLabels?: MathNodeViewLabels
+  /** Localized accessible name of a task item's checkbox, from the item's
+   * text. Omit to keep the library's English default (schema/test contexts). */
+  taskCheckboxLabel?: (taskText: string) => string
 }
 
 export type CollaborationReviewDisplay = 'all' | 'final' | 'original' | 'simple'
@@ -1037,6 +1040,31 @@ function enforceCaretOnlyPresence(root: HTMLElement): void {
   }
 }
 
+/**
+ * WebKit places the caret on mouse down and reports it a moment later. A change
+ * of another person that arrives in between writes the old selection back, as
+ * ProseMirror guards that moment for Chrome only, and the click has no effect.
+ * The click still knows where it went, so it places the caret on release, as
+ * ProseMirror does for a click whose mouse down it had to flush.
+ */
+function restoreCaretOfOverwrittenClick(view: EditorView, pos: number, event: MouseEvent): void {
+  const { doc, selection } = view.state
+  if (
+    !view.editable
+    || !selection.empty
+    || Math.abs(selection.head - pos) <= 1
+    || event.button !== 0
+    || event.detail > 1
+    || event.altKey
+    || event.ctrlKey
+    || event.metaKey
+    || event.shiftKey
+    || !doc.resolve(pos).parent.inlineContent
+    || (event.target as Element | null)?.closest?.('[contenteditable="false"]')
+  ) return
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(doc, pos)).setMeta('pointer', true))
+}
+
 function emitEditRefusal(view: EditorView, refusal: CollaborationEditRefusal): void {
   view.dom.dispatchEvent(new CustomEvent<CollaborationEditRefusal>(
     collaborationSuggestionErrorEvent,
@@ -1578,6 +1606,29 @@ function collaborationReviewStateFromUpdate(
   }
 }
 
+function sameSuggestionIds(
+  left: ReadonlySet<string> | null,
+  right: ReadonlySet<string> | null,
+): boolean {
+  if (left === null || right === null) return left === right
+  return left.size === right.size && [...left].every((id) => right.has(id))
+}
+
+export function collaborationReviewUpdateChangesState(
+  value: CollaborationReviewOverlayState,
+  update: CollaborationReviewOverlayUpdate,
+): boolean {
+  const next = collaborationReviewStateFromUpdate(value, update)
+  return next.collaboration !== value.collaboration
+    || next.display !== value.display
+    || next.documentId !== value.documentId
+    || next.enabled !== value.enabled
+    || next.writeAuthorId !== value.writeAuthorId
+    || next.writeMode !== value.writeMode
+    || !sameSuggestionIds(next.selectedSuggestionIds, value.selectedSuggestionIds)
+    || !sameSuggestionIds(next.visibleSuggestionIds, value.visibleSuggestionIds)
+}
+
 export const CollaborationReviewExtension = Extension.create<
   CollaborationReviewExtensionOptions,
   CollaborationReviewExtensionStorage
@@ -1741,6 +1792,12 @@ export const CollaborationReviewExtension = Extension.create<
             return collaborationReviewPluginKey.getState(state)?.decorations
               ?? DecorationSet.empty
           },
+          handleClick(view, pos, event) {
+            if (collaborationReviewPluginKey.getState(view.state)?.collaboration) {
+              restoreCaretOfOverwrittenClick(view, pos, event)
+            }
+            return false
+          },
         },
         view(view) {
           enforceCaretOnlyPresence(view.dom)
@@ -1779,8 +1836,7 @@ export const CollaborationReviewExtension = Extension.create<
               window.removeEventListener('resize', schedulePresenceLayout)
               view.dom.removeEventListener('scroll', schedulePresenceLayout, { capture: true })
             },
-            update(nextView) {
-              enforceCaretOnlyPresence(nextView.dom)
+            update() {
               schedulePresenceLayout()
             },
           }
@@ -2323,14 +2379,22 @@ export function createEditorExtensions(
   } = {},
 ): Extensions {
   const mathLabels = options.mathLabels
+  const taskCheckboxLabel = options.taskCheckboxLabel
   return [
-    ...createEditorSchemaExtensions({ resizableTables: true }).map((extension) => (
-      mathLabels && (extension.name === 'inlineMath' || extension.name === 'blockMath')
-        ? extension.extend({
-            addNodeView() { return createMathNodeView(mathLabels) },
-          })
-        : extension
-    )),
+    ...createEditorSchemaExtensions({ resizableTables: true }).map((extension) => {
+      if (mathLabels && (extension.name === 'inlineMath' || extension.name === 'blockMath')) {
+        return extension.extend({
+          addNodeView() { return createMathNodeView(mathLabels) },
+        })
+      }
+      if (taskCheckboxLabel && extension.name === 'taskItem') {
+        // configure merges into the schema's options (nested and the rest stay).
+        return extension.configure({
+          a11y: { checkboxLabel: (node: ProseMirrorNode) => taskCheckboxLabel(node.textContent) },
+        })
+      }
+      return extension
+    }),
     CollaborationReviewExtension.configure({
       initialPolicy: options.collaborationReview,
       onLocalWriteMode: options.onLocalWriteMode,

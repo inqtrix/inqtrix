@@ -18,9 +18,11 @@ resource-has-no-workspace edge it is deliberately MORE permissive than list: a
 ``workspace_id IS NULL`` row is dropped by a workspaced list (strict equality)
 yet remains deletable from any request. That asymmetry is the safe direction for
 a defense-in-depth guard -- it never blocks a legitimate delete of legacy or
-anonymous data -- and such rows only arise outside the normal client flow (which
-always sends a stable per-browser workspace id), so it is never reached in
-practice. The guard is a super-set of "listable", never a subset.
+anonymous data. Such rows arise in modes without a person (``apikey``,
+``none``), and as rows of older versions that migration 0098 could not move;
+signed-in writes without a namespace take the writer's canonical one
+(``request_parsing.workspace_id_for_write``). The guard is a super-set of
+"listable", never a subset.
 """
 
 from __future__ import annotations

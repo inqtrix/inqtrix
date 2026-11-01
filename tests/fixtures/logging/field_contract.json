@@ -1,0 +1,5 @@
+{
+  "common_fields": ["ts", "level", "service"],
+  "levels": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+  "ts_pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+}

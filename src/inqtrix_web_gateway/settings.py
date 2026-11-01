@@ -6,8 +6,11 @@ validated values from here; they do not read environment variables directly.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
+import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit
@@ -88,6 +91,202 @@ class CollaborationProxySettings:
                 if queued_frames is not None
                 else _COLLABORATION_DEFAULT_QUEUED_FRAMES
             ),
+        )
+
+
+#: The identity, proof and assertion header names of the gateway mode; the
+#: same variables the API server reads. The shared secret is not among them:
+#: the API server checks the proof, the edge only needs the names.
+_IDENTITY_HEADER_VARIABLES = (
+    "INQTRIX_GATEWAY_JWT_HEADER",
+    "INQTRIX_GATEWAY_SUBJECT_HEADER",
+    "INQTRIX_GATEWAY_EMAIL_HEADER",
+    "INQTRIX_GATEWAY_NAME_HEADER",
+    "INQTRIX_GATEWAY_GROUPS_HEADER",
+    "INQTRIX_GATEWAY_PROOF_HEADER",
+)
+
+
+#: Header names a resolver of its own may never read: credentials, routing,
+#: the hop-by-hop headers and what the edge passes on unchanged. A test keeps
+#: this equal to the API server's rule.
+_RESOLVER_FORBIDDEN_HEADERS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "host",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "x-csrf-token",
+        "x-inqtrix-expected-user-id",
+        "x-inqtrix-workspace-id",
+        "x-inqtrix-guest-csrf",
+        "origin",
+    }
+)
+
+#: An HTTP field name (a token of RFC 9110).
+_HEADER_TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+
+def _strippable(
+    entries: Iterable[str], *, proof_header: str = ""
+) -> tuple[frozenset[str], list[str], list[str]]:
+    """The names the edge may strip, then the entries it refuses, as written.
+
+    A name the edge must leave alone (credentials, routing, the forwarded
+    chain, the CSRF, generation, workspace and guest headers, ``Origin``) is
+    never stripped, nor is *proof_header*, which the list of a resolver of
+    its own may not name; those come second. Entries that are no header name
+    come third.
+    """
+    names: set[str] = set()
+    refused: list[str] = []
+    invalid: list[str] = []
+    proof = proof_header.strip().lower()
+    for entry in entries:
+        written = entry.strip()
+        if not written:
+            continue
+        # The token rule applies to the name as written: lowering first would
+        # turn a Kelvin sign into an ASCII k.
+        if not _HEADER_TOKEN.match(written):
+            invalid.append(written)
+            continue
+        name = written.lower()
+        if (
+            name in _RESOLVER_FORBIDDEN_HEADERS
+            or name.startswith("x-forwarded-")
+            or (proof and name == proof)
+        ):
+            refused.append(written)
+            continue
+        names.add(name)
+    return frozenset(names), refused, invalid
+
+
+def _refusal(source: str, reason: str, refused: list[str], invalid: list[str]) -> str | None:
+    """The readiness problem with the entries of *source* the edge refuses, or ``None``."""
+    parts = []
+    if refused:
+        parts.append(f"{source} {reason}: " + ", ".join(dict.fromkeys(refused)))
+    if invalid:
+        # ascii() shows a lookalike, such as a Kelvin sign for a K, for what it is.
+        parts.append(
+            f"these entries of {source} are no header name: "
+            + ", ".join(ascii(entry) for entry in dict.fromkeys(invalid))
+        )
+    return "; ".join(parts) or None
+
+
+class IdentityEdgePolicy:
+    """The identity headers of the gateway mode and the peers that may send them.
+
+    ``INQTRIX_GATEWAY_TRUSTED_PROXIES`` of this process lists the peers whose
+    identity headers reach the API server (the API gateway in front of this
+    edge). An empty list removes nothing, which only the token assertion
+    allows, because its signature is the proof; with the header assertion
+    the edge stays unready without a list. The subject and proof header names
+    are kept apart because the header assertion needs both at the edge; the
+    names a resolver of its own reads (``INQTRIX_GATEWAY_RESOLVER_HEADERS``)
+    are kept apart for its readiness.
+
+    Raises:
+        ValueError: An entry is no IP network, or one trusts every address.
+    """
+
+    __slots__ = (
+        "header_names",
+        "proof_header",
+        "refused_header_problem",
+        "resolver_header_names",
+        "resolver_header_problem",
+        "subject_header",
+        "trusted_networks",
+    )
+
+    def __init__(
+        self,
+        *,
+        header_names: Iterable[str] = (),
+        trusted_proxies: str = "",
+        subject_header: str = "",
+        proof_header: str = "",
+        resolver_headers: str = "",
+    ) -> None:
+        self.subject_header = subject_header.strip().lower()
+        self.proof_header = proof_header.strip().lower()
+        self.resolver_header_names, refused, invalid = _strippable(
+            resolver_headers.split(","), proof_header=proof_header
+        )
+        self.resolver_header_problem = _refusal(
+            "INQTRIX_GATEWAY_RESOLVER_HEADERS",
+            "names headers a resolver of its own may not read (credentials, routing, "
+            "the proof header or a header the edge passes on unchanged)",
+            refused,
+            invalid,
+        )
+        named, refused, invalid = _strippable((*header_names, subject_header, proof_header))
+        self.refused_header_problem = _refusal(
+            "the identity header variables (INQTRIX_GATEWAY_*_HEADER)",
+            "name headers that carry credentials or routing or that the edge passes on "
+            "unchanged, which it never strips",
+            refused,
+            invalid,
+        )
+        self.header_names = named | self.resolver_header_names
+        networks = []
+        for entry in trusted_proxies.split(","):
+            if not entry.strip():
+                continue
+            try:
+                network = ipaddress.ip_network(entry.strip(), strict=False)
+            except ValueError:
+                raise ValueError(
+                    "INQTRIX_GATEWAY_TRUSTED_PROXIES must list IP networks in "
+                    "CIDR form"
+                ) from None
+            if network.prefixlen == 0:
+                raise ValueError(
+                    "INQTRIX_GATEWAY_TRUSTED_PROXIES must not trust every address"
+                )
+            networks.append(network)
+        self.trusted_networks = tuple(networks)
+
+    @classmethod
+    def from_env(cls) -> "IdentityEdgePolicy":
+        """Read the header names and this process's peer list."""
+        return cls(
+            header_names=[os.getenv(name, "") for name in _IDENTITY_HEADER_VARIABLES],
+            trusted_proxies=os.getenv("INQTRIX_GATEWAY_TRUSTED_PROXIES", ""),
+            subject_header=os.getenv("INQTRIX_GATEWAY_SUBJECT_HEADER", ""),
+            proof_header=os.getenv("INQTRIX_GATEWAY_PROOF_HEADER", ""),
+            resolver_headers=os.getenv("INQTRIX_GATEWAY_RESOLVER_HEADERS", ""),
+        )
+
+    def trusts(self, peer: str | None) -> bool:
+        """Whether the socket peer lies in the trusted list."""
+        if peer is None:
+            return False
+        try:
+            address = ipaddress.ip_address(peer)
+        except ValueError:
+            return False
+        return any(address in network for network in self.trusted_networks)
+
+    def strips(self, peer: str | None) -> bool:
+        """Whether a request from *peer* loses its identity headers."""
+        return (
+            bool(self.header_names)
+            and bool(self.trusted_networks)
+            and not self.trusts(peer)
         )
 
 

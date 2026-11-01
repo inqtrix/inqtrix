@@ -7,7 +7,7 @@ import re
 from abc import ABC, abstractmethod
 
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class RiskScoringStrategy(ABC):

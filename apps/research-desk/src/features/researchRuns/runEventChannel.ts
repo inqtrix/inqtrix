@@ -22,7 +22,9 @@ import {
 } from '@/api/inqtrixClient'
 import type { ResearchRunEvent } from './types'
 
-export type RunEventTransport = 'sse' | 'polling'
+/** `parked` polls too, but by choice: the run waits for a person and has
+ * nothing to send, so nothing is degraded. Only `polling` is the fallback. */
+export type RunEventTransport = 'sse' | 'polling' | 'parked'
 
 export type RunEventsPage = {
   events: ResearchRunEvent[]
@@ -261,11 +263,11 @@ export async function subscribeRunEventsWithFallback(
   let outcome: 'terminal' | 'ended' | 'failed' | 'parked'
     = shouldStream() ? await trySse() : 'parked'
   while (outcome !== 'terminal' && !signal.aborted) {
-    reportTransport('polling')
     // WHY this episode polls decides how it ends. Parked: back to the
     // stream the moment the run wakes. Transport outage: keep the full
     // retry budget, so a flaky network is not hammered with reconnects.
     const parked = outcome === 'parked'
+    reportTransport(parked ? 'parked' : 'polling')
     let pollsSinceRetry = 0
     // First page of each polling episode = catch-up (everything missed while
     // the stream was down); later pages arrive on cadence and count as live.

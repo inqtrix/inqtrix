@@ -224,7 +224,7 @@ def _web_turn(
     )
 
 
-def make_client(llm: ScriptedToolLLM) -> TestClient:
+def make_client(llm: ScriptedToolLLM, search: Any = None) -> TestClient:
     app = FastAPI()
     router = create_router()
     settings = Settings(
@@ -239,7 +239,9 @@ def make_client(llm: ScriptedToolLLM) -> TestClient:
     )
     container = register_routes(
         router,
-        providers=SimpleNamespace(llm=llm, search=RecordingSearch()),
+        providers=SimpleNamespace(
+            llm=llm, search=search if search is not None else RecordingSearch()
+        ),
         strategies=SimpleNamespace(),
         settings=settings,
         semaphore_factory=lambda: __import__("asyncio").Semaphore(2),

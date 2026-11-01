@@ -61,7 +61,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 from sqlalchemy.util.concurrency import await_only
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 TENANT_GUC = "inqtrix.tenant_id"
 """Name of the per-transaction GUC carrying the tenant id for RLS."""

@@ -30,7 +30,10 @@ import {
 } from '@/api/inqtrixClient'
 import {
   type AuthMode,
+  type GatewayAction,
+  deskAuthMode,
   isCookieSessionMode,
+  isGatewayMode,
   isKnownAuthMode,
 } from '@/features/auth/authMode'
 import { AuthLockScreen } from './components/AuthLockScreen'
@@ -133,7 +136,7 @@ import { buildKnowledgeAskMessages } from '@/features/knowledge/conversationCont
 import { knowledgeComposerContextForSession } from '@/features/knowledge/composerSessionContext'
 import { AgentWorkspace } from '@/features/agent/AgentWorkspace'
 import { emptyAgentComposerDraft } from '@/features/agent/composerDraft'
-import { effectiveAgentDepth } from '@/features/agent/agentStatusOverview'
+import { effectiveAgentAutonomy, effectiveAgentDepth } from '@/features/agent/agentStatusOverview'
 import { createAgentDemo } from '@/features/agent/demo'
 import { agentRuleSources } from '@/features/agent/contextCategories'
 import { applyKnowledgeRunEvent } from '@/features/knowledge/runSteps'
@@ -152,7 +155,7 @@ import {
   resolveKnowledgeDefaultProfileId,
 } from '@/features/knowledge/profileOptions'
 import type { KnowledgeCollectionOption, KnowledgeDataSource } from '@/features/knowledge/types'
-import { reloadApplication, useAuthSession } from '@/features/auth/useAuthSession'
+import { readGatewaySignedOut, reloadApplication, useAuthSession } from '@/features/auth/useAuthSession'
 import {
   clearAllPlanDrafts,
   identityChanged,
@@ -794,10 +797,9 @@ export function ResearchDesk({
   // Auth + the per-user project namespace are resolved here, after discovery and
   // before the run-API hook, so the run hook and every project-data call scope to
   // the SAME namespace from one resolved session (no in-hook re-probe).
-  const authMode: AuthMode = isDemoMode
-    ? 'none'
-    : health?.auth_mode
-      ?? (health?.auth_required ? 'apikey' : 'none')
+  // Read once per page life: a sign-out in another tab reloads this one.
+  const [gatewaySignedOut] = useState(readGatewaySignedOut)
+  const authMode: AuthMode = deskAuthMode(health, { demo: isDemoMode, gatewaySignedOut })
   const isCookieMode = isCookieSessionMode(authMode)
   // A server ahead of or behind this bundle can report a mode this build
   // does not render. It then falls through to the token form, which cannot
@@ -811,17 +813,30 @@ export function ResearchDesk({
       )
     }
   }, [health?.auth_mode, isDemoMode])
+  const isGateway = isGatewayMode(authMode)
   const {
     session: authSession,
+    gatewayState: gatewaySessionState,
     login: ssoLogin,
     logout: ssoLogout,
     logoutError,
     refresh: refreshAuthSession,
+    refreshing: authSessionRefreshing,
   } = useAuthSession(
     isCookieMode,
     state.workspaceId,
     flushActiveCollaborationDocuments,
+    isGateway,
   )
+  const handleGatewayAction = useCallback((action: Exclude<GatewayAction, null>) => {
+    if (action === 'retry') {
+      void refreshAuthSession()
+    } else if (action === 'signInAgain') {
+      ssoLogin()
+    } else {
+      reloadApplication()
+    }
+  }, [refreshAuthSession, ssoLogin])
   const lastIdentityRef = useRef<string | null | undefined>(undefined)
   const lastTitleIdentityRef = useRef<string | null | undefined>(undefined)
   useEffect(() => {
@@ -883,6 +898,7 @@ export function ResearchDesk({
     enabled: !isDemoMode
       && isCookieMode
       && authSession.status === 'authenticated',
+    gateway: isGateway,
     userId: authSession.user?.id ?? null,
   })
   // Each list refreshes for the scopes that can change it: a run starting or
@@ -977,7 +993,10 @@ export function ResearchDesk({
   }, [knowledgeItemRunIds, requestRunResults])
   // One badge for any API error: discovery probes or run operations.
   const apiError = logoutError ?? discoveryError ?? runError
-  const singleStackLabel = useMemo(() => resolveSingleStackLabel(effectiveHealth), [effectiveHealth])
+  const singleStackLabel = useMemo(
+    () => resolveSingleStackLabel(effectiveHealth, t.chat.modelServerDefault),
+    [effectiveHealth, t.chat.modelServerDefault],
+  )
   const knowledgeAvailable = !isDemoMode && capabilities?.features.knowledge === true
   // The server's reason when this deployment cannot build indexes
   // (`operator_disabled`, `store_unreachable`): the database view turns
@@ -1478,9 +1497,7 @@ export function ResearchDesk({
     }
   }, [state.selectedAgentSessionId])
   const [agentDocumentId, setAgentDocumentId] = useState<string | null>(null)
-  const effectiveAgentAutonomy = agentAutonomy
-    ?? capabilities?.agent?.default_autonomy
-    ?? 'balanced'
+  const agentRunAutonomy = effectiveAgentAutonomy(agentAutonomy, capabilities?.agent)
   const effectiveDepth = effectiveAgentDepth(
     agentDepth,
     capabilities?.agent?.default_depth,
@@ -2236,11 +2253,13 @@ export function ResearchDesk({
       dispatch({ enabled: shouldSync, persistLocal: false, type: 'setServerSyncEnabled' })
     }
   }, [isCookieMode, projectPersistenceAvailable, cookieAuthed, state.serverSyncEnabled])
-  // No lock flash while the very first session probe is in flight.
+  // No lock flash while the very first session probe is in flight; the
+  // gateway mode locks only once the state of its session start is known.
   const isAuthLocked =
     !isDemoMode
     && !authUnlocked
     && (!isCookieMode || authSession.status !== 'unknown')
+    && (!isGateway || gatewaySessionState !== null)
   // Exactly the silent window the lock screen deliberately leaves open
   // (cookie mode, first session probe in flight): submission is visibly
   // disabled there instead of handleComposerSubmit no-op'ing a click.
@@ -3984,7 +4003,7 @@ export function ResearchDesk({
               onSelectedDocumentIdChange={setAgentDocumentId}
               onSessionsPanelSizeChange={(size) =>
                 dispatch({ key: 'agentSessions', size, type: 'setPanelLayoutSize' })}
-              selectedAutonomy={effectiveAgentAutonomy}
+              selectedAutonomy={agentRunAutonomy}
               selectedDepth={effectiveDepth}
               selectedTier={agentTier}
               onTierChange={setAgentTier}
@@ -4243,14 +4262,18 @@ export function ResearchDesk({
       <AuthLockScreen
         error={authLockError}
         identifier={authIdentifier}
-        isSubmitting={isAuthSubmitting}
+        isSubmitting={isGateway ? authSessionRefreshing : isAuthSubmitting}
+        gatewayState={gatewaySessionState}
         mode={
           authMode === 'oidc'
             ? 'sso'
             : authMode === 'local'
               ? 'local'
-              : 'apikey'
+              : isGateway
+                ? 'gateway'
+                : 'apikey'
         }
+        onGatewayAction={handleGatewayAction}
         onCredentialSubmit={() => void handleCredentialLogin()}
         onIdentifierChange={(value) => {
           setAuthIdentifier(value)
@@ -4736,15 +4759,15 @@ function normalizeChatMessageModelResolution(
   }
 }
 
-function resolveSingleStackLabel(health: InqtrixHealth | null) {
-  if (!health) return 'Server default'
+function resolveSingleStackLabel(health: InqtrixHealth | null, serverDefaultLabel: string) {
+  if (!health) return serverDefaultLabel
   const providerParts = [
     health.llm.provider,
     health.search.provider,
   ].filter(Boolean)
   const providerLabel = providerParts.length > 0
     ? providerParts.join(' + ')
-    : 'Server default'
+    : serverDefaultLabel
   return health.reasoning_model
     ? `${providerLabel} · ${health.reasoning_model}`
     : providerLabel

@@ -63,7 +63,7 @@ from inqtrix.citation_labels import (
 )
 from inqtrix.strategies._claim_values import claim_values
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 RECHECK_REJECTION_CODES: tuple[str, ...] = ("not_carried", "reservation_dropped", "off_finding")
 """The codes the re-check of an applied edit rejects it with, in precedence
@@ -622,8 +622,8 @@ def apply_review_edits(
     unknown = sorted({edit.finding_id for edit in bundle.edits} - known)
     if unknown:
         log.warning(
-            "Revision names finding ids the review did not locate (%s); they are ignored.",
-            ", ".join(unknown),
+            "Revision names %d finding id(s) the review did not locate; they are ignored.",
+            len(unknown),
         )
     edits: dict[str, list[str]] = {}
     for edit in bundle.edits:
@@ -634,9 +634,7 @@ def apply_review_edits(
         finding_id = str(item["finding_id"])
         replacements = edits.get(finding_id, [])
         if len(replacements) != 1:
-            results[finding_id] = _refused(
-                item, "edit_not_single", f"{len(replacements)} replacements"
-            )
+            results[finding_id] = _refused(item, "edit_not_single")
             continue
         # A replacement is writer text: grouped citations are written singly
         # before it is checked, so the check reads what is spliced in.
@@ -648,7 +646,7 @@ def apply_review_edits(
             ),
         )
         if problem:
-            results[finding_id] = _refused(item, *problem)
+            results[finding_id] = _refused(item, problem)
             continue
         surviving.setdefault(str(item["output_id"]), []).append((item, replacement))
     revised = dict(outputs)
@@ -666,7 +664,7 @@ def apply_review_edits(
                 original, spans, references, identifiers, user_text
             )
             if problem:
-                results[str(item["finding_id"])] = _refused(item, *problem)
+                results[str(item["finding_id"])] = _refused(item, problem)
                 continue
             accepted.append(spans[-1])
             results[str(item["finding_id"])] = applied_result(item)
@@ -1095,9 +1093,9 @@ def _bounded(line: str, limit: int) -> str:
     return f"{line[:limit - len(PLACEMENT_SHORTENED) - 1].rstrip()} {PLACEMENT_SHORTENED}"
 
 
-def _refused(item: Mapping[str, Any], reason: str, detail: str) -> FindingResult:
-    """*item* named with *reason*; the English detail goes to the log only."""
-    log.warning("Review edit %s not applied: %s (%s).", item["finding_id"], reason, detail)
+def _refused(item: Mapping[str, Any], reason: str) -> FindingResult:
+    """*item* named with *reason*, which is logged."""
+    log.warning("Review edit %s not applied: %s.", item["finding_id"], reason)
     return named_result(item, reason)
 
 
@@ -1121,8 +1119,8 @@ def _prose_words(text: str) -> int:
 
 def _content_problem(
     quote: str, replacement: str, *, at_line_start: bool, at_line_end: bool,
-) -> tuple[str, str] | None:
-    """The content rule of one edit, as ``(reason, detail)``, or ``None``.
+) -> str | None:
+    """The content rule of one edit, as its reason, or ``None``.
 
     The review corrects, qualifies or attributes; it never removes content.
     No place where the edit changes its passage (:func:`changed_segments`)
@@ -1135,16 +1133,11 @@ def _content_problem(
     places = changed_segments(
         quote, replacement, at_line_start=at_line_start, at_line_end=at_line_end,
     )
-    lost = [
-        place.id for place in places
-        if _prose_words(place.before) and not _prose_words(place.after)
-    ]
-    if lost:
-        return "edit_deletes", f"{len(lost)} place(s) lose their content: {', '.join(lost)}"
+    if any(_prose_words(place.before) and not _prose_words(place.after) for place in places):
+        return "edit_deletes"
     held = _prose_words(quote)
-    kept = _prose_words(replacement)
-    if held >= PASSAGE_KEEP_WORDS and kept < PASSAGE_KEEP_SHARE * held:
-        return "edit_shrinks", f"{kept} of {held} words"
+    if held >= PASSAGE_KEEP_WORDS and _prose_words(replacement) < PASSAGE_KEEP_SHARE * held:
+        return "edit_shrinks"
     return None
 
 
@@ -1192,8 +1185,8 @@ def _reworded_units(
     return reworded
 
 
-def _dropped_numbers(item: Mapping[str, Any], quote: str, replacement: str) -> str:
-    """Why an edit loses a number of its passage, for the log, or ``""``.
+def _drops_numbers(item: Mapping[str, Any], quote: str, replacement: str) -> bool:
+    """Whether an edit loses a number of its passage.
 
     A fix from general knowledge (``knowledge``) may change a number but
     never drop one: it keeps at least as many. A fix citing only sources
@@ -1202,14 +1195,13 @@ def _dropped_numbers(item: Mapping[str, Any], quote: str, replacement: str) -> s
     re-checked against it instead, and a run diagnostic speaks for the run.
     """
     if item.get("kind") == "run_diagnostic":
-        return ""
+        return False
     held, kept = stated_numbers(quote), stated_numbers(replacement)
     if item.get("knowledge"):
-        return f"{len(held)} numbers held, {len(kept)} kept" if len(kept) < len(held) else ""
+        return len(kept) < len(held)
     if not _cites_only_unstored(item, replacement):
-        return ""
-    lost = held - kept
-    return f"{len(lost)} number(s) dropped" if lost else ""
+        return False
+    return bool(held - kept)
 
 
 _MATH_SPAN = re.compile(r"\$([^$\n]+)\$")
@@ -1268,15 +1260,11 @@ def _edit_problem(
     *,
     at_line_start: bool,
     at_line_end: bool,
-) -> tuple[str, str] | None:
-    """The first per-finding check *replacement* fails, as ``(reason, detail)``.
-
-    The detail is English for the log: labels, identifiers or counts, never
-    the replacement's prose.
-    """
+) -> str | None:
+    """The first per-finding check *replacement* fails, as its reason, or ``None``."""
     quote = str(item["quote"])
     if replacement == canonicalize_citations(quote, DELEGATED_FAMILIES):
-        return "edit_unchanged", "the replacement equals its passage"
+        return "edit_unchanged"
     lost = _content_problem(
         quote, replacement, at_line_start=at_line_start, at_line_end=at_line_end,
     )
@@ -1286,31 +1274,28 @@ def _edit_problem(
         item, quote, replacement, at_line_start=at_line_start, at_line_end=at_line_end,
     )
     if reworded:
-        return "edit_rewrites_unchecked", f"{reworded} unit(s) reworded"
-    dropped = _dropped_numbers(item, quote, replacement)
-    if dropped:
-        return "edit_drops_figure", dropped
+        return "edit_rewrites_unchecked"
+    if _drops_numbers(item, quote, replacement):
+        return "edit_drops_figure"
     copied = added_identifiers(
         replacement,
         introduced_identifiers(replacement, list(identifiers), authored_by=user_text),
         replacing=quote,
     )
     if copied:
-        return "identifier_added", ", ".join(copied)
+        return "identifier_added"
     unreadable = Counter(
         malformed_citation_brackets(replacement, families=DELEGATED_FAMILIES)
     ) - Counter(malformed_citation_brackets(quote, families=DELEGATED_FAMILIES))
     if unreadable:
-        return "citation_malformed", ", ".join(unreadable)
+        return "citation_malformed"
     keep = list(item["keep"])
     may_add = list(item["may_add"])
     cited = cited_labels(replacement, DELEGATED_FAMILIES)
-    foreign = [label for label in cited if label not in {*keep, *may_add}]
-    if foreign:
-        return "label_not_citable", ", ".join(foreign)
-    dropped = [label for label in keep if label not in cited]
-    if dropped:
-        return "quote_label_dropped", ", ".join(dropped)
+    if any(label not in {*keep, *may_add} for label in cited):
+        return "label_not_citable"
+    if any(label not in cited for label in keep):
+        return "quote_label_dropped"
     edges = {"at_line_start": at_line_start, "at_line_end": at_line_end}
     segments = citation_segments(replacement, DELEGATED_FAMILIES, **edges)
     moved = _moved_labels(
@@ -1321,21 +1306,16 @@ def _edit_problem(
         may_add=set(may_add),
     )
     if moved:
-        return "label_moved", ", ".join(moved)
+        return "label_moved"
     # A run without stored evidence has no label to cite (``knowledge``).
     if item["kind"] in _BASIS_LABEL_KINDS and not item.get("knowledge"):
-        unlabeled = [
-            segment.kind
-            for segment in segments
-            if segment.kind != "heading"
+        if any(
+            segment.kind != "heading"
             and segment_is_new(segment, quote, DELEGATED_FAMILIES)
             and not set(segment.labels) & set(may_add)
-        ]
-        if unlabeled:
-            return "segment_without_basis_label", (
-                f"{len(unlabeled)} new {'/'.join(dict.fromkeys(unlabeled))} segment(s) "
-                f"without one of: {', '.join(may_add) or 'no basis label'}"
-            )
+            for segment in segments
+        ):
+            return "segment_without_basis_label"
     return None
 
 
@@ -1390,16 +1370,15 @@ def _composition_problem(
     references: list[dict[str, Any]],
     identifiers: Sequence[str],
     user_text: str,
-) -> tuple[str, str] | None:
-    """The first whole-text check *original* with *spans* spliced in fails."""
+) -> str | None:
+    """The first whole-text check *original* with *spans* spliced in fails, as
+    its reason, or ``None``."""
     composed = _spliced(original, spans)
     if original.strip() and not composed.strip():
-        return "output_emptied", "the output would be empty"
+        return "output_emptied"
     held = _prose_words(original)
-    if held >= OUTPUT_KEEP_WORDS:
-        kept = _prose_words(composed)
-        if kept < OUTPUT_KEEP_SHARE * held:
-            return "output_shrunk", f"{kept} of {held} words"
+    if held >= OUTPUT_KEEP_WORDS and _prose_words(composed) < OUTPUT_KEEP_SHARE * held:
+        return "output_shrunk"
     unknown = set(
         unknown_citation_labels(composed, references, families=DELEGATED_FAMILIES)
     ) - set(unknown_citation_labels(original, references, families=DELEGATED_FAMILIES))
@@ -1408,14 +1387,14 @@ def _composition_problem(
     ) - Counter(malformed_citation_brackets(original, families=DELEGATED_FAMILIES))
     changed = _untouched_citations_changed(original, spans, composed)
     if unknown or grown or changed:
-        return "labels_whole_text", ", ".join([*sorted(unknown), *grown, *changed])
+        return "labels_whole_text"
     added = added_identifiers(
         composed,
         introduced_identifiers(composed, list(identifiers), authored_by=user_text),
         replacing=original,
     )
     if added:
-        return "identifier_added", ", ".join(added)
+        return "identifier_added"
     return None
 
 

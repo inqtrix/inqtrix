@@ -441,12 +441,9 @@ PLANNED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-#: The tenant's deleted-account placeholder: the actor that REASSIGN rules
-#: point at. It is an ordinary ``users`` row so every foreign key and
-#: CHECK holds, but it is disabled from birth, has no credential, can never
-#: sign in, and the admin listing hides it. One per tenant, created on
-#: first use.
-DELETED_ACCOUNT_ISSUER = "inqtrix:system"
+#: The rest of the tenant's deleted-account placeholder; its issuer is
+#: ``inqtrix.auth.directory.DELETED_ACCOUNT_ISSUER``, one of the reserved
+#: issuers no identity source may bind users under.
 DELETED_ACCOUNT_SUBJECT = "deleted-account"
 DELETED_ACCOUNT_EMAIL = "deleted-account@invalid"
 DELETED_ACCOUNT_DISPLAY_NAME = "Deleted account"

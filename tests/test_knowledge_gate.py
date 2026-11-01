@@ -125,7 +125,11 @@ class RecordingStore(MemoryKnowledgeStore):
 
 
 def make_algorithm(
-    llm: ScriptedLLM, *, gate_enabled: bool = True, grow: bool = False
+    llm: ScriptedLLM,
+    *,
+    gate_enabled: bool = True,
+    grow: bool = False,
+    events: list[tuple[str, dict]] | None = None,
 ) -> tuple[KnowledgeAlgorithm, RecordingStore, RunContext, RuntimeContext]:
     store = RecordingStore(grow=grow)
     knowledge = KnowledgeProviderContext(
@@ -158,6 +162,11 @@ def make_algorithm(
         providers=runtime.providers,
         strategies=None,
         agent_settings=settings.agent,
+        event_sink=(
+            (lambda event, payload: events.append((event, payload)))
+            if events is not None
+            else None
+        ),
     )
     return algorithm, store, context, runtime
 
@@ -352,9 +361,62 @@ def test_none_coverage_still_refuses_honestly():
             "reason": "themenfremd",
         },
     ])
-    algorithm, _store, context, runtime = make_algorithm(llm)
+    events: list[tuple[str, dict]] = []
+    algorithm, _store, context, runtime = make_algorithm(llm, events=events)
     result = run_question(algorithm, runtime, context)
     assert "keine relevanten Inhalte" in result.answer
+    # The gate's refusal makes no answer call and records no quote verdict.
+    assert llm.answer_prompts == []
+    assert result.raw["result_state"]["knowledge_grounding"] == {"enabled": True}
+    assert not any(
+        event == "inqtrix.knowledge.grounding.checked"
+        for event, _payload in events
+    )
+
+
+class NoEvidenceAnswerLLM(ScriptedLLM):
+    """Gate verdicts as scripted; every answer declares that no excerpt
+    answers the question."""
+
+    def complete_with_metadata(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        if "EXCLUSIVELY with a JSON object" in prompt:
+            return super().complete_with_metadata(prompt, **kwargs)
+        self.answer_prompts.append(prompt)
+        return LLMResponse(
+            content=(
+                "QUOTES:\nNONE\nANSWER:\nDie Auszüge beantworten die Frage nicht."
+            ),
+            prompt_tokens=42,
+            completion_tokens=11,
+            model="stub-answer",
+            finish_reason="stop",
+        )
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        {
+            "sufficient": False,
+            "coverage": "partial",
+            "rewritten_query": None,
+            "reason": "ein Aspekt fehlt",
+        },
+        {"sufficient": True, "rewritten_query": None},
+        # An unparseable verdict falls open to full coverage.
+        "kein JSON",
+    ],
+)
+def test_a_declared_absence_refuses_after_every_answering_gate_verdict(verdict):
+    llm = NoEvidenceAnswerLLM([verdict])
+    algorithm, _store, context, runtime = make_algorithm(llm)
+
+    result = run_question(algorithm, runtime, context)
+
+    assert result.terminal_failure is None
+    assert "keine relevanten Inhalte" in result.answer
+    assert len(llm.answer_prompts) == 1
+    assert result.raw["result_state"]["report_references"] == []
 
 
 def test_legacy_verdict_without_coverage_maps_conservatively():

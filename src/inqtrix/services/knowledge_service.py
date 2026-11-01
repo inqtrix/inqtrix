@@ -43,7 +43,7 @@ from inqtrix.knowledge.source_cleanup import SourceCleanupPlan
 from inqtrix.quota.models import estimate_tokens
 from inqtrix.source_authority import SourceDeletionPermit
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 from inqtrix.knowledge.retrieval import retrieve
 
 from typing import TYPE_CHECKING

@@ -37,6 +37,15 @@ ENV PATH="/app/.venv/bin:$PATH" \
     INQTRIX_SERVER_HOST=0.0.0.0 \
     INQTRIX_SERVER_PORT=5100
 
+# The base image still ships the operating system's trust store with the
+# compromised emSign ECC Root CA - G3, and the Anthropic and LangSmith clients
+# trust that store rather than certifi. Take Debian's fixed package until the
+# base image carries it; the last line fails the build if the root is still in.
+RUN apt-get update \
+    && apt-get install -y --only-upgrade --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && test ! -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem
+
 # The editable project install points the venv at /app/src; keep the same
 # path so the .pth resolves. Migrations ship inside the package
 # (src/inqtrix/storage/migrations) so inqtrix-migrate finds them.

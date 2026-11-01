@@ -75,7 +75,7 @@ from inqtrix.providers.base import (
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Retry & backoff constants

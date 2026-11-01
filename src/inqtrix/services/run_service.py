@@ -11,6 +11,7 @@ runs router — the store already is the in-memory repository.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -23,7 +24,7 @@ from inqtrix.core.results import (
     WorkHandover,
 )
 from inqtrix.execution_authority import AuthorizationRevoked, guard_provider_context
-from inqtrix.execution_failures import RunExecutionFailure
+from inqtrix.execution_failures import RunExecutionFailure, classify_execution_failure
 from inqtrix.quota.models import QuotaDimension, QuotaSubject, consumed_tokens
 from inqtrix.result import ResearchResult, reported_usage
 from inqtrix.services.agent_answer_publisher import AgentAnswerPublisher
@@ -40,8 +41,7 @@ if TYPE_CHECKING:
     )
     from inqtrix.services.quota_service import QuotaService
 
-
-"""What a reported token count covers: the whole run, or one segment."""
+log = logging.getLogger(__name__)
 
 
 def execute_run_request(
@@ -95,6 +95,65 @@ def execute_run_request(
         answer_publisher: Shared durable publisher for native Agent Desk
             modes.  Those modes fail loudly when it is absent; other modes
             retain the event-only answer lifecycle.
+    """
+    mode = str(getattr(run_request, "mode", "") or "") or "-"
+    log.info("Run %s segment started (mode=%s).", handle.run_id, mode)
+    started = time.monotonic()
+    ended = "status=failed"
+    try:
+        ended = _execute_run_segment(
+            handle,
+            algorithm=algorithm,
+            run_request=run_request,
+            resolved=resolved,
+            runtime=runtime,
+            principal=principal,
+            quota_service=quota_service,
+            quota_subject=quota_subject,
+            token_budget=token_budget,
+            workspace_id=workspace_id,
+            authority_check=authority_check,
+            answer_publisher=answer_publisher,
+            trace_root=trace_root,
+        )
+    except BaseException as exc:
+        code = classify_execution_failure(exc)
+        ended = (
+            "status=cancelled"
+            if code == "client_requested_cancel"
+            else f"status=failed, failure_code={code}, error_type={type(exc).__name__}"
+        )
+        raise
+    finally:
+        log.info(
+            "Run %s segment ended (%s, mode=%s, seconds=%.1f).",
+            handle.run_id,
+            ended,
+            mode,
+            time.monotonic() - started,
+        )
+
+
+def _execute_run_segment(
+    handle: "RunHandle",
+    *,
+    algorithm: "AgentAlgorithm",
+    run_request: RunRequest,
+    resolved: ResolvedAgentContext,
+    runtime: RuntimeContext,
+    principal: "Principal | None",
+    quota_service: "QuotaService | None" = None,
+    quota_subject: "QuotaSubject | None" = None,
+    token_budget: int | None = None,
+    workspace_id: str | None = None,
+    authority_check: Callable[[], None] | None = None,
+    answer_publisher: AgentAnswerPublisher | None = None,
+    trace_root: bool = True,
+) -> str:
+    """The body of :func:`execute_run_request`.
+
+    Returns how the segment ended, for its end line; an exception leaves
+    the classification to the caller.
     """
     t0 = time.monotonic()
 
@@ -288,10 +347,10 @@ def execute_run_request(
         # The algorithm parked the run (agent interrupt): the segment is
         # over, the store retained the closure/payload for the resume —
         # completing or cancelling here would destroy the wait.
-        return
+        return "status=parked"
     if handle.cancel_event.is_set():
         handle.cancel("client_requested_cancel")
-        return
+        return "status=cancelled"
     if agent_result.cancelled:
         if agent_result.cancel_reason == "token_budget_exceeded":
             handle.fail(
@@ -300,11 +359,11 @@ def execute_run_request(
             )
             mark_current_span_error("token_budget_exceeded")
             enrich_current_span({semconv.INQTRIX_OUTCOME: semconv.OUTCOME_FAILED})
-        else:
-            handle.cancel(
-                agent_result.cancel_reason or "client_requested_cancel"
-            )
-        return
+            return "status=failed, failure_code=token_budget_exceeded"
+        handle.cancel(
+            agent_result.cancel_reason or "client_requested_cancel"
+        )
+        return "status=cancelled"
 
     terminal_failure = result_state.get("_terminal_failure")
     if isinstance(terminal_failure, dict):
@@ -408,6 +467,7 @@ def execute_run_request(
 
     if getattr(handle, "terminal_landed", True):
         record_run_scores(mode, result_state, trace_root=trace_root)
+    return "status=completed"
 
 
 #: Research metrics an AGENT run genuinely produces. Everything else in

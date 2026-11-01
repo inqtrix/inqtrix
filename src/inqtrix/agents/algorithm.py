@@ -126,6 +126,7 @@ from inqtrix.agents.plan_collections import CollectionCatalogEntry
 from inqtrix.agents.plan_models import (
     WEB_RESEARCH_PROFILE_ORDER,
     ExecutionPlanModel,
+    loggable_task_id,
 )
 from inqtrix.agents.planner import (
     PlanningFailed,
@@ -258,7 +259,7 @@ if TYPE_CHECKING:
     from inqtrix.services.run_service import RunService
     from inqtrix.settings import AgentPlatformSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _AGENT_NODES = (
     "agent_intake",
@@ -2748,15 +2749,15 @@ def _node_plan(state: AgentPhaseState) -> AgentPhaseState:
             # valid plan version instead of losing the run — or, on the
             # critic route, keep the memo the critic was judging.
             log.warning(
-                "Replan round %d discarded (%s); the run continues with plan version "
-                "%s.",
+                "Replan round %d discarded (%d validation error(s)); the run continues "
+                "with plan version %s.",
                 replan_round,
-                detail,
+                len(exc.errors),
                 previous_plan.version if previous_plan else "?",
             )
             # The label says what happened and how the run goes on. The
             # planner's validation errors are no reader text: they travel as
-            # machine data and stand in the log above.
+            # machine data; the log line above counts them.
             deps.emit(
                 ACTIVITY_EVENT,
                 {
@@ -3496,7 +3497,10 @@ def _task_label(task_id: str, title: str | None, words: dict[str, str]) -> str:
     name = " ".join(str(title or "").split())
     if name:
         return t(words, "task_evidence_label_quoted", title=neutralize_fence_delimiters(name))
-    log.warning("Evidence note of task %s has no plan title; naming it by its id.", task_id)
+    log.warning(
+        "Evidence note of task %s has no plan title; naming it by its id.",
+        loggable_task_id(task_id),
+    )
     return t(words, "task_evidence_label_id", task_id=task_id)
 
 
@@ -3801,7 +3805,7 @@ def _fold_pending_children(
             log.warning(
                 "Task %s failed transiently (failure_code=%s); retrying once with "
                 "unchanged operator limits.",
-                task_id,
+                loggable_task_id(task_id),
                 outcome.failure_code or "unknown",
             )
             try:
@@ -3815,7 +3819,7 @@ def _fold_pending_children(
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "Retry for agent task %s could not be submitted (error_type=%s).",
-                    task_id,
+                    loggable_task_id(task_id),
                     type(exc).__name__,
                 )
                 outcomes[task_id] = outcome
@@ -3967,7 +3971,7 @@ def _node_execute(state: AgentPhaseState) -> AgentPhaseState:
                     log.warning(
                         "Agent task %s (web_research) could not be submitted "
                         "(error_type=%s).",
-                        task.task_id,
+                        loggable_task_id(task.task_id),
                         type(exc).__name__,
                     )
                     outcome = TaskOutcome(
@@ -4061,7 +4065,7 @@ def _node_execute(state: AgentPhaseState) -> AgentPhaseState:
                     if not admitted:
                         log.info(
                             "Agent task %s: retry discarded because of status %s.",
-                            task.task_id,
+                            loggable_task_id(task.task_id),
                             current.status,
                         )
                     return admitted
@@ -4249,8 +4253,10 @@ def _emit_task_ended(
         title = task.title if task is not None else None
         note = _task_evidence_note(task_id, outcome, _deps_language(deps), title=title)
         log.warning(
-            "Child evidence limited: %s",
-            _task_evidence_note(task_id, outcome, "en", title=title),
+            "Child evidence limited for task %s (contract=%s, omitted=%d).",
+            loggable_task_id(task_id),
+            outcome.evidence_contract_status or "-",
+            int(outcome.omitted_evidence_count or 0),
         )
         # A limit of the evidence is a note about the task, not a fallback
         # path it took: the task keeps its own status (a completed task
@@ -5126,10 +5132,9 @@ def _perform_synthesis(state: AgentPhaseState, tasks: list[Any]) -> AgentPhaseSt
             reached_past_nothing = not preselected and bool(references)
             if reached_past_nothing:
                 log.warning(
-                    "Section %d (%s) had no preselected evidence although the run "
+                    "Section %d had no preselected evidence although the run "
                     "held %d references; its register listed %d and it cited %d.",
                     index,
-                    done["title"],
                     len(references),
                     len(register_references),
                     len(cited),
@@ -5262,10 +5267,9 @@ def _perform_synthesis(state: AgentPhaseState, tasks: list[Any]) -> AgentPhaseSt
             # Never a quiet gap and never a whole synthesis lost to one role:
             # the section is written in one call, and the reader is told.
             log.warning(
-                "Section role for section %d (%s) could not deliver (reason=%s); "
+                "Section role for section %d could not deliver (reason=%s); "
                 "writing the section in one call.",
                 index,
-                section.title,
                 handed.failure,
             )
             deps.emit(
@@ -7071,7 +7075,7 @@ def _emit_legacy_budget_notices(
         log.warning(
             "Agent task %s contains an obsolete task budget; its values are ignored, "
             "and operator limits remain authoritative.",
-            task.task_id,
+            loggable_task_id(task.task_id),
         )
         deps.emit(
             ACTIVITY_EVENT,
@@ -7184,14 +7188,14 @@ def _execute_task_inner(
         # failure reasons it is written in the run's language when the task
         # fails.
         # The reader's sentence names no collection: the exception carries
-        # an internal id or an English message, which belong in the log.
+        # an internal id or an English message; the log line names its type.
         reason = t(state, "agent_collection_not_visible")
         log.warning(
             "Agent task %s (%s) failed (failure_code=invalid_input, "
-            "detail=%s).",
-            task.task_id,
+            "error_type=%s).",
+            loggable_task_id(task.task_id),
             task.tool_kind,
-            exc.args[0] if exc.args else type(exc).__name__,
+            type(exc).__name__,
         )
         return TaskOutcome(
             status="failed",
@@ -7203,7 +7207,7 @@ def _execute_task_inner(
         failure_code = _task_failure_code(exc)
         log.warning(
             "Agent task %s (%s) failed (failure_code=%s, error_type=%s).",
-            task.task_id,
+            loggable_task_id(task.task_id),
             task.tool_kind,
             failure_code,
             type(exc).__name__,
@@ -7263,7 +7267,7 @@ def _submit_child_run(
         log.warning(
             "Agent task %s contains the obsolete research profile %r; the server uses "
             "%r.",
-            task.task_id,
+            loggable_task_id(task.task_id),
             requested_profile,
             profile,
         )
@@ -8078,7 +8082,7 @@ def _rejects_new_analysis(
         log.warning(
             "Replan: the document selection of new file analysis %s failed; the "
             "task stays unchecked (error_type=%s).",
-            task.task_id,
+            loggable_task_id(task.task_id),
             error_type,
         )
         deps.emit(
@@ -8097,7 +8101,7 @@ def _rejects_new_analysis(
         log.info(
             "Replan: new file analysis %s dropped; it would read nothing new "
             "(found=%s, already_read=%d, windows_left=%d).",
-            task.task_id,
+            loggable_task_id(task.task_id),
             found,
             already_read,
             windows_left,
@@ -8128,7 +8132,7 @@ def _rejects_new_analysis(
         log.info(
             "Replan: new file analysis %s is not checked before planning; strict "
             "autonomy searches nothing before the replan approval.",
-            task.task_id,
+            loggable_task_id(task.task_id),
         )
         deps.emit(
             ACTIVITY_EVENT,
@@ -8815,7 +8819,7 @@ def _reading_view(
         log.warning(
             "Reading view: readings of tasks %s have no position in the current "
             "plan; they void no reading of another document version.",
-            ", ".join(unplaced),
+            ", ".join(loggable_task_id(task_id) for task_id in unplaced),
         )
     return ReadingView(
         readings=readings,

@@ -396,7 +396,7 @@ function AddedCell({ asset }: { asset: FileAssetRecord }) {
           <span className="cursor-help whitespace-nowrap">{formatAddedAt(asset.createdAt, locale)}</span>
         </TooltipTrigger>
         <TooltipContent side="top">
-          {t.fileLibrary.addedTooltip.replace('{date}', formatAddedAtFull(asset.createdAt, locale))}
+          {t.fileLibrary.addedTooltip.replace('{date}', () => formatAddedAtFull(asset.createdAt, locale))}
         </TooltipContent>
       </Tooltip>
     </div>
@@ -718,7 +718,7 @@ function RowActions(props: FileItemProps) {
       {onDelete ? (
         <ConfirmDelete
           ariaLabel={t.fileLibrary.remove}
-          hint={t.fileLibrary.removeFileHint.replace('{label}', asset.label)}
+          hint={t.fileLibrary.removeFileHint.replace('{label}', () => asset.label)}
           onConfirm={() => onDelete(asset.id)}
         />
       ) : null}
@@ -796,7 +796,7 @@ export const FileRow = memo(function FileRow(props: FileItemProps) {
       <div className="flex min-w-0 items-center gap-2">
         {canSelect ? (
           <SelectCheck
-            label={t.fileLibrary.selectFile.replace('{label}', asset.label)}
+            label={t.fileLibrary.selectFile.replace('{label}', () => asset.label)}
             onToggle={(event) => props.onToggleSelect?.(asset.id, {
               additive: event.metaKey || event.ctrlKey,
               range: event.shiftKey,
@@ -872,7 +872,7 @@ export const FileCard = memo(function FileCard(props: FileItemProps) {
         <div className="flex min-w-0 items-center gap-2">
           {canSelect ? (
             <SelectCheck
-              label={t.fileLibrary.selectFile.replace('{label}', asset.label)}
+              label={t.fileLibrary.selectFile.replace('{label}', () => asset.label)}
               onToggle={(event) => props.onToggleSelect?.(asset.id, {
                 additive: event.metaKey || event.ctrlKey,
                 range: event.shiftKey,

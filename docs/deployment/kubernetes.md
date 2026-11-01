@@ -105,7 +105,7 @@ Decide before you start (each maps to a value below):
   (`postgres.enabled=true`, `valkey.enabled=true`, `s3.enabled=true`, each with
   its credential) or point at external/managed ones (`INQTRIX_DATABASE_URL`,
   `INQTRIX_VALKEY_URL`, `INQTRIX_OBJECT_STORE_BACKEND=s3` with the S3 settings).
-- **Auth mode**: `none`, `apikey`, `local`, or `oidc`? (See [Auth modes](auth-modes.md).)
+- **Auth mode**: `none`, `apikey`, `local`, `oidc`, or `gateway`? (See [Auth modes](auth-modes.md).)
 - **Knowledge engine**: needed? (Qdrant via `qdrant.enabled=true` or `INQTRIX_QDRANT_URL`.)
 - **Live editor collaboration**: needed? It requires Postgres, cookie auth, and one private collaboration pod.
 
@@ -523,10 +523,12 @@ initialized role password, so use a real database-role rotation procedure.
 | `INQTRIX_BUNDLED_POSTGRES_PASSWORD` | bundled Postgres with `secret.existingSecret` | Raw password used by the Postgres container; it must match the password represented in `INQTRIX_DATABASE_URL`. |
 | `INQTRIX_VALKEY_URL` | the worker (on by default) with an external broker | `redis://:password@host:6379/0`, password percent-encoded. Auto-wired when `valkey.enabled=true`. In `secret.existingSecret`, confirm it with `config.INQTRIX_QUEUE_BACKEND=valkey`; the chart cannot read that Secret. |
 | `INQTRIX_MIGRATION_DATABASE_URL` | managed PostgreSQL migration job | Direct migration-only URL stored in `migrations.databaseSecret`; never put it in the app Secret. |
-| `INQTRIX_SESSION_SECRET` | auth `local`/`oidc` | >=32 chars; CSRF-token HMAC key. `openssl rand -hex 32`. |
-| `INQTRIX_PAT_PEPPER` | auth `local`/`oidc` | >=32 chars; pepper for personal access tokens. Rotating it invalidates all tokens. |
-| `INQTRIX_PSEUDONYM_PEPPER` | required for `oidc`; recommended for `local` | Instance-wide pepper behind the stable `usr_<hex16>` subject pseudonyms in logs and audit correlation. Share ONE value across API and worker pods (the app Secret reaches both). Empty degrades to per-process references (startup WARNING); rotation unlinks previously written pseudonyms. |
+| `INQTRIX_SESSION_SECRET` | auth `local`/`oidc`/`gateway` | >=32 chars; CSRF-token HMAC key. `openssl rand -hex 32`. |
+| `INQTRIX_PAT_PEPPER` | auth `local`/`oidc`/`gateway` | >=32 chars; pepper for personal access tokens. Rotating it invalidates all tokens. |
+| `INQTRIX_PSEUDONYM_PEPPER` | required for `oidc` and `gateway`; recommended for `local` | Instance-wide pepper behind the stable `usr_<hex16>` subject pseudonyms in logs and audit correlation. Share ONE value across API and worker pods (the app Secret reaches both). Empty degrades to per-process references (startup WARNING); rotation unlinks previously written pseudonyms. |
 | `INQTRIX_OIDC_CLIENT_SECRET` | auth `oidc` | Confidential OIDC client secret from your IdP. |
+| `INQTRIX_GATEWAY_SHARED_SECRET` | auth `gateway` in sub-mode `header` or with a resolver of your own | >=32 chars; the proof the API gateway sends in the proof header, the same value on both sides. The chart never passes it to the web pod. |
+| `INQTRIX_SCIM_TOKEN` | auth `gateway` with `config.INQTRIX_SCIM_ENABLED=true` | >=32 chars; Bearer token of the SCIM client. The API pods use it and the worker pods check its length at start; both read it only at start, so restart them after a rotation. |
 | `INQTRIX_S3_ACCESS_KEY`, `INQTRIX_S3_SECRET_KEY`, optional `INQTRIX_S3_SESSION_TOKEN` | object store `s3`, static auth | S3 credentials. Auto-wired from `s3.accessKey`/`s3.secretKey` only for bundled MinIO. Omit all three with `INQTRIX_S3_AUTH_MODE=default`. |
 | `INQTRIX_BUNDLED_VALKEY_PASSWORD` | bundled Valkey with `secret.existingSecret` | Raw password used by the Valkey container; it must match the password represented in `INQTRIX_VALKEY_URL`. |
 | `INQTRIX_QDRANT_API_KEY` | bundled Qdrant or external Qdrant with auth | Required for bundled Qdrant and shared by the Qdrant pod and application. |
@@ -556,8 +558,8 @@ Set the mode in `config.INQTRIX_AUTH_MODE` and provide the mode's secrets. Full
 behaviour is in [Auth modes](auth-modes.md); the chart-specific essentials:
 
 `local` and `oidc` need the **postgres** storage backend (to persist
-accounts/sessions durably). The chart default `config.INQTRIX_STORAGE_BACKEND`
-is already `postgres`, so it just works — do **not** override it to `memory` for
+accounts/sessions durably), and `gateway` refuses to start without it.
+The chart default `config.INQTRIX_STORAGE_BACKEND` is already `postgres`, so it just works; do **not** override it to `memory` for
 these modes (with `memory`, logins are lost on restart and not shared across
 replicas).
 
@@ -577,6 +579,63 @@ replicas).
   --set config.INQTRIX_PUBLIC_BASE_URL=https://<YOUR-DOMAIN>
   # Secrets and boot preconditions: see Auth modes (auth-modes.md).
   ```
+
+- **gateway**: sign-in by an API gateway in front of the web Service (not
+  live tested on Kubernetes).
+
+  ```bash
+  --set config.INQTRIX_AUTH_MODE=gateway \
+  --set config.INQTRIX_GATEWAY_ASSERTION=jwt \
+  --set config.INQTRIX_GATEWAY_JWT_HEADER=X-Inqtrix-Assertion \
+  --set config.INQTRIX_GATEWAY_TRUSTED_PROXIES=<POD-NETWORK-OF-THE-WEB-PODS> \
+  --set web.gatewayTrustedProxies=<DIRECT-PEER-OF-THE-WEB-PODS> \
+  --set config.INQTRIX_PUBLIC_BASE_URL=https://<YOUR-DOMAIN>
+  # Issuer, audience, user scope, keys and secrets: see Auth modes (auth-modes.md).
+  ```
+
+  Both lists hold, in CIDR form, the addresses their pods see as the socket
+  peer of a connection. Helm splits a `--set` value at a bare comma, so
+  separate several entries with `\,` inside single quotes, for example
+  `--set 'web.gatewayTrustedProxies=10.42.0.0/16\,10.43.0.0/16'`, or put the
+  lists into a values file. What the two lists do:
+  [Gateway mode: peer lists and client address](../configuration/settings-and-env.md#gateway-mode-peer-lists-and-client-address).
+
+  `web.gatewayTrustedProxies` names whatever opens the connection to the web
+  Service, and that depends on where the API gateway sits:
+
+  | Layout | Direct peer of the web pods | `web.gatewayTrustedProxies` |
+  |---|---|---|
+  | The API gateway calls the web Service itself, for example oauth2-proxy as a Deployment of its own with the web Service (port 8080) as upstream; the chart's Ingress stays off | the pods of the API gateway | their pod network, or a narrower range that your network plugin gives them; with the pod network, every pod counts as the API gateway, an Ingress controller that serves the entrance of token and SCIM clients included, so in sub-mode `header` and with a resolver of your own only the shared secret separates them: prefer the narrow range or a NetworkPolicy |
+  | An Ingress controller stands between the API gateway and the web Service, for example the chart's Ingress (`ingress.enabled=true`) behind an API gateway outside the cluster | the pods of the Ingress controller | their pod network; the Ingress must then be reachable only from the API gateway, because otherwise a client sends identity headers and an `X-Forwarded-For` chain past it, and the web gateway passes them on |
+
+  With a peer missing from the list, the web gateway removes the assertion of
+  every request: everyone sees **No gateway sign-in detected**, and the web
+  pod logs the WARNING `Identity headers from a peer outside
+  INQTRIX_GATEWAY_TRUSTED_PROXIES were removed (outcome=untrusted_source ...)`.
+  Which client address the API server reads in each layout is explained under
+  `INQTRIX_TRUSTED_PROXY_HOPS` in
+  [Edge timeouts and body size](#edge-timeouts-and-body-size).
+
+  The API pods see the changing pod addresses of the web pods, so their list
+  (`config.INQTRIX_GATEWAY_TRUSTED_PROXIES`) is usually the whole pod
+  network. In sub-mode `header` and with a resolver of your own, every pod of
+  the cluster then counts as a trusted peer, and only the shared secret
+  separates the web pods from all others. The chart ships no NetworkPolicies;
+  add one that admits connections to the API pods only from the web pods,
+  from the collaboration pod when `collaboration.enabled=true`, and from
+  whatever runs `helm test` or scrapes `/metrics`.
+
+  The web pod has no `envFrom`, so the chart passes it the identity header
+  names from `config:` (or `extraConfig:`) and its own peer list from
+  `web.gatewayTrustedProxies`; the shared secret of sub-mode `header` stays
+  in the Secret and never reaches the web pod. A resolver of your own comes
+  from `api.resolverVolume`, mounted read-only at `/opt/inqtrix-plugins` on
+  `PYTHONPATH`; a complete example is in
+  [Running it on Kubernetes](../extending/auth-provider.md#running-it-on-kubernetes).
+  A TLS terminator in front of the web Service is covered in
+  [Edge timeouts and body size](#edge-timeouts-and-body-size), and the SCIM
+  client's entrance in
+  [Switching SCIM on](create-and-manage-users.md#switching-scim-on).
 
 ### Edge timeouts and body size
 
@@ -610,22 +669,40 @@ passes the byte value to the web gateway, which derives 10 MiB headroom so
 the API's labelled 413 stays authoritative. Raise the timeouts together with
 `INQTRIX_MAX_TOTAL_SECONDS`.
 
-Two related settings behind the chart's edge:
+Related settings behind the chart's edge:
 
-- `INQTRIX_TRUSTED_PROXY_HOPS=2` is derived automatically when the chart's
-  Ingress is enabled: the edge plus the Python web gateway put two entries
-  into `X-Forwarded-For`, and with the app default of 1 the login rate
-  limiter would key every client on the edge pod address (collapsing all
-  users into one lockout bucket). This assumes an edge that writes
-  `X-Forwarded-For` — ingress-nginx does. An
-  explicit `config.INQTRIX_TRUSTED_PROXY_HOPS` wins — for example `3` with
-  an additional load balancer in front of the edge, or `1` for an exotic
-  edge that does not touch the header.
-- `web.externalScheme` — set to `https` when a TLS terminator the chart does
-  not own (own LoadBalancer, Gateway API, service mesh) fronts the web
-  Service; otherwise the web gateway forwards `X-Forwarded-Proto: http` and
-  the collaboration WebSocket origin check rejects sessions even with a
-  correct `INQTRIX_PUBLIC_BASE_URL`.
+- `INQTRIX_TRUSTED_PROXY_HOPS` outside mode `gateway`: with the chart's
+  Ingress enabled, the chart derives `2`. The edge writes the client address
+  into `X-Forwarded-For` and the Python web gateway appends the edge pod's
+  address, so the client sits two entries from the right; with the app
+  default of 1 the login rate limiter would key every client on the edge pod
+  address (collapsing all users into one lockout bucket). This assumes an
+  edge that writes `X-Forwarded-For`, as ingress-nginx does. An explicit
+  `config.INQTRIX_TRUSTED_PROXY_HOPS` wins, for example `3` with an
+  additional load balancer in front of the edge, or `1` for an edge that
+  does not touch the header.
+- `INQTRIX_TRUSTED_PROXY_HOPS` in mode `gateway`: the chart derives nothing,
+  and the app default of 1 applies. The web gateway appends nothing to the
+  chain of a peer in `web.gatewayTrustedProxies`, so the count starts in
+  front of it: 1 when the API gateway writes the client address itself, and
+  one more for each proxy that writes its own peer after the client address,
+  for example a load balancer in front of the API gateway, or an Ingress
+  between the API gateway and the web Service that appends the API gateway's
+  address. A worked example is in
+  [Gateway mode: peer lists and client address](../configuration/settings-and-env.md#gateway-mode-peer-lists-and-client-address).
+- TLS in front of the web Service: behind a TLS terminator that the chart
+  does not own (your own LoadBalancer, the Gateway API, a service mesh or an
+  API gateway), scheme and host follow
+  [one rule](auth-modes.md#scheme-behind-a-tls-proxy). In the chart,
+  `config.INQTRIX_PUBLIC_BASE_URL` reaches the API pods through the
+  ConfigMap and the web pod as a variable of its own, and the chart derives
+  the web pod's scheme (`INQTRIX_EXTERNAL_SCHEME`) from it.
+  `web.externalScheme` overrides that derivation and must then name the same
+  scheme, otherwise the render fails. Only without a public base URL (no
+  `config.INQTRIX_PUBLIC_BASE_URL` and no chart Ingress) does the web pod's
+  scheme come from `web.externalScheme` alone, or else default to `http`; the
+  collaboration origin check then accepts no forwarded origin at all. With
+  `https` the web gateway also sends `Strict-Transport-Security` (180 days).
 
 ### Values reference (most-used knobs)
 
@@ -647,7 +724,7 @@ reference. The knobs you will reach for most:
 | `worker.enabled` | `true` | Durable worker Deployment. Needs Postgres, a Valkey queue and a shared S3 object store; the render names whatever is missing. `false` selects the [single-pod variant](#the-single-pod-variant). |
 | `worker.replicaCount` | `1` | Worker pods. Each executes up to `INQTRIX_WORKER_CONCURRENCY` (default 100) jobs at once. See [Scaling](#scaling). |
 | `collaboration.enabled` | `false` | Private one-replica `Recreate` Deployment and ClusterIP Service. Requires Postgres, cookie auth, and an independent secret; it has no HPA/PDB/PVC. |
-| `collaboration.resources` | `100m` / `512Mi` request, `1` / `1Gi` limit | Node caps its heap at about half the memory limit, so keep the limit at twice the request. For long documents (about 50 pages or more) typed in concurrently use `1Gi` / `2Gi`. Every change restarts the single replica and briefly disconnects all editors. See [Collaboration service](#collaboration-service). |
+| `collaboration.resources` | `100m` / `512Mi` request, `1` / `1Gi` limit | Node caps its heap at about half the memory limit, so keep the limit at twice the request. For many long documents typed in at the same time, size it with the rule of thumb under [Collaboration service](#collaboration-service). Every change restarts the single replica and briefly disconnects all editors. See [Collaboration service](#collaboration-service). |
 | `api.replicaCount`, `api.autoscaling.*` | `1`, off | Scale the API. More than one replica requires the worker. See [Scaling](#scaling). |
 | `persistence.enabled`, `persistence.size` | `false`, `5Gi` | PVC for the local object store of the single-pod variant. Mounted only while the effective backend is `local`; disabling it deletes the PVC. |
 | `postgres.enabled`, `qdrant.enabled`, `valkey.enabled`, `s3.enabled` | `false` | Bundle a demo backing service in-cluster (`s3.enabled` = MinIO object store). Each enabled service requires an explicit credential; no `change-me` fallback is rendered. |
@@ -674,7 +751,7 @@ value wins wherever overriding is allowed at all.
 | `INQTRIX_REPLICA_COUNT` | always | `api.replicaCount` (or `autoscaling.maxReplicas`) + `worker.replicaCount` when the worker is enabled | **no, the render fails.** The chart's own topology checks already keep the local object store to one pod, and a value that is too high would pass the chart and then crash-loop every api pod at startup via the app-side guard. |
 | `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY` | always | `bundled_legacy` with the bundled Postgres, else `restricted` | yes, but doing so waives a guard — see [Database migrations](database-migrations.md) |
 | `INQTRIX_PUBLIC_BASE_URL` | ingress with a host | scheme + host of the chart-owned edge | yes — explicitly supported for edges the chart does not own |
-| `INQTRIX_TRUSTED_PROXY_HOPS` | chart-owned ingress | `2` | yes |
+| `INQTRIX_TRUSTED_PROXY_HOPS` | chart-owned ingress, not in mode `gateway` | `2` | yes |
 | `INQTRIX_KNOWLEDGE_ENABLED`, `INQTRIX_VECTOR_BACKEND`, `INQTRIX_QDRANT_URL` | `qdrant.enabled` | `true` / `qdrant` / in-cluster service URL | yes |
 | `INQTRIX_QUEUE_BACKEND` | `worker.enabled` | `valkey` | an explicit `valkey` is the confirmation that a URL in `secret.existingSecret` needs; `memory` with the worker, or `valkey` without it, fails the render |
 | `INQTRIX_S3_AUTH_MODE`, `INQTRIX_S3_ENDPOINT_URL`, `INQTRIX_S3_BUCKET`, `INQTRIX_S3_ADDRESSING_STYLE`, `INQTRIX_S3_BUCKET_PROVISIONING` | `s3.enabled` | bundled-MinIO topology | **no — the render fails**; the bundled topology is derived from `s3.*` |
@@ -812,13 +889,14 @@ helm upgrade inqtrix deploy/helm/inqtrix --reuse-values \
     --set observability.tracing.headersSecret.name=langfuse-otlp
 ```
 
-Depth, log format and retention are separate knobs in the same block:
+Depth, log format, log threshold and retention are separate knobs in the same block:
 
 ```bash
 helm upgrade inqtrix deploy/helm/inqtrix --reuse-values \
     --set migrations.maintenanceConfirmed=true \
     --set observability.tracing.profile=forensic \
     --set observability.logFormat=json \
+    --set observability.logLevel=INFO \
     --set observability.retention.auditDays=365 \
     --set observability.retention.usageDays=730
 ```
@@ -827,8 +905,14 @@ helm upgrade inqtrix deploy/helm/inqtrix --reuse-values \
   decides WHERE TO. `forensic` without a recording sink — mode `off`/`local`,
   or `sampleRate` below `1.0` — records only part of what was asked for and
   warns at startup.
-- `logFormat: json` makes stdout the machine-readable sink carrying the full
-  configured level plus the correlation envelope.
+- `logFormat` sets `INQTRIX_LOG_FORMAT` for the API, the worker and the web
+  gateway. The default is already `json`, the machine-readable stdout sink
+  with the correlation envelope; `text` gives readable lines. The
+  collaboration server always writes JSON.
+- `logLevel` sets `INQTRIX_LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR` or
+  `CRITICAL`) for the API, the worker, the web gateway and the collaboration
+  server; empty keeps `INFO`. Set here, it wins over a value under `config`,
+  which reaches only the API and the worker.
 - Both retention jobs run in the WORKER process. Without `worker.enabled`
   these values describe an intent, not an enforced policy; prune externally
   through the same `audit_prune` / `llm_usage_prune` functions instead.
@@ -960,34 +1044,35 @@ across replicas.
   Neither the chart nor Compose sets `NODE_OPTIONS`.
 - An open document costs little: about 0.075 MiB of heap per page (offline);
   twenty open 85-page documents added 73 MiB (measured).
-- Typing in long documents dominates, because every update clones and
-  validates the whole document. Four people typing in 85-page documents drove
-  the service to about 1020 MiB while they typed, and it fell back to about
-  300 MiB within about 8 seconds after they stopped; in 20-page documents they
-  added about 23 MiB, in 2-page documents about 1.4 MiB (measured).
-- A tight limit slows typing rather than crashing the service: replaying the
-  85-page case reached 14.2 updates per second without a limit, 4.4 under 1Gi
-  and 1.3 under 512Mi (offline).
-- Default `requests.memory: 512Mi`, `limits.memory: 1Gi`. For teams that type
-  concurrently in documents of about 50 pages or more, use `1Gi` / `2Gi`: its
-  heap of about 1048 MiB holds the heap peak of the measured 85-page case
-  (786 MiB, offline).
+- Typing in long documents dominates, because every update validates the whole
+  document. Four people typing, each in an 85-page document of their own at
+  about 4.5 characters per second, took the container from about 95 MiB to about
+  255 MiB, in 20-page documents to about 134 MiB, in 2-page documents to about
+  120 MiB, and it stayed there afterwards (measured).
+- A room in which someone has written keeps one more copy of its document, about
+  0.03 MiB of heap per page (offline).
+- A tight limit does not slow typing in documents of this size: replaying the
+  85-page case reached about 100 updates per second without a limit, under
+  1Gi and under 512Mi alike, and the 300-page case about 26 under both (offline).
+- Default `requests.memory: 512Mi`, `limits.memory: 1Gi` holds the measured
+  85-page case. Beyond it, use the rule of thumb.
 - Rule of thumb (extrapolated from three document sizes; the typing term
   rests on one data point): B ≈ 300 MiB + 0.1 MiB per page of every loaded
-  document + 2 MiB per page of every document of about 50 pages or more in
+  document + 0.5 MiB per page of every document of about 50 pages or more in
   which someone is typing. Request at least B, limit at least 2 × B. The rule
-  is conservative: for the measured case (twenty 85-page documents, four
-  people typing) it gives about 1150 MiB against 1023 MiB measured and so
-  asks for slightly more than the `1Gi` / `2Gi` variant, whose heap already
-  holds that case's heap peak. Use the rule for cases beyond the measured one.
+  is conservative: for the measured case (four 85-page documents, four people
+  typing) it gives about 500 MiB against 255 MiB measured.
 - A loaded document is the active document of every open tab plus up to three
   recently viewed ones, which stay loaded for three minutes.
-- CPU per persisted update: about 7 to 15 ms for 2 to 3 pages, about 28 ms for
-  20 pages and about 170 ms for 85 pages (derived). With 85-page documents the
-  service processed about 6.9 updates per second at 1.17 cores (measured).
+- CPU per keystroke: about 5 ms for 2 pages, about 8 ms for 20 pages, about
+  20 ms for 85 pages and about 63 ms for 300 pages (measured). The four people
+  of the 85-page case used 0.32 cores together (measured). The service runs on
+  one thread, so a room with long documents reaches its end at about one core:
+  at 300 pages, writers then wait for each other and their keystrokes travel in
+  small groups instead of one by one.
 - The default CPU request of 100m reserves less than sustained typing uses: at
-  12 to 15 ms per update, 20 updates per second already take 0.25 to 0.3
-  cores (extrapolated). Raise `collaboration.resources.requests.cpu` to the
+  5 to 8 ms per update, 20 updates per second already take 0.1 to 0.16 cores
+  (extrapolated). Raise `collaboration.resources.requests.cpu` to the
   observed usage.
 - Every change to `collaboration.resources` restarts the single replica
   (`Recreate`) and briefly disconnects all editors.
@@ -1026,7 +1111,7 @@ request rates in this table are measured.
 
 | User | Long-lived connections | HTTP requests per minute | Server cost |
 |---|---|---|---|
-| Editor, typing continuously | 1 WebSocket + 1 SSE | about 4 | 3.5 to 4 persisted updates per second under load (measured), each about 13 ms of API CPU and 12 to 15 ms of collaboration CPU (derived) |
+| Editor, typing continuously | 1 WebSocket + 1 SSE | about 4 | one persisted update per keystroke, at most about 9.6 per second as the browser paces them, each about 13 ms of API CPU (derived) and 5 to 8 ms of collaboration CPU in documents of up to 20 pages (measured) |
 | Editor tab open, not typing | 1 WebSocket + 1 SSE | about 4 | about 3.5 ms of API CPU per second (derived); about 25 incoming frames per second while others type in the document (measured) |
 | Navigating the interface | 1 SSE | about 7.4, 16.6 with static files | |
 | Chat, one turn about every 30 seconds | 1 SSE + the answer stream | about 11, about 5 per turn | answer computed in the API |
@@ -1204,7 +1289,8 @@ for a maintenance window. Sizing: [Collaboration service](#collaboration-service
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Pods `CrashLoopBackOff`, logs show a DB/connection error | `INQTRIX_DATABASE_URL` missing or wrong, or storage backend is `postgres` with no DB | Provide the Secret (scenario C) or bundle Postgres (scenario A/B); verify the URL. |
-| Pod `CrashLoopBackOff` with `Read-only file system: 'logs'` | `INQTRIX_LOG_ENABLED=true` under the read-only root filesystem | Logs already go to container stdout (captured by the cluster). Leave file logging off; the chart mounts an ephemeral `/app/logs` so the flag does not crash, but stdout is the durable sink. |
+| Pod `CrashLoopBackOff` with `Read-only file system: 'logs'` | `INQTRIX_LOG_TARGET=file` or `both` under the read-only root filesystem without the chart's `/app/logs` mount | Logs already go to container stdout (captured by the cluster). Keep the target `console`; the chart mounts an ephemeral `/app/logs` so `file` does not crash, but stdout is the durable sink. |
+| Pod exits at start with `Retired setting INQTRIX_LOG_... is set` | `INQTRIX_LOG_ENABLED`, `INQTRIX_LOG_CONSOLE` or `INQTRIX_LOG_INCLUDE_WEB` is still in `config:`/`extraConfig:` | Remove it; the log line names the replacement (`INQTRIX_LOG_TARGET` or `INQTRIX_LOG_WEB_LEVEL`). |
 | `helm install` hangs on the migrate hook | The database is unreachable from the cluster | Check `kubectl -n inqtrix logs job/inqtrix-migrate`; fix connectivity/credentials. |
 | Migration fails with SQLSTATE `28000` / `inqtrix.tenant_id is not set` | A normal managed-PostgreSQL role touched a forced-RLS table, or the custom chart reused the runtime credential | Configure the migration-only Secret and explicit `bypass`/`owner` mode; do not set a tenant env variable. See [Database migrations](database-migrations.md). |
 | `/readyz` says database unavailable and product routes return `database_not_ready` | Confirmed contract break (old schema, `SET ROLE` failure, privileged role) or the boot-time check never passed. Check the readyz body's `database_contract` field: `violation` is a confirmed break; `unavailable` is mere unreachability, which keeps product routes serving until it persists past the bounded keep-open window | Inspect the failed migration Job and role grants. Do not bypass readiness or start workers until the contract passes. |
@@ -1224,6 +1310,8 @@ for a maintenance window. Sizing: [Collaboration service](#collaboration-service
 | Render fails: `... supports exactly one API replica` | More than one API replica, or an HPA, without the worker | Enable the worker, or run one API replica. |
 | API and worker `CrashLoopBackOff`; logs name `INQTRIX_VALKEY_URL` | `config.INQTRIX_QUEUE_BACKEND=valkey` confirms a URL that `secret.existingSecret` does not contain | Add `INQTRIX_VALKEY_URL` to the Secret, then restart the API and worker Deployments. |
 | Collaboration pod is ready but `service_available=false` | API/Node secrets differ, private API is unreachable, or the instance fencing lease was not acquired | Compare Secret references, inspect API and collaboration logs, and verify one collaboration replica only. |
+| Mode `gateway`: everyone sees **No gateway sign-in detected**, and the web pod logs `Identity headers from a peer outside INQTRIX_GATEWAY_TRUSTED_PROXIES were removed` | The direct peer of the web pods (the API gateway, or an Ingress in front of the web Service) is not in `web.gatewayTrustedProxies` | List that peer; the layouts are under [Auth modes](#auth-modes). |
+| Mode `gateway`: the web pod stays unready, and its log says `The API server runs the gateway mode, but ...` | The web pod lacks what the message names, for example the identity header names (set them under `config:`) or, in sub-mode `header`, `web.gatewayTrustedProxies` | Set what the message names; the rules are in [Settings and env](../configuration/settings-and-env.md#gateway-mode-web-gateway-variables). |
 
 Inspect a deployment:
 
@@ -1237,6 +1325,6 @@ helm test inqtrix -n inqtrix          # /readyz; also requires S3 when configure
 ## Related docs
 
 - [Deploy editor collaboration](editor-collaboration.md) - secret, readiness, backup, and kill-switch details.
-- [Auth modes](auth-modes.md) - full `none`/`apikey`/`local`/`oidc` reference.
+- [Auth modes](auth-modes.md) - full `none`/`apikey`/`local`/`oidc`/`gateway` reference.
 - [Settings and env](../configuration/settings-and-env.md) - every environment variable.
 - [Runbooks](runbooks.md) - backup, restore, and operational procedures.

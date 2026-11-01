@@ -46,6 +46,24 @@ function markup(status: 'blocked' | 'reconciling' | 'deleting' | 'delete_failed'
   )
 }
 
+describe('FileItem names', () => {
+  it('keeps a $ pattern in the file name as written', () => {
+    const html = renderToStaticMarkup(
+      <LocaleProvider initialLocale="de">
+        <TooltipProvider>
+          <FileRow
+            asset={{ ...asset, label: 'Budget $& Plan' }}
+            mode="library"
+            onToggleSelect={vi.fn()}
+          />
+        </TooltipProvider>
+      </LocaleProvider>,
+    )
+    expect(html).toContain('Budget $&amp; Plan')
+    expect(html).not.toContain('Budget {label} Plan')
+  })
+})
+
 describe('FileItem index-removal truthfulness', () => {
   it('keeps an unresolved legacy member visible and labels it as blocked', () => {
     const html = markup('blocked')

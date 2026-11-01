@@ -153,11 +153,17 @@ observability:
     # accept truncated prompts. Empty keeps the default (1 MiB).
     maxAttrBytes: ""
 
-  # -- Machine-readable stdout logs (INQTRIX_LOG_FORMAT=json). Recommended
-  # for container runtimes: stdout then carries the full configured level
-  # with the correlation envelope (request_id/run_id/user/trace_id), so a
-  # log line and its trace join without a lookup. Empty keeps text.
+  # -- Log line format (INQTRIX_LOG_FORMAT): json or text. Empty keeps the
+  # default json: one object per line on stdout with the correlation envelope
+  # (request_id/run_id/user/trace_id), so a log line and its trace join
+  # without a lookup. Reaches api, worker and web; the collaboration server
+  # always writes JSON.
   logFormat: ""
+
+  # -- Log threshold (INQTRIX_LOG_LEVEL): DEBUG, INFO, WARNING, ERROR or
+  # CRITICAL. Empty keeps the default INFO. Reaches api, worker, web and
+  # collaboration; set here, it wins over config.INQTRIX_LOG_LEVEL.
+  logLevel: ""
 
   # -- Retention for the two durable trails the worker prunes daily.
   # BOTH jobs live in the worker process: without worker.enabled these
@@ -208,6 +214,11 @@ api:
   podDisruptionBudget:
     enabled: false
     minAvailable: 1
+  # -- Gateway mode with a resolver of its own (INQTRIX_GATEWAY_RESOLVER in
+  # config:): a Kubernetes volume source that holds the resolver's module,
+  # for example {configMap: {name: identity-resolver}}. It is mounted read-only
+  # at /opt/inqtrix-plugins, which goes on PYTHONPATH. Empty mounts nothing.
+  resolverVolume: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -222,16 +233,25 @@ web:
   # service mesh) fronts the web Service. When INQTRIX_PUBLIC_BASE_URL is
   # explicit, this scheme must match it; the web gateway rejects a mismatch
   # at startup rather than forwarding contradictory origin metadata.
+  externalScheme: ""
   # -- Per-worker ceiling for the gateway's pooled backend connections
   # (INQTRIX_MAX_UPSTREAM_CONNECTIONS). Unset (null) keeps the gateway's
   # built-in default -- deliberately not restated here, so there is one
   # source of truth. Every open SSE stream holds one upstream connection for
   # its whole duration; exhaustion is a 503 naming the variable. Set only a
   # positive integer; anything below 1 fails the render.
-  # This is a typed value because the web pod has NO envFrom: entries in
-  # config:/extraConfig: never reach it.
+  # This is a typed value because the web pod has NO envFrom:
+  # config:/extraConfig: reach it only for the keys the chart re-emits (the
+  # identity header names of gateway mode among them).
   maxUpstreamConnections: null
-  externalScheme: ""
+  # -- Gateway mode only (INQTRIX_AUTH_MODE=gateway): the peers, as a CIDR
+  # list, that may send identity headers to the web gateway, normally the API
+  # gateway in front of the web Service. The API pod's
+  # INQTRIX_GATEWAY_TRUSTED_PROXIES (in config:) lists the web pods instead.
+  # Empty removes nothing, which only the jwt assertion allows (the token's
+  # signature is the proof); with the header assertion or a resolver of its
+  # own the web gateway stays unready until this list is set.
+  gatewayTrustedProxies: ""
   # -- Extra environment for the web container (e.g. an explicit
   # INQTRIX_PROXY_MAX_BODY_BYTES when the derived default does not fit).
   extraEnv: []

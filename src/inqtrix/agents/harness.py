@@ -19,7 +19,7 @@ from inqtrix.exceptions import AgentContextArchiveError
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 KERNEL_EXCLUDED_BUILTIN_TOOLS = frozenset(
     {

@@ -133,9 +133,9 @@ function rowMeta(row: ChildTaskRow, t: TranslationDictionary): string {
 
 function CardBody({ t, view }: { t: TranslationDictionary; view: ChildMissionView }) {
   const sum = (view.searches > 0 ? t.agent.timeline.childCardSum : t.agent.timeline.childCardSumNoSearch)
-    .replace('{tasks}', countLabel(view.tasks, t.agent.timeline.taskCountOne, t.agent.timeline.taskCount))
+    .replace('{tasks}', () => countLabel(view.tasks, t.agent.timeline.taskCountOne, t.agent.timeline.taskCount))
     .replace('{done}', String(view.done))
-    .replace('{searches}', searchCount(view.searches, t))
+    .replace('{searches}', () => searchCount(view.searches, t))
     + (view.failed > 0
       ? t.agent.timeline.childCardSumFailed.replace('{failed}', String(view.failed))
       : '')
@@ -202,7 +202,7 @@ function CardBody({ t, view }: { t: TranslationDictionary; view: ChildMissionVie
                 )}
                 {row.query && (
                   <span className="block truncate t-hint text-muted-foreground/70" title={row.query}>
-                    {t.agent.timeline.childSearch.replace('{query}', queryPreview(row.query))}
+                    {t.agent.timeline.childSearch.replace('{query}', () => queryPreview(row.query!))}
                   </span>
                 )}
               </span>
@@ -231,7 +231,7 @@ function CardBody({ t, view }: { t: TranslationDictionary; view: ChildMissionVie
         <span className="shrink-0">{sum}</span>
         {view.lastQuery && (
           <span className="min-w-0 truncate" title={view.lastQuery}>
-            {t.agent.timeline.childSearch.replace('{query}', queryPreview(view.lastQuery))}
+            {t.agent.timeline.childSearch.replace('{query}', () => queryPreview(view.lastQuery!))}
           </span>
         )}
       </p>

@@ -51,6 +51,15 @@ function render(
 }
 
 describe('EditorDocumentChangesSection', () => {
+  // The inspector is narrower than two labelled buttons side by side, and a
+  // button does not shrink: without wrapping, the first one leaves the card
+  // on the left and its label is cut off.
+  it('lets both button rows wrap inside the narrow inspector', () => {
+    const rows = render({}).match(/<div class="[^"]*justify-end[^"]*"/g) ?? []
+    expect(rows).toHaveLength(2)
+    for (const row of rows) expect(row).toContain('flex-wrap')
+  })
+
   // Die Karte, die den Uebernehmen-Knopf traegt, traegt auch dessen
   // Fehlschlag. Endete der Fehlerkanal (suggestionErrors) vor dem Panel,
   // verschwaende ein 409 auf suggestions:publish spurlos, der Nutzer

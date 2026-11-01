@@ -201,6 +201,22 @@ describe('collaboration caret label layout', () => {
     layout.pluginView.destroy?.()
   })
 
+  it('reads the layout only in the frame, never while the editor applies a change', () => {
+    const layout = presenceLayout('#2563EB')
+    for (let frame = 0; frame < 3; frame += 1) layout.runFrame()
+    const read = vi.spyOn(layout.caret, 'getBoundingClientRect')
+
+    // Reading the layout here would make the browser lay out the whole
+    // document once per change of another person.
+    layout.pluginView.update?.({ dom: layout.root } as never, {} as never)
+
+    expect(read).not.toHaveBeenCalled()
+    expect(layout.frames.size).toBe(1)
+    layout.runFrame()
+    expect(read).toHaveBeenCalled()
+    layout.pluginView.destroy?.()
+  })
+
   it('keeps dark label text on a bright user colour after every layout', () => {
     const layout = presenceLayout('#FACC15')
     expect(layout.label.style.getPropertyValue('color')).toBe('rgb(17, 24, 39)')

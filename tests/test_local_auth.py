@@ -229,21 +229,11 @@ def test_csrf_warning_uses_only_a_pseudonymous_session_reference(caplog):
     session_id = setup.cookies.get("inqtrix_session")
     assert session_id is not None and len(session_id) >= 32
 
-    inqtrix_logger = logging.getLogger("inqtrix")
-    inqtrix_logger.addHandler(caplog.handler)
-    previous_level = inqtrix_logger.level
-    previous_propagate = inqtrix_logger.propagate
-    inqtrix_logger.setLevel(logging.WARNING)
-    inqtrix_logger.propagate = False
-    try:
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
         rejected = client.post(
             "/v1/protected",
             headers={"X-CSRF-Token": "synthetic-invalid-csrf-token"},
         )
-    finally:
-        inqtrix_logger.removeHandler(caplog.handler)
-        inqtrix_logger.setLevel(previous_level)
-        inqtrix_logger.propagate = previous_propagate
 
     assert rejected.status_code == 403
     assert rejected.json()["detail"]["error"]["type"] == "csrf_error"

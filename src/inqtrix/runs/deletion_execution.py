@@ -9,6 +9,7 @@ attempt runs as the operation's creator -- the owner of the aggregate.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from inqtrix.auth.principal import Principal, UserContext
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
     )
     from inqtrix.services.asset_deletion_service import AssetDeletionService
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class FencedDeletionJobHandle(DeletionJobHandle):
@@ -100,6 +101,22 @@ class FencedDeletionJobHandle(DeletionJobHandle):
         )
 
 
+def operation_principal(
+    tenant_id: str, created_by_user_id: uuid.UUID | None
+) -> Principal:
+    """The principal a deletion operation runs as.
+
+    Its creator, or -- for an operation nobody created, such as an account
+    erasure provisioning started -- an anonymous owner of the tenant.
+    """
+    return Principal(
+        user_id=created_by_user_id,
+        kind="oidc_session" if created_by_user_id is not None else "anonymous",
+        tenant_id=tenant_id,
+        role="member" if created_by_user_id is not None else "owner",
+    )
+
+
 def execute_claimed_deletion(
     store: "PostgresDeletionOperationStore",
     service: "AssetDeletionService",
@@ -112,20 +129,7 @@ def execute_claimed_deletion(
     The returned handle says whether the terminal state landed.
     """
     handle = FencedDeletionJobHandle(store, claimed.operation_id, claimed.attempt)
-    principal = Principal(
-        user_id=claimed.created_by_user_id,
-        kind=(
-            "oidc_session"
-            if claimed.created_by_user_id is not None
-            else "anonymous"
-        ),
-        tenant_id=claimed.tenant_id,
-        role=(
-            "member"
-            if claimed.created_by_user_id is not None
-            else "owner"
-        ),
-    )
+    principal = operation_principal(claimed.tenant_id, claimed.created_by_user_id)
     visible_to = UserContext(
         principal=principal,
         workspace_ids=(

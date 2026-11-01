@@ -505,6 +505,7 @@ export function AgentWorkspace({
     runs: state.agentRuns,
     selectedSessionId: state.selectedAgentSessionId,
     sessionArtifacts: state.agentSessionArtifacts,
+    sessions: state.agentSessions,
     workspaceId,
   })
 

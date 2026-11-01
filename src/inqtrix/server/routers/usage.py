@@ -40,7 +40,7 @@ from inqtrix.usage.models import summarize_usage_cost, usage_cost_usd
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 MAX_WINDOW_SECONDS = 366 * 24 * 3600
 """Widest window a single query may span.

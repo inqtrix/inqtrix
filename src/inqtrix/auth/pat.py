@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.directory import UserDirectory
     from inqtrix.auth.permissions import AuditSink
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 PAT_PREFIX = "ipat_"
 
@@ -113,6 +113,10 @@ class MintedPat:
 
     record: PersonalAccessToken
     plaintext: str
+
+
+class PatTtlExceedsCap(Exception):
+    """A requested token lifetime beyond the deployment's longest one."""
 
 
 class PatLimitExceeded(Exception):
@@ -321,6 +325,18 @@ class PatVerifier:
             correct secret on a revoked/expired row). Garbage tokens
             never reach the audit table — they are attacker-controlled
             volume and stay at log level.
+        max_ttl_seconds: Longest life of a token, counted from its
+            creation and applied to tokens minted before the bound;
+            ``0`` switches it off. Only a gateway deployment sets it:
+            without SCIM nothing reports that a person left.
+        owner_inactive_seconds: A token lapses once its owner has not
+            started a browser session for this long; ``0`` switches it
+            off. The account itself stays enabled.
+        source_issuer: The issuer of the identity source; a token then
+            counts only when its owner is bound under it. ``None`` accepts
+            every issuer. Only a gateway deployment sets it: an account of
+            another issuer cannot sign in there, and provisioning never
+            reaches it.
     """
 
     def __init__(
@@ -330,6 +346,9 @@ class PatVerifier:
         pepper: str,
         user_lookup: "UserDirectory",
         audit: "AuditSink | None" = None,
+        max_ttl_seconds: float = 0,
+        owner_inactive_seconds: float = 0,
+        source_issuer: str | None = None,
     ) -> None:
         if not pepper.strip():
             raise ValueError(
@@ -339,6 +358,9 @@ class PatVerifier:
         self._pepper = pepper
         self._user_lookup = user_lookup
         self._audit = audit
+        self.max_ttl_seconds = max_ttl_seconds
+        self.owner_inactive_seconds = owner_inactive_seconds
+        self.source_issuer = source_issuer
 
     def bind_audit(self, audit: "AuditSink") -> None:
         """Bind the one canonical sink after composition is assembled."""
@@ -380,11 +402,26 @@ class PatVerifier:
         if record.expires_at is not None and record.expires_at <= now:
             await self._audit_rejection(record, "expired")
             raise self._unauthorized()
+        if (
+            self.max_ttl_seconds
+            and record.created_at + self.max_ttl_seconds <= now
+        ):
+            await self._audit_rejection(record, "ttl_cap")
+            raise self._unauthorized()
         user = await self._user_lookup.find_by_user_id(
             tenant_id=record.tenant_id, user_id=record.owner_user_id
         )
         if user is None or user.disabled_at is not None:
             await self._audit_rejection(record, "user_disabled")
+            raise self._unauthorized()
+        if self.source_issuer is not None and user.issuer != self.source_issuer:
+            await self._audit_rejection(record, "foreign_issuer")
+            raise self._unauthorized()
+        if (
+            self.owner_inactive_seconds
+            and (user.last_login_at or 0) + self.owner_inactive_seconds <= now
+        ):
+            await self._audit_rejection(record, "owner_inactive")
             raise self._unauthorized()
         try:
             touched = await self._store.touch_last_used(
@@ -473,6 +510,9 @@ class PatService:
         max_per_user: Active-token cap per owner (guardrail).
         default_ttl_days: Default lifetime for tokens created without
             an explicit expiry; ``0`` means non-expiring.
+        max_ttl_days: Longest lifetime of a new token: a token without
+            an expiry, or with a longer default, gets this one, and a
+            longer explicit expiry is refused; ``0`` switches it off.
     """
 
     def __init__(
@@ -483,6 +523,7 @@ class PatService:
         audit: "AuditSink | None" = None,
         max_per_user: int = 10,
         default_ttl_days: int = 0,
+        max_ttl_days: int = 0,
     ) -> None:
         if not pepper.strip():
             raise ValueError("PatService requires a non-empty pepper.")
@@ -491,6 +532,7 @@ class PatService:
         self._audit = audit
         self._max_per_user = max_per_user
         self._default_ttl_days = default_ttl_days
+        self.max_ttl_days = max_ttl_days
 
     def bind_audit(self, audit: "AuditSink") -> None:
         """Bind the one canonical sink after composition is assembled."""
@@ -516,7 +558,14 @@ class PatService:
                 guardrail: concurrent creates across replicas may
                 briefly overshoot, which is documented and acceptable
                 for a sprawl cap.
+            PatTtlExceedsCap: An explicit expiry beyond ``max_ttl_days``.
         """
+        if (
+            self.max_ttl_days
+            and expires_in_days is not None
+            and expires_in_days > self.max_ttl_days
+        ):
+            raise PatTtlExceedsCap(str(self.max_ttl_days))
         existing = await self._store.list_for_owner(
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
@@ -534,6 +583,8 @@ class PatService:
             if expires_in_days is not None
             else (self._default_ttl_days or None)
         )
+        if self.max_ttl_days and (ttl_days is None or ttl_days > self.max_ttl_days):
+            ttl_days = self.max_ttl_days
         token_id, secret = mint_pat_credentials()
         record = PersonalAccessToken(
             token_id=token_id,

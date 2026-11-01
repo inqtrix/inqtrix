@@ -41,6 +41,7 @@ from inqtrix.runs.deletion_operations import (
 )
 from inqtrix.services.request_parsing import (
     error_response,
+    workspace_id_for_write,
     workspace_id_from_request,
 )
 
@@ -118,6 +119,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
     router = APIRouter()
     principal_dep = container.principal_dependency
+    users = getattr(container.auth_provider, "users", None)
     user_context_dep = container.user_context_dependency
 
     # -- sections --------------------------------------------------------- #
@@ -138,7 +140,7 @@ def build_router(container: "AppContainer") -> APIRouter:
 
         sections = await service.ensure_default_sections(
             caller_user_id=_caller_user_id(principal),
-            workspace_id=workspace_id_from_request(req),
+            workspace_id=await workspace_id_for_write(req, principal, users),
         )
         return {"object": "list", "data": [_section_payload(s) for s in sections]}
 
@@ -152,7 +154,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         if not isinstance(body, dict) or not _require_numbers(body):
             return error_response(400, "Invalid body", "invalid_request_error")
         try:
-            workspace_id = workspace_id_from_request(req)
+            workspace_id = await workspace_id_for_write(req, principal, users)
             deletion_service.assert_target_allowed(
                 DeletionTargetKind.SECTION,
                 section_id,
@@ -222,7 +224,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         if not isinstance(section_id, str) or not section_id:
             return error_response(400, "section_id is required", "invalid_request_error")
         try:
-            workspace_id = workspace_id_from_request(req)
+            workspace_id = await workspace_id_for_write(req, principal, users)
             deletion_service.assert_target_allowed(
                 DeletionTargetKind.GROUP,
                 group_id,
@@ -235,6 +237,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id, visible_to=visible_to,
             )
+        except SectionNotFound:
+            return error_response(404, "Section not found", "not_found")
         except GroupNotFound:
             return error_response(404, "Group not found", "not_found")
         except DeletionOperationConflict:
@@ -430,7 +434,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "size_bytes must be a non-negative integer", "invalid_request_error"
             )
-        workspace_id = workspace_id_from_request(req)
+        workspace_id = await workspace_id_for_write(req, principal, users)
         try:
             deletion_service.assert_upload_allowed(
                 asset_id,
@@ -504,7 +508,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         if page_count is not None and not isinstance(page_count, int):
             return error_response(400, "page_count must be an integer or null", "invalid_request_error")
         try:
-            workspace_id = workspace_id_from_request(req)
+            workspace_id = await workspace_id_for_write(req, principal, users)
             deletion_service.assert_upload_allowed(
                 asset_id,
                 principal=principal,
@@ -544,6 +548,10 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "File was deleted and cannot be restored",
                 "asset_deletion_in_progress",
             )
+        except SectionNotFound:
+            return error_response(404, "Section not found", "not_found")
+        except GroupNotFound:
+            return error_response(404, "Group not found", "not_found")
         except AssetNotFound:
             return error_response(404, "Asset not found", "not_found")
         return _asset_detail_payload(asset)

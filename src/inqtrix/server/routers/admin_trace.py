@@ -34,7 +34,7 @@ from inqtrix.services.request_parsing import error_response
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 def _trace_ui_url(settings, html_path: str | None) -> str | None:

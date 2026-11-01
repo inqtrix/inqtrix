@@ -10,6 +10,7 @@ streaming rejection, and the capability manifest.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from dataclasses import replace
@@ -47,7 +48,7 @@ from inqtrix.settings import (
 )
 from inqtrix.source_authority import SourceScope
 
-from tests.contract._app import wait_for_run_status
+from tests.contract._app import parse_sse_frames, wait_for_run_status
 from tests.test_knowledge_engine import StubEmbeddings
 
 
@@ -599,6 +600,98 @@ def test_knowledge_mode_with_empty_store_says_no_evidence():
     assert response.status_code == 200
     content = response.json()["choices"][0]["message"]["content"]
     assert "keine relevanten" in content
+
+
+class NoEvidenceStubLLM(KnowledgeStubLLM):
+    """Every prompt gets the declared absence of evidence: the gate cannot
+    parse it and falls open, and the answer declares that no excerpt
+    answers the question."""
+
+    def complete_with_metadata(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        self.prompts.append(prompt)
+        self.kwargs.append(kwargs)
+        return LLMResponse(
+            content=(
+                "QUOTES:\nNONE\nANSWER:\nDie Auszüge beantworten die Frage nicht."
+            ),
+            prompt_tokens=42,
+            completion_tokens=11,
+            model="stub-answer-model",
+            finish_reason="stop",
+        )
+
+
+def test_native_run_without_fitting_evidence_completes_with_the_refusal():
+    client, _ = make_knowledge_client(llm=NoEvidenceStubLLM())
+    with client:
+        collection_id = _create_collection_with_document(client)
+        created = client.post(
+            "/v1/runs",
+            json={
+                "question": "Wer ist der Ansprechpartner im Vertrag?",
+                "mode": "knowledge",
+                "knowledge_filters": {"collection_ids": [collection_id]},
+            },
+        )
+        assert created.status_code == 202
+        run_id = created.json()["run_id"]
+        wait_for_run_status(client, run_id, "completed")
+
+        # The result route reads the stored receipt strictly.
+        result = client.get(f"/v1/runs/{run_id}/result")
+
+    assert result.status_code == 200
+    payload = result.json()
+    assert "keine relevanten" in payload["answer"]
+    assert payload["references"] == []
+    assert payload["knowledge_grounding"]["marker"] == (
+        "_knowledge_grounding_no_evidence"
+    )
+    assert "status" not in payload["knowledge_grounding"]
+
+
+def test_chat_without_fitting_evidence_answers_with_the_refusal():
+    client, _ = make_knowledge_client(llm=NoEvidenceStubLLM())
+    with client:
+        collection_id = _create_collection_with_document(client)
+        request = {
+            "messages": [
+                {"role": "user", "content": "Wer ist der Ansprechpartner im Vertrag?"}
+            ],
+            "mode": "knowledge",
+            "knowledge_filters": {"collection_ids": [collection_id]},
+        }
+        response = client.post(
+            "/v1/chat/completions", json={**request, "stream": False}
+        )
+        with client.stream(
+            "POST", "/v1/chat/completions", json={**request, "stream": True}
+        ) as streamed:
+            assert streamed.status_code == 200
+            body = streamed.read().decode("utf-8")
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert "keine relevanten" in choice["message"]["content"]
+    assert choice["finish_reason"] == "stop"
+    chunks = [
+        json.loads(data)
+        for _event, data in parse_sse_frames(body)
+        if data != "[DONE]"
+    ]
+    finish_reasons = [
+        chunk["choices"][0].get("finish_reason")
+        for chunk in chunks
+        if chunk.get("choices")
+    ]
+    assert "stop" in finish_reasons
+    assert "error" not in finish_reasons
+    streamed_text = "".join(
+        chunk["choices"][0].get("delta", {}).get("content") or ""
+        for chunk in chunks
+        if chunk.get("choices")
+    )
+    assert "keine relevanten" in streamed_text
 
 
 # ------------------------------------------------------------------ #

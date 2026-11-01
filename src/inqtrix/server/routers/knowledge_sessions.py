@@ -25,6 +25,7 @@ from inqtrix.project.knowledge_sessions_ports import (
 from inqtrix.runs.deletion_operations import DeletionOperationConflict
 from inqtrix.services.request_parsing import (
     error_response,
+    workspace_id_for_write,
     workspace_id_from_request,
 )
 
@@ -83,6 +84,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
     router = APIRouter()
     principal_dep = container.principal_dependency
+    users = getattr(container.auth_provider, "users", None)
     user_context_dep = container.user_context_dependency
 
     @router.get("/v1/knowledge-sessions")
@@ -117,7 +119,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 created_at=float(body["created_at"]),
                 updated_at=float(body["updated_at"]),
                 caller_user_id=_caller_user_id(principal),
-                workspace_id=workspace_id_from_request(req),
+                workspace_id=await workspace_id_for_write(req, principal, users),
                 visible_to=visible_to,
             )
         except KnowledgeSessionGroupNotFound:
@@ -172,7 +174,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 group_id=group_id,
                 created_at=float(body["created_at"]), updated_at=float(body["updated_at"]),
                 caller_user_id=_caller_user_id(principal),
-                workspace_id=workspace_id_from_request(req), visible_to=visible_to,
+                workspace_id=await workspace_id_for_write(req, principal, users), visible_to=visible_to,
             )
         except KnowledgeSessionGroupNotFound:
             return error_response(404, "Folder not found", "not_found")

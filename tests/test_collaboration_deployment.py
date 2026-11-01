@@ -69,7 +69,7 @@ def _node_collaboration_env_names() -> set[str]:
     )
     return set(
         re.findall(
-            r"INQTRIX_(?:API_INTERNAL_URL|COLLABORATION_[A-Z0-9_]+)",
+            r"INQTRIX_(?:API_INTERNAL_URL|LOG_LEVEL|COLLABORATION_[A-Z0-9_]+)",
             source,
         )
     )

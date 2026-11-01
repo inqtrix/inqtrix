@@ -30,6 +30,15 @@ class EditorGuestLinkRateLimited(PermissionError):
     """Password attempts for a token/source pair are temporarily blocked."""
 
 
+class EditorGuestLinkUnavailable(PermissionError):
+    """The link is live, but its document's owner is not an active account.
+
+    A guest link is access from outside that only an active owner manages:
+    while the owner is disabled, deprovisioned or being erased, the link
+    answers as currently unavailable, and it works again once the owner is.
+    """
+
+
 @dataclass(frozen=True)
 class EditorDocumentShareLink:
     id: uuid.UUID

@@ -391,7 +391,7 @@ export function AgentRunTurn({
           — the box may simply be wider than the bubble. */}
       <div className="flex min-w-0 flex-col items-end">
         <div className="mb-1 flex max-w-[min(72%,44rem)] flex-wrap items-center justify-end gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
-            <span>{t.chat.you}</span>
+            <span>{run.access?.mode === 'shared' ? t.sharing.owner : t.chat.you}</span>
             <span className="whitespace-nowrap tabular-nums">
               {formatMessageTimestamp(run.createdAt, locale)}
             </span>
@@ -430,7 +430,7 @@ export function AgentRunTurn({
                   )
                     .replace(
                       '{name}',
-                      artifactNames?.[run.canvasContextMeta.artifactId]
+                      () => artifactNames?.[run.canvasContextMeta!.artifactId]
                         || t.agent.canvas.views.document,
                     )}
                 </span>
@@ -647,7 +647,7 @@ export function AgentRunTurn({
                 : (run.error || run.errorCode)
                   ? t.agent.timeline.taskFailed.replace(
                     '{error}',
-                    agentRunFailureText(run.error ?? '', t, run.errorCode),
+                    () => agentRunFailureText(run.error ?? '', t, run.errorCode),
                   )
                   : t.agent.timeline.failure}
             </p>
@@ -656,7 +656,7 @@ export function AgentRunTurn({
                 {t.agent.timeline.terminalTaskSummary
                   .replace('{done}', String(done))
                   .replace('{total}', String(tasks.length))
-                  .replace('{failed}', countLabel(
+                  .replace('{failed}', () => countLabel(
                     failed.length,
                     t.agent.timeline.attentionCountOne,
                     t.agent.timeline.attentionCount,
@@ -883,7 +883,7 @@ function TodoReportAge({
   return (
     <span data-testid="agent-todo-reported-at">
       {' \u00b7 '}
-      {t.agent.timeline.todoReportedAgo.replace('{duration}', formatDuration(seconds))}
+      {t.agent.timeline.todoReportedAgo.replace('{duration}', () => formatDuration(seconds))}
     </span>
   )
 }
@@ -951,7 +951,7 @@ function RunCompletionRecap({
     recap.elapsedSeconds !== undefined
       ? t.agent.timeline.recapElapsed.replace(
         '{duration}',
-        formatDuration(recap.elapsedSeconds),
+        () => formatDuration(recap.elapsedSeconds!),
       )
       : '',
   ].filter(Boolean)
@@ -2147,7 +2147,7 @@ export function noticeDisplayText(
       return entry.status === 'degraded'
         ? t.agent.timeline.noticeCitationsDegraded.replace(
           '{labels}',
-          entry.detail ?? '',
+          () => entry.detail ?? '',
         )
         : t.agent.timeline.noticeCitationsRepaired
     case 'sufficiency_gap': {

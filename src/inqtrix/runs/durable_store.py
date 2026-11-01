@@ -42,7 +42,7 @@ from inqtrix.urls import sanitize_error
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 DEFAULT_TENANT = "default"
 

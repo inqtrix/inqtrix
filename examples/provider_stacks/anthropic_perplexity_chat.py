@@ -45,15 +45,13 @@ Required environment variables (in ``.env`` or process env):
 
 Optional (file logging, same as the sibling):
 
-- ``INQTRIX_LOG_ENABLED``, ``INQTRIX_LOG_LEVEL``, ``INQTRIX_LOG_CONSOLE``
-- ``OBSERVABILITY_PROFILE=forensic`` — structured lineage in the same log file;
-  pair with ``INQTRIX_LOG_LEVEL=DEBUG`` (see ``docs/observability/logging.md`` and
-  ``docs/observability/forensic-cookbook.md``).
+- ``INQTRIX_LOG_TARGET``, ``INQTRIX_LOG_LEVEL``, ``INQTRIX_LOG_FORMAT``
+- ``OBSERVABILITY_PROFILE=forensic`` — keeps lineage in the protected run audit
+  (see ``docs/observability/logging.md``).
 
-Recommendation: leave ``INQTRIX_LOG_CONSOLE`` unset (the default).
-WARNING+ records on stderr can otherwise collide with the live
-progress region and visually fragment the rendered frame. File-only
-logging via ``INQTRIX_LOG_ENABLED=true`` is safe.
+Recommendation: use ``INQTRIX_LOG_TARGET=file`` rather than ``console``.
+Log lines on the terminal can otherwise collide with the live
+progress region and visually fragment the rendered frame.
 
 Run with::
 
@@ -117,23 +115,21 @@ from rich.text import Text
 load_dotenv()
 
 # ── Logging ──────────────────────────────────────────────────────────
-# File-based logging with automatic secret redaction.  Disabled by
-# default — enable via environment variables to keep the terminal
-# clean (the chat loop already prints progress to stdout):
+# Logging with automatic secret redaction. Off by default — enable via
+# environment variables; prefer a file, because the chat loop already
+# prints progress to stdout:
 #
-#   INQTRIX_LOG_ENABLED=true   — write logs to logs/inqtrix_*.log
+#   INQTRIX_LOG_TARGET=file    — console, file (logs/inqtrix-script.log) or both
 #   INQTRIX_LOG_LEVEL=DEBUG    — DEBUG / INFO / WARNING (default: INFO)
-#   INQTRIX_LOG_CONSOLE=true   — also print WARNING+ to stderr
-#   OBSERVABILITY_PROFILE=forensic — lineage EVENT JSON in the same log file; requires
-#     INQTRIX_LOG_LEVEL=DEBUG. docs/observability/logging.md,
-#     docs/observability/forensic-cookbook.md
-_log_path = configure_logging(
-    enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
-    level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
-    console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
+#   INQTRIX_LOG_FORMAT=text    — json (default) or text
+#   See docs/observability/logging.md.
+# Examples keep the terminal for their own output: logs appear only when
+# INQTRIX_LOG_TARGET is set (console, file or both).
+_logging = configure_logging(
+    service="script", target=os.environ.get("INQTRIX_LOG_TARGET") or "none"
 )
-if _log_path:
-    print(f"Logging to {_log_path}")
+if _logging.file_path:
+    print(f"Logging to {_logging.file_path}")
 
 
 # Maximum number of past Q&A turns folded into the history string passed

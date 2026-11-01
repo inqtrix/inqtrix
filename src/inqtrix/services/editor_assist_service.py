@@ -43,7 +43,7 @@ from inqtrix.observability.context import with_feature
 from inqtrix.observability import semconv
 from inqtrix.observability.otel import operation_root_span
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 EDITOR_INSTRUCT_CONTEXT_FLOOR_TOKENS = 128_000
 """Assumed context floor for document-level instructions. Providers that

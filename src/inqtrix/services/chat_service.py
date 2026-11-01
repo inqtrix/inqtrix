@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from inqtrix.core.algorithms import AlgorithmRegistry
     from inqtrix.server.execution import ExecutionLanes
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 
@@ -146,6 +146,11 @@ class ChatService:
                     timeout=request_timeout_seconds(chat_agent_settings),
                 )
             except asyncio.TimeoutError:
+                log.warning(
+                    "Chat request timed out after %ds (mode=%s); the client gets 504.",
+                    int(request_timeout_seconds(chat_agent_settings)),
+                    resolved.mode,
+                )
                 return JSONResponse(
                     status_code=504,
                     content={"error": {

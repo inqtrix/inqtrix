@@ -8,12 +8,26 @@ from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:
-    from inqtrix.auth.directory import UserDirectory
+    from inqtrix.auth.directory import MirroredUser, UserDirectory
     from inqtrix.auth.permissions import AuthorizationService
     from inqtrix.auth.principal import Principal
     from inqtrix.core.results import RunRequest
     from inqtrix.services.knowledge_service import KnowledgeService
     from inqtrix.services.skill_service import SkillService
+
+
+def _may_continue_work(user: "MirroredUser | None") -> bool:
+    """Whether *user* may still carry a run or a reindex job.
+
+    An erasure lifts ``disabled_at`` because the deletion machine acts as the
+    owner of what it removes. That machine runs no run and no reindex job, so
+    here an account being erased counts like a disabled one.
+    """
+    return (
+        user is not None
+        and user.disabled_at is None
+        and user.erasure_operation_id is None
+    )
 
 
 class ExecutionDependencyAuthorizer:
@@ -58,7 +72,7 @@ class ExecutionDependencyAuthorizer:
                 tenant_id=principal.tenant_id,
                 user_id=principal.user_id,
             )
-            if user is None or user.disabled_at is not None:
+            if not _may_continue_work(user):
                 raise AuthorizationRevoked(
                     "effective actor is missing or disabled"
                 )
@@ -67,12 +81,19 @@ class ExecutionDependencyAuthorizer:
             if principal is not None
             else None
         )
-        collection_ids = [
-            str(item)
-            for item in (
-                request.knowledge_filters.get("collection_ids") or []
-            )
-        ]
+        # With knowledge off no tool reaches a collection, so what admission
+        # pinned is no dependency of whoever continues the run. A transcript
+        # naming those collections is still authorized when it is read.
+        collection_ids = (
+            [
+                str(item)
+                for item in (
+                    request.knowledge_filters.get("collection_ids") or []
+                )
+            ]
+            if request.source_policy.knowledge == "available"
+            else []
+        )
         if collection_ids:
             if self._knowledge_service is None:
                 raise AuthorizationRevoked(
@@ -147,7 +168,7 @@ class CollectionEditAuthorizer:
                 tenant_id=principal.tenant_id,
                 user_id=principal.user_id,
             )
-            if user is None or user.disabled_at is not None:
+            if not _may_continue_work(user):
                 raise AuthorizationRevoked(
                     "reindex requester is missing or disabled"
                 )

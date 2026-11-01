@@ -53,13 +53,14 @@ from inqtrix.services.agent_control_service import (
 )
 from inqtrix.services.request_parsing import (
     error_response,
+    workspace_id_for_write,
     workspace_id_from_request,
 )
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _RUN_NOT_FOUND = ("Run not found", "not_found")
 
@@ -74,6 +75,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     run_store = container.run_store
     principal_dep = container.principal_dependency
+    users = getattr(container.auth_provider, "users", None)
     user_context_dep = container.user_context_dependency
 
     async def _resolve_run(
@@ -786,7 +788,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "invalid_request_error",
             )
         try:
-            workspace_id = workspace_id_from_request(req, body)
+            workspace_id = await workspace_id_for_write(req, principal, users, body)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         caller_user_id = (

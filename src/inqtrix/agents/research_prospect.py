@@ -32,7 +32,7 @@ from inqtrix.agents.document_analysis import reading_blockers
 from inqtrix.agents.intake import assignment_needs_web
 from inqtrix.agents.phase_models import AssignmentProfile
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 REACHABLE = "reachable"
 """A re-read of the same document version can close the row (window rule)."""

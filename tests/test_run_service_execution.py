@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from inqtrix.core.results import AgentResult
+from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.services.run_service import execute_run_request
 
 
@@ -281,3 +285,139 @@ def test_agent_cancelled_exception_terminalizes_as_client_cancel() -> None:
 
     assert error_type == "client_requested_cancel"
     assert handle.calls == [("cancel", "client_requested_cancel")]
+
+
+# --------------------------------------------------------------------- #
+# One start and one end line per execution segment
+# --------------------------------------------------------------------- #
+
+
+def _segments(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if " segment " in record.getMessage()]
+
+
+def _run(handle, algorithm, *, mode: str = "research") -> None:
+    execute_run_request(
+        handle,
+        algorithm=algorithm,
+        run_request=SimpleNamespace(mode=mode),
+        resolved=SimpleNamespace(
+            providers=SimpleNamespace(),
+            strategies=SimpleNamespace(),
+            agent_settings=SimpleNamespace(),
+        ),
+        runtime=SimpleNamespace(
+            settings=SimpleNamespace(quota=SimpleNamespace(max_tokens_per_run=500))
+        ),
+        principal=None,
+    )
+
+
+class _RaisingAlgorithm:
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def run(self, _request, *, runtime, context) -> AgentResult:
+        del runtime, context
+        raise self._exc
+
+
+class _TerminalFailureAlgorithm:
+    def run(self, _request, *, runtime, context) -> AgentResult:
+        del runtime, context
+        return AgentResult(
+            answer="",
+            raw={
+                "answer": "",
+                "usage": {},
+                "result_state": {
+                    "_terminal_failure": {"type": "evidence_unavailable", "message": "zzmarker7"}
+                },
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("handle", "algorithm", "expected"),
+    [
+        (_Handle(), _Algorithm("token_budget_exceeded"), "status=failed, failure_code=token_budget_exceeded"),
+        (_Handle(cancelled=True), _Algorithm("token_budget_exceeded"), "status=cancelled"),
+        (_Handle(), _Algorithm("user_stopped"), "status=cancelled"),
+        (_CompletedHandle(total_elapsed=1.0), _CompletedAlgorithm(), "status=completed"),
+    ],
+    ids=["budget", "client-cancel", "other-cancel", "completed"],
+)
+def test_each_exit_writes_one_start_and_one_end_line(
+    caplog: pytest.LogCaptureFixture, handle, algorithm, expected: str
+) -> None:
+    with caplog.at_level(logging.INFO, logger="inqtrix"):
+        _run(handle, algorithm)
+
+    started, ended = _segments(caplog)
+    assert started == f"Run {handle.run_id} segment started (mode=research)."
+    assert ended.startswith(f"Run {handle.run_id} segment ended ({expected}, mode=research, seconds=")
+
+
+def test_a_parked_segment_ends_as_parked(caplog: pytest.LogCaptureFixture) -> None:
+    handle = _Handle()
+    handle.parked = True
+
+    with caplog.at_level(logging.INFO, logger="inqtrix"):
+        _run(handle, _Algorithm("user_stopped"))
+
+    started, ended = _segments(caplog)
+    assert "status=parked" in ended
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (RuntimeError("zzmarker7"), "status=failed, failure_code=server_error, error_type=RuntimeError"),
+        (None, "status=cancelled"),
+        (
+            AuthorizationRevoked("zzmarker7"),
+            "status=failed, failure_code=authorization_revoked, error_type=AuthorizationRevoked",
+        ),
+    ],
+    ids=["exception", "agent-cancelled", "authorization-revoked"],
+)
+def test_an_exception_ends_its_segment_by_its_class(
+    caplog: pytest.LogCaptureFixture, exc, expected: str
+) -> None:
+    from inqtrix.exceptions import AgentCancelled
+
+    raised = exc if exc is not None else AgentCancelled("stop")
+    with caplog.at_level(logging.INFO, logger="inqtrix"):
+        with pytest.raises(type(raised)):
+            _run(_Handle(), _RaisingAlgorithm(raised))
+
+    started, ended = _segments(caplog)
+    assert expected in ended
+    assert "zzmarker7" not in ended
+
+
+def test_a_terminal_failure_ends_its_segment_with_its_type(caplog: pytest.LogCaptureFixture) -> None:
+    from inqtrix.execution_failures import RunExecutionFailure
+
+    with caplog.at_level(logging.INFO, logger="inqtrix"):
+        with pytest.raises(RunExecutionFailure):
+            _run(_Handle(), _TerminalFailureAlgorithm())
+
+    started, ended = _segments(caplog)
+    assert "status=failed, failure_code=evidence_unavailable" in ended
+    assert "zzmarker7" not in ended
+
+
+def test_a_publication_failure_ends_its_segment_with_its_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from inqtrix.execution_failures import RunExecutionFailure
+
+    # An agent run without an answer publisher cannot publish its answer.
+    with caplog.at_level(logging.INFO, logger="inqtrix"):
+        with pytest.raises(RunExecutionFailure):
+            _run(_CompletedHandle(total_elapsed=1.0), _CompletedAlgorithm(), mode="agent_kernel")
+
+    started, ended = _segments(caplog)
+    assert started.endswith("segment started (mode=agent_kernel).")
+    assert "status=failed, failure_code=answer_publication_unavailable" in ended

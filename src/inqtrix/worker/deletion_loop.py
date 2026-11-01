@@ -6,6 +6,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
+from inqtrix.observability.context import bind_log_context, reset_log_context
 from inqtrix.runs.deletion_execution import execute_claimed_deletion
 from inqtrix.worker.loop import BaseWorkerLoop, _RECONCILE_MIN_AGE_SECONDS
 
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
     )
     from inqtrix.services.asset_deletion_service import AssetDeletionService
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class DeletionWorkerLoop(
@@ -72,6 +73,8 @@ class DeletionWorkerLoop(
     ) -> None:
         del cancel_event  # deletion is intentionally not reversible mid-saga
         old_message_acked = False
+        # Like the run and indexing workers: every line of this job names it.
+        log_tokens = bind_log_context(run_id=job.operation_id, tenant=job.tenant_id)
         try:
             handle = execute_claimed_deletion(self._store, self._service, claimed)
             if handle.terminal_landed:
@@ -94,3 +97,4 @@ class DeletionWorkerLoop(
             )
         finally:
             self._finish_active(job, allow_successor=old_message_acked)
+            reset_log_context(log_tokens)

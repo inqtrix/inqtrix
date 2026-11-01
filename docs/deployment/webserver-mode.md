@@ -19,7 +19,7 @@ server/routers/*          thin, one module per surface (chat, runs, knowledge, f
 
 `server/container.py:build_container` is the composition root — the single place where providers, strategies, settings, the algorithm registry, the auth provider, and the application services are assembled into one `AppContainer`. Services never read the environment (Constructor-First); the container hands them everything. `server/routes.py` is a thin registration facade kept for the legacy `register_routes(...)` signature; it builds the container and includes the split routers. `research/web_research.py` is the only module invoking `graph.run` for serving — tests monkeypatch `inqtrix.research.web_research.run_web_graph`.
 
-`create_app(*, settings=None, providers=None, strategies=None, auth_provider=None, object_store_impl=None)` is the single-stack factory (used by `python -m inqtrix`); `create_multi_stack_app(*, settings, stacks, default_stack)` mounts several `StackBundle`s in one process and adds `GET /v1/stacks` plus the per-request `body["stack"]` selector. Both call `build_auth_provider(settings)` and wire an ASGI lifespan that logs providers, security layers, and queue/concurrency configuration on startup (no silent fallbacks).
+`create_app(*, settings=None, providers=None, strategies=None, auth_provider=None, object_store_impl=None)` is the single-stack factory (used by `python -m inqtrix`); `create_multi_stack_app(*, settings, stacks, default_stack, auth_provider=None)` mounts several `StackBundle`s in one process and adds `GET /v1/stacks` plus the per-request `body["stack"]` selector. Both use a provider passed as `auth_provider` as it is and otherwise call `build_auth_provider(settings)`, which builds the provider of `INQTRIX_AUTH_MODE`; both wire an ASGI lifespan that logs providers, security layers, and queue/concurrency configuration on startup (no silent fallbacks). [Building the app yourself](#building-the-app-yourself) shows the order of a start.
 
 ## Endpoints
 
@@ -128,7 +128,11 @@ See [Knowledge engine](../architecture/knowledge-engine.md) for the data model, 
 These routes are wired with the project-persistence tier's private
 owner/workspace scoping. The volatile memory implementation is available for
 offline/tests, but the frontend treats the tier as durable only when the
-capability flag is true.
+capability flag is true. A `PUT` that names a parent the caller cannot see (the
+`folder_id` of an editor document, the `section_id` of an asset group or asset,
+the `group_id` of an asset or chat thread) answers 404 `not_found` and stores
+nothing, with the same body for an id of another person and for one that does
+not exist.
 
 ### Instance administration (session-admin gated)
 
@@ -136,23 +140,34 @@ capability flag is true.
 |---|---|---|
 | `/v1/admin/system/runtime` | GET | Sanitized runtime categories for the System settings page: storage, run queue/execution, file store, knowledge backends, API documentation state, and read-only reachability booleans for optional backing services. |
 
-### Auth (registered in the cookie-session modes, `INQTRIX_AUTH_MODE=oidc` and `local`)
+### Auth (registered in the cookie-session modes, `INQTRIX_AUTH_MODE=oidc`, `local` and `gateway`)
 
-[Auth modes](auth-modes.md) lists these routes per mode (login/callback, the `local` first-run and password routes, session, logout) alongside the mode each one belongs to.
+[Auth modes](auth-modes.md) lists these routes per mode (login/callback, the `local` first-run and password routes, the `gateway` session start, session, logout) alongside the mode each one belongs to.
 
 ### Test
 
 `POST /v1/test/run` exists only when `TESTING_MODE=true` (used by `inqtrix-parity`). Never enable in production.
 
-Registration is a composition decision, not a runtime fallback: `routes.py` includes the files router only when a `FileService` is wired (the default wiring always builds one), the knowledge and sources routers only when the knowledge engine is enabled, and the auth router only in the cookie-session modes (`oidc` and `local`). A disabled feature has no routes (404), keeping the historical surface untouched.
+Registration is a composition decision, not a runtime fallback: `routes.py` includes the files router only when a `FileService` is wired (the default wiring always builds one), the knowledge and sources routers only when the knowledge engine is enabled, and the auth router only in the cookie-session modes (`oidc`, `local` and `gateway`). A disabled feature has no routes (404), keeping the historical surface untouched.
 
 ## Authentication and TLS
 
 Every request resolves to a `Principal` through the active `AuthProvider`; `/health`, `/v1/models`, `/v1/capabilities`, and `/v1/stacks` stay open for probes and pre-credential discovery.
 
-`INQTRIX_AUTH_MODE` is `infer` (default), `none`, `apikey`, `oidc`, or `local`.
+`INQTRIX_AUTH_MODE` is `infer` (default), `none`, `apikey`, `oidc`, `local`, or `gateway`.
 
 See [Auth modes](auth-modes.md) for the full mode reference and the OIDC variable set, and [Security model](security-model.md) for TLS, CORS, and the startup banner. TLS: setting both `INQTRIX_SERVER_TLS_KEYFILE` and `INQTRIX_SERVER_TLS_CERTFILE` makes the example stack scripts bind HTTPS (partial configuration raises at startup); `python -m inqtrix` does not wire TLS into uvicorn — terminate TLS at a reverse proxy or run a stack script.
+
+## Building the app yourself
+
+`python -m inqtrix` is a short `main()` around `create_app` (`src/inqtrix/__main__.py`). An application that builds the server itself keeps its order:
+
+1. `configure_logging(service="api")` first, because `create_app` configures no logging ([Logging](../observability/logging.md)).
+2. `check_retired_settings()` from `inqtrix.settings`, which stops the start while a retired setting is set that must not stay, such as `FORWARDED_ALLOW_IPS` in mode `gateway`.
+3. `Settings()`, then `create_app(settings=..., auth_provider=...)` or `create_multi_stack_app(...)`. Without `auth_provider` both build the provider of `INQTRIX_AUTH_MODE`; a provider you pass is used as it is.
+4. `uvicorn.run(app, ...)` with `log_config=None`, so that uvicorn keeps the logging configuration, and `proxy_headers=False`, because Inqtrix reads `X-Forwarded-For` itself. `python -m inqtrix` also sets `timeout_keep_alive=300` and the WebSocket limits `ws_max_size` and `ws_max_queue` from the collaboration settings.
+
+How to pass a provider of your own is in [Writing a custom auth provider](../extending/auth-provider.md#inject-it). For mode `gateway` with a resolver of your own, [The library path](../extending/auth-provider.md#the-library-path) has a complete `main()` and lists the processes such a deployment needs besides this one.
 
 ## Modes and per-request overrides
 
@@ -222,7 +237,7 @@ alias.
 
 See [Runs API](../extending/runs-api.md) for payload schemas. With the in-memory store, terminal runs remain fetchable for `RUN_COMPLETED_TTL_SECONDS` (default 300); the Postgres backend makes records, events, and results durable.
 
-Native UI clients should send a stable, non-secret workspace namespace via the `X-Inqtrix-Workspace-Id` header or a top-level `workspace_id` on `POST /v1/runs`. When present, the server stores it on the run record, filters `GET /v1/runs`, and requires the same namespace on the per-run routes. It is a browser/project routing namespace, not an auth boundary; omitting it preserves the unscoped behaviour for scripts.
+Native UI clients should send a stable, non-secret workspace namespace via the `X-Inqtrix-Workspace-Id` header or a top-level `workspace_id` on `POST /v1/runs`. When present, the server stores it on the run record, filters `GET /v1/runs`, and requires the same namespace on the per-run routes. It is a browser/project routing namespace, not an auth boundary. Without it, a signed-in caller's run is stored in the caller's canonical project namespace, so a run a script starts appears in that person's run list, and `GET /v1/runs` without it lists the caller's runs of every namespace ([Build a UI on Inqtrix](../extending/ui.md#project-namespace)).
 
 `/v1/chat/completions` keeps the OpenAI-compatible SSE format (`stream=true`: progress chunks, `---` separator, answer chunks, `data: [DONE]`; `"include_progress": false` for answer-only). `"incognito": true` keeps the turn's content out of the traces whatever `INQTRIX_TRACE_CONTENT` says: no prompt, answer or tool payload reaches a span, while model, token usage, duration and codes are still recorded; only `true` or `false` is accepted. `POST /v1/runs` accepts the same flag for a `mode=knowledge` ask without `session_id`; such a run is also deleted `RUN_INCOGNITO_RETENTION_SECONDS` after it ended. The React Research Desk consumes the native run API instead — see [React UI](react-ui.md) for `VITE_INQTRIX_API_BASE_URL` and deployment topologies.
 
@@ -296,9 +311,11 @@ answered with HTTP 499 and the typed error `client_closed_request` — never
 delivered to the caller. The API's own uvicorn access log stays silent
 (uvicorn skips access logging for clients that are already gone); the web
 gateway's access log DOES record the 499 line for the aborted request. The greppable signals are
-the WARNING lines instead — "…nach Client-Disconnect abgebrochen…" on the
-API and "Client disconnected while awaiting the upstream response" on the
-web gateway. 499 is only used when the disconnect actually happened; a
+the API's WARNING lines "… cancelled after client disconnect …" (chat,
+editor suggestion and editor instruction) and the web gateway's INFO line
+"Client disconnected while awaiting the upstream response …"; on the gateway
+it is no warning, because the interface aborts outdated requests on its own.
+499 is only used when the disconnect actually happened; a
 cancellation raised without one stays an honest 502. The bundled web
 gateway propagates client aborts itself: when the browser closes the
 connection while the gateway is still waiting for the upstream response,
@@ -350,7 +367,8 @@ A missing or wrong Bearer header returns 401 with `WWW-Authenticate: Bearer`. `I
 
 ## Related docs
 
-- [Auth modes](auth-modes.md) — `none` | `apikey` | `oidc` in full, including the OIDC BFF variables.
+- [Auth modes](auth-modes.md): every mode (`none`, `apikey`, `local`, `oidc`, `gateway`) in full, including the OIDC BFF variables.
+- [Writing a custom auth provider](../extending/auth-provider.md): a provider of your own, or a resolver of your own for mode `gateway`.
 - [Knowledge engine](../architecture/knowledge-engine.md) — collections, ingestion, the gated answer path.
 - [Settings and environment](../configuration/settings-and-env.md) — every server/storage/queue variable with defaults.
 - [Retrieval profiles](../configuration/knowledge-profiles.md) — `knowledge_filters.profile` and the stage matrix.

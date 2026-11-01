@@ -31,7 +31,7 @@ from inqtrix.providers.base import (
 )
 from inqtrix.urls import sanitize_error
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _RETRYABLE_RERANK_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
 

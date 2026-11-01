@@ -19,7 +19,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from inqtrix.auth.permissions import SharePermission
+from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
 from inqtrix.auth.shares import ShareFacts
 
 if TYPE_CHECKING:
@@ -42,6 +42,10 @@ Auto, ``auto`` (default) follows the permission mode, ``never`` skips it
 across activated skills wins; the patch gate is never affected."""
 
 SKILL_INVOCATIONS = ("user_only", "model_allowed")
+"""Who may activate the skill: only the user (``/``-mention) or also the
+model (disclosure block + ``load_skill``). Shared-in skills are ALWAYS
+``user_only`` for the recipient — structural injection defense, enforced
+by :func:`model_may_activate`."""
 
 SKILL_ALLOWED_TOOLS = (
     "search_context",
@@ -60,9 +64,6 @@ SKILL_ALLOWED_TOOLS = (
 library editor mirrors this list). A name outside it would be a silent
 misconfiguration: the runtime union would restrict the run without any
 tool ever matching the typo."""
-"""Who may activate the skill: only the user (``/``-mention) or also the
-model (disclosure block + ``load_skill``). Shared-in skills are ALWAYS
-``user_only`` for the recipient — structural injection defense."""
 
 MAX_CLARIFICATION_POINTS = 5
 """Hard cap on declared clarification points per skill."""
@@ -150,6 +151,23 @@ class SkillRecord:
     revision: int = 1
     created_at: float = 0.0
     updated_at: float = 0.0
+
+
+def model_may_activate(record: SkillRecord, access: ResourceAccess) -> bool:
+    """Whether the MODEL may activate *record* on its own.
+
+    The kernel's skill catalog, ``load_skill`` and the resume re-arming
+    of a loaded skill all ask this one rule. Only a ``model_allowed``
+    skill the caller owns qualifies, or an ownerless one in the modes
+    without user accounts. A shared-in skill carries another user's
+    instructions: the recipient may attach it, the recipient's model may
+    not activate it. The access modes are an allow-list, so a mode added
+    later stays blocked until it is named here.
+    """
+    return record.invocation == "model_allowed" and access.mode in (
+        AccessMode.OWNER,
+        AccessMode.UNSCOPED,
+    )
 
 
 @runtime_checkable

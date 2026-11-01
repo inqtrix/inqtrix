@@ -87,12 +87,18 @@ export async function runVerification(
   }
 
   await writer.setStatus('running')
-  let executionStatus: RunStatus = blockedEngines.size > 0
-    ? 'blocked'
-    : 'passed'
-  for (const adapter of runnableAdapters) {
+  let failed = false
+  let interrupted = false
+  for (const [index, adapter] of runnableAdapters.entries()) {
+    // The adapters of one run reuse run-scoped names, and a red adapter
+    // leaves its open entries to this ledger: the next one starts only after
+    // they are cleaned, and a failed cleanup ends the run as cleanup_failed.
+    if (index > 0) {
+      const cleanup = await cleanupLedger.cleanupAll()
+      if (cleanup.some((record) => record.status === 'failed')) break
+    }
     if (context.abortSignal.aborted) {
-      executionStatus = 'interrupted'
+      interrupted = true
       break
     }
     const result = requireExplicitPassedScenarios(
@@ -100,13 +106,24 @@ export async function runVerification(
       await executeAdapter(adapter, context, cleanupLedger),
     )
     await writer.addAdapterResult(result)
-    if (result.status === 'passed') continue
-    executionStatus = result.status === 'interrupted' ? 'interrupted' : 'failed'
-    break
+    if (result.status === 'interrupted') {
+      interrupted = true
+      break
+    }
+    // A red adapter does not hide the ones after it.
+    if (result.status !== 'passed') failed = true
   }
 
   const cleanup = await cleanupLedger.cleanupAll()
   await writer.setCleanup(cleanup)
+  // A red adapter stays the verdict even when the run is interrupted later.
+  const executionStatus: RunStatus = failed
+    ? 'failed'
+    : interrupted
+      ? 'interrupted'
+      : blockedEngines.size > 0
+        ? 'blocked'
+        : 'passed'
   const status = cleanup.some((record) => record.status === 'failed')
     ? 'cleanup_failed'
     : executionStatus

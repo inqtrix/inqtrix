@@ -116,7 +116,7 @@ class CollectionPreflight(Protocol):
     ) -> list[Any]:
         ...
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 APPROVAL_DECIDED_EVENT = "inqtrix.agent.approval.decided"
 CLARIFICATION_ANSWERED_EVENT = "inqtrix.agent.clarification.answered"

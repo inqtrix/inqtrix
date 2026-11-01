@@ -19,12 +19,6 @@ def _warnings(caplog, text: str) -> list[logging.LogRecord]:
     return list(unique.values())
 
 
-def _capture_inqtrix(caplog) -> logging.Logger:
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    return logger
-
-
 def test_an_unpublished_policy_is_built_from_settings_and_says_so(monkeypatch, caplog):
     # Building the policy from the environment was silent: a process that
     # traced without publishing its composed policy captured content under
@@ -33,13 +27,9 @@ def test_an_unpublished_policy_is_built_from_settings_and_says_so(monkeypatch, c
     monkeypatch.setattr(content, "_active_policy", None)
     monkeypatch.setattr(content, "build_content_policy", lambda settings: built)
     monkeypatch.setattr("inqtrix.settings.Settings", lambda: object())
-    logger = _capture_inqtrix(caplog)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            assert content.active_content_policy() is built
-            assert content.active_content_policy() is built
-    finally:
-        logger.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        assert content.active_content_policy() is built
+        assert content.active_content_policy() is built
     assert len(_warnings(caplog, "No trace content policy was published")) == 1
 
 
@@ -52,14 +42,10 @@ def test_an_unserializable_payload_stays_valid_json_and_says_so(monkeypatch, cap
 
     monkeypatch.setattr(content, "_warned", set())
     policy = content.ContentCapturePolicy(configured_capture=True, max_attr_bytes=1000)
-    logger = _capture_inqtrix(caplog)
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            for _ in range(2):
-                clipped = policy.clip_payload({"value": Opaque()})
-                assert isinstance(json.loads(clipped.text), str)
-    finally:
-        logger.removeHandler(caplog.handler)
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        for _ in range(2):
+            clipped = policy.clip_payload({"value": Opaque()})
+            assert isinstance(json.loads(clipped.text), str)
     assert len(_warnings(caplog, "could not be serialized as JSON")) == 1
 
 

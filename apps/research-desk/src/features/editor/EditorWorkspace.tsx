@@ -237,6 +237,11 @@ import {
 } from './inspector/EditorInspector'
 import { EditorTopBarLayout } from './inspector/EditorTopBarLayout'
 import {
+  TemplateExportError,
+  templateExportErrorText,
+  templateExportNoticeText,
+} from './export/templateExportMessages'
+import {
   CollaborationActivationDialog,
   collaborationActivationConflictError,
   collaborationActivationFallbackError,
@@ -556,9 +561,8 @@ export default function EditorWorkspace({
     mentionEventVersion: collaboration.commentMentionEventVersion,
     workspaceId,
   })
-  const recoverySnapshotsRef = useRef(new Map<string, {
+  const recoverySnapshotsRef = useRef(new Map<string, RecoveryText & {
     commentDrafts: string[]
-    documentMarkdown: string
     generation: number
     locale: 'de' | 'en'
     title: string
@@ -581,14 +585,14 @@ export default function EditorWorkspace({
       recoverySnapshotsRef.current.delete(documentId)
       return
     }
-    const liveMarkdown = collaboration.hasUnconfirmedLocalChanges
-      ? activeEditor && !activeEditor.isDestroyed
-        ? serializeEditorMarkdown(activeEditor)
-        : activeDocument.contentMarkdown
-      : ''
+    const known = recoverySnapshotsRef.current.get(documentId)
+    const unconfirmed = collaboration.hasUnconfirmedLocalChanges
     recoverySnapshotsRef.current.set(documentId, {
       commentDrafts,
-      documentMarkdown: liveMarkdown,
+      documentMarkdown: unconfirmed ? known?.documentMarkdown || activeDocument.contentMarkdown : '',
+      editor: unconfirmed
+        ? activeEditor && !activeEditor.isDestroyed ? activeEditor : known?.editor ?? null
+        : null,
       generation,
       locale,
       title: activeDocument.title,
@@ -602,6 +606,9 @@ export default function EditorWorkspace({
     teamComments.drafts,
     workspaceId,
   ])
+  useEffect(() => {
+    if (activeEditor) trackRecoveryTextOfEditor(recoverySnapshotsRef.current, activeEditor)
+  }, [activeEditor])
   const consumeRecoveryCapture = useCallback<EditorRecoveryCaptureProvider>((
     documentId,
   ) => {
@@ -632,7 +639,7 @@ export default function EditorWorkspace({
       contentMarkdown: editorRecoveryMarkdown({
         commentDrafts: snapshot.commentDrafts,
         documentMarkdown: hasUnconfirmedDocumentChanges
-          ? snapshot.documentMarkdown
+          ? recoverySnapshotMarkdown(snapshot)
           : '',
         locale: snapshot.locale,
         title: snapshot.title,
@@ -759,17 +766,21 @@ export default function EditorWorkspace({
     () => filterInspectorChanges(collaborationSnapshot.changes, openChangeFilters),
     [collaborationSnapshot.changes, openChangeFilters],
   )
-  // The bound editor holds the live document even while it reconnects; the
-  // projection is older than what the editor shows then.
+  const collaborationSourceViewOpen = collaborationActive
+    && state.editorUi.viewMode === 'source'
   const collaborationSourceMarkdown = useMemo(
-    () => activeEditor && isCollaborationSurfaceBound(collaboration)
-      ? serializeEditorFinalProjectionMarkdown(activeEditor)
-      : activeDocument?.contentMarkdown ?? '',
+    () => collaborationSourceViewMarkdown({
+      bound: isCollaborationSurfaceBound(collaboration),
+      editor: activeEditor,
+      fallback: activeDocument?.contentMarkdown ?? '',
+      open: collaborationSourceViewOpen,
+    }),
     [
       activeDocument?.contentMarkdown,
       activeEditor,
       collaboration.liveDocumentReady,
       collaborationSnapshot,
+      collaborationSourceViewOpen,
     ],
   )
   const [isMobileTreeOpen, setIsMobileTreeOpen] = useState(false)
@@ -2134,7 +2145,7 @@ export default function EditorWorkspace({
                       />
                     </EditorDocumentSurfaceReadiness>
                   </div>
-                  {collaborationActive && state.editorUi.viewMode === 'source' ? (
+                  {collaborationSourceViewOpen ? (
                     <ScrollArea className="absolute inset-0 bg-background">
                       <pre
                         aria-label={copy.sourceEditor}
@@ -3119,7 +3130,7 @@ function EditorDocumentTreeItem({
   const ownerName = document.access?.owner?.name
     ?? (locale === 'de' ? 'Unbekannter Nutzer' : 'Unknown user')
   const shareDetails = t.sharing.sharedBy
-    .replace('{name}', ownerName)
+    .replace('{name}', () => ownerName)
     .concat(` · ${permission}`)
   // One grammar for every row: the leading icon says who is involved, the
   // trailing hover actions say what can be done — and the details action
@@ -3371,6 +3382,33 @@ export function editorRecoveryMarkdown({
 }
 
 /** A local recovery copy: why it exists, and the two decisions it offers. */
+/** What an export into a Word template wants the user to know. A menu is closed by then, so it has its own bar. */
+function EditorWordTemplateNotice({
+  copy,
+  messages,
+  onDismiss,
+}: {
+  copy: EditorCopy
+  messages: string[]
+  onDismiss: () => void
+}) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2 border-b border-warning/40 bg-warning-subtle px-3 py-2"
+      data-editor-word-template-notice
+      role="alert"
+    >
+      <AlertTriangle className="icon-sm shrink-0 text-warning" />
+      <div className="t-meta min-w-64 flex-1 text-foreground">
+        {messages.map((message) => <p key={message}>{message}</p>)}
+      </div>
+      <Button onClick={onDismiss} size="sm" type="button" variant="ghost">
+        {copy.exportTemplateNoticeDismiss}
+      </Button>
+    </div>
+  )
+}
+
 export function EditorRecoveryBar({
   locale,
   onDiscard,
@@ -3566,6 +3604,11 @@ export function EditorTopBar({
   const shareDialogRequestedRef = useRef(false)
   const [isExporting, setIsExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
+  const templateInputRef = useRef<HTMLInputElement | null>(null)
+  const [templateNotice, setTemplateNotice] = useState<{
+    documentId: string
+    messages: string[]
+  } | null>(null)
   const ownerControls = isOwnedEditorDocument(document)
   const { locale } = useLocale()
 
@@ -3606,6 +3649,33 @@ export function EditorTopBar({
     }
   }
 
+  async function handleExportWordTemplate(file: File) {
+    if (isExporting) return
+    setTemplateNotice(null)
+    setIsExporting(true)
+    try {
+      const { exportMarkdownToDocxTemplate } = await import('./export/docxTemplateExport')
+      const markdown = await onExportWordMarkdown()
+      const notices = await exportMarkdownToDocxTemplate(file, markdown, document.title, locale)
+      if (notices.length > 0) {
+        setTemplateNotice({
+          documentId: document.id,
+          messages: notices.map((notice) => templateExportNoticeText(notice, copy)),
+        })
+      }
+    } catch (error) {
+      setTemplateNotice({
+        documentId: document.id,
+        messages: [templateExportErrorText(error, copy)],
+      })
+      if (!(error instanceof TemplateExportError)) {
+        console.error('Inqtrix Word template export failed.', error)
+      }
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
   const provenanceLabel = document.sourceRunId
     ? document.source === 'agent-artifact'
       ? copy.importedFromAgent
@@ -3629,6 +3699,7 @@ export function EditorTopBar({
   const shareLabel = locale === 'de' ? 'Dokument teilen' : 'Share document'
 
   return (
+    <>
     <EditorTopBarLayout
       actions={(
         <>
@@ -3649,7 +3720,7 @@ export function EditorTopBar({
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="end"
-              className="w-56"
+              className="w-max min-w-56 max-w-80"
               onCloseAutoFocus={(event) => {
                 if (!shareDialogRequestedRef.current) return
                 shareDialogRequestedRef.current = false
@@ -3697,6 +3768,14 @@ export function EditorTopBar({
               >
                 <FileDown />
                 {exportError ?? copy.exportWord}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                data-editor-word-template-export
+                disabled={isExporting}
+                onSelect={() => templateInputRef.current?.click()}
+              >
+                <FileText />
+                {copy.exportWordTemplate}
               </DropdownMenuItem>
               {ownerControls ? (
                 <>
@@ -3771,14 +3850,14 @@ export function EditorTopBar({
                 {document.title}
               </button>
             )}
-            {isDirty ? (
+            {editorDocumentShowsUnsavedMarker({ canFlushForShare, isDirty }) ? (
               // role makes the label count: a bare span carries no name for
               // assistive technology, so "unsaved changes" existed only as a
               // coloured dot. status also announces the change when it appears.
               <span
                 className="size-1.5 shrink-0 rounded-full bg-brand"
                 role="status"
-                aria-label="Unsaved changes"
+                aria-label={copy.unsavedChanges}
               />
             ) : null}
           </div>
@@ -3811,10 +3890,97 @@ export function EditorTopBar({
         <EditorCommandToolbar
           editor={editor}
           isSource={viewMode === 'source' || writeMode === 'comment' || writeMode === 'view'}
+          redoLabel={copy.redo}
+          undoLabel={copy.undo}
         />
       )}
     />
+    <input
+      accept=".docx,.dotx"
+      aria-hidden="true"
+      className="hidden"
+      data-editor-word-template-input
+      onChange={(event) => {
+        const file = event.target.files?.[0]
+        event.target.value = ''
+        if (file) void handleExportWordTemplate(file)
+      }}
+      ref={templateInputRef}
+      tabIndex={-1}
+      type="file"
+    />
+    {templateNotice?.documentId === document.id ? (
+      <EditorWordTemplateNotice
+        copy={copy}
+        messages={templateNotice.messages}
+        onDismiss={() => setTemplateNotice(null)}
+      />
+    ) : null}
+    </>
   )
+}
+
+/** What the read-only source view of a collaboration document shows. The bound
+ * editor holds the live document even while it reconnects; the projection is
+ * older than what the editor shows then. Nothing else reads this, and it
+ * serializes the whole document on every change of it, so a closed view asks
+ * for nothing. */
+type RecoveryText = {
+  documentMarkdown: string
+  editor: Editor | null
+}
+
+/** The text of a recovery copy: the live document while its editor lives,
+ * otherwise the last text known. */
+export function recoverySnapshotMarkdown(snapshot: RecoveryText): string {
+  return snapshot.editor && !snapshot.editor.isDestroyed
+    ? serializeEditorMarkdown(snapshot.editor)
+    : snapshot.documentMarkdown
+}
+
+/** A recovery copy can outlive its editor, so its text is written out when the
+ * editor goes away, and not for every keystroke, which would serialize the
+ * whole document each time. The listener ends with the editor: the workspace
+ * unmounts before the editor it leaves behind is destroyed. */
+export function trackRecoveryTextOfEditor(
+  snapshots: ReadonlyMap<string, RecoveryText>,
+  editor: Editor,
+): void {
+  editor.on('destroy', () => {
+    for (const snapshot of snapshots.values()) {
+      if (snapshot.editor !== editor) continue
+      snapshot.documentMarkdown = serializeEditorMarkdown(editor)
+      snapshot.editor = null
+    }
+  })
+}
+
+export function collaborationSourceViewMarkdown({
+  bound,
+  editor,
+  fallback,
+  open,
+}: {
+  bound: boolean
+  editor: Editor | null
+  fallback: string
+  open: boolean
+}): string {
+  if (!open) return ''
+  return editor && bound ? serializeEditorFinalProjectionMarkdown(editor) : fallback
+}
+
+/** The dirty flag belongs to the project file. A server-synced desk saves each
+ * document on its own and never clears that flag, so there it says nothing
+ * about the open document. */
+export function editorDocumentShowsUnsavedMarker({
+  canFlushForShare,
+  isDirty,
+}: {
+  canFlushForShare: boolean
+  isDirty: boolean
+}): boolean {
+  return isDirty && !canFlushForShare
 }
 
 export function editorDocumentShareDisabled({
@@ -3838,9 +4004,13 @@ export function editorDocumentShareDisabled({
 function EditorCommandToolbar({
   editor,
   isSource,
+  redoLabel,
+  undoLabel,
 }: {
   editor: Editor | null
   isSource: boolean
+  redoLabel: string
+  undoLabel: string
 }) {
   const disabled = !editor || isSource
   const undoDisabled = disabled
@@ -3853,13 +4023,13 @@ function EditorCommandToolbar({
       <ToolbarButton
         disabled={undoDisabled}
         icon={Undo2}
-        label="Undo"
+        label={undoLabel}
         onClick={() => runEditorHistoryCommand(editor, 'undo')}
       />
       <ToolbarButton
         disabled={redoDisabled}
         icon={Redo2}
-        label="Redo"
+        label={redoLabel}
         onClick={() => runEditorHistoryCommand(editor, 'redo')}
       />
     </div>

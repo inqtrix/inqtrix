@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from inqtrix.capabilities import CapabilityContext, CapabilityRegistry
     from inqtrix.providers.base import LLMProvider
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _PROBE_SNIPPET_CHARS = 400 + len(PASSAGE_CUT_MARKER)
 """Longest excerpt in the analyst digest (knowledge passages, web

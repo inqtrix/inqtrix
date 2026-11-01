@@ -19,6 +19,11 @@ if [ "$INQTRIX_WEB_ADAPTER" != "nginx" ]; then
         "nginx image requires INQTRIX_WEB_ADAPTER=nginx; select compose.web-nginx.yaml exactly once" \
         || return 1
 fi
+if [ "${INQTRIX_AUTH_MODE:-}" = "gateway" ]; then
+    inqtrix_env_error \
+        "INQTRIX_AUTH_MODE=gateway runs only with the Python web adapter: nginx does not remove identity headers from untrusted peers" \
+        || return 1
+fi
 case "$INQTRIX_DIRECT_TLS" in
     false) ;;
     true)

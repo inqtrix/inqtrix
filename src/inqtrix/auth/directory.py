@@ -12,8 +12,22 @@ from __future__ import annotations
 
 import threading
 import uuid
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Mapping, Protocol
+
+from inqtrix.auth.credentials import LOCAL_ISSUER
+
+#: The tenant's deleted-account placeholder: the actor that REASSIGN rules
+#: point at. It is an ordinary ``users`` row so every foreign key and
+#: CHECK holds, but it is disabled from birth, has no credential, can never
+#: sign in, and the admin listing hides it. One per tenant, created on
+#: first use.
+DELETED_ACCOUNT_ISSUER = "inqtrix:system"
+
+#: Issuers that belong to Inqtrix itself. No external identity source may
+#: bind users under them: a gateway issuer named ``local`` would reach the
+#: password accounts, and one named like the system issuer the placeholder.
+RESERVED_ISSUERS: frozenset[str] = frozenset({LOCAL_ISSUER, DELETED_ACCOUNT_ISSUER})
 
 
 @dataclass(frozen=True)
@@ -42,31 +56,31 @@ class MirroredUser:
     # Last successful login (unix seconds); audit column for the admin list.
     last_login_at: float | None = None
     # The user's canonical project namespace (a ``ws_...`` string), adopted on
-    # first authenticated boot so the project follows the user across devices.
+    # first authenticated boot or claimed by the first write without a
+    # namespace, so the project follows the user across devices and clients.
     # Additive default ``None`` = not yet adopted (mirrors the disabled_at /
     # instance_role additive precedent).
     default_workspace_id: str | None = None
     # The deletion operation erasing this account; ``None`` unless an
     # administrator started its erasure (only the Postgres backend erases).
     erasure_operation_id: str | None = None
+    # Who disabled the account: ``admin`` or ``provisioning``. ``None`` while
+    # it is enabled, and for a disable from before the source was recorded,
+    # which counts as an administrator's.
+    disabled_source: str | None = None
+    # Provisioning state: the SCIM userName, the SCIM name object and the
+    # time the identity provider deleted the account (a tombstone). ``None``
+    # for every account provisioning never touched.
+    scim_user_name: str | None = None
+    scim_name: Mapping[str, str] | None = field(default=None, hash=False)
+    scim_deleted_at: float | None = None
+    # When the account came into being (unix seconds); ``None`` for records
+    # built before the field existed.
+    created_at: float | None = None
 
 
 class UserDirectory(Protocol):
     """Port for the local user mirror."""
-
-    async def record_login(
-        self,
-        *,
-        tenant_id: str,
-        issuer: str,
-        subject: str,
-        email: str,
-        email_verified: bool,
-        display_name: str | None,
-        canonical_user_id: uuid.UUID | None = None,
-    ) -> MirroredUser:
-        """Upsert and return one identity on successful login."""
-        ...
 
     async def find_user(
         self, *, tenant_id: str, issuer: str, subject: str
@@ -100,22 +114,13 @@ class UserDirectory(Protocol):
 
         Idempotent claim-on-first-use: if the user already has a
         ``default_workspace_id`` it is returned unchanged (``candidate`` is
-        ignored), so every device converges on the namespace adopted by the
-        first authenticated boot — the data follows the user. The write is
-        atomic (set-only-when-NULL) so concurrent first-logins cannot split the
-        namespace. Returns ``None`` only when the user row is absent (an
-        un-mirrored identity), so the caller falls back to the browser-local id.
+        ignored), so every device and client converges on the namespace of the
+        first authenticated boot or the first write without a namespace, and the
+        data follows the user. The write is atomic (set-only-when-NULL) so
+        concurrent first uses cannot split the namespace. Returns ``None`` only
+        when the user row is absent (an un-mirrored identity): a session start
+        then falls back to the browser-local id and a write keeps no namespace.
         """
-        ...
-
-    async def set_disabled(
-        self,
-        *,
-        tenant_id: str,
-        user_id: uuid.UUID,
-        disabled_at: float | None,
-    ) -> bool:
-        """Set/clear the mirror disable flag; ``True`` when a row changed."""
         ...
 
     async def list_users(
@@ -124,41 +129,17 @@ class UserDirectory(Protocol):
         """All mirrored identities in the tenant (admin listing)."""
         ...
 
-    async def count_admins(self, *, tenant_id: str) -> int:
-        """Active instance-admin count (the last-admin guard)."""
-        ...
-
-    async def promote_if_no_admin(
-        self, *, tenant_id: str, user_id: uuid.UUID
-    ) -> bool:
-        """Promote to admin iff no active admin exists (first-login owner)."""
-        ...
-
-    async def demote_if_not_last_admin(
-        self, *, tenant_id: str, user_id: uuid.UUID
-    ) -> bool:
-        """Demote to ``user`` atomically, guarding the last-admin invariant.
-
-        The check ("is this the last active admin?") and the write are ONE
-        operation so two concurrent demotions cannot both pass a stale count
-        and leave the instance with zero admins. Returns ``True`` when the
-        demotion was applied (including the no-op case where the target was
-        not an active admin), ``False`` ONLY when the target is the last
-        active admin (the caller maps that to 409) or the row is absent.
-        """
-        ...
-
-    async def disable_if_not_last_admin(
-        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float
-    ) -> bool:
-        """Set the disable flag atomically, guarding the last-admin invariant.
-
-        Same contract as :meth:`demote_if_not_last_admin`: ``True`` when the
-        flag was set (including disabling a non-admin), ``False`` only when
-        the target is the last active admin or the row is absent. The rest of
-        the cut-off cascade (sessions, PATs, the local credential) is left to
-        the admin router and runs only after this returns ``True``.
-        """
+    async def list_users_page(
+        self,
+        *,
+        tenant_id: str,
+        issuer: str,
+        user_name: str | None = None,
+        subject: str | None = None,
+        start_index: int = 1,
+        count: int = 100,
+    ) -> tuple[int, tuple["MirroredUser", ...]]:
+        """One page of the accounts provisioning sees, and their total."""
         ...
 
 
@@ -196,37 +177,35 @@ class MemoryUserDirectory:
         canonical_user_id: uuid.UUID | None = None,
     ) -> MirroredUser:
         import time
+        from dataclasses import replace
 
         with self._lock:
             key = (tenant_id, issuer, subject)
             existing = self.users.get(key)
-            user = MirroredUser(
-                user_id=(
-                    existing.user_id
-                    if existing is not None
-                    else (canonical_user_id or uuid.uuid4())
-                ),
-                issuer=issuer,
-                subject=subject,
-                email=email,
-                email_verified=email_verified,
-                display_name=display_name,
-                tenant_id=tenant_id,
-                # Preserve admin-managed state (disable + role) across logins;
-                # only profile fields and the login timestamp refresh.
-                disabled_at=(
-                    existing.disabled_at if existing is not None else None
-                ),
-                instance_role=(
-                    existing.instance_role if existing is not None else "user"
-                ),
-                last_login_at=time.time(),
-                # Preserve the adopted project namespace across logins (like
-                # disabled_at / instance_role) so re-login does not orphan data.
-                default_workspace_id=(
-                    existing.default_workspace_id if existing is not None else None
-                ),
-            )
+            if existing is not None:
+                # Only the profile and the login timestamp refresh; disable,
+                # role, project namespace and provisioning state stay as they
+                # are, so a re-login never orphans data or a SCIM binding.
+                user = replace(
+                    existing,
+                    email=email,
+                    email_verified=email_verified,
+                    display_name=display_name,
+                    last_login_at=time.time(),
+                )
+            else:
+                now = time.time()
+                user = MirroredUser(
+                    user_id=canonical_user_id or uuid.uuid4(),
+                    issuer=issuer,
+                    subject=subject,
+                    email=email,
+                    email_verified=email_verified,
+                    display_name=display_name,
+                    tenant_id=tenant_id,
+                    last_login_at=now,
+                    created_at=now,
+                )
             self.users[key] = user
             return user
 
@@ -283,9 +262,17 @@ class MemoryUserDirectory:
             return True
 
     async def set_disabled(
-        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float | None
+        self,
+        *,
+        tenant_id: str,
+        user_id: uuid.UUID,
+        disabled_at: float | None,
+        source: str | None = None,
     ) -> bool:
-        """Set/clear the soft-disable timestamp; ``True`` when a row changed."""
+        """Set/clear the soft-disable timestamp and who set it.
+
+        ``True`` when a row changed.
+        """
         from dataclasses import replace
 
         with self._lock:
@@ -295,7 +282,7 @@ class MemoryUserDirectory:
                 return False
             assert key is not None
             self.users[key] = replace(
-                existing, disabled_at=disabled_at
+                existing, disabled_at=disabled_at, disabled_source=source
             )
             return True
 
@@ -315,16 +302,61 @@ class MemoryUserDirectory:
                 )
             )
 
-    async def count_admins(self, *, tenant_id: str) -> int:
-        """Active instance-admins (the last-admin guard reads this)."""
+    async def list_users_page(
+        self,
+        *,
+        tenant_id: str,
+        issuer: str,
+        user_name: str | None = None,
+        subject: str | None = None,
+        start_index: int = 1,
+        count: int = 100,
+    ) -> tuple[int, tuple[MirroredUser, ...]]:
+        """One page of the accounts provisioning sees, and their total.
+
+        Accounts bound under *issuer*; tombstones and accounts being erased
+        never appear, disabled ones do. ``user_name`` matches without regard
+        to case, ``subject`` exactly; ``start_index`` counts from 1. Pages
+        follow the order in which the accounts were mirrored.
+        """
+        wanted = user_name.lower() if user_name is not None else None
         with self._lock:
-            return sum(
-                1
-                for u in self.users.values()
-                if u.tenant_id == tenant_id
-                and u.instance_role == "admin"
-                and u.disabled_at is None
-            )
+            matches = [
+                user
+                for user in self.users.values()
+                if user.tenant_id == tenant_id
+                and user.issuer == issuer
+                and user.scim_deleted_at is None
+                and user.erasure_operation_id is None
+                and (
+                    wanted is None
+                    or (user.scim_user_name or "").lower() == wanted
+                )
+                and (subject is None or user.subject == subject)
+            ]
+        offset = max(start_index, 1) - 1
+        return len(matches), tuple(matches[offset : offset + max(count, 0)])
+
+    def insert_user(self, user: MirroredUser) -> None:
+        """Mirror an account that provisioning created (no sign-in yet)."""
+        with self._lock:
+            key = (user.tenant_id, user.issuer, user.subject)
+            if key in self.users:
+                raise ValueError("this identity is already mirrored")
+            self.users[key] = user
+
+    def update_user(
+        self, *, tenant_id: str, user_id: uuid.UUID, **changes: object
+    ) -> MirroredUser:
+        """Replace fields of one mirrored account and return it."""
+        from dataclasses import replace
+
+        with self._lock:
+            key = self._key_for_user_id(tenant_id, user_id)
+            if key is None:
+                raise KeyError(user_id)
+            self.users[key] = replace(self.users[key], **changes)
+            return self.users[key]
 
     def active_admin_user_ids_nowait(
         self, tenant_id: str
@@ -352,89 +384,6 @@ class MemoryUserDirectory:
             key = self._key_for_user_id(tenant_id, user_id)
             user = self.users.get(key) if key is not None else None
             return user is not None and user.disabled_at is None
-
-    async def promote_if_no_admin(
-        self, *, tenant_id: str, user_id: uuid.UUID
-    ) -> bool:
-        """Promote this user to admin IFF no active admin exists yet.
-
-        The first-login-owner bootstrap, atomic under the lock: exactly
-        the first authenticated user in a fresh deployment becomes admin.
-        """
-        from dataclasses import replace
-
-        with self._lock:
-            has_admin = any(
-                u.instance_role == "admin" and u.disabled_at is None
-                for u in self.users.values()
-                if u.tenant_id == tenant_id
-            )
-            key = self._key_for_user_id(tenant_id, user_id)
-            existing = self.users.get(key) if key is not None else None
-            if has_admin or existing is None:
-                return False
-            assert key is not None
-            self.users[key] = replace(
-                existing, instance_role="admin"
-            )
-            return True
-
-    def _is_last_active_admin(
-        self, existing: MirroredUser, user_id: uuid.UUID
-    ) -> bool:
-        """Whether *existing* is an active admin with no other active admin.
-
-        Caller must hold ``self._lock``. The basis of the atomic last-admin
-        guards: if removing this user's active-admin status leaves none, the
-        guarded op refuses.
-        """
-        if existing.instance_role != "admin" or existing.disabled_at is not None:
-            return False
-        return not any(
-            u.tenant_id == existing.tenant_id
-            and u.instance_role == "admin"
-            and u.disabled_at is None
-            and u.user_id != user_id
-            for u in self.users.values()
-        )
-
-    async def demote_if_not_last_admin(
-        self, *, tenant_id: str, user_id: uuid.UUID
-    ) -> bool:
-        """Demote to ``user`` unless this is the last active admin (atomic)."""
-        from dataclasses import replace
-
-        with self._lock:
-            key = self._key_for_user_id(tenant_id, user_id)
-            existing = self.users.get(key) if key is not None else None
-            if existing is None:
-                return False
-            if self._is_last_active_admin(existing, user_id):
-                return False
-            assert key is not None
-            self.users[key] = replace(
-                existing, instance_role="user"
-            )
-            return True
-
-    async def disable_if_not_last_admin(
-        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float
-    ) -> bool:
-        """Set the disable flag unless this is the last active admin (atomic)."""
-        from dataclasses import replace
-
-        with self._lock:
-            key = self._key_for_user_id(tenant_id, user_id)
-            existing = self.users.get(key) if key is not None else None
-            if existing is None:
-                return False
-            if self._is_last_active_admin(existing, user_id):
-                return False
-            assert key is not None
-            self.users[key] = replace(
-                existing, disabled_at=disabled_at
-            )
-            return True
 
     async def find_user(
         self, *, tenant_id: str, issuer: str, subject: str

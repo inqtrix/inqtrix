@@ -458,16 +458,15 @@ def test_joining_two_sentences_of_the_passage_adds_no_new_sentence():
 
 
 def test_a_refused_new_sentence_is_logged_without_its_prose(caplog):
-    """The log is English and names labels and counts; the reviser's prose
-    stays out of it."""
+    """The log names the reason; the reviser's prose and what it got wrong
+    (figures, identifiers taken from the answer) stay out of it."""
     with caplog.at_level("WARNING", logger="inqtrix"):
         outcome(
             finding("A gilt [K12].", kind="evidence_error", basis_ids=["source:k16"]),
             "A gilt [K12].", "A gilt [K12]. Ergänzend regelt das Kapitel X.", references=SOURCES,
         )
     assert (
-        "segment_without_basis_label (1 new sentence segment(s) without one of: K16)"
-        in caplog.text,
+        "not applied: segment_without_basis_label." in caplog.text,
         "Ergänzend" in caplog.text,
     ) == (True, False)
 

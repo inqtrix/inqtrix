@@ -86,22 +86,9 @@ def test_missing_identifier_is_explicit_none():
 
 
 def test_empty_pepper_falls_back_with_one_warning(caplog):
-    inqtrix_logger = logging.getLogger("inqtrix")
-    inqtrix_logger.addHandler(caplog.handler)
-    previous_level = inqtrix_logger.level
-    previous_propagate = inqtrix_logger.propagate
-    inqtrix_logger.setLevel(logging.WARNING)
-    # Only the explicitly attached handler may capture: with propagation
-    # a second (root) capture would double-count the single emission.
-    inqtrix_logger.propagate = False
-    try:
-        with caplog.at_level(logging.WARNING, logger="inqtrix"):
-            assert configure_stable_pseudonyms("") is False
-            assert configure_stable_pseudonyms(None) is False
-    finally:
-        inqtrix_logger.removeHandler(caplog.handler)
-        inqtrix_logger.setLevel(previous_level)
-        inqtrix_logger.propagate = previous_propagate
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        assert configure_stable_pseudonyms("") is False
+        assert configure_stable_pseudonyms(None) is False
 
     warnings = [
         record

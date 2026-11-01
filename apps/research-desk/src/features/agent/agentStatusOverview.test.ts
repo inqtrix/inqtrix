@@ -8,6 +8,7 @@ import {
   buildAgentOverview,
   countAgentToolUse,
   defaultEngineMode,
+  effectiveAgentAutonomy,
   effectiveAgentDepth,
   type AgentOverviewSource,
 } from './agentStatusOverview'
@@ -27,6 +28,31 @@ describe('sourceAvailabilityFromOverviewSource', () => {
       tools: [{ id: 'knowledge.search', effect: 'read', read_only: true, idempotent: true }] as never,
     })).toEqual({ web: false, knowledge: true, knowledgeReason: null })
     expect(sourceAvailabilityFromOverviewSource(null)).toEqual({ web: false, knowledge: false, knowledgeReason: null })
+  })
+})
+
+describe('effectiveAgentAutonomy', () => {
+  const standardOnly = { autonomy_modes: ['strict', 'balanced'], default_autonomy: 'balanced' }
+
+  it('keeps a selection the server offers', () => {
+    expect(effectiveAgentAutonomy('strict', standardOnly)).toBe('strict')
+  })
+
+  it('takes the default for a selection the server stopped offering', () => {
+    expect(effectiveAgentAutonomy('autonomous', standardOnly)).toBe('balanced')
+  })
+
+  it('takes the default without a selection', () => {
+    expect(effectiveAgentAutonomy(null, { autonomy_modes: ['balanced'], default_autonomy: 'balanced' }))
+      .toBe('balanced')
+  })
+
+  it('keeps a selection while nothing says what the server offers', () => {
+    expect(effectiveAgentAutonomy('autonomous', undefined)).toBe('autonomous')
+  })
+
+  it('falls back to Standard when the server names no default', () => {
+    expect(effectiveAgentAutonomy(null, undefined)).toBe('balanced')
   })
 })
 

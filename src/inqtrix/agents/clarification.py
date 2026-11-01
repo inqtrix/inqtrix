@@ -37,7 +37,7 @@ from inqtrix.constants import CLARIFICATION_OPTION_LABEL_CHARS
 from inqtrix.core.results import HandoverClarification
 from inqtrix.i18n import t, t_count
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 MAX_QUESTIONS_PER_ROUND = 3
 """Hard cap of questions per gate round (one record, one interrupt)."""

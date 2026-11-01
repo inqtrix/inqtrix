@@ -290,6 +290,27 @@ describe('chatAttachmentsFromRefs', () => {
     expect(attachments[0].contentMarkdown).toContain('Then answer.')
     expect(attachments[0].contentMarkdown).not.toContain('{{context}}')
   })
+
+  it('hands document text with $ patterns to the rule as written', () => {
+    // A context pack carries the user's document. Display math lost a dollar
+    // sign ($$) and $& put the placeholder back into the text.
+    const text = 'Formel $$x^2$$ und Budget $& Plan'
+    const state = {
+      ...stateWith([{ ...makeAsset('f1', 'alpha'), extractedText: text }]),
+      chatRuleOrder: ['r1'],
+      chatRules: {
+        r1: makeRule('r1', 'cv', {
+          category: 'context',
+          contentMarkdown: 'Kontext:\n{{context}}',
+          linkedContextRefs: [{ fileId: 'f1', kind: 'file-asset' }],
+        }),
+      },
+    }
+
+    const attachments = chatAttachmentsFromRefs(state, [{ kind: 'chat-rule', ruleId: 'r1' }])
+
+    expect(attachments[0].contentMarkdown).toContain(text)
+  })
 })
 
 describe('attachmentContextReadiness', () => {

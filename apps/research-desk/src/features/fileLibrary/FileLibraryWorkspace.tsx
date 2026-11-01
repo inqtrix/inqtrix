@@ -169,7 +169,7 @@ function BandHeader({
       <span className="grid w-7 shrink-0 place-items-center">
         {onToggleSelectAll ? (
           <button
-            aria-label={t.fileLibrary.selectBand.replace('{title}', band.title)}
+            aria-label={t.fileLibrary.selectBand.replace('{title}', () => band.title)}
             aria-pressed={selectionState === 'all' ? true : selectionState === 'some' ? 'mixed' : false}
             className={cn(
               'grid size-5 place-items-center rounded-full border transition-all',

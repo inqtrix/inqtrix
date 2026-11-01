@@ -17,6 +17,9 @@ Precedence (highest wins):
 from __future__ import annotations
 
 import logging
+import os
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -60,7 +63,124 @@ _SETTINGS_MODEL_CONFIG = {
 }
 
 
-_log = logging.getLogger("inqtrix")
+_log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RetiredSetting:
+    """A deleted setting that may still be set in an environment.
+
+    ``outcome`` is ``warn`` as the rule; ``abort`` where silently ignoring
+    the value would undo a deliberate operator choice. ``abort_in_modes``
+    names the ``INQTRIX_AUTH_MODE`` values in which a ``warn`` entry stops the
+    start instead, because there the ignored value would sit at a trust
+    boundary. The report names the variable and its replacement, never the
+    value.
+    """
+
+    name: str
+    replacement: str
+    outcome: Literal["warn", "abort"] = "warn"
+    abort_in_modes: frozenset[str] = frozenset()
+
+
+RETIRED_SETTINGS: tuple[RetiredSetting, ...] = (
+    RetiredSetting(
+        "INQTRIX_LOG_ENABLED",
+        "INQTRIX_LOG_TARGET (console, file, both or none)",
+        "abort",
+    ),
+    RetiredSetting(
+        "INQTRIX_LOG_CONSOLE",
+        "INQTRIX_LOG_TARGET (console, file, both or none)",
+        "abort",
+    ),
+    RetiredSetting(
+        "INQTRIX_LOG_INCLUDE_WEB",
+        "INQTRIX_LOG_WEB_LEVEL (INFO, WARNING or ERROR)",
+        "abort",
+    ),
+    # uvicorn runs without proxy headers; Inqtrix reads X-Forwarded-For
+    # itself. In gateway mode the allow list would sit next to the identity
+    # boundary without any effect.
+    RetiredSetting(
+        "FORWARDED_ALLOW_IPS",
+        "INQTRIX_TRUSTED_PROXY_HOPS (Inqtrix reads X-Forwarded-For itself)",
+        "warn",
+        abort_in_modes=frozenset({"gateway"}),
+    ),
+)
+
+
+def check_retired_settings(
+    *, env_file: str | os.PathLike[str] | None = None
+) -> list[RetiredSetting]:
+    """Report every retired setting set in the environment or the dotenv file.
+
+    Called by each service ``main()`` right after logging is configured. A
+    ``warn`` entry is one WARNING line with the name and its replacement. An
+    ``abort`` entry, and a ``warn`` entry whose ``abort_in_modes`` contains the
+    configured ``INQTRIX_AUTH_MODE``, stops the start with a ``RuntimeError``
+    whose message names each such entry and its replacement; the process hook
+    shows that message in every log target. The mode is read like every
+    setting: the environment first, then the dotenv file. Values never appear.
+
+    Args:
+        env_file: The dotenv file to read. Default: the file the settings
+            classes read (``.env`` in the working directory).
+
+    Returns:
+        The ``warn`` entries that are set, for the status line.
+
+    Raises:
+        RuntimeError: When an ``abort`` entry is set.
+    """
+    if env_file is None:
+        env_file = _SETTINGS_MODEL_CONFIG["env_file"]
+    file_values: dict[str, str | None] = {}
+    if env_file is not None and Path(env_file).is_file():
+        from dotenv import dotenv_values
+
+        file_values = dict(dotenv_values(env_file))
+    file_names = {name.upper() for name in file_values}
+    environment = {name.upper() for name in os.environ}
+    auth_mode = _configured_auth_mode(file_values)
+    found = [
+        entry
+        for entry in RETIRED_SETTINGS
+        if entry.name in environment or entry.name in file_names
+    ]
+    aborts = [
+        entry
+        for entry in found
+        if entry.outcome == "abort" or auth_mode in entry.abort_in_modes
+    ]
+    for entry in found:
+        if entry not in aborts:
+            _log.warning(
+                "Retired setting %s is set and has no effect; use %s instead.",
+                entry.name,
+                entry.replacement,
+            )
+    if aborts:
+        raise RuntimeError(
+            " ".join(
+                f"Retired setting {entry.name} is set; use {entry.replacement} instead."
+                for entry in aborts
+            )
+            + " The service does not start until it is removed."
+        )
+    return [entry for entry in found if entry not in aborts]
+
+
+def _configured_auth_mode(file_values: dict[str, str | None]) -> str:
+    """``INQTRIX_AUTH_MODE`` as the settings read it, before they are built."""
+    for source in (os.environ, file_values):
+        for name, value in source.items():
+            if name.upper() == "INQTRIX_AUTH_MODE" and value is not None:
+                return value.strip().lower()
+    return ""
+
 
 class ModelSettings(BaseSettings):
     """Per-role model identifiers loaded from environment variables.
@@ -590,13 +710,13 @@ class AgentSettings(BaseSettings):
             "the compact INFO/DEBUG behavior, ``debug`` is reserved for "
             "future mid-level diagnostics, and ``forensic`` emits "
             "provider-neutral source, citation, claim, stop, and answer "
-            "lineage into the protected run audit. Ordinary logs receive "
-            "only its content-minimized operational projection; exact "
-            "queries, URLs, evidence, prompts, and provider prose stay out "
-            "of container/file logs."
+            "lineage into the protected run audit. The active span receives "
+            "only its content-minimized operational projection; logs never "
+            "carry these events, and exact queries, URLs, evidence, prompts, "
+            "and provider prose stay out of the trace."
         ),
     )
-    """Control protected audit detail and its content-minimized log projection."""
+    """Control protected audit detail and its content-minimized trace projection."""
 
     skip_search: bool = Field(
         False,
@@ -1566,7 +1686,7 @@ class AuthSettings(BaseSettings):
 
     model_config = _SETTINGS_MODEL_CONFIG
 
-    mode: Literal["infer", "none", "apikey", "oidc", "local"] = Field(
+    mode: Literal["infer", "none", "apikey", "oidc", "local", "gateway"] = Field(
         "infer",
         alias="INQTRIX_AUTH_MODE",
         description=(
@@ -1582,13 +1702,15 @@ class AuthSettings(BaseSettings):
             "its connection settings are rejected loudly at startup; "
             "``none`` "
             "with a configured key disables the gate deliberately and "
-            "logs a WARNING. This raw field never reports the ACTIVE "
+            "logs a WARNING. ``gateway`` takes the signed-in user from an "
+            "API gateway in front of Inqtrix (``INQTRIX_GATEWAY_*``). "
+            "This raw field never reports the ACTIVE "
             "mode — consult "
             ":func:`inqtrix.auth.principal.resolve_auth_mode` or the "
             "auth provider's ``mode`` property for that."
         ),
     )
-    """Authentication-mode selector. ``infer`` (the default) derives the mode for backwards compatibility: a non-empty ``INQTRIX_SERVER_API_KEY`` means ``apikey``, an empty one means ``none``. An explicit value wins over inference and survives settings serialization round-trips. ``apikey`` without a configured key and ``oidc`` without its connection settings are rejected loudly at startup; ``none`` with a configured key disables the gate deliberately and logs a WARNING. This raw field never reports the ACTIVE mode — consult :func:`inqtrix.auth.principal.resolve_auth_mode` or the auth provider's ``mode`` property for that."""
+    """Authentication-mode selector. ``infer`` (the default) derives the mode for backwards compatibility: a non-empty ``INQTRIX_SERVER_API_KEY`` means ``apikey``, an empty one means ``none``. An explicit value wins over inference and survives settings serialization round-trips. ``apikey`` without a configured key and ``oidc`` without its connection settings are rejected loudly at startup; ``none`` with a configured key disables the gate deliberately and logs a WARNING. ``gateway`` takes the signed-in user from an API gateway in front of Inqtrix (``INQTRIX_GATEWAY_*``). This raw field never reports the ACTIVE mode; consult :func:`inqtrix.auth.principal.resolve_auth_mode` or the auth provider's ``mode`` property for that."""
     oidc_issuer: str = Field(
         "",
         alias="INQTRIX_OIDC_ISSUER",
@@ -1720,7 +1842,10 @@ class AuthSettings(BaseSettings):
             "to the group allowlist: when non-empty, a login whose email "
             "domain is not listed is rejected (visible 403). A login "
             "without an email is rejected (fail-closed). Matched "
-            "case-insensitively."
+            "case-insensitively. In gateway mode only an address the "
+            "identity provider confirms counts; with "
+            "INQTRIX_OIDC_SKIP_EMAIL_VERIFIED the oidc mode checks an "
+            "unconfirmed address."
         ),
     )
     """Optional comma-separated email-domain allowlist (orthogonal to groups)."""
@@ -1761,7 +1886,9 @@ class AuthSettings(BaseSettings):
         description=(
             "Accept logins whose token lacks ``email_verified=true``. "
             "Required for Entra ID, which omits the claim entirely; "
-            "leave off for IdPs that emit it."
+            "leave off for IdPs that emit it. Such a login accepts no "
+            "workspace invitation, and with INQTRIX_REGISTRATION=invite "
+            "it creates no account. No effect in gateway mode."
         ),
     )
     """Accept logins without ``email_verified=true`` (Entra ID omits the claim)."""
@@ -1815,8 +1942,8 @@ class AuthSettings(BaseSettings):
         description=(
             "Server-side secret for CSRF-token derivation (OWASP "
             "signed double-submit: HMAC over the session id). "
-            "Required for ``INQTRIX_AUTH_MODE=oidc``; rotate to "
-            "invalidate outstanding CSRF tokens (sessions survive)."
+            "Required for the modes ``oidc``, ``local`` and ``gateway``; "
+            "rotate to invalidate outstanding CSRF tokens (sessions survive)."
         ),
     )
     """Server-side secret for CSRF-token derivation (signed double-submit). Required for mode ``oidc``."""
@@ -1826,8 +1953,9 @@ class AuthSettings(BaseSettings):
         ge=300,
         description=(
             "Absolute server-side session lifetime (default 8 hours). "
-            "Expired sessions resolve to 401 and the SPA re-runs the "
-            "login redirect; no silent refresh in this iteration."
+            "Expired sessions resolve to 401; the SPA then signs in "
+            "again (in gateway mode a new session starts from the "
+            "assertion); there is no silent refresh."
         ),
     )
     """Absolute server-side session lifetime in seconds (default 8 hours)."""
@@ -1836,7 +1964,8 @@ class AuthSettings(BaseSettings):
         alias="INQTRIX_PAT_PEPPER",
         description=(
             "Server-side secret mixed into the HMAC of every personal "
-            "access token. REQUIRED in oidc mode (fail-loud at "
+            "access token. REQUIRED in the modes oidc, local and gateway "
+            "(fail-loud at "
             "startup): without a pepper a database leak alone would "
             "let stolen hashes be brute-forced offline against short "
             "secrets. Rotating the pepper invalidates EVERY issued "
@@ -1844,7 +1973,7 @@ class AuthSettings(BaseSettings):
             "deliberate maintenance."
         ),
     )
-    """Server-side secret mixed into the HMAC of every personal access token. Required in oidc mode (fail-loud at startup); a database leak alone must not suffice to verify guesses against stolen hashes. Rotating the pepper invalidates every issued token at once — clients receive uniform 401s, so treat rotation as deliberate maintenance with re-issue."""
+    """Server-side secret mixed into the HMAC of every personal access token. Required in the modes oidc, local and gateway (fail-loud at startup); a database leak alone must not suffice to verify guesses against stolen hashes. Rotating the pepper invalidates every issued token at once; clients receive uniform 401s, so treat rotation as deliberate maintenance with re-issue."""
     pseudonym_pepper: str = Field(
         "",
         alias="INQTRIX_PSEUDONYM_PEPPER",
@@ -1855,12 +1984,13 @@ class AuthSettings(BaseSettings):
             "then carries ONE stable pseudonym across processes and "
             "restarts. Empty keeps the historical per-process references "
             "(a startup WARNING explains the degraded correlation). "
-            "REQUIRED in oidc mode (fail-loud at startup). Rotating the "
+            "REQUIRED in the modes oidc and gateway (fail-loud at startup). "
+            "Rotating the "
             "pepper deliberately breaks linkability with all previously "
             "written pseudonyms."
         ),
     )
-    """Instance-wide secret behind the stable subject pseudonyms in logs/traces/audit correlation. Shared by API server and workers; empty falls back to per-process references (WARNING at startup). Required in oidc mode; rotation deliberately breaks linkability with previously written pseudonyms."""
+    """Instance-wide secret behind the stable subject pseudonyms in logs/traces/audit correlation. Shared by API server and workers; empty falls back to per-process references (WARNING at startup). Required in the modes oidc and gateway; rotation deliberately breaks linkability with previously written pseudonyms."""
     pat_max_per_user: int = Field(
         10,
         alias="INQTRIX_PAT_MAX_PER_USER",
@@ -1890,18 +2020,21 @@ class AuthSettings(BaseSettings):
         "open",
         alias="INQTRIX_REGISTRATION",
         description=(
-            "Admission policy for FIRST-time OIDC logins. ``open`` "
-            "(default, the historical behaviour) admits every "
+            "Admission policy for FIRST-time OIDC and gateway logins. "
+            "``open`` (default, the historical behaviour) admits every "
             "IdP-authenticated user; ``invite`` admits unknown users "
-            "only when an open invitation matches their email and "
-            "rejects everyone else with 403 BEFORE any user record is "
-            "created. ``invite`` requires oidc mode AND the postgres "
-            "storage backend (memory invitations would evaporate on "
-            "restart and lock everyone out) — both contradictions "
-            "fail loudly at startup."
+            "only when an open invitation matches an email address the "
+            "identity provider confirms, and rejects everyone else with "
+            "403 BEFORE any user record is created. ``invite`` requires "
+            "the postgres storage backend "
+            "(memory invitations would evaporate on restart and lock "
+            "everyone out). In gateway mode it is a start error with "
+            "``INQTRIX_GATEWAY_ASSERTION=header`` (identity headers carry "
+            "no verified email) and with SCIM enabled (SCIM is then the "
+            "only way an account is created)."
         ),
     )
-    """Admission policy for first-time OIDC logins. ``open`` (default) keeps the historical admit-everyone behaviour; ``invite`` requires a matching open invitation for unknown users (403 otherwise, before any user record exists) and is only valid with oidc mode plus the postgres storage backend — both contradictions are rejected loudly at startup."""
+    """Admission policy for first-time OIDC and gateway logins. ``open`` (default) keeps the historical admit-everyone behaviour; ``invite`` requires a matching open invitation for a confirmed email address of unknown users (403 otherwise, before any user record exists) and the postgres storage backend. In gateway mode it is a start error with header assertions (no verified email) and with SCIM enabled (SCIM is then the only way an account is created)."""
     local_registration: Literal["closed", "open"] = Field(
         "closed",
         alias="INQTRIX_LOCAL_REGISTRATION",
@@ -1969,6 +2102,314 @@ class AuthSettings(BaseSettings):
         ),
     )
     """Trusted reverse-proxy hop count for resolving the client IP from the right of X-Forwarded-For (login throttle). 1 = one bundled proxy (default); 0 = direct exposure; N = exact chain length."""
+    gateway_assertion: Literal["", "jwt", "header"] = Field(
+        "",
+        alias="INQTRIX_GATEWAY_ASSERTION",
+        description=(
+            "How the API gateway in front of Inqtrix asserts the signed-in "
+            "user in ``INQTRIX_AUTH_MODE=gateway``: ``jwt`` (recommended) "
+            "is a signed user token in ``INQTRIX_GATEWAY_JWT_HEADER``; "
+            "``header`` are identity headers that count only with the "
+            "shared secret in ``INQTRIX_GATEWAY_PROOF_HEADER`` from a peer "
+            "in ``INQTRIX_GATEWAY_TRUSTED_PROXIES``. Required in gateway "
+            "mode unless a resolver of its own is configured, which leaves "
+            "it empty."
+        ),
+    )
+    """How the gateway asserts the user in gateway mode: ``jwt`` (signed user token, recommended) or ``header`` (identity headers with a shared-secret proof from a trusted peer). Required in gateway mode unless a resolver of its own is configured."""
+    gateway_jwt_header: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_JWT_HEADER",
+        description=(
+            "Request header that carries the raw user token, without a "
+            "``Bearer`` prefix, in gateway ``jwt`` mode. Never "
+            "``Authorization``, ``Cookie``, ``Host``, a hop-by-hop header, "
+            "an ``X-Forwarded-*`` header or a header the web gateway passes "
+            "on unchanged (``Origin``, ``X-CSRF-Token``, "
+            "``X-Inqtrix-Expected-User-Id``, ``X-Inqtrix-Workspace-Id``, "
+            "``X-Inqtrix-Guest-CSRF``)."
+        ),
+    )
+    """Header with the raw user token in gateway ``jwt`` mode; never Authorization, Cookie, Host, a hop-by-hop, an X-Forwarded-* or a header the web gateway passes on unchanged."""
+    gateway_jwt_issuer: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_JWT_ISSUER",
+        description=(
+            "Exact ``iss`` of the user tokens, compared byte for byte "
+            "including a trailing ``/``. It is also the issuer under which "
+            "gateway users are bound, so it is never ``local`` or "
+            "``inqtrix:system``. Required in gateway ``jwt`` mode."
+        ),
+    )
+    """Exact ``iss`` of the user tokens (byte for byte) and the issuer gateway users are bound under; never a reserved issuer. Required in gateway ``jwt`` mode."""
+    gateway_jwt_audience: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_JWT_AUDIENCE",
+        description=(
+            "Audience the user tokens must name in ``aud``. Required in "
+            "gateway ``jwt`` mode."
+        ),
+    )
+    """Audience the user tokens must name in ``aud``. Required in gateway ``jwt`` mode."""
+    gateway_jwt_user_scope: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_JWT_USER_SCOPE",
+        description=(
+            "One scope value, without spaces, that only a person's sign-in "
+            "receives (Entra: a delegated permission of the Inqtrix API; "
+            "Keycloak: a client scope on the sign-in client only). A "
+            "validly signed token without it, such as a managed-identity or "
+            "client-credentials token, creates neither account nor session. "
+            "Required in gateway ``jwt`` mode."
+        ),
+    )
+    """Scope that only a person's sign-in receives; a signed token without it (managed identity, client credentials) creates neither account nor session. Required in gateway ``jwt`` mode."""
+    gateway_jwks_url: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_JWKS_URL",
+        description=(
+            "JWKS endpoint with the token signing keys. Set exactly one of "
+            "this and ``INQTRIX_GATEWAY_JWT_PUBLIC_KEY_FILE`` in gateway "
+            "``jwt`` mode."
+        ),
+    )
+    """JWKS endpoint with the signing keys; exactly one of this and the key file in gateway ``jwt`` mode."""
+    gateway_jwt_public_key_file: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_JWT_PUBLIC_KEY_FILE",
+        description=(
+            "Path of a JWK Set file with the token signing keys, read at "
+            "start (a key rotation is a restart). Set exactly one of this "
+            "and ``INQTRIX_GATEWAY_JWKS_URL`` in gateway ``jwt`` mode."
+        ),
+    )
+    """JWK Set file with the signing keys, read at start; exactly one of this and the JWKS URL in gateway ``jwt`` mode."""
+    gateway_ca_cert: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_CA_CERT",
+        description=(
+            "CA bundle for fetching ``INQTRIX_GATEWAY_JWKS_URL``; empty "
+            "uses the system trust store."
+        ),
+    )
+    """CA bundle for fetching the JWKS URL; empty uses the system trust store."""
+    gateway_jwt_algorithms: str = Field(
+        "RS256,ES256",
+        alias="INQTRIX_GATEWAY_JWT_ALGORITHMS",
+        description=(
+            "Comma-separated signature algorithms the user tokens may use: "
+            "a subset of RS256, RS384, RS512, PS256, PS384, PS512, ES256 "
+            "and ES384. ``none`` and the HMAC algorithms are rejected at "
+            "start."
+        ),
+    )
+    """Allowed token signature algorithms (asymmetric only; ``none`` and HMAC are start errors). Default RS256,ES256."""
+    gateway_jwt_leeway_seconds: int = Field(
+        30,
+        alias="INQTRIX_GATEWAY_JWT_LEEWAY_SECONDS",
+        ge=0,
+        le=120,
+        description=(
+            "Clock tolerance in seconds for ``exp``, ``nbf`` and ``iat`` of the user "
+            "tokens, from 0 to 120."
+        ),
+    )
+    """Clock tolerance for ``exp``, ``nbf`` and ``iat`` in seconds (0 to 120, default 30)."""
+    gateway_subject_claim: str = Field(
+        "sub",
+        alias="INQTRIX_GATEWAY_SUBJECT_CLAIM",
+        description=(
+            "Claim with the user's immutable id (Entra: ``oid``). Never the "
+            "email claim and never ``email``, ``upn``, "
+            "``preferred_username`` or ``unique_name``, which can change or "
+            "be given to someone else."
+        ),
+    )
+    """Claim with the user's immutable id (default ``sub``; Entra ``oid``); never an email-, UPN- or username-like claim."""
+    gateway_issuer_key: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_ISSUER_KEY",
+        description=(
+            "Issuer under which header-asserted users are bound, for "
+            "example ``gateway:sso``. Required in gateway ``header`` mode "
+            "and with a resolver of its own; never ``local`` or "
+            "``inqtrix:system``."
+        ),
+    )
+    """Issuer header-asserted users are bound under (for example ``gateway:sso``). Required in gateway ``header`` mode and with a resolver of its own."""
+    gateway_subject_header: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_SUBJECT_HEADER",
+        description=(
+            "Header with the user's stable id in gateway ``header`` mode. "
+            "It is the identity, so it is never the email header."
+        ),
+    )
+    """Header with the user's stable id in gateway ``header`` mode; never the email header."""
+    gateway_email_header: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_EMAIL_HEADER",
+        description=(
+            "Header with the user's email in gateway ``header`` mode: "
+            "profile data, never identity. At least one of the email and "
+            "name headers is required so admins and the share search can "
+            "find the person."
+        ),
+    )
+    """Header with the user's email in gateway ``header`` mode (profile data only); at least one of the email and name headers is required."""
+    gateway_name_header: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_NAME_HEADER",
+        description=(
+            "Header with the user's display name in gateway ``header`` "
+            "mode. At least one of the email and name headers is required."
+        ),
+    )
+    """Header with the user's display name in gateway ``header`` mode; at least one of the email and name headers is required."""
+    gateway_groups_header: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_GROUPS_HEADER",
+        description=(
+            "Header with the user's groups in gateway ``header`` mode, used "
+            "for admission only. Groups from headers never grant admin "
+            "rights."
+        ),
+    )
+    """Header with the user's groups in gateway ``header`` mode, for admission only; never admin rights."""
+    gateway_header_decoding: Literal["none", "percent"] = Field(
+        "none",
+        alias="INQTRIX_GATEWAY_HEADER_DECODING",
+        description=(
+            "``percent`` decodes percent-encoded name and group headers; "
+            "``none`` (default) takes them as sent."
+        ),
+    )
+    """``percent`` decodes percent-encoded name and group headers; ``none`` (default) takes them as sent."""
+    gateway_proof_header: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_PROOF_HEADER",
+        description=(
+            "Header that carries ``INQTRIX_GATEWAY_SHARED_SECRET`` as proof "
+            "that the identity headers come from the gateway. Required in "
+            "gateway ``header`` mode and with a resolver of its own."
+        ),
+    )
+    """Header carrying the shared secret as proof of origin. Required in gateway ``header`` mode and with a resolver of its own."""
+    gateway_shared_secret: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_SHARED_SECRET",
+        description=(
+            "Secret of at least 32 characters that the gateway sends in "
+            "``INQTRIX_GATEWAY_PROOF_HEADER``; compared in constant time. "
+            "Required in gateway ``header`` mode and with a resolver of its own."
+        ),
+    )
+    """Secret (at least 32 characters) the gateway sends in the proof header. Required in gateway ``header`` mode and with a resolver of its own."""
+    gateway_trusted_proxies: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_TRUSTED_PROXIES",
+        description=(
+            "Comma-separated CIDR networks of the peers that may hand this "
+            "process identity headers: the API gateway for the web gateway, "
+            "the web gateway for the API server. Required in gateway "
+            "``header`` mode and with a resolver of its own; ``0.0.0.0/0`` "
+            "and ``::/0`` are rejected."
+        ),
+    )
+    """CIDR networks of the peers allowed to send identity headers to this process; required in ``header`` mode and with a resolver of its own, never all networks."""
+    gateway_resolver: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_RESOLVER",
+        description=(
+            "Import path ``module:Class`` of a resolver of its own in gateway "
+            "mode, loaded once at start and built without arguments; the "
+            "module comes from PYTHONPATH, for example a mounted folder. It "
+            "replaces INQTRIX_GATEWAY_ASSERTION."
+        ),
+    )
+    """Import path ``module:Class`` of a resolver of its own; replaces ``INQTRIX_GATEWAY_ASSERTION``."""
+    gateway_resolver_headers: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_RESOLVER_HEADERS",
+        description=(
+            "Comma-separated names of the headers a resolver of its own "
+            "reads in gateway mode. The web gateway strips them from "
+            "untrusted peers, and the API server refuses to start when the "
+            "resolver declares a header this list does not name."
+        ),
+    )
+    """Headers a resolver of its own reads; the web gateway strips them from untrusted peers."""
+    gateway_logout_url: str = Field(
+        "",
+        alias="INQTRIX_GATEWAY_LOGOUT_URL",
+        description=(
+            "Where the browser goes after signing out in gateway mode, "
+            "usually the gateway's own sign-out. Empty logs a WARNING at "
+            "start."
+        ),
+    )
+    """Sign-out target in gateway mode (usually the gateway's sign-out); empty logs a WARNING at start."""
+    gateway_first_user_owner: bool = Field(
+        False,
+        alias="INQTRIX_GATEWAY_FIRST_USER_OWNER",
+        description=(
+            "Make the first person who signs in the instance owner, but "
+            "only while no active admin of the gateway's identity source "
+            "exists. Off by default."
+        ),
+    )
+    """First person to sign in becomes owner while the gateway's identity source has no active admin. Off by default."""
+    gateway_pat_max_ttl_days: int = Field(
+        90,
+        alias="INQTRIX_GATEWAY_PAT_MAX_TTL_DAYS",
+        ge=0,
+        description=(
+            "Upper bound in days for every personal access token in gateway "
+            "mode, existing ones included; 0 removes the bound. Without "
+            "SCIM this and ``INQTRIX_GATEWAY_PAT_INACTIVE_DAYS`` cannot "
+            "both be 0."
+        ),
+    )
+    """Upper bound in days for every personal access token in gateway mode (default 90; 0 = none). Without SCIM, not both PAT bounds may be 0."""
+    gateway_pat_inactive_days: int = Field(
+        0,
+        alias="INQTRIX_GATEWAY_PAT_INACTIVE_DAYS",
+        ge=0,
+        description=(
+            "A personal access token counts only while its owner started a "
+            "gateway session within this many days; 0 (default) turns the "
+            "check off."
+        ),
+    )
+    """A personal access token counts only if its owner started a gateway session within this many days (default 0 = off)."""
+    scim_enabled: bool = Field(
+        False,
+        alias="INQTRIX_SCIM_ENABLED",
+        description=(
+            "Serve the SCIM 2.0 Users endpoints so the identity system "
+            "creates, deactivates and removes users. Only in gateway mode; "
+            "SCIM is then the only way an account is created."
+        ),
+    )
+    """Serve the SCIM 2.0 Users endpoints. Only in gateway mode, and then the only way an account is created."""
+    scim_token: str = Field(
+        "",
+        alias="INQTRIX_SCIM_TOKEN",
+        description=(
+            "Bearer token of the SCIM client, at least 32 characters."
+        ),
+    )
+    """Bearer token of the SCIM client (at least 32 characters)."""
+    scim_delete_action: Literal["disable", "erase"] = Field(
+        "disable",
+        alias="INQTRIX_SCIM_DELETE_ACTION",
+        description=(
+            "What a SCIM DELETE does: ``disable`` (default) deactivates the "
+            "account and keeps a tombstone; ``erase`` also starts the "
+            "account erasure."
+        ),
+    )
+    """SCIM DELETE: ``disable`` (default) deactivates with a tombstone; ``erase`` also starts the account erasure."""
 
 
 class KnowledgeSettings(BaseSettings):
@@ -2547,7 +2988,7 @@ class QuotaSettings(BaseSettings):
     means UNLIMITED for that field — so the all-zero default leaves
     every deployment byte-identical until an operator sets real
     numbers. Quotas apply ONLY when ``enabled`` and the active auth mode
-    is one of the cookie-session modes (``oidc``/``local``); the
+    is one of the cookie-session modes (``oidc``, ``local``, ``gateway``); the
     single-operator anonymous/static principals (``none``/``apikey``) are
     never metered.
     """
@@ -2560,12 +3001,12 @@ class QuotaSettings(BaseSettings):
         description=(
             "Master switch for per-user usage quotas. Off by default. "
             "Even when on, quotas bind only in the cookie-session modes "
-            "(``oidc``/``local``) — the single-operator "
+            "(``oidc``, ``local``, ``gateway``); the single-operator "
             "``none``/``apikey`` modes are never metered. The capability "
             "manifest advertises ``features.quota`` accordingly."
         ),
     )
-    """Master switch for per-user usage quotas. Off by default; binds only in the cookie-session modes (oidc/local)."""
+    """Master switch for per-user usage quotas. Off by default; binds only in the cookie-session modes (oidc, local, gateway)."""
 
     runs_default: int = Field(
         0,
@@ -2987,7 +3428,7 @@ class SharingSettings(BaseSettings):
             "revokes pending and accepted shares. Startup reconciles existing "
             "shares before readiness. Disabling the setting does not restore "
             "revoked shares. Default false keeps sharing tenant-wide. Only "
-            "meaningful in the cookie-session modes (oidc/local) that "
+            "meaningful in the cookie-session modes (oidc, local, gateway) that "
             "mount the sharing surface; the single-operator none/apikey modes "
             "never mount it."
         ),
@@ -3195,7 +3636,7 @@ class CollaborationSettings(BaseSettings):
     )
     """Instance-fencing renewal interval in seconds. Default ``5`` and always lower than ``instance_lease_seconds``."""
     provider_flush_ms: int = Field(
-        50,
+        10,
         alias="INQTRIX_COLLABORATION_PROVIDER_FLUSH_MS",
         ge=10,
         le=1000,
@@ -3204,7 +3645,7 @@ class CollaborationSettings(BaseSettings):
             "returned by the session API."
         ),
     )
-    """Maximum browser-side update batching delay in milliseconds. Default ``50``. Returned by the session API."""
+    """Maximum browser-side update batching delay in milliseconds. Default ``10``. Returned by the session API."""
     snapshot_idle_seconds: int = Field(
         5,
         alias="INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS",
@@ -3489,7 +3930,7 @@ class AgentPlatformSettings(BaseSettings):
         alias="INQTRIX_AGENT_SKILLS_DISCLOSURE_BUDGET_CHARS",
         description=(
             "Character budget of the model-facing skill disclosure "
-            "block; overflow is cut with a VISIBLE '... und N weitere' "
+            "block; overflow is cut with a VISIBLE '... and N more' "
             "line, never silently."
         ),
     )
@@ -3894,6 +4335,16 @@ class AgentPlatformSettings(BaseSettings):
         ),
     )
     """Republish the legacy three-way autonomy control in the UI (default off). The wire vocabulary (strict/balanced/autonomous) is unchanged either way — this only decides whether the composer shows the simplified two-mode Standard/Auto toggle or all three modes; ``strict`` stays fully functional for API callers and enterprise deployments regardless."""
+    allow_autonomous: bool = Field(
+        True,
+        alias="INQTRIX_AGENT_ALLOW_AUTONOMOUS",
+        description=(
+            "Offer the autonomous permission mode (Auto). When false, the "
+            "Agent Desk offers Standard only and POST /v1/runs refuses "
+            "autonomy=autonomous for an agent run."
+        ),
+    )
+    """Offer the autonomous permission mode (default on). When off, ``/v1/capabilities`` no longer publishes it, the Agent Desk offers Standard only, and ``POST /v1/runs`` answers 403 ``autonomy_not_allowed`` for an agent run that asks for it. Runs already started keep their mode, and the internal review run of a finished agent run does not depend on this. A start with ``INQTRIX_AGENT_DEFAULT_AUTONOMY=autonomous`` fails while this is off."""
     allow_volatile: bool = Field(
         False,
         alias="INQTRIX_AGENT_ALLOW_VOLATILE",
@@ -3944,6 +4395,15 @@ class AgentPlatformSettings(BaseSettings):
         ),
     )
     """Optional server-side Mem0 API token. Sensitive: never log or expose this value."""
+
+    @model_validator(mode="after")
+    def _default_autonomy_must_be_offered(self) -> "AgentPlatformSettings":
+        if not self.allow_autonomous and self.default_autonomy.strip() == "autonomous":
+            raise ValueError(
+                "INQTRIX_AGENT_DEFAULT_AUTONOMY=autonomous contradicts "
+                "INQTRIX_AGENT_ALLOW_AUTONOMOUS=false."
+            )
+        return self
 
     @field_validator("default_agent_mode")
     @classmethod

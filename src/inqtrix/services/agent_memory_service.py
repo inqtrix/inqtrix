@@ -36,7 +36,7 @@ if TYPE_CHECKING:
         AccountPreferencesStore,
     )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _LONG_TERM_KINDS = frozenset({"oidc_session", "pat"})
 _INELIGIBLE_SUBS = frozenset({"__anonymous__", "__static__", ""})

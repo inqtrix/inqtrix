@@ -150,10 +150,14 @@ class OidcProvider(AuthProvider):
     def users(self):
         class _Users:
             async def find_by_user_id(self, *, tenant_id, user_id):
-                return SimpleNamespace(disabled_at=None)
+                return SimpleNamespace(disabled_at=None, erasure_operation_id=None)
 
             async def has_user_id(self, *, tenant_id, user_id):
                 return True
+
+            async def resolve_default_workspace(self, *, tenant_id, user_id, candidate):
+                # Every signed-in subject already has its project namespace.
+                return f"ws_{user_id.hex}"
 
         return _Users()
 
@@ -669,6 +673,13 @@ def test_bound_upload_replay_repairs_at_full_quota_without_second_charge(
         role="member",
     )
     visible_to = UserContext(principal=principal)
+    # The uploads below send no namespace, so they write into the subject's
+    # project namespace; the section is seeded there.
+    namespace = asyncio.run(
+        container.auth_provider.users.resolve_default_workspace(
+            tenant_id="default", user_id=user_id, candidate="ws_browser_candidate"
+        )
+    )
     asyncio.run(
         container.asset_records_service.save_section(
             id="quota-section",
@@ -677,7 +688,7 @@ def test_bound_upload_replay_repairs_at_full_quota_without_second_charge(
             created_at=1.0,
             updated_at=1.0,
             caller_user_id=user_id,
-            workspace_id=None,
+            workspace_id=namespace,
             visible_to=visible_to,
         )
     )

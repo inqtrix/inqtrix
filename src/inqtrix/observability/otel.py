@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
@@ -36,7 +37,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 
     from inqtrix.settings import Settings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 try:  # Optional dependency: resolved ONCE at import time so the first
     # run thread never pays the OpenTelemetry import latency.
@@ -112,12 +113,11 @@ def build_tracer_provider(
             OTLPSpanExporter,
         )
 
-        # An unreachable backend must be VISIBLE. The SDK reports export
-        # failures and queue-full drops only on the `opentelemetry`
-        # logger, which configure_logging deliberately never wires (it
-        # touches `inqtrix` only) — so without this bridge a wrong
-        # endpoint or a dead Langfuse looks exactly like "no traffic".
-        _bridge_otel_diagnostics()
+        # An unreachable backend stays VISIBLE without any wiring here: the
+        # SDK reports export failures and queue-full drops on its
+        # `opentelemetry` loggers at WARNING, which propagate to the root
+        # handlers that configure_logging installs (foreign arguments are
+        # reduced to type names there).
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
         from inqtrix.observability.trace_scores import build_score_processor
 
@@ -153,30 +153,6 @@ def build_tracer_provider(
     # mode == "local": provider without processor — valid span ids for
     # log correlation, zero persistence, zero network.
     return provider
-
-
-def _bridge_otel_diagnostics() -> None:
-    """Route the SDK's export diagnostics into the inqtrix log stream.
-
-    Attaches the `inqtrix` logger's handlers to the `opentelemetry`
-    exporter loggers at WARNING and stops propagation, so a failing
-    OTLP export surfaces exactly once per SDK message in the operator's
-    normal log — without letting third-party INFO chatter flood it.
-    Idempotent: repeated setup_tracing calls do not stack handlers.
-    """
-    inqtrix_logger = logging.getLogger("inqtrix")
-    for name in (
-        "opentelemetry.exporter.otlp.proto.http.trace_exporter",
-        "opentelemetry.sdk.trace.export",
-    ):
-        sdk_logger = logging.getLogger(name)
-        if getattr(sdk_logger, "_inqtrix_bridged", False):
-            continue
-        sdk_logger.setLevel(logging.WARNING)
-        for handler in inqtrix_logger.handlers:
-            sdk_logger.addHandler(handler)
-        sdk_logger.propagate = False
-        sdk_logger._inqtrix_bridged = True  # type: ignore[attr-defined]
 
 
 def setup_tracing(
@@ -668,6 +644,23 @@ def traced_thread_call(
     return runner
 
 
+def _chat_turn_status(result: Any) -> str:
+    """How a chat turn that returned ended, in the words of the run lines.
+
+    A turn can return a stop instead of raising it: a token-budget stop is a
+    cancelled result, a provider failure a result with a terminal failure.
+    Both end the turn as failed, as they end a run.
+    """
+    failure = getattr(result, "terminal_failure", None)
+    if failure is not None:
+        return f"status=failed, failure_code={failure.type}"
+    if getattr(result, "cancelled", False):
+        if getattr(result, "cancel_reason", "") == "token_budget_exceeded":
+            return "status=failed, failure_code=token_budget_exceeded"
+        return "status=cancelled"
+    return "status=completed"
+
+
 def chat_thread_call(
     fn: Any,
     *,
@@ -720,10 +713,35 @@ def chat_thread_call(
             int(usage.get("completion_tokens", 0) or 0),
         )
 
+    def _logged_turn() -> Any:
+        # One start and one end line per chat turn, around ``fn`` itself:
+        # the closure runs in the executor thread, where the turn happens.
+        from inqtrix.execution_failures import classify_execution_failure
+
+        log.info("Chat started (mode=%s).", mode)
+        started = time.monotonic()
+        ended = "status=failed"
+        try:
+            result = fn()
+            ended = _chat_turn_status(result)
+            return result
+        except BaseException as exc:
+            code = classify_execution_failure(exc)
+            ended = (
+                "status=cancelled"
+                if code == "client_requested_cancel"
+                else f"status=failed, failure_code={code}, error_type={type(exc).__name__}"
+            )
+            raise
+        finally:
+            log.info(
+                "Chat ended (%s, mode=%s, seconds=%.1f).", ended, mode, time.monotonic() - started
+            )
+
     return traced_thread_call(
         "inqtrix.chat",
         attributes,
-        fn,
+        _logged_turn,
         enrich=_enrich,
         tracer_provider=tracer_provider,
         feature="chat",

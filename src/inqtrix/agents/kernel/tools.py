@@ -84,7 +84,7 @@ from inqtrix.capabilities.catalog.knowledge import CITE_QUOTE_CHARS_MAX, CITE_QU
 from inqtrix.quote_limits import CITE_QUOTE_MIN_WORDS
 from inqtrix.urls import normalize_url
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _IMPORT_HINT = (
     "Der Agent-Kernel braucht das 'agent'-Extra (uv sync --extra agent)."
@@ -2480,9 +2480,9 @@ def build_kernel_tools() -> list[Any]:
                     getattr(outcome, "failure_reason", "") or ""
                 ) or "result no longer retrievable"
                 log.warning(
-                    "Child run %s returned no projectable result (%s).",
+                    "Child run %s returned no projectable result (failure_code=%s).",
                     child_id,
-                    reason,
+                    getattr(outcome, "failure_code", "") or "-",
                 )
                 return (
                     f"The subtask ({mode}) delivered no retrievable "
@@ -2955,7 +2955,7 @@ def build_kernel_tools() -> list[Any]:
                 "a skill."
             )
         try:
-            record, _shared = run_coro(
+            record, access = run_coro(
                 deps.skill_service.get_visible(
                     skill_id,
                     tenant_id=(
@@ -2974,13 +2974,19 @@ def build_kernel_tools() -> list[Any]:
                 f"Skill {skill_id} is not available. Continue without it "
                 "and name the gap where relevant."
             )
-        if record.invocation != "model_allowed":
-            # Structural injection defense: shared-in and user_only
-            # skills never self-activate — only the USER may attach
-            # them.
+        from inqtrix.content.skills import model_may_activate
+
+        if not model_may_activate(record, access):
+            # Structural injection defense: user_only skills and skills
+            # shared in by another user never self-activate — only the
+            # USER may attach them. Refused before the inputs resolve, so
+            # a refused skill reaches neither a point check nor the user.
             log.warning(
-                "load_skill: %s is user_only; model activation denied.",
+                "load_skill: %s may only be activated by the user "
+                "(invocation=%s, access=%s); model activation denied.",
                 skill_id,
+                record.invocation,
+                access.mode.value,
             )
             return (
                 f"The skill '{record.label}' may only be activated by the "

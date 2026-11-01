@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .headers import _proxy_request_headers, _relay_response_headers
+from .identity_edge import IdentityEdge
 from .logging import _redact_guest_route_tokens
 from .settings import _PublicOrigin
 
@@ -124,6 +125,12 @@ async def _send_watching_disconnect(
         watch_task.cancel()
         with suppress(asyncio.CancelledError):
             await watch_task
+        # A caller cancelled while it waits, as at a stop after the shutdown
+        # deadline, must not leave the backend request running.
+        if not send_task.done():
+            send_task.cancel()
+            with suppress(asyncio.CancelledError, httpx.HTTPError):
+                await send_task
 
 
 def _backend_limits(max_connections: int) -> httpx.Limits:
@@ -182,6 +189,7 @@ def register_http_routes(
     external_scheme: str | None,
     max_request_bytes: int,
     max_upstream_connections: int,
+    edge: IdentityEdge,
 ) -> None:
     """Attach all same-origin HTTP routes using one proxy implementation."""
 
@@ -209,11 +217,17 @@ def register_http_routes(
         body_done = asyncio.Event()
         if not has_body:
             body_done.set()
+        peer = request.client.host if request.client else None
+        edge.report_removed(request.headers.keys(), peer)
         upstream = client.build_request(
             method=request.method,
             url=httpx.URL(raw_path=target),
             headers=_proxy_request_headers(
-                request, public_origin, external_scheme
+                request,
+                public_origin,
+                external_scheme,
+                policy=edge.policy,
+                gateway_mode=await edge.gateway_mode(),
             ),
             content=(
                 _bounded_request_stream(
@@ -257,7 +271,8 @@ def register_http_routes(
                 status_code=502,
             )
         if response is None:
-            log.warning(
+            # The interface aborts outdated fetches itself: not a warning.
+            log.info(
                 "Client disconnected while awaiting the upstream response "
                 "for %s %s — upstream request aborted.",
                 request.method,
@@ -271,13 +286,20 @@ def register_http_routes(
         relay.raw_headers = _relay_response_headers(response.headers)
         return relay
 
+    async def probe(request: Request) -> Response:
+        # A gateway deployment this edge cannot protect stays unready.
+        reason = await edge.unready_reason()
+        if reason is not None:
+            return JSONResponse({"detail": reason}, status_code=503)
+        return await proxy(request)
+
     @app.api_route("/health", methods=_PROXY_METHODS)
     async def proxy_health(request: Request) -> Response:
-        return await proxy(request)
+        return await probe(request)
 
     @app.api_route("/readyz", methods=_PROXY_METHODS)
     async def proxy_readiness(request: Request) -> Response:
-        return await proxy(request)
+        return await probe(request)
 
     @app.get("/collaboration/instance")
     async def proxy_collaboration_instance(request: Request) -> Response:

@@ -226,7 +226,7 @@ describe('createUserIdentityVerifier', () => {
     authenticated: true
     user: { display_name: null; email: null; id: string; role: string }
   }>
-  const harness = (answers: Answer[]) => {
+  const harness = (answers: Answer[], signedOut?: () => boolean) => {
     const timers: Array<{ callback: () => void; delayMs: number; id: number }> = []
     const cancelled: number[] = []
     const events: string[] = []
@@ -244,6 +244,7 @@ describe('createUserIdentityVerifier', () => {
         return answer() as never
       },
       reload: () => events.push('reload'),
+      signedOut,
       scheduleTimer: (callback, delayMs) => {
         const id = timers.length + 1
         timers.push({ callback, delayMs, id })
@@ -315,6 +316,35 @@ describe('createUserIdentityVerifier', () => {
     expect(run.cancelled).toEqual([1, 2])
     await run.verifier.verify()
     expect(run.probes()).toBe(2)
+  })
+
+  // In gateway mode a probe starts the next session at once: after a
+  // sign-out in another tab it would sign this tab in again unasked.
+  it('reloads into the signed-out page instead of probing once this browser signed out', async () => {
+    const run = harness([sameUser], () => true)
+    await run.verifier.verify()
+    expect(run.events).toEqual(['reload'])
+    expect(run.probes()).toBe(0)
+  })
+
+  it('reads the sign-out mark again before every probe', async () => {
+    let signedOut = false
+    const run = harness([serverError, sameUser], () => signedOut)
+    await run.verifier.verify()
+    expect(run.probes()).toBe(1)
+
+    signedOut = true
+    await run.runTimer(0)
+
+    expect(run.events).toEqual(['unverified:Inqtrix request failed with HTTP 503.', 'reload'])
+    expect(run.probes()).toBe(1)
+  })
+
+  it('probes as before while nobody signed out', async () => {
+    const run = harness([sameUser], () => false)
+    await run.verifier.verify()
+    expect(run.events).toEqual(['confirmed'])
+    expect(run.probes()).toBe(1)
   })
 })
 

@@ -46,7 +46,7 @@ _UMLAUT_CANDIDATE = re.compile(r"\b[A-Za-zÄÖÜäöüß]*(?:ae|oe|ue|ss)[A-Za-z
 _LEGITIMATE_SPELLINGS = frozenset({
     # German words that genuinely carry these letter pairs
     "Abschlussbericht", "Ausführungsschritte", "Aussage", "Aussagen", "Aussagenlage",
-    "Ausschnitt", "Bewertungssignal", "Einzelquellen", "Einzelquellenangaben", "Ergebnisse",
+    "Ausschnitt", "Bewertungssignal", "Einzelquellen", "Einzelquellenangaben", "Ereignisse", "Ergebnisse",
     "Klassifikation", "Kontextquellen", "Mission", "Nachbesserung", "Passe",
     "Primärquelle", "Prämisse", "Quelle", "Quellen", "Quellenkontext",
     "Quellenmix", "Quellenqualität", "Quellenverweise", "Suchergebnissen",

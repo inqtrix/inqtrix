@@ -13,7 +13,7 @@ from inqtrix.agents.context_sources import (
     MATERIAL_DEPENDENCIES, SOURCE_RECEIPT, merge_materials, merge_source_receipts,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 MATERIAL_TOOLS = frozenset({
     "read_project_document", "search_project_knowledge", "cite_document_passages",

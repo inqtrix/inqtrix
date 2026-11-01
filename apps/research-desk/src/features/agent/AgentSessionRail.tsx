@@ -445,6 +445,7 @@ export function AgentSessionRail({
               onSelect: () => onTogglePinnedSession(session.id),
             },
             ...(mutable ? [{
+              ariaLabel: `${t.agent.sessions.delete}: ${session.title}`,
               destructive: true,
               icon: <Trash2 className="icon-sm" />,
               label: t.agent.sessions.delete,

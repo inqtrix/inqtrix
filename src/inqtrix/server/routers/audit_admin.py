@@ -39,7 +39,7 @@ from inqtrix.services.request_parsing import error_response
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _CSV_COLUMNS = (
     "id",

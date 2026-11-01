@@ -217,7 +217,7 @@ def _checked_units(units: list[_Unit]) -> list[_Unit]:
 _SUPPORT_BONUS_SCALE = math.log1p(10)
 _PHASE2_MAX_PER_DOMAIN = 3
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class ClaimConsolidationStrategy(ABC):

@@ -1,4 +1,5 @@
-import { Paragraph, Table } from 'docx'
+import { Document, Packer, Paragraph, Table } from 'docx'
+import JSZip from 'jszip'
 import { describe, expect, it } from 'vitest'
 import {
   degradeMathDelimiters,
@@ -83,6 +84,19 @@ describe('markdownToDocxBlocks', () => {
 })
 
 describe('docxDocumentOptions', () => {
+  it('writes the report look: numbered headings, its own styles, direct table borders', async () => {
+    const markdown = '# H\n\n```\ncode\n```\n\n> Zitat\n\n| A |\n| - |\n| 1 |\n\n[L](https://example.com) `c`'
+    const zip = await JSZip.loadAsync(await Packer.toBuffer(new Document(docxDocumentOptions(markdown, 'T'))))
+    const document = await zip.file('word/document.xml')!.async('string')
+
+    expect(document).toContain('<w:pStyle w:val="Heading1"/><w:numPr>')
+    expect(document).toContain('<w:pStyle w:val="InqtrixCode"/>')
+    expect(document).toContain('<w:pStyle w:val="InqtrixQuote"/>')
+    expect(document).toContain('<w:top w:val="single" w:color="000000" w:sz="8"/>')
+    expect(document).toContain('w:color w:val="0563C1"')
+    expect(document).toContain('Courier New')
+  })
+
   it('marks a generated report in the core properties a reader can see', () => {
     const options = docxDocumentOptions('# Report\n\nBody.', 'Quarterly review', {
       notice: AI_NOTICE,

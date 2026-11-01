@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
     from inqtrix.settings import CollaborationSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 _INSTANCE_PROBE_CONTRACT = "inqtrix-collaboration-instance-v1"
 _INSTANCE_PROBE_SERVICE = "inqtrix-collaboration"
 
@@ -67,22 +67,20 @@ def build_router(container: "AppContainer") -> APIRouter:
             settings,
             public_origin=public_origin,
         ):
-            # Name both sides. An origin is an address, not an identity, so
-            # logging it does not weaken pseudonymization — and without it the
-            # operator cannot tell a misconfigured base URL from a real
-            # cross-site attempt.
+            # A class and a count, never the header (client input) or the
+            # configured list: ``not_allowed`` with a count of 0 points at a
+            # missing base URL, ``not_allowed`` with a count above 0 at a
+            # mismatched one or a cross-site attempt.
             log.warning(
-                "Collaboration WebSocket rejected an invalid Origin: "
-                "presented=%s expected one of=%s",
-                websocket.headers.get("origin", "") or "(none)",
-                ", ".join(
-                    sorted(
-                        {
-                            *settings.allowed_origins,
-                            *([public_origin] if public_origin else []),
-                        }
-                    )
-                ) or "(none configured)",
+                "Collaboration WebSocket rejected an Origin (class=%s, "
+                "configured_origins=%d).",
+                _origin_rejection_class(websocket),
+                len(
+                    {
+                        *settings.allowed_origins,
+                        *([public_origin] if public_origin else []),
+                    }
+                ),
             )
             await websocket.accept()
             await websocket.close(code=4403, reason="origin_rejected")
@@ -283,6 +281,16 @@ def _origin_allowed(
         and normalized == public_origin
         and _forwarded_origin(websocket) == public_origin
     )
+
+
+def _origin_rejection_class(websocket: WebSocket) -> str:
+    """Why an Origin was rejected, as a fixed class."""
+    presented = websocket.headers.get("origin", "")
+    if not presented.strip():
+        return "missing"
+    if _normalize_origin(presented, allow_path=False) is None:
+        return "malformed"
+    return "not_allowed"
 
 
 def _forwarded_origin(websocket: WebSocket) -> str | None:

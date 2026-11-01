@@ -9,7 +9,6 @@ constructor args are passed so the tests are independent of any ``.env``.
 
 from __future__ import annotations
 
-import logging
 
 import pytest
 from pydantic import ValidationError
@@ -31,14 +30,6 @@ def _settings(providers: ProviderSettings, *, reasoning_model: str = "R", **mode
         providers=providers,
         models=ModelSettings(reasoning_model=reasoning_model, **model_kwargs),
     )
-
-
-def _capture_inqtrix_warnings(caplog: pytest.LogCaptureFixture):
-    """Attach caplog to the non-propagating ``inqtrix`` logger (gotcha #2)."""
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    caplog.set_level(logging.WARNING, logger="inqtrix")
-    return logger
 
 
 def test_default_unset_selectors_build_litellm_perplexity() -> None:
@@ -146,13 +137,9 @@ def test_search_timeout_and_foundry_concurrency_reach_provider() -> None:
 
 
 def test_missing_anthropic_key_fails_loud(caplog: pytest.LogCaptureFixture) -> None:
-    logger = _capture_inqtrix_warnings(caplog)
     providers = ProviderSettings(llm_provider="anthropic", anthropic_api_key="")
-    try:
-        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-            create_providers(_settings(providers))
-    finally:
-        logger.removeHandler(caplog.handler)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        create_providers(_settings(providers))
     assert any("ANTHROPIC_API_KEY" in r.message for r in caplog.records)
 
 
@@ -265,12 +252,8 @@ def test_perplexity_empty_key_allowed_at_factory_time() -> None:
 
 
 def test_inapplicable_temperature_warns_for_litellm(caplog: pytest.LogCaptureFixture) -> None:
-    logger = _capture_inqtrix_warnings(caplog)
     providers = ProviderSettings(llm_provider="litellm", temperature=0.5)
-    try:
-        ctx = create_providers(_settings(providers))
-    finally:
-        logger.removeHandler(caplog.handler)
+    ctx = create_providers(_settings(providers))
     assert provider_label(ctx.llm) == "LiteLLM"
     assert any("INQTRIX_TEMPERATURE" in r.message for r in caplog.records)
 

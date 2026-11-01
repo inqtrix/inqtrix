@@ -115,11 +115,11 @@ Required:
 Optional:
 - WEB_SEARCH_AGENT_VERSION
 - AZURE_WEB_SEARCH_TEST_QUERY
-- INQTRIX_LOG_ENABLED
+- INQTRIX_LOG_TARGET (console, file or both; logs are off by default)
 - INQTRIX_LOG_LEVEL
-- INQTRIX_LOG_CONSOLE
-- OBSERVABILITY_PROFILE (``forensic`` for structured lineage in the log file;
-  requires ``INQTRIX_LOG_LEVEL=DEBUG``; see ``docs/observability/logging.md``)
+- INQTRIX_LOG_FORMAT
+- OBSERVABILITY_PROFILE (``forensic`` keeps lineage in the protected run audit;
+  see ``docs/observability/logging.md``)
 
 Authentication -- three options (pick ONE):
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -178,13 +178,13 @@ from inqtrix.logging_config import configure_logging
 
 load_dotenv()
 
-_log_path = configure_logging(
-    enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
-    level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
-    console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
+# Examples keep the terminal for their own output: logs appear only when
+# INQTRIX_LOG_TARGET is set (console, file or both).
+_logging = configure_logging(
+    service="script", target=os.environ.get("INQTRIX_LOG_TARGET") or "none"
 )
-if _log_path:
-    print(f"Logging to {_log_path}")
+if _logging.file_path:
+    print(f"Logging to {_logging.file_path}")
 
 QUERY = os.getenv(
     "AZURE_WEB_SEARCH_TEST_QUERY",

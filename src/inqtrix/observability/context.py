@@ -1,12 +1,12 @@
 """Correlation context carried into every log line.
 
 ``contextvars`` keep the per-request / per-run correlation fields
-(request id, run id, subject pseudonym, workspace, tenant) flowing
-through async call chains without threading parameters through every
-function. The JSON formatter reads :func:`current_log_context` for each
-record, so one ``bind_log_context`` at a boundary (request middleware,
-worker job claim, principal resolution) stamps every log line inside
-that boundary.
+(request id, run id, subject pseudonym, tenant) flowing through async
+call chains without threading parameters through every function. The
+log filter reads :func:`current_log_context` when a record is created and
+stamps the fields onto it, so one ``bind_log_context`` at a boundary
+(request middleware, worker job claim, principal resolution) marks every
+log line inside that boundary.
 
 Two usage patterns:
 
@@ -35,14 +35,11 @@ from inqtrix.auth.log_redaction import stable_pseudonym
 if TYPE_CHECKING:
     from inqtrix.auth.principal import Principal
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _REQUEST_ID: ContextVar[str] = ContextVar("inqtrix_request_id", default="")
 _RUN_ID: ContextVar[str] = ContextVar("inqtrix_run_id", default="")
 _USER_REF: ContextVar[str] = ContextVar("inqtrix_user_ref", default="")
-_WORKSPACE_ID: ContextVar[str] = ContextVar(
-    "inqtrix_workspace_id", default=""
-)
 _TENANT_ID: ContextVar[str] = ContextVar("inqtrix_tenant_id", default="")
 
 # Field name -> ContextVar. The names are the PUBLIC log-field names;
@@ -52,7 +49,6 @@ _FIELDS: Mapping[str, ContextVar[str]] = {
     "request_id": _REQUEST_ID,
     "run_id": _RUN_ID,
     "user": _USER_REF,
-    "workspace": _WORKSPACE_ID,
     "tenant": _TENANT_ID,
 }
 
@@ -62,7 +58,7 @@ def bind_log_context(**fields: object) -> dict[str, Token[str]]:
 
     Args:
         **fields: Any of ``request_id``, ``run_id``, ``user``,
-            ``workspace``, ``tenant``. Values are stringified; ``None``
+            ``tenant``. Values are stringified; ``None``
             binds the empty string (which :func:`current_log_context`
             omits).
 

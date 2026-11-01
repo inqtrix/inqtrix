@@ -103,6 +103,26 @@ class _RunFailureHandle(Protocol):
         """Persist a cancelled terminal state."""
 
 
+def safe_failure_detail(exc: BaseException) -> str:
+    """A failure detail that carries no model or user text.
+
+    ``str()`` of a validation failure quotes the rejected input, often the
+    model's own output. A pydantic ``ValidationError``, also when it is the
+    ``source`` of a structured-output failure, becomes its ``type@location``
+    pairs; anything else becomes its type name.
+    """
+    from pydantic import ValidationError
+
+    from inqtrix.logging_config import validation_error_pairs
+
+    source = getattr(exc, "source", None)
+    if isinstance(source, BaseException):
+        exc = source
+    if isinstance(exc, ValidationError):
+        return "; ".join(validation_error_pairs(exc)) or type(exc).__name__
+    return type(exc).__name__
+
+
 def classify_execution_failure(
     exc: BaseException,
     *,

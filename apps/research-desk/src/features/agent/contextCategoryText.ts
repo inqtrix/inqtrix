@@ -43,8 +43,8 @@ export function agentContextText(
     'unchecked' in budget
       ? t.agent.composer.ruleBudgetUnchecked
       : t.agent.composer.ruleBudget
-        .replace('{used}', formatChars(budget.used))
-        .replace('{max}', formatChars(budget.max))
+        .replace('{used}', () => formatChars(budget.used))
+        .replace('{max}', () => formatChars(budget.max))
   // Every cap in its own words — a report row never reads as a rule cap, a
   // taken single slot (the pinned canvas document, the editing target) never
   // as a report cap — and at its own size: the cap the server published for
@@ -91,13 +91,13 @@ export function agentContextText(
     if (blocked?.kind === 'linkedFiles') return t.agent.composer.ruleLinkedFiles
     if (blocked?.kind === 'tooLong') {
       return t.agent.composer.ruleTooLong
-        .replace('{chars}', formatChars(blocked.chars))
-        .replace('{max}', formatChars(blocked.max))
+        .replace('{chars}', () => formatChars(blocked.chars))
+        .replace('{max}', () => formatChars(blocked.max))
     }
     if (blocked?.kind === 'overBudget') {
       return t.agent.composer.ruleOverBudget
-        .replace('{total}', formatChars(blocked.total))
-        .replace('{max}', formatChars(blocked.max))
+        .replace('{total}', () => formatChars(blocked.total))
+        .replace('{max}', () => formatChars(blocked.max))
     }
     return id === 'rule'
       ? `@rules:${item.secondary}`

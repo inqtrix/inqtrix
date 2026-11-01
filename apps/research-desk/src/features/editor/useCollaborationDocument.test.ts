@@ -1190,7 +1190,7 @@ describe('collaboration document lifecycle', () => {
     editorDocument?.getMap('test').set('subtitle', 'Notes')
 
     expect(harness.scheduledDelays()).toContain(COLLABORATION_UPDATE_BATCH_MS)
-    expect(COLLABORATION_UPDATE_BATCH_MS).toBeLessThanOrEqual(50)
+    expect(COLLABORATION_UPDATE_BATCH_MS).toBeLessThanOrEqual(10)
     expect(harness.transportUpdates).toHaveLength(0)
 
     harness.runTimer(COLLABORATION_UPDATE_BATCH_MS)
@@ -1691,6 +1691,29 @@ describe('collaboration document lifecycle', () => {
       + 'Stand bleibt als Sicherung erhalten, bis Sie das Dokument neu laden.',
     )
     expect(german).not.toContain('App-Version')
+  })
+
+  it('ends a guest\'s access as paused when the link answers 423, on opening and on reconnecting', async () => {
+    const paused = Object.assign(new Error('This link is currently unavailable.'), { status: 423 })
+    const openHarness = createHarness(vi.fn().mockRejectedValueOnce(paused))
+    await openHarness.controller.start()
+    expect(openHarness.controller.getSnapshot()).toMatchObject({
+      connectionStatus: 'access_revoked',
+      error: COLLABORATION_NOTICES.link_unavailable,
+    })
+
+    const reconnectHarness = createHarness(vi.fn()
+      .mockResolvedValueOnce(session('initial-token'))
+      .mockRejectedValueOnce(paused))
+    await reconnectHarness.controller.start()
+    reconnectHarness.getProviderOptions()?.events.onClose(1006, 'network_lost')
+    reconnectHarness.runTimer(1_000)
+    await settleMicrotasks()
+    expect(reconnectHarness.controller.getSnapshot()).toMatchObject({
+      connectionStatus: 'access_revoked',
+      error: COLLABORATION_NOTICES.link_unavailable,
+      liveDocumentReady: false,
+    })
   })
 
   it('keeps the live document bound across a reconnect and releases it on revocation or release', async () => {

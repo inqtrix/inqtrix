@@ -716,30 +716,6 @@ def test_azure_openai_api_error_minimal():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _reset_inqtrix_logger():
-    """Drop log handlers between tests so caplog observations stay isolated.
-
-    Mirrors the pattern documented in gotchas.md #1 (test-order pollution from
-    logger configuration tests). Without this fixture the
-    ``test_*_warn*`` cases below pass in isolation but fail when the full
-    suite runs because earlier tests leave the inqtrix logger in a state
-    where caplog cannot observe its records.
-    """
-    import logging
-
-    inqtrix_logger = logging.getLogger("inqtrix")
-    saved_handlers = list(inqtrix_logger.handlers)
-    saved_level = inqtrix_logger.level
-    saved_propagate = inqtrix_logger.propagate
-    try:
-        yield
-    finally:
-        inqtrix_logger.handlers = saved_handlers
-        inqtrix_logger.setLevel(saved_level)
-        inqtrix_logger.propagate = saved_propagate
-
-
 class TestAzureReasoningEffort:
     """Cover constructor-level Azure reasoning-effort validation."""
 

@@ -18,6 +18,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from inqtrix.auth.directory import DELETED_ACCOUNT_ISSUER
 from inqtrix.auth.permissions import (
     AccessMode,
     ResourceAccess,
@@ -69,7 +70,6 @@ from inqtrix.services.editor_collaboration_service import (
 from inqtrix.services.user_erasure import (
     DELETED_ACCOUNT_DISPLAY_NAME,
     DELETED_ACCOUNT_EMAIL,
-    DELETED_ACCOUNT_ISSUER,
 )
 from inqtrix.settings import (
     AgentPlatformSettings,
@@ -93,6 +93,10 @@ INTERNAL_TENANT_ID = "tenant-collaboration-test"
 def _sha256(value: bytes) -> str:
     """Return the canonical lowercase digest used by collaboration payloads."""
     return hashlib.sha256(value).hexdigest()
+
+
+def test_a_local_update_leaves_the_browser_almost_at_once() -> None:
+    assert CollaborationSettings.model_fields["provider_flush_ms"].default == 10
 
 
 def test_collaboration_settings_canonicalize_the_deployment_tenant() -> None:

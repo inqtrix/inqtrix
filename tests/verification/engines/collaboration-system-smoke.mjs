@@ -4,12 +4,15 @@ import process from 'node:process'
 import {
   eraseTemporaryUser,
   ensureTemporaryUsers,
+  requireAccountLocale,
+  setAccountLocale,
   temporaryUserDescriptors,
 } from '../fixtures/accounts.mjs'
 import { assertFixture, fetchActorJson } from '../fixtures/api.mjs'
 import {
   buildGeneratedSystemSmokeFixture,
   normalizeSystemSmokeBaseURL,
+  SYSTEM_SMOKE_LOCALE,
   writeGeneratedSystemSmokeFixture,
 } from '../fixtures/collaboration-system-smoke.mjs'
 import {
@@ -77,6 +80,7 @@ try {
       && capabilities.feature_status?.collaboration?.state === 'enabled',
     'System-smoke requires enabled sharing and collaboration capabilities.',
   )
+  await requireAccountLocale(admin, SYSTEM_SMOKE_LOCALE)
 
   progress('Creating one Run-ID-bound collaborator identity.')
   const descriptor = temporaryUserDescriptors(runId)[0]
@@ -98,6 +102,7 @@ try {
     admin.user.id !== collaborator.user.id,
     'System-smoke identities resolved to the same account.',
   )
+  await setAccountLocale(collaborator, SYSTEM_SMOKE_LOCALE)
   collaboratorProjectCleanup = await lifecycle.register({
     email: temporaryUser.email,
     id: `${runId}:${temporaryUser.email}:project`,

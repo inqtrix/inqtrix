@@ -39,7 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
     from opentelemetry.sdk.trace import ReadableSpan
     from opentelemetry.sdk.trace.export import SpanExportResult
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # One spool file grows to this size before rotating to a fresh one;
 # small enough that the total-cap cleanup has usable granularity.

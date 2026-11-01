@@ -108,19 +108,57 @@ users = Table(
     # is set the account is being erased: no sign-in admits it, it cannot be
     # enabled, and the deletion machine acts as its owner. NULL otherwise.
     Column("erasure_operation_id", Text, nullable=True),
+    # SCIM provisioning state (revision 0097); NULL on every account SCIM
+    # never touched. ``scim_user_name`` is the SCIM userName, unique per
+    # tenant and issuer without regard to case; ``scim_name`` the SCIM name
+    # object; ``scim_deleted_at`` a tombstone that neither a sign-in nor
+    # provisioning brings back. Deprovisioning clears the user name, so a
+    # tombstone stays out of the unique index.
+    Column("scim_user_name", Text, nullable=True),
+    Column("scim_name", JSONB(none_as_null=True), nullable=True),
+    Column("scim_deleted_at", DateTime(timezone=True), nullable=True),
+    # Who disabled the account: 'admin' or 'provisioning'. NULL counts as
+    # 'admin' (every disable before revision 0097).
+    Column("disabled_source", Text, nullable=True),
     UniqueConstraint(
         "tenant_id",
         "issuer",
         "subject",
         name="uq_users_tenant_issuer_subject",
     ),
+    CheckConstraint(
+        "disabled_source IN ('admin', 'provisioning')",
+        name="ck_users_disabled_source",
+    ),
     Index("ix_users_tenant", "tenant_id"),
+    Index(
+        "uq_users_scim_user_name",
+        "tenant_id",
+        "issuer",
+        text("lower(scim_user_name)"),
+        unique=True,
+        postgresql_where=text("scim_user_name IS NOT NULL"),
+    ),
 )
 
 """Local mirror of IdP-provisioned users (JIT on first login)."""
 
 
-def active_admin():
+def active_account():
+    """An account that is enabled and not being erased.
+
+    An account under erasure is not disabled in the authorization sense --
+    the deletion machine acts as its owner -- but it is no longer a person
+    anybody works with: it never becomes the target of a new share or
+    membership and never appears in a user search.
+    """
+    return and_(
+        users.c.disabled_at.is_(None),
+        users.c.erasure_operation_id.is_(None),
+    )
+
+
+def active_admin(issuer: str | None = None):
     """An admin who can still administer: enabled and not being erased.
 
     The last-admin invariant counts these, and administrative events wake
@@ -128,12 +166,17 @@ def active_admin():
     sense -- the deletion machine acts as its owner -- but it can never
     administer again, so it never counts as the admin that keeps the
     instance manageable and is never woken as one.
+
+    With *issuer* only admins bound under that issuer count: in the gateway
+    mode an account of another source can never sign in, so it cannot be
+    the admin that keeps the instance manageable. ``None`` counts every
+    issuer and is never compared, because ``issuer == None`` would render
+    as ``IS NULL`` and match nobody.
     """
-    return and_(
-        users.c.instance_role == "admin",
-        users.c.disabled_at.is_(None),
-        users.c.erasure_operation_id.is_(None),
-    )
+    condition = and_(users.c.instance_role == "admin", active_account())
+    if issuer is None:
+        return condition
+    return and_(condition, users.c.issuer == issuer)
 
 
 # Commit-ordered per-user authorization counter, in its OWN table on

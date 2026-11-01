@@ -72,3 +72,47 @@ describe('MarkdownRenderer static contract', () => {
     expect(html.match(/class="katex"/g)?.length).toBeGreaterThanOrEqual(2)
   })
 })
+
+describe('MarkdownRenderer table width', () => {
+  const TWO_SHORT_COLUMNS = '| Art | Wert |\n| --- | --- |\n| Quellen | 12 |\n'
+  const LONG_WORD = [
+    '| Begriff | Wert |',
+    '| --- | --- |',
+    '| Rindfleischetikettierungsüberwachungsaufgabenübertragungsgesetz | [Link](https://example.org/a) `Code` |',
+    '',
+  ].join('\n')
+
+  function tableMarkup(markdown: string, variant: MarkdownRendererVariant): string {
+    return render(markdown, variant).match(/<table\b.*<\/table>/s)?.[0] ?? ''
+  }
+
+  function tableClass(markdown: string, variant: MarkdownRendererVariant): string {
+    return tableMarkup(markdown, variant).match(/^<table class="([^"]*)"/)?.[1] ?? ''
+  }
+
+  it('sets no fixed minimum width for chat and canvas, so two short columns fit a narrow column', () => {
+    // A fixed 32rem pushed the second column of a two-column table out of the
+    // 382 px canvas, behind a sideways scroll.
+    const classes = tableClass(TWO_SHORT_COLUMNS, 'chat')
+    expect(classes).toContain('w-full')
+    expect(classes).not.toContain('min-w-')
+  })
+
+  it('keeps the minimum width of the report', () => {
+    expect(tableClass(TWO_SHORT_COLUMNS, 'report')).toContain('min-w-[560px]')
+  })
+
+  it('never lets a long word set the column below its own width', () => {
+    // `break-word` does not lower a column's minimum, `anywhere` does: nothing
+    // in a chat table may carry it, or the column shrinks to single letters.
+    const table = tableMarkup(LONG_WORD, 'chat')
+    expect(table).toContain('Rindfleischetikettierungsüberwachungsaufgabenübertragungsgesetz')
+    expect(tableClass(LONG_WORD, 'chat').split(' ')).toContain('break-words')
+    expect(table).not.toContain('anywhere')
+  })
+
+  it('leaves a table wider than the column to its own scroll region', () => {
+    const html = render(LONG_WORD, 'chat')
+    expect(html).toMatch(/<div[^>]*class="[^"]*\boverflow-x-auto\b[^"]*"[^>]*role="region"/)
+  })
+})

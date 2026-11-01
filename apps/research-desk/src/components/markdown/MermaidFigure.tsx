@@ -387,7 +387,7 @@ export function MermaidFigure({
     cache: mermaidCache,
     cacheKey: key,
   })
-  const fallbackLabel = t.markdown.mermaidDiagramLabel.replace('{type}', diagramType ?? 'mermaid')
+  const fallbackLabel = t.markdown.mermaidDiagramLabel.replace('{type}', () => diagramType ?? 'mermaid')
   // The accessible root is applied at injection so a locale switch renames
   // an untitled diagram without touching the render cache.
   const svg = useMemo(
@@ -431,7 +431,7 @@ export function MermaidFigure({
         <div className="flex items-start gap-2 border-b border-warning/30 px-3 py-2">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" />
           <span className="min-w-0 break-words t-meta text-foreground/90">
-            {t.markdown.mermaidError.replace('{message}', entry.message)}
+            {t.markdown.mermaidError.replace('{message}', () => entry.message)}
           </span>
         </div>
         <pre className="max-w-full overflow-x-auto p-3 font-mono text-xs text-muted-foreground">

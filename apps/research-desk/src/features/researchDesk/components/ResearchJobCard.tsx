@@ -17,6 +17,7 @@ import {
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { isRepeatPress } from '@/components/ui/explorer-list'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { SharedBadge } from '@/features/sharing/SharedBadge'
 import { canCancelWithAccess } from '@/features/sharing/shareModel'
@@ -224,7 +225,10 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
               <Button
                 aria-label={t.runCard.delete}
                 className="text-muted-foreground hover:text-destructive"
-                onClick={(event) => runCardAction(event, onDelete)}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  if (!isRepeatPress(event)) onDelete()
+                }}
                 size="icon"
                 type="button"
                 variant="ghost"

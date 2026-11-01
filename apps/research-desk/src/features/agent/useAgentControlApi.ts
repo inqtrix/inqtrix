@@ -41,6 +41,7 @@ import {
   canEditAgentRun,
   type AgentRunRecord,
   type AgentSessionArtifactIndex,
+  type AgentSessionRecord,
 } from './model'
 import { readerError } from '@/api/requestErrorText'
 
@@ -71,6 +72,7 @@ export function useAgentControlApi({
   runs,
   selectedSessionId,
   sessionArtifacts = {},
+  sessions = {},
   workspaceId,
 }: {
   apiKey: string | undefined
@@ -83,6 +85,9 @@ export function useAgentControlApi({
   selectedSessionId: string | null
   /** Anchor-independent per-session artifact index. */
   sessionArtifacts?: Record<string, AgentSessionArtifactIndex>
+  /** A session marked not persistable is a local shell (a shared-run view):
+   * the server holds no artifact list for it. */
+  sessions?: Record<string, Pick<AgentSessionRecord, 'persistable'>>
   workspaceId: string
 }) {
   const optionsRef = useRef({ apiKey, workspaceId })
@@ -94,6 +99,8 @@ export function useAgentControlApi({
   const failedRef = useRef(new Set<string>())
   const runsRef = useRef(runs)
   runsRef.current = runs
+  const sessionsRef = useRef(sessions)
+  sessionsRef.current = sessions
   const enabledRef = useRef(enabled)
   enabledRef.current = enabled
   const requireEditableRun = useCallback((runId: string) => {
@@ -269,6 +276,7 @@ export function useAgentControlApi({
     // next SSE artifact signal is the honest retry moment.
     for (const [sessionId, index] of Object.entries(sessionArtifacts)) {
       if (!index.stale || sessionId !== selectedSessionId) continue
+      if (sessions[sessionId]?.persistable === false) continue
       const sessionKey = `${sessionId}:session_artifacts`
       if (inFlightRef.current.has(sessionKey)) continue
       inFlightRef.current.add(sessionKey)
@@ -345,7 +353,7 @@ export function useAgentControlApi({
           inFlightRef.current.delete(key)
         })
     }
-  }, [dispatch, enabled, runs, selectedSessionId, sessionArtifacts])
+  }, [dispatch, enabled, runs, selectedSessionId, sessionArtifacts, sessions])
 
   const decideApproval = useCallback(
     async (
@@ -668,7 +676,7 @@ export function useAgentControlApi({
       // none — refresh the row and the session name index directly so
       // chips, tabs and the registry follow without a reload.
       await loadArtifact(runId, artifactId)
-      if (sessionId) {
+      if (sessionId && sessionsRef.current[sessionId]?.persistable !== false) {
         const result = await listAgentSessionArtifacts(
           sessionId,
           optionsRef.current,

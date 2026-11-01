@@ -6,6 +6,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
+from inqtrix.observability.context import bind_log_context, reset_log_context
 from inqtrix.runs.upload_operations import UploadAttemptSuperseded
 from inqtrix.services.upload_operation_service import (
     UploadBytesRequired,
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
     from inqtrix.runs.upload_queue import QueuedUploadOperation, ValkeyUploadQueue
     from inqtrix.services.upload_operation_service import UploadOperationService
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class UploadWorkerLoop(
@@ -89,6 +90,8 @@ class UploadWorkerLoop(
     ) -> None:
         del cancel_event
         ack = False
+        # Like the run and indexing workers: every line of this job names it.
+        log_tokens = bind_log_context(run_id=job.operation_id, tenant=job.tenant_id)
         try:
             try:
                 self._service.execute_claimed(claimed)
@@ -138,3 +141,4 @@ class UploadWorkerLoop(
             _count_worker_job("uploads", "finalization_failed")
         finally:
             self._finish_active(job, allow_successor=ack)
+            reset_log_context(log_tokens)

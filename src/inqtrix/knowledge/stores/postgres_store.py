@@ -120,7 +120,7 @@ from inqtrix.storage.resource_access import (
     visible_resource_select,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _DEFAULT_TENANT = "default"
 def _new_id(prefix: str) -> str:

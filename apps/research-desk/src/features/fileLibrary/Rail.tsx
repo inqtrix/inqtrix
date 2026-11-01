@@ -129,8 +129,8 @@ function UsageMeters({
   const { locale, t } = useLocale()
   const pct = Math.min(100, (usedBytes / FILE_QUOTA_BYTES) * 100)
   const usage = t.fileLibrary.storageUsage
-    .replace('{used}', formatBytes(usedBytes, locale))
-    .replace('{total}', formatBytes(FILE_QUOTA_BYTES, locale))
+    .replace('{used}', () => formatBytes(usedBytes, locale))
+    .replace('{total}', () => formatBytes(FILE_QUOTA_BYTES, locale))
   const quotaMonth =
     embeddingQuota && embeddingQuota.periodStart > 0
       ? new Date(embeddingQuota.periodStart * 1000).toLocaleDateString(locale, {

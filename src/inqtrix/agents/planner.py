@@ -336,10 +336,10 @@ def run_planner(
                 errors = attempt_errors(plan)
                 if errors:
                     log.warning(
-                        "Replan: the plan without the dropped analyses %s failed "
-                        "validation (%s); the previous plan version stays.",
-                        ", ".join(dropped),
-                        "; ".join(errors),
+                        "Replan: the plan without the %d dropped analyses failed "
+                        "validation (%d error(s)); the previous plan version stays.",
+                        len(dropped),
+                        len(errors),
                     )
                     raise PlanningFailed(errors, usage=usage)
         if not errors:

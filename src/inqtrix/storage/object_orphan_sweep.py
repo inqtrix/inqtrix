@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from inqtrix.storage.object_store import ObjectStore
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _FILE_KEY_PATTERN = re.compile(
     r"^tenants/(?P<tenant>[^/]+)/files/(?P<file_id>[^/]+)$"

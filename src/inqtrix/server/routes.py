@@ -222,6 +222,12 @@ def register_routes(
             from inqtrix.server.routers import indexing
 
             _router.include_router(indexing.build_router(container))
+    from inqtrix.server.routers.scim import build_router as build_scim_router
+
+    # SCIM only for the gateway with INQTRIX_SCIM_ENABLED; otherwise no route.
+    scim_router = build_scim_router(container)
+    if scim_router is not None:
+        _router.include_router(scim_router)
     if container.auth_provider.mode in COOKIE_SESSION_MODES:
         from inqtrix.server.routers.auth import build_auth_router
 
@@ -233,15 +239,9 @@ def register_routes(
             )
         )
         if getattr(container.auth_provider, "users", None) is not None:
-            from inqtrix.server.routers.admin import build_admin_router
+            from inqtrix.server.routers.admin import build_router as build_admin_router
 
-            _router.include_router(
-                build_admin_router(
-                    container.auth_provider,
-                    container.principal_dependency,
-                    deletions=container.asset_deletion_service,
-                )
-            )
+            _router.include_router(build_admin_router(container))
             from inqtrix.server.routers.admin_system import (
                 build_router as build_admin_system_router,
             )

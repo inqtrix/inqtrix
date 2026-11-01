@@ -1,8 +1,8 @@
-"""JSON log format (INQTRIX_LOG_FORMAT=json) and its text-mode guarantees.
+"""JSON log format (the default) and the settings that select it.
 
-The JSON formatter renders one machine-readable object per line with the
-bound correlation fields; the redaction filter runs unchanged in front of
-it. Without the flag the historical text output stays byte-identical.
+The JSON formatter renders one machine-readable object per line from record
+attributes only; the log filter stamps the correlation fields and projects
+message and exceptions in front of it.
 """
 
 from __future__ import annotations
@@ -10,29 +10,25 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
-from inqtrix.logging_config import (
-    _FILE_FORMAT,
-    _RedactSecretsFilter,
-    build_uvicorn_log_config,
-    configure_logging,
-    describe_logging_state,
-    read_logging_env,
-)
+from inqtrix.logging_config import InqtrixLogFilter, LoggingSettings, configure_logging
 from inqtrix.observability.context import bind_log_context, reset_log_context
 from inqtrix.observability.json_formatter import InqtrixJsonFormatter
 from inqtrix.server.request_context import RequestContextMiddleware
 
 
 def _json_capture_logger(name: str) -> tuple[logging.Logger, io.StringIO]:
-    """An isolated inqtrix-child logger writing JSON lines to a buffer."""
+    """An isolated logger writing JSON lines to a buffer through the filter."""
     buffer = io.StringIO()
     handler = logging.StreamHandler(buffer)
     handler.setFormatter(InqtrixJsonFormatter())
-    handler.addFilter(_RedactSecretsFilter())
+    handler.addFilter(InqtrixLogFilter(service="api"))
     logger = logging.getLogger(name)
     logger.handlers = [handler]
     logger.setLevel(logging.DEBUG)
@@ -52,12 +48,13 @@ def test_json_line_carries_required_fields_and_context():
     line = json.loads(buffer.getvalue().strip())
     assert line["message"] == "hello world"
     assert line["level"] == "INFO"
+    assert line["service"] == "api"
     assert line["logger"] == "inqtrix.test_json_fields"
-    assert line["event"] == "log"
+    assert "event" not in line
     assert line["request_id"] == "req-42"
     assert line["run_id"] == "run_abc"
     assert line["user"] == "usr_0123456789abcdef"
-    assert line["ts"].endswith("+00:00")
+    assert line["ts"].endswith("Z")
     assert "thread" in line
 
 
@@ -77,93 +74,64 @@ def test_json_line_renders_exception_field():
     line = json.loads(buffer.getvalue().strip())
     assert line["level"] == "WARNING"
     assert "ValueError" in line["exc"]
+    assert "boom" not in line["exc"]
 
 
-def test_structured_payload_merges_without_clobbering_reserved_keys():
-    logger, buffer = _json_capture_logger("inqtrix.test_json_payload")
-    logger.info(
-        "EVENT run_end",
-        extra={
-            "inqtrix_event": "run_end",
-            "inqtrix_payload": {"status": "completed", "message": "shadow"},
-        },
-    )
+def test_flat_event_extra_becomes_the_event_field():
+    logger, buffer = _json_capture_logger("inqtrix.test_json_event")
+    logger.info("Run %s ended", "run_1", extra={"event": "run_end"})
     line = json.loads(buffer.getvalue().strip())
     assert line["event"] == "run_end"
-    assert line["status"] == "completed"
-    assert line["message"] == "EVENT run_end"
-    assert line["payload_message"] == "shadow"
+    assert line["message"] == "Run run_1 ended"
 
 
-def test_text_mode_stays_byte_identical(tmp_path):
-    """Without the flag the file handler keeps the historical format."""
-    log_file = configure_logging(enabled=True, log_dir=str(tmp_path))
-    try:
-        logger = logging.getLogger("inqtrix")
-        handler = next(
-            h for h in logger.handlers if isinstance(h, logging.FileHandler)
-        )
-        assert not isinstance(handler.formatter, InqtrixJsonFormatter)
-        assert handler.formatter._style._fmt == _FILE_FORMAT
-        assert describe_logging_state()["format"] == "text"
-        assert log_file is not None
-    finally:
-        configure_logging(enabled=False)
-
-
-def test_json_mode_switches_handlers_and_state(tmp_path):
-    configure_logging(enabled=True, log_dir=str(tmp_path), json_format=True)
-    try:
-        logger = logging.getLogger("inqtrix")
-        handler = next(
-            h for h in logger.handlers if isinstance(h, logging.FileHandler)
-        )
-        assert isinstance(handler.formatter, InqtrixJsonFormatter)
-        assert describe_logging_state()["format"] == "json"
-        logger.info("json check")
-        handler.flush()
-        content = next(tmp_path.glob("inqtrix_*.log")).read_text().strip()
-        assert json.loads(content)["message"] == "json check"
-    finally:
-        configure_logging(enabled=False)
-
-
-def test_uvicorn_config_switches_formatters_with_the_flag():
-    text_config = build_uvicorn_log_config(None)
-    assert (
-        text_config["formatters"]["default"]["()"]
-        == "uvicorn.logging.DefaultFormatter"
+def test_text_format_names_level_service_and_logger(tmp_path):
+    resolved = configure_logging(
+        service="worker", target="file", format="text", log_dir=str(tmp_path)
     )
-    json_config = build_uvicorn_log_config(None, json_format=True)
-    for name in ("default", "access", "file"):
-        assert (
-            json_config["formatters"][name]["()"]
-            == "inqtrix.observability.json_formatter.InqtrixJsonFormatter"
-        )
+    logging.getLogger("inqtrix").warning("text check %d", 7)
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    line = (tmp_path / "inqtrix-worker.log").read_text(encoding="utf-8").strip()
+    assert resolved.format == "text"
+    assert re.fullmatch(
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \| WARNING \| worker \| inqtrix \| text check 7",
+        line,
+    )
 
 
-def test_read_logging_env_defaults_and_json_flag(monkeypatch):
+def test_logging_settings_defaults_and_environment(monkeypatch):
     for name in (
-        "INQTRIX_LOG_ENABLED",
+        "INQTRIX_LOG_TARGET",
         "INQTRIX_LOG_LEVEL",
-        "INQTRIX_LOG_CONSOLE",
-        "INQTRIX_LOG_INCLUDE_WEB",
-        "INQTRIX_LOG_WEB_LEVEL",
         "INQTRIX_LOG_FORMAT",
+        "INQTRIX_LOG_DIR",
+        "INQTRIX_LOG_MAX_BYTES",
+        "INQTRIX_LOG_BACKUP_COUNT",
+        "INQTRIX_LOG_WEB_LEVEL",
+        "INQTRIX_LOG_CONFIG",
     ):
         monkeypatch.delenv(name, raising=False)
-    env = read_logging_env()
-    assert env.enabled is False
-    assert env.level == "INFO"
-    assert env.console is False
-    assert env.include_web is True
-    assert env.web_level == "INFO"
-    assert env.json_format is False
+    settings = LoggingSettings()
+    assert settings.target == "console"
+    assert settings.level == "INFO"
+    assert settings.format == "json"
+    assert settings.dir == "logs"
+    assert settings.max_bytes == 20 * 1024 * 1024
+    assert settings.backup_count == 5
+    assert settings.web_level == ""
+    assert settings.config == ""
 
-    monkeypatch.setenv("INQTRIX_LOG_FORMAT", "JSON")
-    assert read_logging_env().json_format is True
-    monkeypatch.setenv("INQTRIX_LOG_FORMAT", "text")
-    assert read_logging_env().json_format is False
+    monkeypatch.setenv("INQTRIX_LOG_FORMAT", "TEXT")
+    monkeypatch.setenv("INQTRIX_LOG_LEVEL", "debug")
+    settings = LoggingSettings()
+    assert settings.format == "text"
+    assert settings.level == "DEBUG"
+
+    monkeypatch.setenv("INQTRIX_LOG_LEVEL", "LOUD")
+    with pytest.raises(ValidationError):
+        LoggingSettings()
 
 
 def _middleware_app() -> TestClient:
@@ -204,13 +172,17 @@ def test_invalid_incoming_request_id_is_replaced():
     assert len(replaced) == 32
 
 
-def test_redaction_filter_lets_a_record_with_exc_info_false_through():
+def test_log_filter_lets_a_record_with_exc_info_false_through():
     # ``exc_info=False`` is a legal logging call and reaches the record as
     # ``False``; the filter unpacked it and the call raised TypeError instead
     # of logging.
-    for name in ("inqtrix.test_exc_info_false", "third_party.test_exc_info_false"):
+    expected = {
+        "inqtrix.test_exc_info_false": "plain warning kept",
+        "third_party.test_exc_info_false": "plain warning <str>",
+    }
+    for name, message in expected.items():
         logger, buffer = _json_capture_logger(name)
         logger.warning("plain warning %s", "kept", exc_info=False)
         line = json.loads(buffer.getvalue().strip())
-        assert line["message"] == "plain warning kept"
+        assert line["message"] == message
         assert "exc" not in line

@@ -14,20 +14,25 @@ orchestrator.
 
 Terminate TLS at your ingress/load balancer (or directly in the bundled Python gateway)
 and serve the app over HTTPS. The public origin must match how the browser
-reaches the app, because cookies and the OIDC callback derive from it:
+reaches the app, because the OIDC callback, guest links, SCIM locations and
+the collaboration origin check derive from it:
 
 ```dotenv
 INQTRIX_PUBLIC_BASE_URL=https://research.example.com
-# Optional only when an additional trusted proxy needs a scheme-only override:
-# INQTRIX_EXTERNAL_SCHEME=https
 ```
 
-`INQTRIX_PUBLIC_BASE_URL` is the primary trust anchor consumed by both API and
-web gateway; it supplies the complete scheme and authority. The optional
-`INQTRIX_EXTERNAL_SCHEME` is only a scheme-level override for unusual
-multi-proxy topologies. When both are set they must agree, otherwise the web
-gateway fails at startup. See [Deploy editor collaboration](editor-collaboration.md)
-for the full origin-trust chain.
+The API server, the worker and the web gateway read this value, and the web
+gateway forwards its scheme and host to the API server instead of what a
+client sends. The one rule for scheme and host behind a TLS proxy, and why it
+holds, is in [Scheme behind a TLS proxy](auth-modes.md#scheme-behind-a-tls-proxy).
+Two facts about `INQTRIX_EXTERNAL_SCHEME` belong here: set beside the public base
+URL, it must name the same scheme, otherwise the web gateway does not start;
+and with `https` the web gateway also sends `Strict-Transport-Security` for
+180 days, without `includeSubDomains` and `preload`. The Helm chart derives
+the value from an `https` public base URL and the direct-TLS override
+`compose.web-tls.yaml` sets it; the plain Compose stack leaves it empty unless
+you set it. See [Deploy editor collaboration](editor-collaboration.md) for the
+full origin-trust chain.
 
 Over HTTPS, leave secure cookies ON — that is the default. **Never** set
 `INQTRIX_OIDC_INSECURE_DEV_COOKIES=true` in production; it drops the `Secure`
@@ -41,8 +46,11 @@ minted on one replica must validate on another):
 
 | Secret | Why |
 |---|---|
-| `INQTRIX_SESSION_SECRET` | HMAC key for the CSRF double-submit token (local/oidc); the session cookie itself is an opaque random id, so rotating this invalidates outstanding CSRF tokens while sessions survive. |
+| `INQTRIX_SESSION_SECRET` | HMAC key for the CSRF double-submit token (local/oidc/gateway); the session cookie itself is an opaque random id, so rotating this invalidates outstanding CSRF tokens while sessions survive. |
 | `INQTRIX_PAT_PEPPER` | Pepper for personal-access-token hashing. |
+| `INQTRIX_PSEUDONYM_PEPPER` | Stable pseudonyms of people in logs and audit correlation; required for `oidc` and `gateway`. Rotating it unlinks the earlier pseudonyms. |
+| `INQTRIX_GATEWAY_SHARED_SECRET` | Mode `gateway` in sub-mode `header` or with a resolver of your own: the proof the API gateway sends, at least 32 characters. The web gateway never receives it. |
+| `INQTRIX_SCIM_TOKEN` | Mode `gateway` with SCIM: the Bearer token of the SCIM client, at least 32 characters. |
 | `INQTRIX_PG_PASSWORD` | Database auth; the visible `INQTRIX_DATABASE_URL` interpolates this one secret. |
 
 Generate them with a CSPRNG and inject via your secret manager, not the repo:
@@ -89,10 +97,74 @@ without a URL, or `valkey` without `postgres`) rather than degrading silently.
 
 ## Auth in production
 
-Pick a real auth mode — `local` (email/password, owner setup)
-or `oidc` (your IdP). The
+Pick a real auth mode: `local` (email/password, owner setup), `oidc` (your
+IdP) or `gateway` (an API gateway in front of Inqtrix signs people in). The
 single-operator `none`/`apikey` modes have no scoped identity and no sharing;
 use them only for a locked-down single-user instance.
+
+### Mode `gateway`: test the bypasses before go-live
+
+[Auth modes](auth-modes.md) lists every check of a gateway setup with its
+expected result. The checks below need no signed-in browser. Use your own
+header names instead of the examples, and your own addresses:
+`<WEB-GATEWAY>` is the address and port of the web gateway itself,
+`<API-SERVER>` that of the API server, `<TOKEN-ENTRANCE>` the entrance of
+clients with a personal access token, and `<PUBLIC-HOST>` the host of
+`INQTRIX_PUBLIC_BASE_URL`.
+
+1. Identity headers sent straight to the web gateway, from a host outside its
+   peer list:
+
+   ```bash
+   curl -s http://<WEB-GATEWAY>/api/auth/session \
+     -H 'X-Inqtrix-Assertion: forged' \
+     -H 'X-Inqtrix-Subject: forged' -H 'X-Inqtrix-Proof: forged'
+   ```
+
+   Expected: `{"authenticated":false,"reason":"assertion_missing"}`, and the
+   web gateway logs `Identity headers from a peer outside
+   INQTRIX_GATEWAY_TRUSTED_PROXIES were removed (outcome=untrusted_source ...)`,
+   at most once a minute. This holds while the web gateway's peer list is
+   set; in sub-mode `jwt` an empty list removes nothing.
+2. Identity headers with any proof sent straight to the API server (sub-mode
+   `header` and a resolver of your own), for example through
+   `kubectl port-forward`:
+
+   ```bash
+   curl -s -w '\n%{http_code}\n' http://<API-SERVER>/api/auth/session \
+     -H 'X-Inqtrix-Subject: forged' -H 'X-Inqtrix-Proof: forged'
+   ```
+
+   Expected: 401 with `"type":"untrusted_source"`.
+3. A service token, for example a client-credentials token of your identity
+   provider, through the API gateway:
+
+   ```bash
+   curl -s -i https://<PUBLIC-HOST>/api/auth/session \
+     -H 'Authorization: Bearer <SERVICE-TOKEN>'
+   ```
+
+   Expected: no `__Host-inqtrix_session` cookie in the answer; an API
+   gateway such as oauth2-proxy with `--skip-jwt-bearer-tokens=false`
+   answers 401 itself.
+4. A personal access token through its entrance and through the sign-in way:
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' https://<TOKEN-ENTRANCE>/v1/runs \
+     -H 'Authorization: Bearer ipat_...'
+   curl -s -o /dev/null -w '%{http_code}\n' https://<PUBLIC-HOST>/v1/runs \
+     -H 'Authorization: Bearer ipat_...'
+   ```
+
+   Expected: 200 through the entrance; through the sign-in way, the answer of
+   the API gateway (oauth2-proxy with `--api-route=^/v1/`: 401), unless it
+   passes `Authorization` on unchanged.
+
+The checks with forged headers on the sign-in way, a duplicate header, a
+forged groups header, a forged `X-Forwarded-For` and long calls need a person
+signed in through the API gateway; run them in the browser or with its
+cookies. The client address the API server should read is worked out in
+[Gateway mode: peer lists and client address](../configuration/settings-and-env.md#gateway-mode-peer-lists-and-client-address).
 
 ## Login rate limiting
 
@@ -116,16 +188,20 @@ proxies in front of the server (e.g. `2` for an external load balancer in front
 of the bundled adapter); a value **higher** than the real chain lets a client
 spoof again. Set it to `0` only when the API server is exposed directly with no
 reverse proxy — then just the socket peer is trusted. The reference row is
-[Settings and env](../configuration/settings-and-env.md#auth-authsettings).
+[Settings and env](../configuration/settings-and-env.md#auth-authsettings). In
+mode `gateway` the Python gateway appends nothing to the chain of a peer in its
+own list, so the count starts at the proxies in front of it; see
+[Gateway mode: peer lists and client address](../configuration/settings-and-env.md#gateway-mode-peer-lists-and-client-address).
 
 ## Pre-flight checklist
 
 - [ ] HTTPS at the ingress; `INQTRIX_PUBLIC_BASE_URL` is the exact public `https://` origin. If `INQTRIX_EXTERNAL_SCHEME` is explicitly set, it is also `https`.
 - [ ] `INQTRIX_OIDC_INSECURE_DEV_COOKIES` unset/false.
-- [ ] `SESSION_SECRET`, `PAT_PEPPER`, `PG_PASSWORD` real and shared across replicas; no `CHANGE_ME_*` in the startup log.
+- [ ] `SESSION_SECRET`, `PAT_PEPPER`, `PG_PASSWORD` (and `PSEUDONYM_PEPPER` for `oidc` and `gateway`) real and shared across replicas; no `CHANGE_ME_*` in the startup log.
 - [ ] Postgres backend + migrations applied; backups scheduled for Postgres and the blob store.
 - [ ] Each enabled profile hardened (Qdrant key, Valkey password, S3 creds, OIDC callback).
 - [ ] A real auth mode chosen; login endpoints rate-limited at the proxy.
+- [ ] Mode `gateway`: both peer lists name the real direct peers, the bypass checks above give the expected answers, `INQTRIX_GATEWAY_FIRST_USER_OWNER` is back to `false` once the first admin exists, and with SCIM the API server's start line shows `scim=on`.
 
 ## Related docs
 

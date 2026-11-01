@@ -156,7 +156,7 @@ export function KnowledgeStatusMenu({
             <div className="px-2.5 pb-2 pt-1 t-meta-sm text-muted-foreground">
               {k.profileAutoDelegates.replace(
                 '{profiles}',
-                profile.delegatesTo.map((id) => profileDisplayName(id, k)).join(', '),
+                () => profile.delegatesTo.map((id) => profileDisplayName(id, k)).join(', '),
               )}
             </div>
           )}

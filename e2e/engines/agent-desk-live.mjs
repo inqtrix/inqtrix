@@ -18,6 +18,9 @@ import {
   fetchActorJson as fetchJson,
 } from '../../tests/verification/fixtures/api.mjs'
 import {
+  requireAccountLocale,
+} from '../../tests/verification/fixtures/accounts.mjs'
+import {
   agentSessionTitleForRun,
   assertVerificationRunId,
 } from '../../tests/verification/fixtures/run-scope.mjs'
@@ -117,6 +120,8 @@ try {
     'AgentTester',
     'user',
   )
+  // The run reads German labels; the page shows the tester's saved language.
+  await requireAccountLocale(tester, 'de')
   // Network hygiene on top of the shared pageerror/console collectors.
   tester.page.on('requestfailed', (request) => {
     const failure = request.failure()?.errorText ?? 'failed'

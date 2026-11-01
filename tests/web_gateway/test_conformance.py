@@ -37,7 +37,11 @@ def test_main_propagates_non_default_collaboration_transport_limits(
         external_scheme: str | None,
         max_request_bytes: int | None,
         max_upstream_connections: int | None,
+        identity_policy: Any,
+        forwarded_allow_ips_set: bool,
     ) -> object:
+        captured["identity_policy"] = identity_policy
+        captured["forwarded_allow_ips_set"] = forwarded_allow_ips_set
         captured["dist_dir"] = dist_dir
         captured["backend_url"] = backend_url
         captured["app_frame_limit"] = collaboration_settings.max_frame_bytes
@@ -77,6 +81,12 @@ def test_main_propagates_non_default_collaboration_transport_limits(
     assert captured["external_scheme"] == "https"
     assert captured["max_request_bytes"] == 5_000_000 + 10 * 1024 * 1024
     assert captured["max_upstream_connections"] == 321
+    # The production entry always hands the app its identity edge, read from
+    # the environment, so the edge asks the API server for its mode.
+    from inqtrix_web_gateway.settings import IdentityEdgePolicy
+
+    assert isinstance(captured["identity_policy"], IdentityEdgePolicy)
+    assert captured["forwarded_allow_ips_set"] is False
     assert captured["uvicorn_app"] is app
     assert (
         captured["uvicorn_options"]["ws_max_size"]
@@ -115,7 +125,7 @@ def test_gateway_transport_defaults_match_canonical_settings() -> None:
 def test_main_passes_workers_explicitly_default_one(
     fake_dist: Path,
     clean_gateway_env: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """WEB_CONCURRENCY cannot flip uvicorn into the multiprocess path.
 
@@ -126,12 +136,72 @@ def test_main_passes_workers_explicitly_default_one(
     platform variable must be visible, not silent.
     """
     clean_gateway_env.setenv("WEB_CONCURRENCY", "4")
-    with caplog.at_level("WARNING", logger="inqtrix.web_gateway"):
-        captured = _run_stubbed_main(clean_gateway_env, fake_dist)
+    captured = _run_stubbed_main(clean_gateway_env, fake_dist)
 
     assert captured["uvicorn_options"]["workers"] == 1
     assert captured["uvicorn_app"] is captured["stub_app"]
-    assert "WEB_CONCURRENCY=4 is ignored" in caplog.text
+    # main() configures the process logging: the line reaches stdout.
+    assert "WEB_CONCURRENCY=4 is ignored" in capsys.readouterr().out
+
+def test_main_runs_uvicorn_without_proxy_headers(
+    fake_dist: Path,
+    clean_gateway_env: pytest.MonkeyPatch,
+) -> None:
+    """The gateway reads forwarding headers itself, never through uvicorn."""
+    captured = _run_stubbed_main(clean_gateway_env, fake_dist)
+
+    assert captured["uvicorn_options"]["proxy_headers"] is False
+
+
+def test_forwarded_allow_ips_is_reported_as_without_effect(
+    fake_dist: Path,
+    clean_gateway_env: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    clean_gateway_env.setenv("FORWARDED_ALLOW_IPS", "10.0.0.1")
+
+    captured = _run_stubbed_main(clean_gateway_env, fake_dist)
+
+    assert captured["uvicorn_options"]["proxy_headers"] is False
+    output = capsys.readouterr().out
+    assert "Retired setting FORWARDED_ALLOW_IPS is set and has no effect" in output
+    assert "10.0.0.1" not in output
+
+def test_the_retired_proxy_variable_is_the_one_the_api_lists() -> None:
+    from inqtrix.settings import RETIRED_SETTINGS
+
+    assert gateway_cli._RETIRED_PROXY_ALLOW_LIST in {entry.name for entry in RETIRED_SETTINGS}
+
+def test_main_hands_uvicorn_the_gateway_log_configuration(
+    fake_dist: Path,
+    clean_gateway_env: pytest.MonkeyPatch,
+) -> None:
+    """uvicorn applies the mapping in every worker; ``log_level`` would
+    override its levels."""
+    from inqtrix_web_gateway.logging import gateway_log_config
+
+    captured = _run_stubbed_main(clean_gateway_env, fake_dist)
+
+    assert captured["uvicorn_options"]["log_config"] == gateway_log_config()
+    assert "log_level" not in captured["uvicorn_options"]
+
+
+@pytest.mark.parametrize("workers", ["1", "3"])
+def test_main_gives_open_streams_a_deadline_below_the_stop_timeout(
+    workers: str,
+    fake_dist: Path,
+    clean_gateway_env: pytest.MonkeyPatch,
+) -> None:
+    """Without a deadline uvicorn waits for the browser's event stream until
+    the container is killed; Docker and Podman stop after 10 seconds. Eight
+    seconds leave room for the application shutdown, and the docs name it."""
+    clean_gateway_env.setenv("RESEARCH_DESK_WORKERS", workers)
+
+    captured = _run_stubbed_main(clean_gateway_env, fake_dist)
+
+    assert captured["uvicorn_options"]["workers"] == int(workers)
+    assert captured["uvicorn_options"].get("timeout_graceful_shutdown") == 8
+
 
 def test_cli_options_override_environment(
     fake_dist: Path,

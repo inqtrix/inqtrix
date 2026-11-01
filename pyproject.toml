@@ -21,15 +21,15 @@ classifiers = [
 dependencies = [
     # Cancellation-safe database finalization uses AnyIO's shield semantics
     # because Starlette applies level cancellation to disconnected requests.
-    "anyio>=4.12,<5.0",
+    "anyio>=4.14.2,<5.0",
     "fastapi>=0.135,<1.0",
-    "starlette>=1.0,<2.0",
+    "starlette>=1.3.1,<2.0",
     "uvicorn[standard]>=0.42,<1.0",
     "openai>=2.0,<3.0",
     "langgraph>=1.2.5,<2.0",
     "cachetools>=5.5,<6.0",
-    "pydantic-settings>=2.7,<3.0",
-    "python-dotenv>=1.0,<2.0",
+    "pydantic-settings>=2.14.2,<3.0",
+    "python-dotenv>=1.2,<2.0",
     "rich>=13.0",
     "boto3>=1.35",
     "azure-identity>=1.18",
@@ -52,6 +52,9 @@ dependencies = [
     # Direct HTTP for the rerank API adapter (already a transitive
     # dependency of the openai SDK; declared for honesty).
     "httpx>=0.28,<1.0",
+    # Trust store of httpx, requests and boto3. Older bundles still trust the
+    # compromised emSign ECC Root CA - G3 (GHSA-6q48-6c7w-9gw2).
+    "certifi>=2026.10.19",
     # Binary WebSocket relay from the public FastAPI gateway to the private
     # collaboration service. Declared directly because application code uses
     # the client API rather than relying on uvicorn's optional transitive extra.
@@ -70,6 +73,9 @@ dependencies = [
     # Docling are optional tiers behind the same port.
     "markitdown[pdf,docx,pptx,xlsx]>=0.1.1,<1.0",
     "tldextract>=5.3,<6",
+    # YAML logging configurations (INQTRIX_LOG_CONFIG) and skill front
+    # matter; declared directly instead of relying on uvicorn[standard].
+    "PyYAML>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
@@ -100,8 +106,8 @@ metrics = [
 # headers come from the standard OTEL_EXPORTER_OTLP_* variables, so a
 # Langfuse/Collector target is pure configuration.
 observability = [
-    "opentelemetry-sdk>=1.30,<2.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.30,<2.0",
+    "opentelemetry-sdk>=1.45.1,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1,<2.0",
 ]
 # Workspace-agent runtime (mode=workspace_agent):
 # deepagents is the sub-agent harness, the Postgres checkpointer keeps
@@ -123,8 +129,8 @@ dev = [
     "fakeredis>=2.26",
     "valkey>=6.1,<7.0",
     "prometheus-client>=0.20,<1.0",
-    "opentelemetry-sdk>=1.30,<2.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.30,<2.0",
+    "opentelemetry-sdk>=1.45.1,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1,<2.0",
 ]
 
 [project.scripts]
@@ -145,7 +151,7 @@ packages = ["src/inqtrix", "src/inqtrix_web_gateway"]
 web-gateway = [
     "fastapi>=0.135,<1.0",
     "httpx>=0.28,<1.0",
-    "starlette>=1.0,<2.0",
+    "starlette>=1.3.1,<2.0",
     "uvicorn>=0.42,<1.0",
     "websockets>=15,<16",
 ]

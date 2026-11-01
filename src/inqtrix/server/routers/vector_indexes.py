@@ -31,6 +31,7 @@ from inqtrix.project.vector_index_ports import (
 )
 from inqtrix.services.request_parsing import (
     error_response,
+    workspace_id_for_write,
     workspace_id_from_request,
 )
 from inqtrix.services.vector_index_service import VectorIndexValidationError
@@ -144,6 +145,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         raise RuntimeError("build_router(vector_indexes) requires a wired service.")
     router = APIRouter()
     principal_dep = container.principal_dependency
+    users = getattr(container.auth_provider, "users", None)
     user_context_dep = container.user_context_dependency
     deletion_service = container.asset_deletion_service
 
@@ -181,11 +183,13 @@ def build_router(container: "AppContainer") -> APIRouter:
         except _PayloadError as exc:
             return error_response(400, str(exc), "invalid_request_error")
         try:
+            # One namespace for the deletion guard and the write.
+            workspace_id = await workspace_id_for_write(req, principal, users)
             deletion_service.assert_target_allowed(
                 DeletionTargetKind.VECTOR_INDEX,
                 index_id,
                 principal=principal,
-                workspace_id=workspace_id_from_request(req),
+                workspace_id=workspace_id,
             )
             index = await service.save_index(
                 id=index_id, title=str(body.get("title", "")),
@@ -205,7 +209,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 members=members, history=history,
                 created_at=float(body["created_at"]), updated_at=float(body["updated_at"]),
                 caller_user_id=_caller_user_id(principal),
-                workspace_id=workspace_id_from_request(req), visible_to=visible_to,
+                workspace_id=workspace_id, visible_to=visible_to,
             )
         except VectorIndexValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")

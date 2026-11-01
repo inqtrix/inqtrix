@@ -30,7 +30,7 @@ import threading
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _ASYNCPG_ONLY_QUERY_PARAMS = frozenset(
     {

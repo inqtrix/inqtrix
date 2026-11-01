@@ -32,11 +32,11 @@ Which feature needs which component and which auth mode. The capability endpoint
 | Hybrid retrieval + reranking | – | – | – | **qdrant** + reranker | – | `features.hybrid_retrieval` / `reranker` |
 | File uploads / attachments | any | postgres | **local or s3** | – | – | `features.files` |
 | Prompt templates (durable) | any | **postgres** | – | – | – | `features.prompt_templates` |
-| Multi-user / invitations | oidc / local | **postgres** | – | – | – | (implicit) |
-| Sharing (runs/collections/templates) | oidc / local | **postgres** | – | – | – | `features.sharing` |
-| Live editor collaboration | oidc / local | **postgres** | – | – | not used | `features.collaboration` plus root `collaboration.service_available` |
+| Multi-user / invitations | oidc / local / gateway | **postgres** | – | – | – | (implicit) |
+| Sharing (runs/collections/templates) | oidc / local / gateway | **postgres** | – | – | – | `features.sharing` |
+| Live editor collaboration | oidc / local / gateway | **postgres** | – | – | not used | `features.collaboration` plus root `collaboration.service_available` |
 
-Note: multi-user, invitations, and sharing require a cookie-session auth mode — `local` (email/password) or `oidc` — plus the Postgres backend. The single-operator `none`/`apikey` modes have no scoped identity and therefore no sharing; for single-user-with-sharing run `local` with one owner.
+Note: multi-user, invitations, and sharing require a cookie-session auth mode, `local` (email/password), `oidc` or `gateway`, plus the Postgres backend. The single-operator `none`/`apikey` modes have no scoped identity and therefore no sharing; for single-user-with-sharing run `local` with one owner.
 
 For administrators, `GET /v1/admin/system/runtime` exposes the same component
 choices as a sanitized runtime manifest for the System settings page. It reports

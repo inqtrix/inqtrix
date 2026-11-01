@@ -6,6 +6,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 
+import { ConfigError } from './config'
 import type { ConnectionContext } from './contracts'
 
 export const VERIFICATION_FAULT_FILE =
@@ -55,7 +56,7 @@ export function verificationFaultGateFromEnv(
     return null
   }
   if (configured !== '1') {
-    throw new Error(`${VERIFICATION_FAULT_ENV} must be 0 or 1`)
+    throw new ConfigError(`${VERIFICATION_FAULT_ENV} must be 0 or 1`)
   }
   return new VerificationFaultGate(path)
 }

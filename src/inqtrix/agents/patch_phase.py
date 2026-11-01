@@ -24,7 +24,7 @@ from inqtrix.server.reference_documents import ReferenceDocument
 if TYPE_CHECKING:
     from inqtrix.providers.base import LLMProvider
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class PatchProposalFailed(RuntimeError):

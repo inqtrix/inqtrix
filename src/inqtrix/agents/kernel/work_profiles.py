@@ -336,14 +336,16 @@ def settle_role_child(
     quiet success. ``stored`` is the child's stored result, read by the
     caller once the child completed.
     """
+    from inqtrix.execution_failures import safe_failure_detail
     from inqtrix.runs.shared import TERMINAL_RUN_STATUS_VALUES
 
     if child["status"] not in TERMINAL_RUN_STATUS_VALUES:
         return None
     if child["status"] != "completed":
+        # The error type, not its message: the message can quote the model.
         return RoleChildOutcome(
             "failed",
-            str((child.get("error") or {}).get("message") or child["status"]),
+            str((child.get("error") or {}).get("type") or child["status"]),
         )
     work_result = stored.get("work_result") if isinstance(stored, dict) else None
     if not isinstance(work_result, dict) or work_result.get("profile") != profile.name:
@@ -356,7 +358,7 @@ def settle_role_child(
     try:
         value = profile.result_model.model_validate(work_result.get("value"))
     except ValidationError as exc:
-        return RoleChildOutcome(WORK_RESULT_SCHEMA_INVALID, str(exc))
+        return RoleChildOutcome(WORK_RESULT_SCHEMA_INVALID, safe_failure_detail(exc))
     return RoleChildOutcome(
         "",
         value=value,

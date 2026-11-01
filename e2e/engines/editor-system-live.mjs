@@ -8,6 +8,8 @@ import * as Y from 'yjs'
 import {
   eraseTemporaryUser,
   ensureTemporaryUsers,
+  requireAccountLocale,
+  setAccountLocale,
 } from '../../tests/verification/fixtures/accounts.mjs'
 import {
   assertFixture as assert,
@@ -17,6 +19,9 @@ import {
   createCollaborationDocument,
   deleteCollaborationDocument,
 } from '../../tests/verification/fixtures/documents.mjs'
+import {
+  SYSTEM_SMOKE_LOCALE,
+} from '../../tests/verification/fixtures/collaboration-system-smoke.mjs'
 import {
   assertVerificationRunId,
 } from '../../tests/verification/fixtures/run-scope.mjs'
@@ -65,6 +70,10 @@ const lifecycle = new VerificationLifecycleClient({
   reportDirectory: requiredEnvironment('INQTRIX_VERIFICATION_REPORT_DIR'),
   runId: runKey,
 })
+// The slash labels below are German, the language of the whole system
+// smoke: the accounts the run creates save it, the borrowed admin and
+// tester must already have it.
+const interfaceLocale = SYSTEM_SMOKE_LOCALE
 const liveSlashActions = [
   { id: 'paragraph', label: 'Absatz', selector: 'p' },
   { id: 'heading1', label: 'Überschrift 1', selector: 'h1' },
@@ -143,6 +152,8 @@ try {
     admin.user.id !== tester.user.id,
     'Admin and tester credentials resolved to the same authenticated identity.',
   )
+  await requireAccountLocale(admin, interfaceLocale)
+  await requireAccountLocale(tester, interfaceLocale)
 
   const capabilities = await fetchJson(admin, 'GET', '/v1/capabilities')
   assert(capabilities.features?.sharing === true, 'Sharing capability is not enabled.')
@@ -160,14 +171,14 @@ try {
   })
   const temporaryActors = []
   for (const user of temporaryUsers) {
-    temporaryActors.push(
-      await sessionFixtures.loginActor(
-        user.email,
-        userPassword,
-        user.displayName,
-        'user',
-      ),
+    const actor = await sessionFixtures.loginActor(
+      user.email,
+      userPassword,
+      user.displayName,
+      'user',
     )
+    await setAccountLocale(actor, interfaceLocale)
+    temporaryActors.push(actor)
   }
   actors = [admin, tester, ...temporaryActors]
   assert(
@@ -749,7 +760,7 @@ async function exerciseGuestLinkGate({
       },
     )
     assert(
-      missingCsrf.body?.error?.message === 'CSRF-Prüfung fehlgeschlagen.',
+      missingCsrf.body?.error?.message === 'CSRF validation failed.',
       'Guest mutation without CSRF was not rejected.',
     )
     const wrongOrigin = await sessionFixtures.guestFetch(
@@ -766,7 +777,7 @@ async function exerciseGuestLinkGate({
       },
     )
     assert(
-      wrongOrigin.body?.error?.message === 'Unzulässiger Ursprung.',
+      wrongOrigin.body?.error?.message === 'Disallowed origin.',
       'Guest mutation from an untrusted Origin was not rejected.',
     )
 
@@ -1460,7 +1471,10 @@ async function exerciseLiveSlashMatrix(matrixActors, schemaVersion) {
       await reloadedSurface.locator(action.selector).count() >= minimumCount,
       `${action.label} did not survive an authoritative reload.`,
     )
-    await reloadedSurface.getByText(marker, { exact: false }).waitFor({
+    // The same statement as before the reload: the one editor surface holds
+    // the marker. A text search would also hit a task item's hidden checkbox
+    // label, which repeats the item's text.
+    await reloadedSurface.filter({ hasText: marker }).waitFor({
       state: 'visible',
       timeout: 20_000,
     })

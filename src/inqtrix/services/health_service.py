@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.principal import AuthProvider
     from inqtrix.providers.base import ProviderContext
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 

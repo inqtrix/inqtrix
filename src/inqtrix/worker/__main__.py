@@ -32,12 +32,12 @@ import threading
 import time
 from typing import Callable
 
-from inqtrix.logging_config import configure_logging, read_logging_env
+from inqtrix.logging_config import configure_logging, log_status_line
 from inqtrix.providers import create_providers
 from inqtrix.runs.postgres_store import PostgresRunStore
 from inqtrix.runs.valkey_queue import ValkeyRunQueue
 from inqtrix.server.container import build_container
-from inqtrix.settings import Settings
+from inqtrix.settings import Settings, check_retired_settings
 from inqtrix.strategies import (
     create_default_strategies,
     resolve_claim_extract_model,
@@ -51,7 +51,9 @@ from inqtrix.worker.loop import (
     WorkerLoop,
 )
 
-log = logging.getLogger("inqtrix")
+# Run as ``python -m inqtrix.worker`` this module's ``__name__`` is
+# ``"__main__"``; the logger keeps the import path either way.
+log = logging.getLogger("inqtrix.worker.__main__")
 
 _DRAIN_SECONDS = 90.0
 # A healthy contract is re-proved once a minute: every probe opens its own
@@ -246,11 +248,12 @@ def _verified_database_claim_contract(
         _wait_for_database_claim_contract(guard, sleep=sleep)
     except Exception as exc:
         cause = sanitize_log_message(exc)
+        # The scrubbed cause travels in the exception below; the process hook
+        # shows it once, at exit. This line stays free of exception text.
         log.error(
             "Worker database runtime contract failed before queue claims "
-            "(error_type=%s): %s",
+            "(error_type=%s).",
             type(exc).__name__,
-            cause,
         )
         # The MESSAGE names the cause, scrubbed. The CHAIN is kept only
         # where the cause is sanitized BY CONSTRUCTION: a
@@ -499,13 +502,9 @@ def _report_binding_ceilings(settings: "Settings", loops: "list") -> None:
 
 def main() -> None:
     """Run one worker process until SIGTERM/SIGINT."""
-    logging_env = read_logging_env()
-    configure_logging(
-        enabled=logging_env.enabled,
-        level=logging_env.level,
-        console=logging_env.console,
-        json_format=logging_env.json_format,
-    )
+    resolved = configure_logging(service="worker")
+    retired = check_retired_settings()
+    log_status_line(resolved, retired=retired)
     settings = Settings()
     # Same instance pepper as the API server: worker log lines must carry
     # the SAME subject pseudonyms, otherwise cross-process correlation

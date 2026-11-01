@@ -42,13 +42,14 @@ from inqtrix.services.editor_persistence_service import (
 )
 from inqtrix.services.request_parsing import (
     error_response,
+    workspace_id_for_write,
     workspace_id_from_request,
 )
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 def _caller_user_id(principal: Principal) -> uuid.UUID | None:
@@ -345,13 +346,15 @@ def build_router(container: "AppContainer") -> APIRouter:
                 created_at=float(created_at),
                 updated_at=float(updated_at),
                 caller_user_id=_caller_user_id(principal),
-                workspace_id=workspace_id_from_request(req),
+                workspace_id=await workspace_id_for_write(req, principal, users),
                 visible_to=visible_to,
             )
         except EditorValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")
         except DocumentNotFound:
             return error_response(404, "Document not found", "not_found")
+        except FolderNotFound:
+            return error_response(404, "Folder not found", "not_found")
         except DocumentContentModeConflict:
             return error_response(
                 409,
@@ -691,7 +694,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 created_at=float(created_at),
                 updated_at=float(updated_at),
                 caller_user_id=_caller_user_id(principal),
-                workspace_id=workspace_id_from_request(req),
+                workspace_id=await workspace_id_for_write(req, principal, users),
                 visible_to=visible_to,
             )
         except FolderNotFound:

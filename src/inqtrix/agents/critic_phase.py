@@ -21,7 +21,7 @@ from inqtrix.agents.report_quality import (
 )
 from inqtrix.i18n import t
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 SOURCE_BASIS_PREFIX = "source:"
 """How a finding names a ledger reference: this prefix plus the reference id."""

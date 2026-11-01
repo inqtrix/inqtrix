@@ -1,0 +1,197 @@
+# Local acceptance of the gateway mode. Keycloak signs people in, oauth2-proxy
+# stands in front of the web gateway as the API gateway, and Inqtrix runs
+# INQTRIX_AUTH_MODE=gateway. A test fixture for one machine: never use it as a
+# production setup. Run it as a Compose project of its own, because it fixes
+# the subnet of the project network so that the web gateway and the API can
+# name their peers:
+#
+#   podman compose -p inqtrix-gateway \
+#     -f deploy/compose/compose.stack.yaml \
+#     -f deploy/compose/compose.gateway-acceptance.yaml \
+#     --env-file <stack secrets> --env-file <stack config> \
+#     --env-file <acceptance values> \
+#     --profile knowledge --profile s3 --profile workers --profile collaboration \
+#     up -d --build
+#
+# The browser opens http://localhost:4180 (oauth2-proxy). Keycloak answers on
+# http://keycloak.localhost:8180 for the browser and inside the network; its
+# admin console is at /admin with the bootstrap admin below. Clients with a
+# personal access token and the SCIM client use the web gateway port of the
+# stack directly (their own entry); the web gateway strips identity headers
+# from every peer but oauth2-proxy.
+#
+# Acceptance values (a private file per run; secrets never live in this file
+# or in the realm):
+#   INQTRIX_GATEWAY_ACCEPTANCE_ASSERTION       jwt or header (selects the
+#                                              assertion of the API and the
+#                                              matching oauth2-proxy file)
+#   INQTRIX_GATEWAY_ACCEPTANCE_CLIENT_SECRET   secret of the sign-in client
+#   INQTRIX_GATEWAY_ACCEPTANCE_SERVICE_SECRET  secret of the service client
+#   INQTRIX_GATEWAY_ACCEPTANCE_USER_PASSWORD   password of alice and bob
+#   INQTRIX_GATEWAY_ACCEPTANCE_ADMIN_PASSWORD  Keycloak bootstrap admin
+#   INQTRIX_GATEWAY_ACCEPTANCE_COOKIE_SECRET   32 characters, oauth2-proxy cookie
+#   INQTRIX_GATEWAY_ACCEPTANCE_SHARED_SECRET   proof secret of the header
+#                                              assertion, at least 32 characters
+#   INQTRIX_GATEWAY_ACCEPTANCE_ADMIN_GROUPS    inqtrix-admins with jwt; empty
+#                                              with header (headers never grant
+#                                              admin)
+#   INQTRIX_GATEWAY_ACCEPTANCE_SCIM            true turns SCIM on, with
+#   INQTRIX_GATEWAY_ACCEPTANCE_SCIM_TOKEN      a token of at least 32 characters
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.89.250.0/24
+
+secrets:
+  gateway_acceptance_client_secret:
+    environment: INQTRIX_GATEWAY_ACCEPTANCE_CLIENT_SECRET
+  gateway_acceptance_shared_secret:
+    environment: INQTRIX_GATEWAY_ACCEPTANCE_SHARED_SECRET
+
+x-gateway-mode: &gateway-mode
+  INQTRIX_AUTH_MODE: gateway
+  INQTRIX_GATEWAY_ASSERTION: ${INQTRIX_GATEWAY_ACCEPTANCE_ASSERTION:?set INQTRIX_GATEWAY_ACCEPTANCE_ASSERTION to jwt or header}
+  INQTRIX_PUBLIC_BASE_URL: http://localhost:4180
+  INQTRIX_GATEWAY_ISSUER_KEY: gateway:acceptance
+  INQTRIX_GATEWAY_JWT_HEADER: X-Inqtrix-Assertion
+  INQTRIX_GATEWAY_JWT_ISSUER: http://keycloak.localhost:8180/realms/inqtrix-acceptance
+  INQTRIX_GATEWAY_JWT_AUDIENCE: inqtrix
+  INQTRIX_GATEWAY_JWT_USER_SCOPE: inqtrix.user
+  INQTRIX_GATEWAY_JWKS_URL: http://keycloak.localhost:8180/realms/inqtrix-acceptance/protocol/openid-connect/certs
+  INQTRIX_GATEWAY_SUBJECT_CLAIM: sub
+  INQTRIX_GATEWAY_SUBJECT_HEADER: X-Inqtrix-Subject
+  INQTRIX_GATEWAY_NAME_HEADER: X-Inqtrix-Name
+  INQTRIX_GATEWAY_GROUPS_HEADER: X-Inqtrix-Groups
+  INQTRIX_GATEWAY_PROOF_HEADER: X-Inqtrix-Proof
+  INQTRIX_GATEWAY_SHARED_SECRET: ${INQTRIX_GATEWAY_ACCEPTANCE_SHARED_SECRET:?set INQTRIX_GATEWAY_ACCEPTANCE_SHARED_SECRET}
+  # The API's direct peer is the web gateway (fixed address below).
+  INQTRIX_GATEWAY_TRUSTED_PROXIES: 10.89.250.251/32
+  INQTRIX_GATEWAY_PAT_MAX_TTL_DAYS: "90"
+  INQTRIX_GATEWAY_FIRST_USER_OWNER: "false"
+  INQTRIX_OIDC_ADMIN_GROUPS: ${INQTRIX_GATEWAY_ACCEPTANCE_ADMIN_GROUPS:-}
+  # Signing out of Inqtrix leads through the sign-out of oauth2-proxy, which
+  # also ends the Keycloak session (backendLogoutURL), back to the start page.
+  INQTRIX_GATEWAY_LOGOUT_URL: /oauth2/sign_out?rd=%2F
+  INQTRIX_SCIM_ENABLED: ${INQTRIX_GATEWAY_ACCEPTANCE_SCIM:-false}
+  INQTRIX_SCIM_TOKEN: ${INQTRIX_GATEWAY_ACCEPTANCE_SCIM_TOKEN:-}
+
+services:
+  api:
+    environment:
+      <<: *gateway-mode
+
+  worker:
+    environment:
+      <<: *gateway-mode
+
+  web:
+    environment:
+      INQTRIX_AUTH_MODE: gateway
+      INQTRIX_PUBLIC_BASE_URL: http://localhost:4180
+      INQTRIX_GATEWAY_JWT_HEADER: X-Inqtrix-Assertion
+      INQTRIX_GATEWAY_SUBJECT_HEADER: X-Inqtrix-Subject
+      INQTRIX_GATEWAY_NAME_HEADER: X-Inqtrix-Name
+      INQTRIX_GATEWAY_GROUPS_HEADER: X-Inqtrix-Groups
+      INQTRIX_GATEWAY_PROOF_HEADER: X-Inqtrix-Proof
+      # Only oauth2-proxy may send identity headers; every other peer, the
+      # stack port on the host included, has them stripped.
+      INQTRIX_GATEWAY_TRUSTED_PROXIES: 10.89.250.250/32
+    networks:
+      default:
+        ipv4_address: 10.89.250.251
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1@sha256:a78d6b79572168cb25886b80a8b5b8d4ed4390743e3eecb810538683e209dd6b
+    # A fixed hostname keeps the issuer byte-identical for the browser, for
+    # oauth2-proxy and for the API; never hostname-strict=false.
+    command:
+      - start-dev
+      - --import-realm
+      - --http-port=8180
+      - --hostname=http://keycloak.localhost:8180
+      - --health-enabled=true
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: acceptance-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${INQTRIX_GATEWAY_ACCEPTANCE_ADMIN_PASSWORD:?set INQTRIX_GATEWAY_ACCEPTANCE_ADMIN_PASSWORD}
+      # Read by the realm import, which replaces the placeholders in the realm.
+      INQTRIX_GATEWAY_ACCEPTANCE_CLIENT_SECRET: ${INQTRIX_GATEWAY_ACCEPTANCE_CLIENT_SECRET:?set INQTRIX_GATEWAY_ACCEPTANCE_CLIENT_SECRET}
+      INQTRIX_GATEWAY_ACCEPTANCE_SERVICE_SECRET: ${INQTRIX_GATEWAY_ACCEPTANCE_SERVICE_SECRET:?set INQTRIX_GATEWAY_ACCEPTANCE_SERVICE_SECRET}
+      INQTRIX_GATEWAY_ACCEPTANCE_USER_PASSWORD: ${INQTRIX_GATEWAY_ACCEPTANCE_USER_PASSWORD:?set INQTRIX_GATEWAY_ACCEPTANCE_USER_PASSWORD}
+    networks:
+      default:
+        aliases:
+          - keycloak.localhost
+    ports:
+      - "127.0.0.1:8180:8180"
+    volumes:
+      - ./gateway-acceptance-realm.json:/opt/keycloak/data/import/inqtrix-acceptance.json:ro
+    healthcheck:
+      # The image has no HTTP client; bash asks the management port.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"UP"' <&3
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5@sha256:8498b0d0ef0a7b29686414000a08aee467f02d0299c9ed1e006a8f33fc017916
+    command:
+      - --alpha-config=/etc/oauth2-proxy/alpha.yaml
+      - --email-domain=*
+      - --cookie-name=_inqtrix_gateway
+      # Plain HTTP on localhost; a real gateway keeps the secure flag.
+      - --cookie-secure=false
+      # Below the access token lifetime of the realm (300 s): the token passed
+      # on is renewed before Inqtrix answers 401 expired.
+      - --cookie-refresh=60s
+      - --cookie-expire=8h
+      - --redirect-url=http://localhost:4180/oauth2/callback
+      - --skip-provider-button=true
+      # oauth2-proxy is the outer edge here: no reverse proxy in front, and
+      # no peer may set X-Forwarded-* for it.
+      - --reverse-proxy=false
+      - --trusted-proxy-ip=127.0.0.1/32
+      - --skip-jwt-bearer-tokens=false
+      # Calls of the app answer 401 instead of a sign-in redirect; the app
+      # also polls /health, which must not start a sign-in either.
+      - --api-route=^/api/
+      - --api-route=^/v1/
+      - --api-route=^/health$
+      # One CSRF cookie per sign-in, so a sign-in started in another tab
+      # does not break the one the person completes.
+      - --cookie-csrf-per-request=true
+      # The ways without a sign-in of a person: guests on the same host, the
+      # collaboration socket (admitted by its lease) and the files of the app.
+      - --skip-auth-route=^/s/
+      - --skip-auth-route=^/v1/editor/share-links/
+      - --skip-auth-route=^/v1/editor/guest/
+      - --skip-auth-route=^/collaboration
+      - --skip-auth-route=^/assets/
+      - --skip-auth-route=^/favicon
+      - --skip-auth-route=^/apple-touch-icon\.png
+    environment:
+      OAUTH2_PROXY_COOKIE_SECRET: ${INQTRIX_GATEWAY_ACCEPTANCE_COOKIE_SECRET:?set INQTRIX_GATEWAY_ACCEPTANCE_COOKIE_SECRET}
+    secrets:
+      - gateway_acceptance_client_secret
+      - gateway_acceptance_shared_secret
+    volumes:
+      - ./gateway-acceptance-oauth2-proxy-${INQTRIX_GATEWAY_ACCEPTANCE_ASSERTION:?set INQTRIX_GATEWAY_ACCEPTANCE_ASSERTION to jwt or header}.yaml:/etc/oauth2-proxy/alpha.yaml:ro
+    networks:
+      default:
+        ipv4_address: 10.89.250.250
+    ports:
+      - "127.0.0.1:4180:4180"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    restart: unless-stopped

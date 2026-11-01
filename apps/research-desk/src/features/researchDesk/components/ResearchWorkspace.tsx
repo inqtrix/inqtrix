@@ -195,7 +195,7 @@ export function ResearchWorkspace({
         {isDesktop && (
           <>
             <AnimatedResizableHandle
-              aria-label="Resize report panel"
+              aria-label={t.report.resizePanel}
               expanded={isReportVisible}
             />
             <ResizablePanel

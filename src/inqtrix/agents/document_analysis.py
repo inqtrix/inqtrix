@@ -58,7 +58,7 @@ from inqtrix.knowledge.retrieval_warnings import (
     stored_search_notices,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 ANALYSIS_NODE = "agent_file_analysis"
 """The routing node of every sweep call (map and reduce)."""

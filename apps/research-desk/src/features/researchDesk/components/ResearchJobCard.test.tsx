@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
@@ -46,6 +48,15 @@ function renderCard(cardJob: ResearchJob, options: { expanded?: boolean } = {}) 
     </LocaleProvider>,
   )
 }
+
+describe('ResearchJobCard delete', () => {
+  // The card below moves up under the pointer once the first press removed
+  // its own, so a double click would delete a second, paid report.
+  it('ignores the second press of a double click', () => {
+    const source = readFileSync(new URL('./ResearchJobCard.tsx', import.meta.url), 'utf8')
+    expect(source).toContain('if (!isRepeatPress(event)) onDelete()')
+  })
+})
 
 describe('ResearchJobCard unavailable lock', () => {
   it('renders the calm lock and retracts every liveness claim', () => {

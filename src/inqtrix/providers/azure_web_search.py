@@ -63,7 +63,7 @@ from inqtrix.urls import (
     safe_public_url_identity,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 def _annotation_offset(value: Any) -> int | None:

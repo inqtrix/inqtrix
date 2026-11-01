@@ -32,8 +32,10 @@ export type AccountErasurePhase =
 export type AccountErasureProgress = {
   operationId: string
   /** `running`: still erasing. `failed`: stopped; the administrator can try
-   * again. `unknown`: the operation is not readable here -- another
-   * administrator started it. */
+   * again. `unknown`: the list still names the erasure, but it is readable
+   * neither through its operation nor through the account -- it never got
+   * an operation, or another administrator holds it; erasing the account
+   * again resumes it or says who holds it. */
   state: 'running' | 'failed' | 'unknown'
   phase: AccountErasurePhase | null
   completed: number
@@ -92,14 +94,26 @@ function waitFor(delayMs: number, signal: AbortSignal): Promise<void> {
 
 export type AccountErasureObserver = {
   /** Follow *operationId* for *userId*; following what is already followed
-   * changes nothing. */
+   * changes nothing, and an erasure the account path no longer found shows
+   * as `unknown` instead of being read again. */
   observe: (userId: string, operationId: string) => void
   /** Stop following every account not in *userIds*. */
   retain: (userIds: ReadonlySet<string>) => void
-  /** Reopen *userId*'s failed erasure and follow it again. */
+  /** Reopen *userId*'s failed or unreadable erasure and follow it again. */
   retry: (userId: string) => Promise<void>
   /** Stop following every account. */
   stopAll: () => void
+}
+
+function unreadableProgress(operationId: string): AccountErasureProgress {
+  return {
+    completed: 0,
+    error: null,
+    operationId,
+    phase: null,
+    state: 'unknown',
+    total: 0,
+  }
 }
 
 export function createAccountErasureObserver({
@@ -109,10 +123,15 @@ export function createAccountErasureObserver({
   onResumed,
   onStopped,
   read,
+  readByUser,
   reopen,
+  restartByUser,
   sleep = waitFor,
 }: {
   failureText: FailureText
+  /** The account is gone, or may be: its erasure ended, or the account path
+   * no longer finds it. The list reloads and drops the account once it is
+   * gone. */
   onErased: (userId: string) => void
   onProgress: (userId: string, progress: AccountErasureProgress) => void
   /** A stopped read loop is no longer stopped: it started again or ended. */
@@ -124,13 +143,25 @@ export function createAccountErasureObserver({
     operationId: string,
     signal: AbortSignal,
   ) => Promise<ServerDeletionOperation>
+  /** Reads the erasure through the account when the operation is not
+   * readable here: one provisioning started belongs to nobody, and every
+   * active administrator follows it through the account. */
+  readByUser: (userId: string, signal: AbortSignal) => Promise<ServerDeletionOperation>
   reopen: (operationId: string) => Promise<ServerDeletionOperation>
+  /** Repeats an erasure read through the account: erasing the account
+   * again resumes it. */
+  restartByUser: (userId: string) => Promise<ServerDeletionOperation>
   sleep?: (delayMs: number, signal: AbortSignal) => Promise<void>
 }): AccountErasureObserver {
   /** The erasure each followed account is in, kept after its loop ended so a
    * failed one can be tried again. */
   const operations = new Map<string, string>()
   const loops = new Map<string, AbortController>()
+  /** Accounts whose erasure is read through the account. */
+  const byUser = new Set<string>()
+  /** Accounts whose erasure the account path did not find; reading it again
+   * would only reload the list again. */
+  const unreadable = new Set<string>()
 
   const end = (userId: string) => {
     loops.get(userId)?.abort()
@@ -138,10 +169,21 @@ export function createAccountErasureObserver({
     const operationId = operations.get(userId)
     if (operationId) onResumed(operationId)
     operations.delete(userId)
+    byUser.delete(userId)
+    unreadable.delete(userId)
   }
 
   const follow = (userId: string, operationId: string) => {
-    if (operations.get(userId) === operationId && loops.has(userId)) return
+    if (operations.get(userId) === operationId) {
+      if (unreadable.has(userId)) {
+        onProgress(userId, unreadableProgress(operationId))
+        return
+      }
+      if (loops.has(userId)) return
+    } else {
+      byUser.delete(userId)
+      unreadable.delete(userId)
+    }
     loops.get(userId)?.abort()
     const controller = new AbortController()
     operations.set(userId, operationId)
@@ -168,7 +210,9 @@ export function createAccountErasureObserver({
         }
         try {
           const progress = erasureProgress(
-            await read(operationId, signal),
+            byUser.has(userId)
+              ? await readByUser(userId, signal)
+              : await read(operationId, signal),
             failureText,
           )
           if (signal.aborted) return
@@ -185,14 +229,16 @@ export function createAccountErasureObserver({
         } catch (caught) {
           if (signal.aborted) return
           if (hasHttpStatus(caught, 404)) {
-            onProgress(userId, {
-              completed: 0,
-              error: null,
-              operationId,
-              phase: null,
-              state: 'unknown',
-              total: 0,
-            })
+            if (!byUser.has(userId)) {
+              byUser.add(userId)
+              continue
+            }
+            // The account path never answers `deleted`: the erasure ends
+            // with the account, and the path answers 404 -- as it does for
+            // an erasure without an operation or one another administrator
+            // holds. Only the list tells them apart.
+            unreadable.add(userId)
+            onErased(userId)
             return
           }
           failures += 1
@@ -219,7 +265,11 @@ export function createAccountErasureObserver({
     retry: async (userId) => {
       const operationId = operations.get(userId)
       if (!operationId) return
-      const progress = erasureProgress(await reopen(operationId), failureText)
+      const throughAccount = byUser.has(userId)
+      const reopened = throughAccount
+        ? await restartByUser(userId)
+        : await reopen(operationId)
+      const progress = erasureProgress(reopened, failureText)
       if (progress === 'erased') {
         end(userId)
         onErased(userId)
@@ -228,7 +278,9 @@ export function createAccountErasureObserver({
       onProgress(userId, progress)
       loops.get(userId)?.abort()
       loops.delete(userId)
-      follow(userId, operationId)
+      unreadable.delete(userId)
+      follow(userId, reopened.operation_id)
+      if (throughAccount) byUser.add(userId)
     },
     stopAll: () => {
       for (const userId of [...operations.keys()]) end(userId)

@@ -86,11 +86,24 @@ OpenAI Chat Completions shape (including `stream: true`), so existing OpenAI
 client libraries work by pointing their base URL at Inqtrix. Use this for chat;
 use `/v1/runs` for long-running, multi-round research with progress.
 
-## Workspace scoping
+## Project namespace
 
-In multi-user modes, scope a request to a workspace with the
-`X-Inqtrix-Workspace-Id` header (omit it for the caller's default scope). Shared
-resources appear in the list endpoints with their access role.
+Every signed-in person has one canonical project namespace: the value of
+`project_namespace` in `GET /api/auth/session`, which the UI sends as the
+`X-Inqtrix-Workspace-Id` header on every call and lists by. It is a UI routing
+value, never an access check; shared resources appear in the list endpoints
+with their access role whatever the namespace.
+
+- **Writes.** A write that sends the header stores the row in that namespace.
+  A write without it, for example from a script with a personal access token,
+  stores the row in the caller's canonical namespace, claimed on the first
+  such write when the person has never opened the UI. The row then appears in
+  that person's UI. In modes `apikey` and `none` there is no person, and rows
+  keep no namespace.
+- **Reads.** A list with the header returns that namespace; a list without it
+  returns the caller's rows across all namespaces, as scripts expect. The one
+  exception is the list of upload operations (`GET /v1/uploads`), which always
+  returns a single namespace: without the header, the caller's canonical one.
 
 ## Related docs
 

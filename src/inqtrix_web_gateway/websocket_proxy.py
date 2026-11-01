@@ -18,6 +18,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.typing import Origin
 
 from .headers import _proxy_websocket_headers
+from .identity_edge import IdentityEdge
 from .settings import CollaborationProxySettings, _PublicOrigin
 
 log = logging.getLogger("inqtrix.web_gateway")
@@ -205,6 +206,7 @@ def register_websocket_route(
     public_origin: _PublicOrigin | None,
     external_scheme: str | None,
     settings: CollaborationProxySettings,
+    edge: IdentityEdge,
 ) -> None:
     """Attach the collaboration route to an application."""
 
@@ -221,7 +223,11 @@ def register_websocket_route(
                 target,
                 origin=cast(Origin | None, websocket.headers.get("origin")),
                 additional_headers=_proxy_websocket_headers(
-                    websocket, public_origin, external_scheme
+                    websocket,
+                    public_origin,
+                    external_scheme,
+                    policy=edge.policy,
+                    gateway_mode=await edge.gateway_mode(),
                 ),
                 user_agent_header=websocket.headers.get("user-agent"),
                 compression=None,

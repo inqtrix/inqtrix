@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, TypeVar, cast
 
+from inqtrix.auth.directory import DELETED_ACCOUNT_ISSUER
 from inqtrix.auth.permissions import AccessMode, SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import encode_cursor
@@ -44,7 +45,6 @@ from inqtrix.services.collaboration_client import (
     CollaborationSuggestionResult,
     CollaborationServiceUnavailable,
 )
-from inqtrix.services.user_erasure import DELETED_ACCOUNT_ISSUER
 
 if TYPE_CHECKING:
     from inqtrix.auth.directory import MirroredUser, UserDirectory
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from inqtrix.services.editor_persistence_service import EditorPersistenceService
     from inqtrix.settings import CollaborationSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _ROOM_PATTERN = re.compile(
     r"^inqtrix-editor-v1:(?P<document>[A-Za-z0-9_-]{1,160}):g(?P<generation>[1-9][0-9]*)$"

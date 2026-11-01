@@ -459,3 +459,43 @@ def test_multi_stack_lifespan_owns_the_upload_reconciler():
         assert reconciler.running is True
     assert reconciler.running is False
     reconciler.close()
+
+
+def test_the_lifespan_closes_the_auth_provider():
+    from inqtrix.auth.api_key import ApiKeyAuthProvider
+
+    class _ClosingProvider(ApiKeyAuthProvider):
+        closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    provider = _ClosingProvider(api_key="key")
+    app = create_multi_stack_app(
+        settings=_make_settings(),
+        stacks={"stack_a": _bundle("a")},
+        default_stack="stack_a",
+        auth_provider=provider,
+    )
+    with TestClient(app):
+        assert provider.closed is False
+
+    assert provider.closed is True
+
+
+def test_a_given_auth_provider_is_used_instead_of_one_from_the_settings():
+    """A library caller with its own provider (for instance a gateway with a
+    custom resolver) must not get a second one built from the settings."""
+    from inqtrix.auth.api_key import ApiKeyAuthProvider
+
+    app = create_multi_stack_app(
+        settings=_make_settings(),
+        stacks={"stack_a": _bundle("a")},
+        default_stack="stack_a",
+        auth_provider=ApiKeyAuthProvider(api_key="injected-key"),
+    )
+    with TestClient(app) as client:
+        config = client.get("/api/auth/config").json()
+
+    # The settings say "none"; only the given provider makes it "apikey".
+    assert config["auth_mode"] == "apikey"

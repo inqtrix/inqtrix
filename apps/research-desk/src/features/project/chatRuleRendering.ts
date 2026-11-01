@@ -83,7 +83,7 @@ export function renderChatRuleAttachmentContent(
   if (contextAttachments.length === 0) return normalized.contentMarkdown
   const contextBlocks = renderAttachmentContextBlocks(contextAttachments)
   if (normalized.contentMarkdown.includes(contextPackPlaceholder)) {
-    return normalized.contentMarkdown.replaceAll(contextPackPlaceholder, contextBlocks)
+    return normalized.contentMarkdown.replaceAll(contextPackPlaceholder, () => contextBlocks)
   }
   return [
     normalized.contentMarkdown,

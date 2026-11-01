@@ -18,6 +18,7 @@ import uuid
 import pytest
 import sqlalchemy as sa
 
+from inqtrix.auth.lifecycle import AdminActor, ExternalProfile, ProvisioningActor, UserLifecycleStatus
 from inqtrix.runs.deletion_operations import (
     DeletionOperationConflict,
     DeletionOperationStatus,
@@ -253,6 +254,27 @@ def test_one_account_has_one_erasure_whoever_asks(people, store, queue) -> None:
     assert failed["operation_id"] == first
     assert failed["status"] == DeletionOperationStatus.DELETE_FAILED.value
     assert queue.enqueued == [first], "a met operation is not enqueued twice"
+
+
+def test_an_erasure_nobody_owns_is_met_by_provisioning_only(people, store, queue) -> None:
+    """Provisioning starts erasures without an owner. Its next start meets
+    the operation; an administrator's own start meets a conflict, running or
+    failed, so the admin route follows it as provisioning instead."""
+    admin, _other_admin, account = people
+    first = _operation_id()
+    _submit(store, admin=None, account=account, operation_id=first)
+
+    again = _submit(store, admin=None, account=account, operation_id=_operation_id())
+    with pytest.raises(DeletionOperationConflict):
+        _submit(store, admin=admin, account=account, operation_id=_operation_id())
+    assert store.fail(first, "probe failure") is True
+    with pytest.raises(DeletionOperationConflict):
+        _submit(store, admin=admin, account=account, operation_id=_operation_id())
+    failed = _submit(store, admin=None, account=account, operation_id=_operation_id())
+
+    assert again["operation_id"] == first
+    assert failed["operation_id"] == first
+    assert failed["status"] == DeletionOperationStatus.DELETE_FAILED.value
 
 
 def test_an_operation_registered_for_inline_execution_reaches_no_worker(
@@ -614,9 +636,6 @@ class _Machine:
 
     def erase(self, *, admin: uuid.UUID, subject: uuid.UUID) -> dict:
         """Start the erasure as the admin route does; wait for its end."""
-        import time
-
-        from inqtrix.auth.principal import Principal
         from inqtrix.storage.user_lifecycle_postgres import (
             PostgresUserLifecycleTransaction,
         )
@@ -634,7 +653,7 @@ class _Machine:
             ).begin_erasure(
                 tenant_id=TENANT,
                 user_id=subject,
-                actor_user_id=admin,
+                actor=AdminActor(admin),
                 operation_id=_operation_id(),
             )
         )
@@ -642,18 +661,45 @@ class _Machine:
         summary = run_coro_sync(
             self.service.start_user_erasure(
                 subject,
-                principal=Principal(
-                    user_id=admin, kind="oidc_session", tenant_id=TENANT, role="admin"
-                ),
+                actor=AdminActor(admin),
+                tenant_id=TENANT,
                 operation_id=report["operation_id"],
             )
         )
+        return self.wait(str(summary["operation_id"]), created_by_user_id=admin)
+
+    def erase_as_provisioning(self, lifecycle, *, subject: uuid.UUID) -> dict:
+        """Start the erasure as a SCIM DELETE with ``erase`` does; wait for its end."""
+        outcome, report = run_coro_sync(
+            lifecycle.begin_erasure(
+                tenant_id=TENANT,
+                user_id=subject,
+                actor=ProvisioningActor(),
+                operation_id=_operation_id(),
+            )
+        )
+        assert "operation_id" in report, (outcome, report)
+        summary = run_coro_sync(
+            self.service.start_user_erasure(
+                subject,
+                actor=ProvisioningActor(),
+                tenant_id=TENANT,
+                operation_id=report["operation_id"],
+            )
+        )
+        # Provisioning leaves the operation without a creator.
+        return self.wait(str(summary["operation_id"]), created_by_user_id=None)
+
+    def wait(self, operation_id: str, *, created_by_user_id: uuid.UUID | None) -> dict:
+        """The receipt of *operation_id* once the machine finished it."""
+        import time
+
         deadline = time.monotonic() + 60
         while True:
             receipt = self.deletions.get(
-                str(summary["operation_id"]),
+                operation_id,
                 tenant_id=TENANT,
-                created_by_user_id=admin,
+                created_by_user_id=created_by_user_id,
                 workspace_id=None,
             )
             if receipt["status"] in {"deleted", "delete_failed"}:
@@ -785,6 +831,7 @@ def test_an_account_is_erased_through_the_real_deletion_machine(
         receipt = machine.erase(admin=admin, subject=subject)
 
         assert receipt["status"] == "deleted", receipt.get("error")
+        assert _erased_by(machine, subject) == [("user", admin)]
         assert not machine.blobs.exists(object_key)
         # Three section tombstones and the file's own: the machine's record
         # that these sources were deleted, ids without content.
@@ -797,6 +844,117 @@ def test_an_account_is_erased_through_the_real_deletion_machine(
         }
     finally:
         machine.close(subject)
+
+
+def test_provisioning_erases_an_account_to_the_end_and_a_new_one_starts_empty(
+    tmp_path,
+) -> None:
+    """A SCIM DELETE with ``erase`` drives the same machine to its end.
+
+    The account the identity system provisioned keeps its library; after
+    its deprovisioning the erasure, started by provisioning and owned by
+    nobody, removes the library and the account row. The identity system
+    then provisions the same subject again: a new account with a new id
+    and nothing of the old one.
+    """
+    from inqtrix.storage.user_lifecycle_postgres import PostgresUserLifecycleTransaction
+
+    tag = uuid.uuid4().hex[:12]
+    machine = _Machine(tmp_path)
+    lifecycle = PostgresUserLifecycleTransaction(
+        session_factory=machine.factory,
+        app_role=APP_ROLE,
+        source_issuer=f"gateway:erasure-{tag}",
+    )
+    created = run_coro_sync(
+        lifecycle.provision_external_user(
+            tenant_id=TENANT,
+            subject=f"oid-{tag}",
+            profile=ExternalProfile(user_name=f"user-{tag}"),
+        )
+    )
+    subject = created.user.user_id
+    again_id = None
+    operation_ids: list[str] = []
+    try:
+        run_coro_sync(
+            machine.library.ensure_default_sections(
+                created_by_user_id=subject, workspace_id=None
+            )
+        )
+        assert machine.owned(subject)["asset_sections"] == 3
+        assert (
+            run_coro_sync(lifecycle.deprovision(tenant_id=TENANT, user_id=subject))
+            is UserLifecycleStatus.UPDATED
+        )
+
+        receipt = machine.erase_as_provisioning(lifecycle, subject=subject)
+        operation_ids.append(str(receipt["operation_id"]))
+
+        assert receipt["status"] == "deleted", receipt.get("error")
+        assert _erased_by(machine, subject) == [("provisioning", None)]
+        gone = machine.owned(subject)
+        assert (gone["asset_sections"], gone["users"]) == (0, 0)
+        again = run_coro_sync(
+            lifecycle.provision_external_user(
+                tenant_id=TENANT,
+                subject=f"oid-{tag}",
+                profile=ExternalProfile(user_name=f"user-{tag}"),
+            )
+        )
+        again_id = again.user.user_id
+        assert again.status is UserLifecycleStatus.UPDATED and not again.adopted
+        assert again_id != subject
+        assert machine.owned(again_id) == {
+            "asset_sections": 0,
+            "asset_records": 0,
+            "files": 0,
+            "users": 1,
+        }
+    finally:
+        ids = [str(subject)] + ([str(again_id)] if again_id is not None else [])
+
+        async def cleanup(session):
+            t = _tables()
+            for operation_id in operation_ids:
+                for table in ("deletion_operation_events", "deletion_operations"):
+                    await session.execute(
+                        sa.delete(t[table]).where(t[table].c.operation_id == operation_id)
+                    )
+            await session.execute(
+                sa.delete(t["audit_log"]).where(t["audit_log"].c.resource_id.in_(ids))
+            )
+            for table, column in (
+                ("user_events", "target_user_id"),
+                ("user_authorization_generations", "user_id"),
+                ("users", "id"),
+            ):
+                await session.execute(
+                    sa.delete(t[table]).where(t[table].c[column].in_(ids))
+                )
+
+        _transaction(machine.factory, cleanup)
+        machine.close(subject)
+
+
+def _erased_by(machine, subject: uuid.UUID) -> list[tuple]:
+    """Who the audit names for the end of *subject*'s erasure."""
+
+    async def rows(session):
+        audit = _tables()["audit_log"]
+        return [
+            tuple(row)
+            for row in (
+                await session.execute(
+                    sa.select(audit.c.actor_type, audit.c.actor_user_id).where(
+                        audit.c.action == "user.erased",
+                        audit.c.resource_id == str(subject),
+                    )
+                )
+            ).all()
+        ]
+
+    return _transaction(machine.factory, rows)
 
 
 class _SourceCleanup:

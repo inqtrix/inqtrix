@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
     from inqtrix.settings import Settings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # The reasons a run/quota admission is rejected BEFORE any cost is paid.
 # Pre-initialised to 0 so the series exist for rate() from the first

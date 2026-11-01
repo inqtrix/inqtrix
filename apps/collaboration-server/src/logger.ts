@@ -4,24 +4,37 @@ import type { LogFields, LogFieldValue, SidecarLogger } from './contracts'
 
 const SENSITIVE_KEY = /(body|comment|content|markdown|secret|token|update)/i
 
+/** The threshold names the Python services use (``INQTRIX_LOG_LEVEL``). */
+export const LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] as const
+export type LogLevel = (typeof LOG_LEVELS)[number]
+
+const SEVERITY: Record<LogLevel, number> = { DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50 }
+const RECORD_LEVEL = { debug: 'DEBUG', error: 'ERROR', info: 'INFO', warn: 'WARNING' } as const
+
+/** One JSON object per record with the fields of the Python services (`ts`,
+ * `level`, `service`) plus the event and its fields; records below
+ * *threshold* are dropped. */
 export function createJsonLogger(
   sink: Pick<Console, 'debug' | 'error' | 'info' | 'warn'> = console,
+  threshold: LogLevel = 'INFO',
 ): SidecarLogger {
   const emit = (
-    level: 'debug' | 'error' | 'info' | 'warn',
+    method: 'debug' | 'error' | 'info' | 'warn',
     event: string,
     fields: LogFields = {},
   ): void => {
+    const level = RECORD_LEVEL[method]
+    if (SEVERITY[level] < SEVERITY[threshold]) return
     const record: Record<string, LogFieldValue> = {
-      component: 'collaboration-server',
-      event,
+      ts: new Date().toISOString(),
       level,
-      timestamp: new Date().toISOString(),
+      service: 'collaboration',
+      event,
     }
     for (const [key, value] of Object.entries(fields)) {
       record[key] = SENSITIVE_KEY.test(key) ? '[redacted]' : value
     }
-    sink[level](JSON.stringify(record))
+    sink[method](JSON.stringify(record))
   }
 
   return {

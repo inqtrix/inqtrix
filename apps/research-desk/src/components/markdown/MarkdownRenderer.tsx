@@ -554,7 +554,7 @@ function MarkdownImage({
   if (!approved || failed) {
     const message = failed
       ? t.markdown.externalImageError
-      : t.markdown.externalImageBlocked.replace('{host}', policy.kind === 'external' ? policy.host : '')
+      : t.markdown.externalImageBlocked.replace('{host}', () => policy.kind === 'external' ? policy.host : '')
     return (
       <span className="my-3 flex max-w-full flex-wrap items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
         <span className="min-w-0 flex-1 break-words">
@@ -715,9 +715,7 @@ function MarkdownTable({
             // prose's overflow-wrap:anywhere otherwise squeezes short labels
             // to a few letters; the region handles tables wider than the panel.
             'w-full border-collapse break-words text-left',
-            variant === 'report'
-              ? 'min-w-[560px] text-sm'
-              : 'min-w-[32rem]',
+            variant === 'report' && 'min-w-[560px] text-sm',
             className,
           )}
           {...props}
@@ -828,7 +826,7 @@ function MarkdownCodePre({
         </Button>
       </div>
       <pre
-        aria-label={t.markdown.scrollableCode.replace('{language}', language)}
+        aria-label={t.markdown.scrollableCode.replace('{language}', () => language)}
         className={cn(
           'max-w-full overflow-x-auto bg-transparent font-mono text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
           variant === 'report' ? 'p-4 leading-6' : 'p-3 leading-[1.45]',

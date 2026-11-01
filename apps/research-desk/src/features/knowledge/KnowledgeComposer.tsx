@@ -620,7 +620,7 @@ function KnowledgeProfileMenu({
           {profileOptions.map((option) => {
             const baseDescription = profileDescription(option.id, t.knowledge)
             const degradedHint = option.degraded.length > 0
-              ? t.knowledge.profileDegradedHint.replace('{stages}', option.degraded.join(', '))
+              ? t.knowledge.profileDegradedHint.replace('{stages}', () => option.degraded.join(', '))
               : null
             const description = [baseDescription, degradedHint]
               .filter(Boolean)

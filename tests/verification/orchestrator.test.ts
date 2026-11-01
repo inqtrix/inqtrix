@@ -28,6 +28,7 @@ import { CleanupLedger } from './cleanup-ledger.ts'
 import { parseCliArguments } from './cli.ts'
 import { runCommand } from './command-runner.ts'
 import {
+  type EngineResult,
   VERIFICATION_ENGINES,
   VERIFICATION_PROFILES,
 } from './model.ts'
@@ -1690,7 +1691,7 @@ describe('report redaction and cleanup', () => {
     }
   })
 
-  test('preserves explicit scenario outcomes and leaves later adapters not run', async () => {
+  test('preserves explicit scenario outcomes and still runs later adapters', async () => {
     const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-scenario-status-'))
     let liveExecutions = 0
     const collaboration: VerificationAdapter = {
@@ -1734,7 +1735,17 @@ describe('report redaction and cleanup', () => {
       },
       async execute() {
         liveExecutions += 1
-        throw new Error('must not execute')
+        const now = new Date().toISOString()
+        return {
+          durationMs: 1,
+          engine: 'editor-system-live',
+          exitCode: 0,
+          finishedAt: now,
+          scenarios: [{ id: 'system.multiuser-live-matrix', status: 'passed' }],
+          signal: null,
+          startedAt: now,
+          status: 'passed',
+        }
       },
     }
     try {
@@ -1746,13 +1757,190 @@ describe('report redaction and cleanup', () => {
       const statuses = new Map(
         report.scenarios.map((scenario) => [scenario.id, scenario.status]),
       )
+      // A red adapter does not hide the ones after it; the run stays red.
       assert.equal(report.status, 'failed')
+      assert.deepEqual(
+        report.adapters.map((adapter) => adapter.engine),
+        ['collaboration-playwright', 'editor-system-live'],
+      )
       assert.equal(statuses.get('system.transport-fingerprint'), 'passed')
       assert.equal(statuses.get('system.direct-edit'), 'failed')
       assert.equal(statuses.get('system.concurrent-edits'), 'not_run')
-      assert.equal(statuses.get('system.multiuser-live-matrix'), 'not_run')
+      assert.equal(statuses.get('system.multiuser-live-matrix'), 'passed')
       assert.equal(statuses.get('fault.revocation'), 'not_applicable')
+      assert.equal(liveExecutions, 1)
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
+  test('keeps a red run red when it is interrupted later', async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-red-then-interrupted-'))
+    const abortController = new AbortController()
+    let liveExecutions = 0
+    const collaboration: VerificationAdapter = {
+      engine: 'collaboration-playwright',
+      profiles: ['system-smoke'],
+      async preflight() {
+        return [{
+          engine: 'collaboration-playwright',
+          id: 'ready',
+          message: 'ready',
+          status: 'passed',
+        }]
+      },
+      async execute() {
+        abortController.abort()
+        const now = new Date().toISOString()
+        return {
+          durationMs: 1,
+          engine: 'collaboration-playwright',
+          exitCode: 1,
+          finishedAt: now,
+          signal: null,
+          startedAt: now,
+          status: 'failed',
+        }
+      },
+    }
+    const live: VerificationAdapter = {
+      engine: 'editor-system-live',
+      profiles: ['system-smoke'],
+      async preflight() {
+        return [{
+          engine: 'editor-system-live',
+          id: 'ready',
+          message: 'ready',
+          status: 'passed',
+        }]
+      },
+      async execute() {
+        liveExecutions += 1
+        throw new Error('must not execute after the interruption')
+      },
+    }
+    try {
+      const report = await runVerification({
+        abortSignal: abortController.signal,
+        profile: 'system-smoke',
+        repositoryRoot,
+        runId: 'inqv-test-run-0005',
+      }, [collaboration, live])
+      assert.equal(report.status, 'failed')
       assert.equal(liveExecutions, 0)
+      assert.deepEqual(
+        report.adapters.map((adapter) => adapter.engine),
+        ['collaboration-playwright'],
+      )
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
+  for (const predecessor of ['failed', 'passed'] as const) {
+    test(`cleans what a ${predecessor} adapter left open before the next adapter starts`, async () => {
+      const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-cleanup-between-adapters-'))
+      let leftOpenCleaned = false
+      let cleanedBeforeLive: boolean | null = null
+      const collaboration = systemSmokeAdapter(
+        'collaboration-playwright',
+        async (_context, cleanupLedger) => {
+          await cleanupLedger.register('resource', 'collaborator left open', async () => {
+            leftOpenCleaned = true
+          })
+          return systemSmokeResult('collaboration-playwright', predecessor)
+        },
+      )
+      const live = systemSmokeAdapter('editor-system-live', async () => {
+        cleanedBeforeLive = leftOpenCleaned
+        return systemSmokeResult('editor-system-live', 'passed')
+      })
+      try {
+        const report = await runVerification({
+          profile: 'system-smoke',
+          repositoryRoot,
+          runId: predecessor === 'failed' ? 'inqv-test-run-0006' : 'inqv-test-run-0007',
+        }, [collaboration, live])
+        assert.equal(cleanedBeforeLive, true)
+        assert.equal(report.status, predecessor)
+        assert.equal(report.cleanup.status, 'clean')
+        assert(report.cleanup.records.every((record) => record.status === 'cleaned'))
+      } finally {
+        rmSync(repositoryRoot, { force: true, recursive: true })
+      }
+    })
+  }
+
+  test('ends the run as cleanup_failed when cleaning between adapters fails', async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-cleanup-between-fails-'))
+    let attempts = 0
+    let liveExecutions = 0
+    const collaboration = systemSmokeAdapter(
+      'collaboration-playwright',
+      async (_context, cleanupLedger) => {
+        // Fails once, as an erasure past its deadline does; a retry would
+        // succeed and hide that the next adapter met the residue.
+        await cleanupLedger.register('resource', 'collaborator left open', async () => {
+          attempts += 1
+          if (attempts === 1) throw new Error('erasure did not finish')
+        })
+        return systemSmokeResult('collaboration-playwright', 'passed')
+      },
+    )
+    const live = systemSmokeAdapter('editor-system-live', async () => {
+      liveExecutions += 1
+      return systemSmokeResult('editor-system-live', 'passed')
+    })
+    try {
+      const report = await runVerification({
+        profile: 'system-smoke',
+        repositoryRoot,
+        runId: 'inqv-test-run-0008',
+      }, [collaboration, live])
+      assert.equal(report.status, 'cleanup_failed')
+      assert.equal(liveExecutions, 0)
+      assert.equal(attempts, 1)
+      assert.deepEqual(
+        report.cleanup.records.map((record) => record.status),
+        ['failed'],
+      )
+      assert.equal(
+        report.scenarios.find((scenario) => (
+          scenario.id === 'system.multiuser-live-matrix'
+        ))?.status,
+        'not_run',
+      )
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
+  test('reports an interruption as interrupted even with a blocked engine', async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-blocked-then-interrupted-'))
+    const blocked: VerificationAdapter = {
+      ...systemSmokeAdapter('collaboration-playwright', async () => {
+        throw new Error('must not execute a blocked engine')
+      }),
+      async preflight() {
+        return [{
+          engine: 'collaboration-playwright',
+          id: 'missing',
+          message: 'missing',
+          status: 'failed',
+        }]
+      },
+    }
+    const live = systemSmokeAdapter(
+      'editor-system-live',
+      async () => systemSmokeResult('editor-system-live', 'interrupted'),
+    )
+    try {
+      const report = await runVerification({
+        profile: 'system-smoke',
+        repositoryRoot,
+        runId: 'inqv-test-run-0009',
+      }, [blocked, live])
+      assert.equal(report.status, 'interrupted')
     } finally {
       rmSync(repositoryRoot, { force: true, recursive: true })
     }
@@ -2276,6 +2464,43 @@ describe('report redaction and cleanup', () => {
     assert.throws(() => selectAdapters('system-smoke', [adapter]), /Missing verification adapter/)
   })
 })
+
+function systemSmokeAdapter(
+  engine: 'collaboration-playwright' | 'editor-system-live',
+  execute: VerificationAdapter['execute'],
+): VerificationAdapter {
+  return {
+    engine,
+    profiles: ['system-smoke'],
+    async preflight() {
+      return [{ engine, id: 'ready', message: 'ready', status: 'passed' }]
+    },
+    execute,
+  }
+}
+
+/** A passed result names every scenario of its engine, or the orchestrator
+ * turns it red. */
+function systemSmokeResult(
+  engine: 'collaboration-playwright' | 'editor-system-live',
+  status: 'passed' | 'failed' | 'interrupted',
+): EngineResult {
+  const now = new Date().toISOString()
+  return {
+    durationMs: 1,
+    engine,
+    exitCode: status === 'passed' ? 0 : 1,
+    finishedAt: now,
+    scenarios: status === 'passed'
+      ? scenariosForProfile('system-smoke')
+        .filter((scenario) => scenario.engine === engine)
+        .map(({ id }) => ({ id, status: 'passed' as const }))
+      : undefined,
+    signal: null,
+    startedAt: now,
+    status,
+  }
+}
 
 function productLifecycleChild(source: string): string[] {
   return [

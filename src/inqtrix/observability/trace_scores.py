@@ -14,7 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from inqtrix.observability import semconv
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 RESEARCH_SCORE_FIELDS = {
     "final_confidence": ("final_confidence", "NUMERIC"),

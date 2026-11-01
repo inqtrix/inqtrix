@@ -37,6 +37,8 @@ export const COLLABORATION_NOTICES = Object.freeze({
     'The collaboration lease could not be refreshed; reconnecting read-only.',
   limits_incompatible:
     'The collaboration limits are not compatible with this client.',
+  link_unavailable:
+    'This shared link is currently unavailable; it may work again later.',
   origin_rejected:
     'The collaboration server rejected this page origin. The address the browser uses does not match the configured public address of the server.',
   protocol_incompatible:

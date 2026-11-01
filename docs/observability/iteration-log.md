@@ -8,7 +8,7 @@ The structured, per-round log that Inqtrix appends to `state["iteration_logs"]` 
 
 ## When the log is populated
 
-Node summaries are always emitted to structured runtime logging. The in-memory list `state["iteration_logs"]` is populated in testing mode only (see [Settings and env](../configuration/settings-and-env.md), `TESTING_MODE=true`). It is exported by test/parity entry points as a top-level `iteration_logs` list; it is not part of the public `ResearchResult.metrics` Pydantic model.
+Node summaries are always emitted as structured runtime events on the active span. The in-memory list `state["iteration_logs"]` is populated in testing mode only (see [Settings and env](../configuration/settings-and-env.md), `TESTING_MODE=true`). It is exported by test/parity entry points as a top-level `iteration_logs` list; it is not part of the public `ResearchResult.metrics` Pydantic model.
 
 ## Entry shape
 

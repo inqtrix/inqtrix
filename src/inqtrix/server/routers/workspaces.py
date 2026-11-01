@@ -41,7 +41,7 @@ from inqtrix.services.workspace_administration import (
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _SCOPED_KINDS = frozenset({"oidc_session", "pat"})
 
@@ -205,7 +205,14 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "An open invitation already exists for this email address.",
                 "invitation_conflict",
             )
-        return _invitation_payload(invitation)
+        # Without a confirmed email at sign-in the invitation stays open;
+        # the caller learns it here instead of waiting for a membership.
+        return {
+            **_invitation_payload(invitation),
+            "accepted_by_login": bool(
+                getattr(provider, "invitations_accepted_by_login", False)
+            ),
+        }
 
     @router.get("/v1/workspaces/{workspace_id}/invitations")
     async def list_invitations(workspace_id: str, request: Request):

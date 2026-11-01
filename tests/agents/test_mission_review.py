@@ -460,11 +460,11 @@ def test_a_malformed_role_result_never_reaches_the_mission_reader(monkeypatch, c
         data for _, data in events if data.get("kind") == "critic_unavailable"
     ][0]["detail"]
     assert detail.endswith(
-        "Die Prüfung lieferte kein auswertbares Ergebnis; der Rohtext steht "
+        "Die Prüfung lieferte kein auswertbares Ergebnis; der Grund steht "
         "im Serverprotokoll."
     )
     assert "source:ref_kd1" not in detail
-    assert "source:ref_kd1" in caplog.text
+    assert "source:ref_kd1" not in caplog.text
 
 
 def test_a_role_verdict_is_applied_through_the_missions_own_write_path(monkeypatch):

@@ -30,7 +30,7 @@ from typing import Any
 from inqtrix.observability.context import bind_purpose
 from inqtrix.prompts import build_knowledge_decompose_prompt
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 DECOMPOSE_MARKER_PARSED = "_knowledge_decompose_parsed"
 DECOMPOSE_MARKER_FALLBACK = "_knowledge_decompose_fallback"

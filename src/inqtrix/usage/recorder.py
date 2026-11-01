@@ -27,7 +27,7 @@ from typing import Any
 from inqtrix.sync_bridge import run_coro_sync
 from inqtrix.usage.models import UsageRow
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _FLUSH_INTERVAL_SECONDS = 5.0
 _MAX_BUFFERED_ROWS = 10_000

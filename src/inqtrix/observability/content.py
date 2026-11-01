@@ -39,7 +39,7 @@ try:  # Optional dependency, like the tracing wrappers that read this policy.
 except Exception:  # noqa: BLE001 — extra not installed
     _otel_context = None
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from inqtrix.settings import Settings

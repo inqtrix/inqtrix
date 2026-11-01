@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 
 import {
   type AdminUser,
+  eraseAdminUser,
+  getAdminUserErasure,
   getAssetDeletionOperation,
   retryAssetDeletionOperation,
 } from '@/api/inqtrixClient'
@@ -18,7 +20,9 @@ import { isErasing } from './adminModel'
 /**
  * How far each listed account's erasure got. Reads run without a workspace:
  * an account erasure belongs to no workspace. `onErased` runs when an account
- * is gone, so the list can drop the row.
+ * is gone or its erasure is no longer found through the account, so the list
+ * reloads: it drops the row of an account that is gone, and a row it still
+ * lists as being erased offers to try again.
  */
 export function useAccountErasures({
   enabled,
@@ -59,7 +63,9 @@ export function useAccountErasures({
         stoppedObservations.stop(operationId, restart),
       read: (operationId, signal) =>
         getAssetDeletionOperation(operationId, { signal }),
+      readByUser: (userId, signal) => getAdminUserErasure(userId, { signal }),
       reopen: (operationId) => retryAssetDeletionOperation(operationId),
+      restartByUser: (userId) => eraseAdminUser(userId),
     })
   }
   const observer = observerRef.current

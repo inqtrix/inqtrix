@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { COLLABORATION_NOTICES } from './collaborationNotices'
-import { guestAccessEnd, guestSessionIsGone } from './guestAccessEnd'
+import { guestAccessEnd, guestLandingFailure, guestLinkUnavailable, guestSessionIsGone } from './guestAccessEnd'
 import type { CollaborationDocumentHandle } from './useCollaborationDocument'
 
 type Snapshot = Parameters<typeof guestAccessEnd>[0]
@@ -29,14 +29,14 @@ describe('when a guest\'s access through a link has ended', () => {
       connectionStatus: 'error',
       error: COLLABORATION_NOTICES.session_expired,
       recoverability: 'login',
-    }))).toEqual({ kind: 'ended', unsavedChanges: false })
+    }))).toEqual({ kind: 'ended', unavailable: false, unsavedChanges: false })
   })
 
   it('ends access when the link was revoked or the document deleted', () => {
     expect(guestAccessEnd(snapshot({
       connectionStatus: 'access_revoked',
       error: COLLABORATION_NOTICES.access_unavailable,
-    }))).toEqual({ kind: 'ended', unsavedChanges: false })
+    }))).toEqual({ kind: 'ended', unavailable: false, unsavedChanges: false })
   })
 
   // A lease renewal that meets the ended session takes the 401 path without
@@ -47,11 +47,11 @@ describe('when a guest\'s access through a link has ended', () => {
       connectionStatus: 'error',
       hasUnconfirmedLocalChanges: true,
       recoverability: 'login',
-    }))).toEqual({ kind: 'ended', unsavedChanges: true })
+    }))).toEqual({ kind: 'ended', unavailable: false, unsavedChanges: true })
     expect(guestAccessEnd(snapshot({
       connectionStatus: 'access_revoked',
       durabilityStatus: 'error',
-    }))).toEqual({ kind: 'ended', unsavedChanges: true })
+    }))).toEqual({ kind: 'ended', unavailable: false, unsavedChanges: true })
   })
 
   // With changes still unconfirmed the controller does not ask the service
@@ -85,5 +85,45 @@ describe('when a guest\'s access through a link has ended', () => {
     expect([429, 500, 502, 503].map((status) => guestSessionIsGone(httpError(status))))
       .toEqual([false, false, false, false])
     expect(guestSessionIsGone(new TypeError('Failed to fetch'))).toBe(false)
+  })
+})
+
+describe('a guest link paused while its owner is not active', () => {
+  it('ends access with the paused notice, not as revoked', () => {
+    expect(guestAccessEnd(snapshot({
+      connectionStatus: 'access_revoked',
+      error: COLLABORATION_NOTICES.link_unavailable,
+    }))).toEqual({ kind: 'ended', unavailable: true, unsavedChanges: false })
+  })
+
+  it('reads a 423 answer as a refused session that may come back', () => {
+    expect(guestSessionIsGone(httpError(423))).toBe(true)
+    expect(guestLinkUnavailable(httpError(423))).toBe(true)
+    expect(guestLinkUnavailable(httpError(404))).toBe(false)
+    expect(guestLinkUnavailable(new TypeError('Failed to fetch'))).toBe(false)
+  })
+})
+
+describe('what the landing page makes of a link it cannot describe', () => {
+  it('calls a link invalid only when the service answers that it does not know it', () => {
+    expect(guestLandingFailure(httpError(404))).toBe('invalid')
+  })
+
+  it('keeps a paused link apart', () => {
+    expect(guestLandingFailure(httpError(423))).toBe('paused')
+  })
+
+  it('reads an outage, a rate limit, a refusal and a lost connection as temporarily unavailable', () => {
+    for (const cause of [
+      httpError(500),
+      httpError(502),
+      httpError(503),
+      httpError(429),
+      httpError(403),
+      new TypeError('Failed to fetch'),
+      undefined,
+    ]) {
+      expect(guestLandingFailure(cause)).toBe('unavailable')
+    }
   })
 })

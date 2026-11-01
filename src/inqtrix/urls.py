@@ -473,13 +473,34 @@ def matching_suffix(domain: str, candidates: Any) -> str:
 _EDITOR_GUEST_ROUTE_TOKEN_RE = re.compile(
     r"(?i)(/s/|/v1/editor/share-links/)[^/?#\s\"'<>]+"
 )
+# ``user:password@`` where the password may itself contain ``/`` or ``@``
+# (common in generated passwords that nobody percent-encoded). The user part
+# has no ``/``, so ``https://host/@name`` paths stay untouched; with a port
+# (``https://host:8443/@name``) such a path is redacted too, the safe side.
+_URL_PASSWORD_RE = re.compile(
+    r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^\s\"'<>@:/]*:[^\s\"'<>]*@"
+)
+# libpq keyword connection strings: ``password=value`` or a quoted value.
+_KEYWORD_PASSWORD_RE = re.compile(
+    r"(?i)\b(password|passwd|pwd)\s*=\s*('[^']*'|\"[^\"]*\"|[^\s'\"]+)"
+)
+# Environment-style assignments of secrets (``INQTRIX_SESSION_SECRET=...``,
+# ``AZURE_OPENAI_API_KEY: ...``). Upper-case names only, and the secret word
+# must end the name, so ``MAX_TOKENS=4096`` or ``max_tokens=...`` stay.
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b([A-Z][A-Z0-9_]*(?:_SECRET|_PASSWORD|_PASSWD|_TOKEN|_PEPPER|_KEY))"
+    r"(\s*[=:]\s*)('[^']*'|\"[^\"]*\"|[^\s'\"]+)"
+)
 
 
 def _scrub_credentials(msg: str) -> str:
     """Common credential-scrubbing rules used by the log filter and error helper.
 
-    Removes API keys, bearer tokens, AWS access keys, and credential values
-    inside URL query parameters. URLs themselves are intentionally NOT replaced
+    Removes API keys, bearer tokens, AWS access keys, credential values
+    inside URL query parameters, passwords in URL userinfo and in keyword
+    connection strings, and environment-style secret assignments
+    (``*_SECRET``, ``*_PASSWORD``, ``*_TOKEN``, ``*_PEPPER``, ``*_KEY``).
+    URLs themselves are intentionally NOT replaced
     by ``[URL]`` — final answers, citation lists, and trace logs need to keep
     their links intact for debugging.
     """
@@ -494,7 +515,10 @@ def _scrub_credentials(msg: str) -> str:
     msg = scrub_credential_urls(msg)
     # URL userinfo credentials (redis://:pw@..., postgresql+asyncpg://
     # user:pw@host/db) — connection strings travel inside driver
-    # exceptions and would otherwise leak broker/database passwords.
+    # exceptions and would otherwise leak broker/database passwords. The
+    # password form runs first: the plain form below stops at the first
+    # ``/`` or ``@`` and would leave the rest of such a password behind.
+    msg = _URL_PASSWORD_RE.sub(r"\1[REDACTED]@", msg)
     msg = re.sub(
         r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^@/\s\"'<>]*@",
         r"\1[REDACTED]@",
@@ -508,6 +532,8 @@ def _scrub_credentials(msg: str) -> str:
         r"\1=[REDACTED]",
         msg,
     )
+    msg = _KEYWORD_PASSWORD_RE.sub(r"\1=[REDACTED]", msg)
+    msg = _SECRET_ASSIGNMENT_RE.sub(r"\1\2[REDACTED]", msg)
     return msg
 
 

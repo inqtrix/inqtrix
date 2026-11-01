@@ -1,4 +1,4 @@
-"""User search for the share typeahead — mounted only in oidc mode.
+"""User search for the share typeahead, mounted in every cookie-session mode with sharing.
 
 Privacy posture: any AUTHENTICATED tenant user can find any other by
 prefix — acceptable for a closed deployment whose signup is gated by

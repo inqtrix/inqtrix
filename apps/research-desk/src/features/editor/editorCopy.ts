@@ -11,6 +11,20 @@ export const editorCopy = {
   de: {
     exportWord: 'Als Word exportieren',
     exportWordFailed: 'Word-Export fehlgeschlagen',
+    exportWordTemplate: 'Mit Word-Vorlage exportieren …',
+    exportWordTemplateFailed: 'Der Export in die Word-Vorlage ist fehlgeschlagen.',
+    exportTemplateHasMacros: 'Vorlagen mit Makros werden nicht unterstützt. Bitte speichern Sie die Vorlage als .docx oder .dotx.',
+    exportTemplateHeadingsBorrowed: 'In der Vorlage fehlt die Formatvorlage für Überschrift {levels}. Dort wurde die nächstliegende Überschrift verwendet.',
+    exportTemplateHeadingsMissing: 'Die Vorlage hat keine Formatvorlagen für Überschriften, sie wurden deshalb fett und größer gesetzt. Word speichert eine Formatvorlage erst, wenn Sie sie ändern oder benutzen: Ändern Sie „Überschrift 1“ usw. in der Vorlage.',
+    exportTemplateIsStrict: 'Diese Vorlage ist im Format „Strict Open XML“ gespeichert. Bitte speichern Sie sie in Word als normales Word-Dokument (.docx).',
+    exportTemplateMarkerMissing: 'In der Vorlage steht kein {{content}}, der Text wurde deshalb ans Ende angehängt. Schreiben Sie {{content}} in einen eigenen Absatz, um die Stelle festzulegen.',
+    exportTemplateMarkerNotAlone: '{{content}} muss allein in einem eigenen Absatz stehen, sonst ginge der Rest des Absatzes verloren.',
+    exportTemplateMarkerOutsideBody: '{{content}} darf nur im Haupttext stehen, nicht in Kopf- oder Fußzeile.',
+    exportTemplateMarkerRepeated: '{{content}} darf in der Vorlage nur einmal vorkommen.',
+    exportTemplateMarkersKept: '{markers} wurde nicht ersetzt, weil es in einer nachverfolgten Änderung, einem Link oder einem Inhaltssteuerelement steht.',
+    exportTemplateNoticeDismiss: 'Schließen',
+    exportTemplateTooLarge: 'Die Vorlage ist größer als 32 MB.',
+    exportTemplateUnreadable: 'Diese Datei lässt sich nicht als Word-Vorlage lesen. Erwartet wird eine .docx oder .dotx ohne Passwortschutz.',
     assistant: 'Editor-Assistent',
     assistantPlaceholder: 'Beschreiben Sie, was am Dokument geändert werden soll...',
     attachComments: 'KI-Notizen anhängen',
@@ -34,6 +48,12 @@ export const editorCopy = {
     mathSource: 'LaTeX-Quelle',
     mathDone: 'Formelbearbeitung beenden',
     mathUnavailable: 'Formeln können nur im Bearbeitungsmodus geändert werden.',
+    taskCheckboxLabel: 'Aufgaben-Checkbox für {task}',
+    taskCheckboxEmpty: 'leere Aufgabe',
+    mentionPerson: 'Person erwähnen',
+    unsavedChanges: 'Ungespeicherte Änderungen',
+    undo: 'Rückgängig',
+    redo: 'Wiederholen',
     setDiffAnchor: 'Vergleichsanker setzen',
     showDiff: 'Diff-Ansicht einschalten',
     hideDiff: 'Diff-Ansicht ausschalten',
@@ -178,7 +198,7 @@ export const editorCopy = {
     formatTables: 'Markdown-Tabellen bereinigen',
     insertOrEditTable: 'Tabelle einfügen oder bearbeiten',
     scrollableTable: 'Horizontal scrollbare Tabelle',
-    sourceEditor: 'Markdown Source',
+    sourceEditor: 'Markdown-Quelltext',
     sourceLineWrap: 'Zeilenumbruch umschalten',
     tableAlignmentCenter: 'Spalte zentrieren',
     tableAlignmentLeft: 'Spalte linksbündig ausrichten',
@@ -209,7 +229,7 @@ export const editorCopy = {
     showLess: 'Weniger anzeigen',
     showMore: 'Mehr anzeigen',
     showTree: 'Dateibaum einblenden',
-    source: 'Source',
+    source: 'Quelltext',
     stopRun: 'Lauf abbrechen',
     unpinDocument: 'Dokument lösen',
     updated: 'zuletzt bearbeitet',
@@ -217,6 +237,20 @@ export const editorCopy = {
   en: {
     exportWord: 'Export to Word',
     exportWordFailed: 'Word export failed',
+    exportWordTemplate: 'Export with Word template …',
+    exportWordTemplateFailed: 'The export into the Word template failed.',
+    exportTemplateHasMacros: 'Templates with macros are not supported. Please save the template as .docx or .dotx.',
+    exportTemplateHeadingsBorrowed: 'The template has no style for heading {levels}. The nearest heading style was used there.',
+    exportTemplateHeadingsMissing: 'The template has no heading styles, so headings were set bold and larger. Word saves a style only once you change or use it: change "Heading 1" and so on in the template.',
+    exportTemplateIsStrict: 'This template is saved as Strict Open XML. Please save it in Word as a regular Word document (.docx).',
+    exportTemplateMarkerMissing: 'The template has no {{content}}, so the text was added at the end. Write {{content}} in a paragraph of its own to choose the place.',
+    exportTemplateMarkerNotAlone: '{{content}} must stand alone in its own paragraph, otherwise the rest of the paragraph would be lost.',
+    exportTemplateMarkerOutsideBody: '{{content}} can only stand in the main text, not in a header or footer.',
+    exportTemplateMarkerRepeated: '{{content}} can occur only once in the template.',
+    exportTemplateMarkersKept: '{markers} was not replaced because it stands in a tracked change, a link or a content control.',
+    exportTemplateNoticeDismiss: 'Close',
+    exportTemplateTooLarge: 'The template is larger than 32 MB.',
+    exportTemplateUnreadable: 'This file cannot be read as a Word template. Expected is a .docx or .dotx without password protection.',
     assistant: 'Editor assistant',
     assistantPlaceholder: 'Describe what should change in this document...',
     attachComments: 'Attach AI notes',
@@ -240,6 +274,12 @@ export const editorCopy = {
     mathSource: 'LaTeX source',
     mathDone: 'Finish editing formula',
     mathUnavailable: 'Formulas can only be changed in edit mode.',
+    taskCheckboxLabel: 'Task item checkbox for {task}',
+    taskCheckboxEmpty: 'empty task item',
+    mentionPerson: 'Mention a person',
+    unsavedChanges: 'Unsaved changes',
+    undo: 'Undo',
+    redo: 'Redo',
     setDiffAnchor: 'Set comparison anchor',
     showDiff: 'Show diff view',
     hideDiff: 'Hide diff view',
@@ -421,3 +461,12 @@ export const editorCopy = {
     updated: 'last edited',
   },
 } as const
+
+/** The accessible name of a task item's checkbox, from the item's text. */
+export function taskCheckboxLabelFor(copy: EditorCopy): (taskText: string) => string {
+  return (taskText) => (
+    // A replacer function: a string replacement would expand `$&` and
+    // similar patterns typed into the task.
+    taskText ? copy.taskCheckboxLabel.replace('{task}', () => taskText) : copy.taskCheckboxEmpty
+  )
+}

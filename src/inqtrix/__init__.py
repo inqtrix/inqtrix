@@ -32,7 +32,7 @@ __version__ = "0.2.0"
 # separate from ``__version__``, which stays on the three-segment release line
 # because packaging metadata, npm, and the eval baselines are pinned to it.
 # It must start with ``__version__`` — tests/test_routes.py pins that.
-__display_version__ = "0.2.0.10"
+__display_version__ = "0.2.0.11"
 
 # -- Public API (high-level) --
 from inqtrix.agent import AgentConfig, ResearchAgent
@@ -67,7 +67,7 @@ from inqtrix.exceptions import (
     BedrockAPIError,
     AgentStructuredOutputError,
 )
-from inqtrix.logging_config import configure_logging
+from inqtrix.logging_config import InqtrixLogFilter, configure_logging
 
 # -- Public API (strategies) --
 from inqtrix.strategies import (
@@ -109,6 +109,7 @@ __all__ = [
     "AgentStructuredOutputError",
     # Logging
     "configure_logging",
+    "InqtrixLogFilter",
     # Strategies
     "SourceTieringStrategy",
     "ClaimExtractionStrategy",

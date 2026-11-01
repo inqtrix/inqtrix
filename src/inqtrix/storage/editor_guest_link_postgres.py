@@ -7,7 +7,7 @@ import uuid
 from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import and_, exists, func, insert, select, update
 
 from inqtrix.project.editor_guest_links import (
     EditorDocumentShareLink,
@@ -17,6 +17,7 @@ from inqtrix.project.editor_guest_links import (
     EditorGuestLinkConflict,
     EditorGuestLinkExpired,
     EditorGuestLinkNotFound,
+    EditorGuestLinkUnavailable,
     EditorShareLinkPermission,
 )
 from inqtrix.storage.db import tenant_session
@@ -26,6 +27,7 @@ from inqtrix.storage.editor_guest_link_orm import (
     editor_document_share_links,
 )
 from inqtrix.storage.editor_orm import editor_documents
+from inqtrix.storage.identity_orm import active_account, users
 from inqtrix.storage.user_events_postgres import append_user_invalidation
 
 if TYPE_CHECKING:
@@ -80,6 +82,36 @@ def _identity(row: Any) -> EditorGuestIdentity:
         ),
         open_count=int(row.open_count),
         last_read_revision=int(row.last_read_revision),
+    )
+
+
+
+def document_owner_active(*, tenant_id: Any, document_id: Any) -> Any:
+    """Whether the owner of an editor document is an active account.
+
+    A guest link is access from outside that only an active owner manages:
+    while the owner is disabled, deprovisioned or being erased, every guest
+    path of the document refuses. Internal recipients are signed-in members
+    and keep reading. *tenant_id* and *document_id* are values or columns of
+    the enclosing query.
+    """
+    owner_document = editor_documents.alias("guest_owner_document")
+    return exists(
+        select(1)
+        .select_from(
+            owner_document.join(
+                users,
+                and_(
+                    users.c.tenant_id == owner_document.c.tenant_id,
+                    users.c.id == owner_document.c.created_by_user_id,
+                ),
+            )
+        )
+        .where(
+            owner_document.c.tenant_id == tenant_id,
+            owner_document.c.id == document_id,
+            active_account(),
+        )
     )
 
 
@@ -519,6 +551,18 @@ class PostgresEditorGuestLinkStore:
             )
         )
 
+    @staticmethod
+    async def _require_active_owner(
+        session: "AsyncSession", *, tenant_id: str, document_id: str
+    ) -> None:
+        owner_active = (
+            await session.execute(
+                select(document_owner_active(tenant_id=tenant_id, document_id=document_id))
+            )
+        ).scalar_one()
+        if not owner_active:
+            raise EditorGuestLinkUnavailable()
+
     async def resolve_link(
         self,
         *,
@@ -536,6 +580,10 @@ class PostgresEditorGuestLinkStore:
                             "current_generation"
                         ),
                         editor_documents.c.deleted_at.label("document_deleted_at"),
+                        document_owner_active(
+                            tenant_id=editor_document_share_links.c.tenant_id,
+                            document_id=editor_document_share_links.c.document_id,
+                        ).label("owner_active"),
                     )
                     .join(
                         editor_documents,
@@ -559,6 +607,8 @@ class PostgresEditorGuestLinkStore:
                 or int(row.current_generation) != int(row.generation)
             ):
                 raise EditorGuestLinkExpired()
+            if not row.owner_active:
+                raise EditorGuestLinkUnavailable()
         return _link(row), str(row.document_title)
 
     async def create_guest_identity(
@@ -617,6 +667,9 @@ class PostgresEditorGuestLinkStore:
                 )
             ):
                 raise EditorGuestLinkExpired()
+            await self._require_active_owner(
+                session, tenant_id=identity.tenant_id, document_id=identity.document_id
+            )
             row = (
                 await session.execute(
                     insert(editor_document_guest_identities)
@@ -735,6 +788,9 @@ class PostgresEditorGuestLinkStore:
                 or int(link_row.generation) != int(row.generation)
             ):
                 raise EditorGuestLinkExpired()
+            await self._require_active_owner(
+                session, tenant_id=tenant_id, document_id=str(row.document_id)
+            )
             identity_values: dict[str, Any] = {"last_seen_at": now}
             if display_name is not None:
                 identity_values["display_name"] = display_name

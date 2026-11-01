@@ -10,30 +10,35 @@ Memory backend, secure_cookies off for the http TestClient.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
+from dataclasses import replace
+from types import SimpleNamespace
 
+import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from inqtrix.auth.api_key import build_local_provider
-from inqtrix.auth.credentials import LOCAL_ISSUER
 from inqtrix.auth.directory import MemoryUserDirectory
-from inqtrix.auth.lifecycle import UserLifecycleStatus
+from inqtrix.auth.lifecycle import AdminActor, ProvisioningActor, UserLifecycleStatus
 from inqtrix.auth.principal_generation import (
     bind_principal_generation,
     install_principal_generation_error_handler,
 )
-from inqtrix.runs.deletion_operations import DeletionOperationConflict
-from inqtrix.server.routers.admin import build_admin_router
+from inqtrix.runs.deletion_operations import DeletionOperationConflict, DeletionOperationNotFound
+from inqtrix.server.routers.admin import _user_payload, build_router
 from inqtrix.server.routers.auth import build_auth_router
 from inqtrix.settings import AuthSettings, Settings
 
 OWNER = ("owner@example.com", "correct-horse-battery")
 
 
-def make_client(*, lifecycle=None, deletions=None) -> TestClient:
+def make_client(*, lifecycle=None, deletions=None, scim_delete_action=None) -> TestClient:
     """``lifecycle`` wraps the provider's lifecycle; ``deletions`` is the
-    deletion service an account erasure starts on."""
+    deletion service an account erasure starts on; ``scim_delete_action``
+    is what a SCIM DELETE does (``None``: SCIM off). The admin routes are
+    built the way the server mounts them."""
     settings = Settings(
         auth=AuthSettings(
             mode="local",
@@ -51,9 +56,19 @@ def make_client(*, lifecycle=None, deletions=None) -> TestClient:
     )
     install_principal_generation_error_handler(app)
     app.include_router(build_auth_router(provider, principal_dep))
-    app.include_router(
-        build_admin_router(provider, principal_dep, deletions=deletions)
+    container = SimpleNamespace(
+        auth_provider=provider,
+        principal_dependency=principal_dep,
+        asset_deletion_service=deletions,
+        settings=SimpleNamespace(
+            auth=SimpleNamespace(
+                scim_enabled=scim_delete_action is not None,
+                scim_delete_action=scim_delete_action or "disable",
+            )
+        ),
     )
+    app.include_router(build_router(container))
+    app.state.provider = provider
 
     @app.get("/v1/protected")
     async def protected(principal=Depends(principal_dep)):
@@ -191,8 +206,8 @@ def test_create_and_promote_and_last_admin_guard():
     owner_user_id = _user_id_of(client, csrf, OWNER[0])
 
     # Self-demote is blocked. (The caller is always the last/only admin when
-    # demoting self, so the self-guard fires first; the atomic last-admin
-    # invariant is covered by test_atomic_last_admin_guard_is_race_free.)
+    # demoting self, so the self-guard fires first; the last-admin invariant
+    # itself is covered by the lifecycle tests in tests/test_user_lifecycle.py.)
     demote = client.patch(
         f"/v1/admin/users/{owner_user_id}",
         json={"instance_role": "user"},
@@ -292,6 +307,7 @@ def test_disable_cascade_blocks_login_and_purges_session():
     # Disable bob (a failed login below does not change the owner's cookie).
     dis = client.post(f"/v1/admin/users/{bob_sub}:disable", headers=headers)
     assert dis.status_code == 200 and dis.json()["disabled"] is True
+    assert dis.json()["disabled_source"] == "admin"
 
     # Bob can no longer log in (credential disabled -> uniform 401).
     relogin = client.post(
@@ -338,69 +354,6 @@ def test_disabled_mirror_reports_session_logged_out():
         )
     )
     assert client.get("/api/auth/session").json()["authenticated"] is False
-
-
-def _seed_admin(directory: MemoryUserDirectory, subject: str) -> uuid.UUID:
-    user = asyncio.run(
-        directory.record_login(
-            tenant_id="default",
-            issuer=LOCAL_ISSUER,
-            subject=subject,
-            email=f"{subject}@example.com",
-            email_verified=True,
-            display_name=subject,
-        )
-    )
-    asyncio.run(
-        directory.set_instance_role(
-            tenant_id="default", user_id=user.user_id, role="admin"
-        )
-    )
-    return user.user_id
-
-
-def test_atomic_last_admin_guard_is_race_free():
-    # The check-and-write is one operation, so the guard holds even without
-    # the router's pre-read. Sole admin -> both guarded ops refuse (False).
-    directory = MemoryUserDirectory()
-    user_a = _seed_admin(directory, "a")
-
-    def demote(user_id: uuid.UUID) -> bool:
-        return asyncio.run(
-            directory.demote_if_not_last_admin(
-                tenant_id="default", user_id=user_id
-            )
-        )
-
-    def disable(user_id: uuid.UUID) -> bool:
-        return asyncio.run(
-            directory.disable_if_not_last_admin(
-                tenant_id="default", user_id=user_id, disabled_at=1.0
-            )
-        )
-
-    assert demote(user_a) is False
-    assert disable(user_a) is False
-
-    # A second admin -> demoting the first is allowed; "b" is then the last
-    # active admin and can be neither demoted nor disabled.
-    user_b = _seed_admin(directory, "b")
-    assert demote(user_a) is True
-    assert disable(user_b) is False
-    assert demote(user_b) is False
-
-    # Disabling a plain user never trips the admin guard.
-    user_c = asyncio.run(
-        directory.record_login(
-            tenant_id="default",
-            issuer=LOCAL_ISSUER,
-            subject="c",
-            email="c@example.com",
-            email_verified=True,
-            display_name="c",
-        )
-    )
-    assert disable(user_c.user_id) is True
 
 
 def test_self_erase_blocked():
@@ -466,11 +419,13 @@ class _ScriptedErasure:
         self._status = status
         self._report = report
         self.erasing: set[uuid.UUID] = set()
+        self.actors: list[object] = []
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
-    async def begin_erasure(self, *, tenant_id, user_id, actor_user_id, operation_id):
+    async def begin_erasure(self, *, tenant_id, user_id, actor, operation_id):
+        self.actors.append(actor)
         if self._status is not UserLifecycleStatus.UPDATED:
             return self._status, self._report
         self.erasing.add(user_id)
@@ -488,23 +443,40 @@ class _ScriptedErasure:
 
 
 class _Deletions:
-    """The deletion service's account-erasure entry points, recorded."""
+    """The deletion service's account-erasure entry points, recorded.
 
-    def __init__(self, *, status="queued", conflict=False):
+    ``owner`` names who started the erasure a request meets: ``None`` for a
+    fresh start, ``"provisioning"`` for one that belongs to nobody (any
+    administrator follows it), ``"admin"`` for another administrator's.
+    """
+
+    def __init__(self, *, status="queued", owner=None):
         self._status = status
-        self._conflict = conflict
+        self._owner = owner
         self.started: list[tuple[str, str]] = []
+        self.actors: list[object] = []
         self.retried: list[str] = []
+        self.retry_actors: list[object] = []
 
-    async def start_user_erasure(self, user_id, *, principal, operation_id):
-        if self._conflict:
+    async def start_user_erasure(self, user_id, *, actor, tenant_id, operation_id):
+        follows = self._owner == "provisioning" and isinstance(actor, ProvisioningActor)
+        if self._owner is not None and not follows:
             raise DeletionOperationConflict(str(user_id))
+        self.actors.append(actor)
         self.started.append((str(user_id), operation_id))
         return {"operation_id": operation_id, "status": self._status}
 
-    async def retry(self, operation_id, *, principal, workspace_id):
+    async def retry_user_erasure(self, operation_id, *, actor, tenant_id):
         self.retried.append(operation_id)
+        self.retry_actors.append(actor)
         return {"operation_id": operation_id, "status": "queued"}
+
+    def get(self, operation_id, *, principal, workspace_id):
+        # Like the store: an operation answers only to its creator, and an
+        # erasure provisioning started has none.
+        if self._owner != "provisioning" or principal.user_id is not None:
+            raise DeletionOperationNotFound(operation_id)
+        return {"operation_id": operation_id, "status": self._status}
 
 
 def _erasure_world(
@@ -537,6 +509,70 @@ def test_erasing_an_account_answers_202_with_its_deletion_operation():
     body = resp.json()
     assert body["status"] == "queued"
     assert deletions.started == [(target, body["operation_id"])]
+
+
+def test_an_erasure_names_the_administrator_as_its_actor():
+    scripted = []
+
+    def wrap(inner):
+        scripted.append(
+            _ScriptedErasure(inner, status=UserLifecycleStatus.UPDATED, report=None)
+        )
+        return scripted[0]
+
+    client, csrf = _owner_client(lifecycle=wrap, deletions=_Deletions())
+    client.post(
+        "/v1/admin/users",
+        json={"email": "carol@example.com", "password": "another-strong-pw-2"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    owner = uuid.UUID(_user_id_of(client, csrf, OWNER[0]))
+    target = _user_id_of(client, csrf, "carol@example.com")
+
+    resp = client.delete(f"/v1/admin/users/{target}", headers={"X-CSRF-Token": csrf})
+
+    assert resp.status_code == 202
+    assert scripted[0].actors == [AdminActor(owner)]
+
+
+class _ActorSpy:
+    """The provider's lifecycle, recording who disables and enables."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.actors: list[object] = []
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def set_disabled(self, *, actor, **kwargs):
+        self.actors.append(actor)
+        return await self._inner.set_disabled(actor=actor, **kwargs)
+
+
+def test_disable_and_enable_name_the_administrator_as_their_actor():
+    spies = []
+
+    def wrap(inner):
+        spies.append(_ActorSpy(inner))
+        return spies[0]
+
+    client, csrf = _owner_client(lifecycle=wrap)
+    client.post(
+        "/v1/admin/users",
+        json={"email": "carol@example.com", "password": "another-strong-pw-2"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    owner = uuid.UUID(_user_id_of(client, csrf, OWNER[0]))
+    target = _user_id_of(client, csrf, "carol@example.com")
+
+    for command in ("disable", "enable"):
+        resp = client.post(
+            f"/v1/admin/users/{target}:{command}", headers={"X-CSRF-Token": csrf}
+        )
+        assert resp.status_code == 200
+
+    assert spies[0].actors == [AdminActor(owner), AdminActor(owner)]
 
 
 def test_a_refused_erasure_names_the_reasons_the_preview_shows():
@@ -580,15 +616,29 @@ def test_a_failed_erasure_is_retried_by_the_next_request():
     assert resp.status_code == 202
     assert resp.json()["status"] == "queued"
     assert deletions.retried == [resp.json()["operation_id"]]
+    assert [type(actor) for actor in deletions.retry_actors] == [AdminActor]
 
 
 def test_another_administrators_erasure_is_a_conflict():
-    client, csrf, target = _erasure_world(_Deletions(conflict=True))
+    client, csrf, target = _erasure_world(_Deletions(owner="admin"))
 
     resp = client.delete(f"/v1/admin/users/{target}", headers={"X-CSRF-Token": csrf})
 
     assert resp.status_code == 409
     assert resp.json()["error"]["type"] == "deletion_in_progress"
+
+
+def test_any_administrator_follows_an_erasure_that_provisioning_started():
+    """It belongs to nobody, so the request meets and repeats it instead of
+    answering with another administrator's conflict."""
+    deletions = _Deletions(status="delete_failed", owner="provisioning")
+    client, csrf, target = _erasure_world(deletions)
+
+    resp = client.delete(f"/v1/admin/users/{target}", headers={"X-CSRF-Token": csrf})
+
+    assert resp.status_code == 202
+    assert deletions.actors == [ProvisioningActor()]
+    assert deletions.retry_actors == [ProvisioningActor()]
 
 
 def test_an_erasure_needs_a_backend_and_the_deletion_machine():
@@ -636,3 +686,117 @@ def test_an_account_being_erased_cannot_be_enabled_or_promoted():
     assert promote.status_code == 409
     assert enable.json()["error"]["type"] == "erasure_in_progress"
     assert promote.json()["error"]["type"] == "erasure_in_progress"
+
+
+def test_the_listing_names_the_source_of_a_disable_and_a_tombstone():
+    users = MemoryUserDirectory()
+    alice = asyncio.run(
+        users.record_login(
+            tenant_id="default",
+            issuer="gateway:corp-sso",
+            subject="oid-alice",
+            email="alice@corp.example",
+            email_verified=False,
+            display_name="Alice",
+        )
+    )
+    tombstone = replace(
+        alice,
+        disabled_at=time.time(),
+        disabled_source="provisioning",
+        scim_deleted_at=time.time(),
+    )
+
+    active, buried = _user_payload(alice), _user_payload(tombstone)
+
+    assert (active["disabled_source"], active["deprovisioned"]) == (None, False)
+    assert (buried["disabled_source"], buried["deprovisioned"]) == ("provisioning", True)
+
+
+def test_a_pending_erasure_needs_a_tombstone_without_a_running_erasure():
+    users = MemoryUserDirectory()
+    alice = asyncio.run(
+        users.record_login(
+            tenant_id="default",
+            issuer="gateway:corp-sso",
+            subject="oid-alice",
+            email="alice@corp.example",
+            email_verified=False,
+            display_name="Alice",
+        )
+    )
+    buried = replace(
+        alice,
+        disabled_at=time.time(),
+        disabled_source="provisioning",
+        scim_deleted_at=time.time(),
+    )
+    erasing = replace(buried, disabled_at=None, erasure_operation_id="del_erasing")
+
+    pending = [
+        _user_payload(user, erasure_on_deprovision=True)["erasure_pending"]
+        for user in (alice, buried, erasing)
+    ]
+
+    assert pending == [False, True, False]
+    assert _user_payload(buried)["erasure_pending"] is False
+
+
+@pytest.mark.parametrize(
+    ("action", "pending"),
+    [("erase", True), ("disable", False), (None, False)],
+    ids=["erase", "disable", "without-scim"],
+)
+def test_the_listing_names_a_pending_erasure_where_scim_deletes_erase(action, pending):
+    client, csrf = _owner_client(scim_delete_action=action)
+    client.post(
+        "/v1/admin/users",
+        json={"email": "bob@example.com", "password": "another-strong-pw-1"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    bob = _user_id_of(client, csrf, "bob@example.com")
+    client.app.state.provider.users.update_user(
+        tenant_id="default",
+        user_id=uuid.UUID(bob),
+        disabled_at=time.time(),
+        disabled_source="provisioning",
+        scim_deleted_at=time.time(),
+    )
+
+    rows = {row["id"]: row for row in client.get("/v1/admin/users").json()["users"]}
+
+    assert rows[bob]["deprovisioned"] is True
+    assert rows[bob]["erasure_pending"] is pending
+
+
+def _marked_for_erasure(client, target: str) -> None:
+    client.app.state.provider.users.update_user(
+        tenant_id="default", user_id=uuid.UUID(target), erasure_operation_id="del_scim"
+    )
+
+
+def test_any_administrator_reads_an_erasure_that_provisioning_started():
+    deletions = _Deletions(owner="provisioning", status="delete_failed")
+    client, _csrf, target = _erasure_world(deletions)
+    _marked_for_erasure(client, target)
+
+    resp = client.get(f"/v1/admin/users/{target}/erasure")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"operation_id": "del_scim", "status": "delete_failed"}
+
+
+@pytest.mark.parametrize(
+    ("owner", "marked"),
+    [("admin", True), ("provisioning", False)],
+    ids=["admin-started", "no-erasure"],
+)
+def test_only_an_erasure_of_nobody_is_read_on_the_account(owner, marked):
+    deletions = _Deletions(owner=owner)
+    client, _csrf, target = _erasure_world(deletions)
+    if marked:
+        _marked_for_erasure(client, target)
+
+    resp = client.get(f"/v1/admin/users/{target}/erasure")
+
+    assert resp.status_code == 404

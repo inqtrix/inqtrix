@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # One warning per process for the half-configured case below; a claim
 # loop restarting the holder must not turn the hint into log spam.

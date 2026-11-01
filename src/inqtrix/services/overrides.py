@@ -79,7 +79,7 @@ from inqtrix.report_profiles import ReportProfile
 from inqtrix.model_routing import ModelTier
 from inqtrix.settings import AgentSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class AgentOverridesRequest(BaseModel):
@@ -288,8 +288,8 @@ def apply_overrides(
             update["depth"] = bridged
     if not update:
         return base
-    for field_name, value in update.items():
-        log.info("Per-request override: %s=%r", field_name, value)
+    # Field names only: a value can be a question-specific instruction.
+    log.info("Per-request overrides: %s.", ", ".join(sorted(update)))
     # Combine the two "explicit" sources so profile presets neither
     # overwrite operator-set fields nor caller-set fields. See module
     # docstring (scenarios A / B / C) for the rationale.

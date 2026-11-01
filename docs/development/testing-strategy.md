@@ -357,7 +357,7 @@ run, which needs both URLs because it selects `postgres`- and `qdrant`-marked
 tests:
 
 ```bash
-INQTRIX_TEST_REQUIRE_INTEGRATION=1 uv run pytest tests/storage tests/test_qdrant_store.py
+INQTRIX_TEST_REQUIRE_INTEGRATION=1 uv run pytest tests/storage tests/test_qdrant_store.py tests/test_qdrant_vector_index_live.py tests/test_qdrant_bm25_parity_live.py
 ```
 
 `INQTRIX_TEST_REQUIRE_INTEGRATION=1` turns a missing URL from a skip into a

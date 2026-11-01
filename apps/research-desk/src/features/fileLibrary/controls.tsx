@@ -176,7 +176,7 @@ export function ContextOmittedLabel({ count }: { count: number }) {
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="min-w-0 cursor-help truncate whitespace-nowrap t-hint font-medium text-warning">
-          {t.vectorIndex.contextOmitted.replace('{count}', count.toLocaleString(locale))}
+          {t.vectorIndex.contextOmitted.replace('{count}', () => count.toLocaleString(locale))}
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-w-[260px]" side="top">

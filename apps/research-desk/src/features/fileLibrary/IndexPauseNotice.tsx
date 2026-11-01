@@ -57,7 +57,7 @@ function noticeText(notice: AutoResumeNotice, t: TranslationDictionary, locale: 
     const template = notice.kind === 'planned'
       ? t.vectorIndex.autoResumePlanned.replace(
           '{time}',
-          notice.at.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }),
+          () => notice.at.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }),
         )
       : t.vectorIndex.autoResumeSoon
     return template

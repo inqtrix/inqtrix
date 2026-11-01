@@ -48,6 +48,17 @@ describe('agentRunFailureText', () => {
       .toBe('A selected knowledge collection is no longer visible to this run.')
   })
 
+  it('names a run stopped by a withdrawn access without promising why', () => {
+    // One code covers a blocked account, a changed skill and a withdrawn
+    // collection, so the sentence stays general. Spelled out on purpose: a
+    // reword must be caught here. The server's English detail must not show.
+    const detail = 'access to a pinned knowledge collection was revoked'
+    expect(agentRunFailureText(detail, de, 'authorization_revoked'))
+      .toBe('Der Auftrag wurde gestoppt, weil ein benötigter Zugriff nicht mehr erlaubt ist.')
+    expect(agentRunFailureText(detail, translations.en, 'authorization_revoked'))
+      .toBe('The task was stopped because access it needs is no longer permitted.')
+  })
+
   it('leaves an empty failure empty', () => {
     expect(agentRunFailureText('   ', de)).toBe('')
   })

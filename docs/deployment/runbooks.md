@@ -97,6 +97,10 @@ inqtrix_compose restart api web
 inqtrix_compose restart api collaboration web
 ```
 
+A restart keeps each container's environment. After a change in
+`deploy/.env.stack` or the secrets file, use `inqtrix_compose up -d`, which
+re-creates the services whose configuration changed.
+
 Equivalent optional CLI:
 
 ```bash

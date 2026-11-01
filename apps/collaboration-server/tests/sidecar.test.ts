@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { inspect } from 'node:util'
 
 import WebSocket from 'ws'
 import { getSchema } from '@tiptap/core'
@@ -20,6 +21,7 @@ import * as Y from 'yjs'
 import type { IntrospectedLease } from '../src/contracts'
 import { hashBytes } from '../src/documentState'
 import { ApiRequestError, CloseCodes, CollaborationError } from '../src/errors'
+import { createJsonLogger } from '../src/logger'
 import { SidecarMetrics } from '../src/metrics'
 import { CollaborationSidecar } from '../src/sidecar'
 import { VerificationFaultGate } from '../src/verificationFault'
@@ -146,6 +148,38 @@ describe('private sidecar listener', () => {
       },
     })
     await sidecar.stop()
+  })
+
+  // An internal operation loads its room through the hook a client join
+  // uses; the store's refusal of that load keeps its status and reason.
+  it('answers an internal projection whose room load the store refuses with that refusal', async () => {
+    const api = new FakeCollaborationApi()
+    api.loadDocumentState = async () => {
+      throw new ApiRequestError(404, 'not_found')
+    }
+    const configured = settings({ policyPollMs: 60_000 })
+    const sidecar = new CollaborationSidecar(configured, { api, logger: silentLogger })
+    await sidecar.start()
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${sidecar.address?.port}/internal/documents/${DOCUMENT_ID}/project`,
+        {
+          body: JSON.stringify({ generation: 1, minimum_sequence: 0 }),
+          headers: {
+            Authorization: `Bearer ${configured.secret}`,
+            'Content-Type': 'application/json',
+          },
+          method: 'POST',
+        },
+      )
+
+      expect(response.status).toBe(404)
+      await expect(response.json()).resolves.toEqual({
+        error: { reason: 'access_revoked', upstream_reason: 'not_found' },
+      })
+    } finally {
+      await sidecar.stop()
+    }
   })
 
   it('broadcasts comment invalidations without revalidating document leases', async () => {
@@ -1292,9 +1326,11 @@ describe('private sidecar listener', () => {
     api.lease = validLease(configured, api.loadedState.schemaHash, 60)
     const persistence = deferred<PersistResult>()
     api.persistImplementation = () => persistence.promise
+    const logged: string[] = []
+    const sink = { debug: vi.fn(), error: vi.fn(), info: (line: string) => logged.push(line), warn: vi.fn() }
     const sidecar = new CollaborationSidecar(configured, {
       api,
-      logger: silentLogger,
+      logger: createJsonLogger(sink),
     })
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     await sidecar.start()
@@ -1309,10 +1345,15 @@ describe('private sidecar listener', () => {
       persistence.reject(new ApiRequestError(status, upstream))
 
       await vi.waitFor(() => expect(refused.closes).toEqual([close]))
-      // The refusal is logged under the same text the socket closed with.
-      await vi.waitFor(() => expect(consoleError.mock.calls.some((call) => (
-        call.some((argument) => String(argument).includes(close.reason))
+      // The refusal is logged under the same text the socket closed with, as
+      // a JSON record. Hocuspocus still prints that it closed the connection,
+      // but with the refusal's type, code and reason only, not this text.
+      await vi.waitFor(() => expect(logged.some((line) => (
+        JSON.parse(line).event === 'hook_refused' && JSON.parse(line).close_reason === close.reason
       ))).toBe(true))
+      expect(consoleError.mock.calls.some((call) => (
+        call.some((argument) => String(argument).includes(close.reason))
+      ))).toBe(false)
       await new Promise((resolve) => setTimeout(resolve, 100))
       expect(other.closes).toEqual([])
       expect(other.socket.readyState).toBe(WebSocket.OPEN)
@@ -4093,6 +4134,75 @@ describe('collaboration ingress backpressure', () => {
     } finally {
       await sidecar.stop()
     }
+  })
+})
+
+describe('log canary', () => {
+  // A marker in the document, an update, the lease token, a presence state,
+  // two stateless messages and a broken frame reaches neither the JSON log on
+  // DEBUG nor anything the process prints to the console.
+  it('keeps every marker out of the log and the console', async () => {
+    const marker = 'zzcanary7'
+    const api = new FakeCollaborationApi()
+    const configured = settings({ policyPollMs: 60_000 })
+    const document = markdownDocument(`Hello ${marker}`)
+    api.loadedState = await documentState(DOCUMENT_ID, document)
+    api.lease = validLease(configured, api.loadedState.schemaHash, 60)
+    const logged: string[] = []
+    const keep = (line: string): void => {
+      logged.push(line)
+    }
+    const printed: string[] = []
+    const consoleSpies = (['debug', 'error', 'info', 'log', 'warn'] as const).map((method) => (
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        printed.push(args.map((argument) => inspect(argument, { depth: 8 })).join(' '))
+      })
+    ))
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: createJsonLogger({ debug: keep, error: keep, info: keep, warn: keep }, 'DEBUG'),
+    })
+    await sidecar.start()
+    const clients: RoomClient[] = []
+    try {
+      const writer = await joinRoom(sidecar, configured.secret, `lease-${marker}`, document)
+      clients.push(writer)
+      writer.socket.send(syncFrame(ROOM, 2, editorUpdate(document, `Hello ${marker} and ${marker}`)))
+      await vi.waitFor(() => expect(api.persisted).toHaveLength(1))
+      writer.socket.send(awarenessFrame(ROOM, 4242, 1, { user: { name: marker } }))
+
+      const asking = await joinRoom(sidecar, configured.secret, 'lease-token', document)
+      clients.push(asking)
+      asking.socket.send(protocolFrame(ROOM, 5, varString(JSON.stringify({
+        hashes: [marker],
+        type: 'durability_reconcile',
+      }))))
+      await vi.waitFor(() => expect(asking.closes).toHaveLength(1))
+
+      // A parse error of the JS engine quotes part of its input.
+      const unparsable = await joinRoom(sidecar, configured.secret, 'lease-token', document)
+      clients.push(unparsable)
+      unparsable.socket.send(protocolFrame(ROOM, 5, varString(`{"hashes": [${marker}`)))
+      await vi.waitFor(() => expect(unparsable.closes).toHaveLength(1))
+
+      const broken = await joinRoom(sidecar, configured.secret, 'lease-token', document)
+      clients.push(broken)
+      broken.socket.send(syncFrame(ROOM, 2, new TextEncoder().encode(marker)))
+      await vi.waitFor(() => expect(broken.closes).toHaveLength(1))
+    } finally {
+      await closeClients(clients)
+      document.destroy()
+      await sidecar.stop()
+      for (const spy of consoleSpies) spy.mockRestore()
+    }
+
+    expect(logged.join('\n')).not.toContain(marker)
+    expect(printed.join('\n')).not.toContain(marker)
+    // The stateless message and the broken frame reached the checks that
+    // refuse them, so their paths are part of what was searched.
+    const records = logged.map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(records).toContainEqual(expect.objectContaining({ event: 'client_stateless_refused' }))
+    expect(records).toContainEqual(expect.objectContaining({ event: 'hook_refused', hook: 'beforeSync' }))
   })
 })
 

@@ -84,7 +84,7 @@ from inqtrix.storage.resource_access import (
     visible_resource_select,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # Document metadata columns (everything EXCEPT the heavy content_markdown
 # body) for the list path — the body is transferred only on get_document.

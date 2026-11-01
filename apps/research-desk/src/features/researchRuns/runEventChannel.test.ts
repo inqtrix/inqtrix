@@ -522,6 +522,88 @@ describe('parked runs poll instead of holding a stream', () => {
   })
 })
 
+describe('a parked run is not a limited connection', () => {
+  it('does not report a run as polling when it is parked from the start', async () => {
+    // A reload or a shared view opens a run that already waits for a person.
+    // Polling is the plan there, and the hint "live connection limited" was
+    // wrong: nothing is limited, the run has nothing to send.
+    const transports: RunEventTransport[] = []
+    await subscribeRunEventsWithFallback({
+      onEvent: () => undefined,
+      onTransportChange: (transport) => transports.push(transport),
+      pollOnce: async () => ({ events: [], terminal: true }),
+      preferPolling: () => true,
+      signal: new AbortController().signal,
+      sleep: instantSleep,
+      streamSse: async () => ({ sawTerminal: true }),
+    })
+    expect(transports).toEqual(['parked'])
+  })
+
+  it('reports the real outage once the woken run cannot stream', async () => {
+    let parked = true
+    const transports: RunEventTransport[] = []
+    let polls = 0
+    await subscribeRunEventsWithFallback({
+      onEvent: () => undefined,
+      onTransportChange: (transport) => transports.push(transport),
+      pollOnce: async () => {
+        polls += 1
+        parked = false
+        return { events: [], terminal: polls > 1 }
+      },
+      preferPolling: () => parked,
+      signal: new AbortController().signal,
+      sleep: instantSleep,
+      streamSse: async () => {
+        throw new Error('stream tot')
+      },
+    })
+    expect(transports).toEqual(['parked', 'polling'])
+  })
+
+  it('ends the outage hint when a run on the fallback parks', async () => {
+    let parked = false
+    const transports: RunEventTransport[] = []
+    let polls = 0
+    await subscribeRunEventsWithFallback({
+      onEvent: () => undefined,
+      onTransportChange: (transport) => transports.push(transport),
+      pollOnce: async () => {
+        polls += 1
+        parked = true
+        return { events: [], terminal: polls > 1 }
+      },
+      pollsPerSseRetry: 1,
+      preferPolling: () => parked,
+      signal: new AbortController().signal,
+      sleep: instantSleep,
+      streamSse: async () => {
+        throw new Error('stream tot')
+      },
+    })
+    expect(transports).toEqual(['polling', 'parked'])
+  })
+
+  it('still rejects loudly when the poll of a parked run fails', async () => {
+    // The outage while parked: nothing may swallow it because the run is
+    // parked. The caller turns this rejection into a visible run error.
+    const transports: RunEventTransport[] = []
+    await expect(subscribeRunEventsWithFallback({
+      onEvent: () => undefined,
+      onTransportChange: (transport) => transports.push(transport),
+      pollOnce: async () => {
+        throw Object.assign(new Error('HTTP 500'), { status: 500 })
+      },
+      preferPolling: () => true,
+      signal: new AbortController().signal,
+      sleep: instantSleep,
+      streamSse: async () => ({ sawTerminal: true }),
+    })).rejects.toThrow('HTTP 500')
+    expect(transports).toEqual(['parked'])
+  })
+})
+
 describe('noteParkedTransition', () => {
   const waiting = (status: string): ResearchRunEvent => ({
     created_at: 0,

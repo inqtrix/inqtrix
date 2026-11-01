@@ -16,7 +16,7 @@ from typing import Any
 from inqtrix.core.results import SourcePolicy
 from inqtrix.exceptions import AgentPolicyDenied
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 WEB_TOOL_NAMES = frozenset(
     {

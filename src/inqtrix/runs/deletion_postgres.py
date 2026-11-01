@@ -97,7 +97,7 @@ if TYPE_CHECKING:
 
     from inqtrix.runs.deletion_queue import ValkeyDeletionQueue
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _KNOWLEDGE_DELETION_TARGET_VALUES = tuple(
     target_kind.value for target_kind in KNOWLEDGE_DELETION_TARGET_KINDS

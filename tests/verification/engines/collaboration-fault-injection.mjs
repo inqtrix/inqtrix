@@ -5,6 +5,8 @@ import process from 'node:process'
 import {
   eraseTemporaryUser,
   ensureTemporaryUsers,
+  requireAccountLocale,
+  setAccountLocale,
   temporaryUserDescriptors,
 } from '../fixtures/accounts.mjs'
 import { assertFixture, fetchActorJson } from '../fixtures/api.mjs'
@@ -16,6 +18,7 @@ import {
 } from '../fixtures/collaboration-fault-injection.mjs'
 import {
   normalizeSystemSmokeBaseURL,
+  SYSTEM_SMOKE_LOCALE,
 } from '../fixtures/collaboration-system-smoke.mjs'
 import {
   ContainerFaultDriver,
@@ -89,6 +92,7 @@ try {
       && capabilities.feature_status?.collaboration?.state === 'enabled',
     'Fault-injection requires enabled sharing and collaboration capabilities.',
   )
+  await requireAccountLocale(admin, SYSTEM_SMOKE_LOCALE)
 
   progress('Creating one Run-ID-bound collaborator identity.')
   const descriptor = temporaryUserDescriptors(runId)[0]
@@ -110,6 +114,7 @@ try {
     admin.user.id !== collaborator.user.id,
     'Fault-injection identities resolved to the same account.',
   )
+  await setAccountLocale(collaborator, SYSTEM_SMOKE_LOCALE)
   collaboratorProjectCleanup = await lifecycle.register({
     email: temporaryUser.email,
     id: `${runId}:${temporaryUser.email}:project`,

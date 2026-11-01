@@ -35,11 +35,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from inqtrix.auth.directory import DELETED_ACCOUNT_ISSUER
+from inqtrix.auth.lifecycle import AdminActor, ProvisioningActor
 from inqtrix.runs.deletion_operations import DeletionStage
 from inqtrix.services.user_erasure import (
     DELETED_ACCOUNT_DISPLAY_NAME,
     DELETED_ACCOUNT_EMAIL,
-    DELETED_ACCOUNT_ISSUER,
     DELETED_ACCOUNT_SUBJECT,
     ERASURE_PLAN,
     Disposition,
@@ -58,7 +59,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from inqtrix.runs.deletion_operations import DeletionJobHandle
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 #: Rows per statement. Each batch is its own short transaction, so no
 #: lock -- row or tenant -- is held across a large account.
@@ -240,7 +241,12 @@ class UserErasure:
                 tenant_id=tenant_id,
                 user_id=user_id,
                 operation_id=handle.operation_id,
-                actor_user_id=actor_user_id,
+                # An erasure without a creator is one provisioning started.
+                actor=(
+                    AdminActor(actor_user_id)
+                    if actor_user_id is not None
+                    else ProvisioningActor()
+                ),
             )
         )
         handle.complete()

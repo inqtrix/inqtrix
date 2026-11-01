@@ -82,7 +82,7 @@ _MAX_PRIVATE_DRAFT_METADATA_TEXT = 4_096
 _MAX_PRIVATE_DRAFT_INSTRUCTION = 8_192
 _MAX_PRIVATE_DRAFT_ID = 255
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class CollaborationProjectionUnavailable(RuntimeError):

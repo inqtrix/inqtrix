@@ -141,7 +141,7 @@ You can instead put `INQTRIX_WEB_BIND_ADDRESS=0.0.0.0` in the selected stack
 env file so the original command stays unchanged. Keep `api`, Postgres,
 Qdrant, Valkey, and the object store private; Compose publishes only the
 Python web service.
-Use `local` or `oidc` auth for distinct users. Plain HTTP requires
+Use `local`, `oidc` or `gateway` auth for distinct users. Plain HTTP requires
 `INQTRIX_OIDC_INSECURE_DEV_COOKIES=true` for the cookie-session modes and is
 appropriate only on a trusted test LAN. For any broader or persistent rollout,
 keep the loopback bind and terminate TLS at a reverse proxy as described in
@@ -161,15 +161,16 @@ A missing or wrong credential surfaces as a loud startup error in `docker compos
 The Stack-mode compose ships with **native accounts** as the default (`INQTRIX_AUTH_MODE=local`). On first visit it walks you through creating the instance owner; from then on the in-app admin area manages users, invitations and access tokens, and people sign in with email and password.
 
 > [!IMPORTANT]
-> **Login over plain `http://localhost` can fail silently on a Mac.** The session cookie is hardened with `Secure` and the `__Host-` prefix, which Safari (and Chrome, for the `__Host-` prefix) refuse to store over non-HTTPS. The login request returns success, but the cookie is dropped, so you land back on the login screen with no error message. For local HTTP development, set `INQTRIX_OIDC_INSECURE_DEV_COOKIES=true` in `deploy/.env.stack` and restart the `api` container; it drops the `Secure`/`__Host-` hardening (and logs a startup warning, never use it in production). For any real deployment, terminate TLS in front so the secure cookie works as intended.
+> **Login over plain `http://localhost` can fail silently on a Mac.** The session cookie is hardened with `Secure` and the `__Host-` prefix, which Safari (and Chrome, for the `__Host-` prefix) refuse to store over non-HTTPS. The login request returns success, but the cookie is dropped, so you land back on the login screen with no error message. For local HTTP development, set `INQTRIX_OIDC_INSECURE_DEV_COOKIES=true` in `deploy/.env.stack` and re-create the `api` container with `up -d` (a `restart` keeps the old environment); it drops the `Secure`/`__Host-` hardening (and logs a startup warning, never use it in production). For any real deployment, terminate TLS in front so the secure cookie works as intended.
 
-Three other modes cover different environments — all in [Auth modes](../deployment/auth-modes.md):
+Four other modes cover different environments, all described in [Auth modes](../deployment/auth-modes.md):
 
 - **`oidc`** — enterprise SSO via your own IdP; configure the
   `INQTRIX_OIDC_*` block and `INQTRIX_PUBLIC_BASE_URL` without a Compose
   profile. Use `--profile oidc` only for the bundled Dex development
   reference.
 - **`apikey`** / **`none`** — a shared Bearer token, or an open single-operator server with no login.
+- **`gateway`**: an API gateway in front of Inqtrix signs people in, for example oauth2-proxy with your identity provider; see [Mode `gateway`](../deployment/auth-modes.md#mode-gateway).
 
 For remote exposure, terminate TLS in front (see [Security model](../deployment/security-model.md)).
 

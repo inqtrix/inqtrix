@@ -216,7 +216,7 @@ The recipes above cover the providers and models. Everything else lives in dedic
 
 - **All env variables** (storage, auth, knowledge, queue, logging, limits): [Settings and env](../configuration/settings-and-env.md).
 - **Infrastructure & features** (Postgres, S3 object store, Qdrant/RAG, Valkey workers — which feature needs which component): [Platform components](platform-components.md).
-- **Authentication** (`none` / `apikey` / `local` / `oidc`, and how users are created): [Auth modes](../deployment/auth-modes.md).
+- **Authentication** (`none` / `apikey` / `local` / `oidc` / `gateway`, and how users are created): [Auth modes](../deployment/auth-modes.md).
 - **Running the full stack with all of the above**: [Stack quickstart](stack-quickstart.md) and [Runbooks](../deployment/runbooks.md).
 
 ## Verify

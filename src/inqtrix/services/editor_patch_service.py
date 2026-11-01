@@ -47,7 +47,7 @@ if TYPE_CHECKING:
         EditorCollaborationService,
     )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _EDIT_POSITIONS = frozenset({"replace", "before", "after", "append"})
 

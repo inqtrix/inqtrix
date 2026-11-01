@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
     from inqtrix.auth.shares import ShareRecord
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

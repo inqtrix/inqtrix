@@ -43,7 +43,7 @@ from inqtrix.providers.base import (
 )
 from inqtrix.providers.embeddings import EmbeddingProvider
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 try:  # Optional dependency: the wrappers work without OpenTelemetry.
     from opentelemetry import trace as _otel_trace

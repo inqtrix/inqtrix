@@ -25,7 +25,7 @@ from enum import StrEnum
 from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class ContextualizationCircuitState(StrEnum):

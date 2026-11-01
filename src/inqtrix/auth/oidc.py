@@ -15,9 +15,10 @@ Dex, Keycloak, Entra ID, Okta, and authentik are configuration, not code.
   (RS256/ES256 — ``none``/HS256 and token-supplied ``jwk``/``jku``
   headers are structurally rejected by joserfc's registry), pinned
   issuer, audience, expiry, and one-time nonce.
-* JWKS cached with a TTL; an unknown ``kid`` triggers at most one
-  refresh per cooldown window so garbage-kid tokens cannot drive
-  outbound fetch storms.
+* JWKS through the shared cache in :mod:`inqtrix.auth.jwks` (six-hour
+  TTL here): an unknown ``kid`` triggers at most one refresh per
+  cooldown for the whole cache, so garbage-kid tokens cannot drive
+  outbound fetch storms; concurrent refreshes share one fetch.
 * CSRF: OWASP signed double-submit — the token is
   ``hex(HMAC(secret, session_id + random)) . hex(random)``, delivered
   in a non-HttpOnly cookie and required back in the ``X-CSRF-Token``
@@ -42,8 +43,8 @@ from typing import TYPE_CHECKING, Any, Callable
 import httpx
 from fastapi import HTTPException, Request
 from joserfc import jwt as jose_jwt
-from joserfc.jwk import KeySet
 
+from inqtrix.auth.jwks import OIDC_JWKS_TTL_SECONDS, JwksCache, KeysUnavailable
 from inqtrix.auth.log_redaction import pseudonymous_log_reference
 from inqtrix.auth.mapping import (
     ClaimMappingConfig,
@@ -62,7 +63,7 @@ from inqtrix.services.request_parsing import workspace_id_from_request
 if TYPE_CHECKING:
     from inqtrix.auth.permissions import AuditSink
     from inqtrix.auth.lifecycle import UserLifecycleService
-    from inqtrix.auth.directory import UserDirectory
+    from inqtrix.auth.directory import MirroredUser, UserDirectory
     from inqtrix.auth.invitations import (
         InvitationRepository,
         RegistrationGate,
@@ -70,15 +71,29 @@ if TYPE_CHECKING:
     from inqtrix.auth.pat import PatService, PatVerifier
     from inqtrix.auth.principal import AuthMode
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
+
+#: Added to the warning of the email_verified switch when invitations gate
+#: the first login.
+_SKIP_WITH_INVITE = (
+    " INQTRIX_REGISTRATION=invite then admits a new user only with an open "
+    "invitation for an email address the identity provider confirms "
+    "(email_verified=true): sign-ins without that claim (Entra ID omits it) "
+    "create no account, existing users keep signing in. To admit new users, "
+    "set INQTRIX_REGISTRATION=open and limit sign-in at the identity provider "
+    "(Entra ID: assignment required) or with INQTRIX_OIDC_ALLOWED_GROUPS."
+)
+#: Added when the domain gate is set: it then checks unconfirmed addresses.
+_SKIP_WITH_DOMAINS = (
+    " INQTRIX_OIDC_ALLOWED_DOMAINS then checks an address the identity "
+    "provider does not confirm."
+)
 
 ALLOWED_ALGORITHMS = ("RS256", "ES256")
 """Accepted id_token signature algorithms. ``none`` and the symmetric
 family are rejected by allowlist — the alg-confusion regression test
 pins this."""
 
-_JWKS_TTL_SECONDS = 6 * 3600.0
-_JWKS_REFRESH_COOLDOWN_SECONDS = 300.0
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 CSRF_HEADER = "X-CSRF-Token"
@@ -92,12 +107,6 @@ _CSRF_INVALID = {
         "type": "csrf_error",
     }
 }
-
-
-# OidcExchangeError and claim_path now live in inqtrix.auth.mapping (the
-# lowest auth layer, so the mapper can raise the error without importing
-# this module). They are re-exported via the import above so the
-# historical `from inqtrix.auth.oidc import ...` paths keep working.
 
 
 def make_csrf_token(secret: str, session_id: str, random_hex: str) -> str:
@@ -163,9 +172,9 @@ class OidcClient:
             transport=transport,
         )
         self._metadata: dict[str, Any] | None = None
-        self._jwks: KeySet | None = None
-        self._jwks_fetched_at = 0.0
-        self._jwks_last_miss_refresh = 0.0
+        self.jwks = JwksCache(
+            self._fetch_jwks_document, cache="oidc", ttl_seconds=OIDC_JWKS_TTL_SECONDS
+        )
 
     @property
     def client_id(self) -> str:
@@ -243,7 +252,12 @@ class OidcClient:
         client id as audience, expiry with small leeway, and the
         transaction nonce.
         """
-        keys = await self._jwks_for(id_token)
+        try:
+            keys = await self.jwks.keys_for(id_token)
+        except KeysUnavailable as exc:
+            raise OidcExchangeError(
+                "The identity provider's signing keys are unavailable."
+            ) from exc
         try:
             token = jose_jwt.decode(
                 id_token, keys, algorithms=list(ALLOWED_ALGORITHMS)
@@ -288,60 +302,16 @@ class OidcClient:
             return {}
         return response.json()
 
-    async def _jwks_for(self, id_token: str) -> KeySet:
-        """JWKS with TTL caching and cooldown-limited kid refresh."""
-        keys = await self._fetch_jwks(force=False)
-        kid = _token_kid(id_token)
-        if kid and not _keyset_has_kid(keys, kid):
-            now = time.monotonic()
-            if (
-                now - self._jwks_last_miss_refresh
-                >= _JWKS_REFRESH_COOLDOWN_SECONDS
-            ):
-                self._jwks_last_miss_refresh = now
-                log.warning(
-                    "JWKS: unknown kid %r; refreshing once "
-                    "(possible key rotation).",
-                    kid,
-                )
-                keys = await self._fetch_jwks(force=True)
-        return keys
-
-    async def _fetch_jwks(self, *, force: bool) -> KeySet:
-        now = time.monotonic()
-        if (
-            not force
-            and self._jwks is not None
-            and now - self._jwks_fetched_at < _JWKS_TTL_SECONDS
-        ):
-            return self._jwks
+    async def _fetch_jwks_document(self) -> dict[str, Any]:
+        """The JWKS document of the discovered ``jwks_uri``."""
         document = await self.metadata()
         response = await self._http.get(document["jwks_uri"])
         response.raise_for_status()
-        self._jwks = KeySet.import_key_set(response.json())
-        self._jwks_fetched_at = now
-        return self._jwks
+        return response.json()
 
     async def aclose(self) -> None:
         """Release the underlying HTTP client."""
         await self._http.aclose()
-
-
-def _token_kid(token: str) -> str | None:
-    import base64
-    import json
-
-    try:
-        header_segment = token.split(".")[0]
-        padded = header_segment + "=" * (-len(header_segment) % 4)
-        header = json.loads(base64.urlsafe_b64decode(padded))
-        return header.get("kid")
-    except Exception:  # noqa: BLE001 — malformed tokens fail validation later
-        return None
-
-
-def _keyset_has_kid(keys: KeySet, kid: str) -> bool:
-    return any(key.kid == kid for key in keys.keys)
 
 
 def make_pkce_pair() -> tuple[str, str]:
@@ -366,25 +336,18 @@ class OidcAuthProvider(AuthProvider):
             (JIT provisioning keyed on the (issuer, subject) anchor).
         session_secret: CSRF-derivation secret.
         session_max_age_seconds: Absolute session lifetime.
-        username_claim: Display-username claim (dot-path capable),
-            falling back to email then sub.
-        email_claim: Email claim.
-        groups_claim: Group-membership claim (dot-path capable).
-        allowed_groups: Non-empty set gates logins on group overlap (a
-            ``"*"`` member admits any authenticated user).
-        roles_claim: Role claim (dot-path capable) for admin elevation.
-        admin_roles: Role values that grant instance-admin (grant-only).
-        admin_groups: Group values that grant instance-admin (grant-only).
-        claim_separators: Characters a string-valued group/role claim is
-            split on (a JSON array is used as-is).
-        strip_group_path_prefix: Strip one leading ``/`` from group
-            values (Keycloak full-path groups).
-        allowed_domains: Non-empty set gates logins on the email domain.
+        claim_mapping: Which claims carry the name, email, groups and
+            roles, and the admission gates and admin values; the settings
+            bridge builds it from the ``INQTRIX_OIDC_*`` claim settings
+            (:func:`inqtrix.auth.api_key.claim_mapping_from_settings`).
+            ``None`` uses the defaults.
         provider_name: Display name for the SSO login button (surfaced by
             the auth-config endpoint; empty falls back to a generic label).
-        skip_email_verified: Deprecated compatibility argument. Identity
-            admission always requires the literal claim value ``true``;
-            passing this flag logs a warning and does not weaken admission.
+        skip_email_verified: Accept logins whose token lacks
+            ``email_verified=true`` (Entra ID omits the claim); logged as a
+            warning at construction. A login without the claim carries no
+            confirmed email and therefore accepts no workspace invitation;
+            with ``INQTRIX_REGISTRATION=invite`` it creates no account.
         userinfo_fallback: Fetch userinfo when mapped claims are
             missing from the id_token.
         secure_cookies: ``False`` drops the ``Secure`` flag and the
@@ -408,16 +371,7 @@ class OidcAuthProvider(AuthProvider):
         users: "UserDirectory | None" = None,
         session_secret: str,
         session_max_age_seconds: int,
-        username_claim: str = "preferred_username",
-        email_claim: str = "email",
-        groups_claim: str = "groups",
-        allowed_groups: frozenset[str] = frozenset(),
-        roles_claim: str = "roles",
-        admin_roles: frozenset[str] = frozenset(),
-        admin_groups: frozenset[str] = frozenset(),
-        claim_separators: str = " ,",
-        strip_group_path_prefix: bool = False,
-        allowed_domains: frozenset[str] = frozenset(),
+        claim_mapping: ClaimMappingConfig | None = None,
         provider_name: str = "",
         skip_email_verified: bool = False,
         userinfo_fallback: bool = True,
@@ -430,7 +384,7 @@ class OidcAuthProvider(AuthProvider):
     ) -> None:
         if not session_secret:
             raise ValueError(
-                "OidcAuthProvider requires a non-empty session_secret"
+                f"{type(self).__name__} requires a non-empty session_secret"
             )
         self.client = client
         self.sessions = sessions
@@ -447,24 +401,21 @@ class OidcAuthProvider(AuthProvider):
         self.lifecycle = lifecycle
         self.session_secret = session_secret
         self.session_max_age_seconds = session_max_age_seconds
-        self.claim_mapping = ClaimMappingConfig(
-            username_claim=username_claim,
-            email_claim=email_claim,
-            groups_claim=groups_claim,
-            roles_claim=roles_claim,
-            separators=claim_separators,
-            strip_group_path_prefix=strip_group_path_prefix,
-            allowed_groups=allowed_groups,
-            admin_groups=admin_groups,
-            admin_roles=admin_roles,
-            allowed_domains=allowed_domains,
+        self.claim_mapping = (
+            claim_mapping if claim_mapping is not None else ClaimMappingConfig()
         )
         self.provider_name = provider_name
         self.skip_email_verified = skip_email_verified
         if skip_email_verified:
+            invite = (
+                registration_gate is not None
+                and registration_gate.registration == "invite"
+            )
             log.warning(
                 "OIDC email_verified check is explicitly disabled; missing "
-                "or false claims are accepted."
+                "or false claims are accepted.%s%s",
+                _SKIP_WITH_INVITE if invite else "",
+                _SKIP_WITH_DOMAINS if self.claim_mapping.allowed_domains else "",
             )
         self.userinfo_fallback = userinfo_fallback
         self.secure_cookies = secure_cookies
@@ -538,6 +489,16 @@ class OidcAuthProvider(AuthProvider):
             self.claim_mapping.admin_roles or self.claim_mapping.admin_groups
         )
 
+    @property
+    def invitations_accepted_by_login(self) -> bool:
+        """Whether a login of this provider can accept a workspace invitation.
+
+        Acceptance needs a confirmed email. With ``skip_email_verified`` the
+        provider admits logins without one, so it does not promise
+        acceptance; an instance admin assigns those people to workspaces.
+        """
+        return not self.skip_email_verified
+
     def resolve_principal(self, request: Request) -> Principal:
         """Unsupported synchronous path — session lookup is async."""
         raise RuntimeError(
@@ -556,52 +517,81 @@ class OidcAuthProvider(AuthProvider):
         """
 
         async def resolve_session_principal(request: Request) -> Principal:
-            header = request.headers.get("Authorization", "").strip()
-            if header.lower().startswith("bearer "):
-                if self.pats is None:
-                    raise HTTPException(
-                        status_code=401,
-                        detail=_UNAUTHENTICATED,
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
-                principal = await self.pats.verify(header[len("Bearer "):])
-                bind_principal_context(principal)
-                return principal
+            bearer = self._bearer_value(request)
+            if bearer is not None:
+                return await self._bearer_principal(bearer)
             session = await self._session_for(request)
-            if request.method not in _SAFE_METHODS:
-                token = request.headers.get(CSRF_HEADER, "")
-                if not token or not verify_csrf_token(
-                    self.session_secret, session.id, token
-                ):
-                    log.warning(
-                        "CSRF check failed "
-                        "(session_ref=%s method=%s).",
-                        pseudonymous_log_reference("ses", session.id),
-                        request.method,
-                    )
-                    raise HTTPException(status_code=403, detail=_CSRF_INVALID)
-            principal = Principal(
-                user_id=session.user_id,
-                kind="oidc_session",
-                tenant_id="default",
-                display_name=session.display_name,
-                email=session.email,
-                session_id=session.id,
-            )
-            # Stamp the subject onto the log context (stable pseudonym,
-            # never the raw id); the request task owns the binding.
-            bind_principal_context(principal)
-            return principal
+            self._require_csrf(request, session)
+            return self._session_principal(session)
 
         return resolve_session_principal
 
-    async def _session_for(self, request: Request) -> AuthSession:
+    @staticmethod
+    def _bearer_value(request: Request) -> str | None:
+        """The token of an ``Authorization: Bearer`` header, or ``None``."""
+        header = request.headers.get("Authorization", "").strip()
+        if header.lower().startswith("bearer "):
+            return header[len("Bearer "):]
+        return None
+
+    async def _bearer_principal(self, token: str) -> Principal:
+        """The principal of a personal access token; never a cookie fallback."""
+        if self.pats is None:
+            raise HTTPException(
+                status_code=401,
+                detail=_UNAUTHENTICATED,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        principal = await self.pats.verify(token)
+        bind_principal_context(principal)
+        return principal
+
+    def _require_csrf(self, request: Request, session: AuthSession) -> None:
+        """Double-submit check on unsafe methods of a cookie session."""
+        if request.method in _SAFE_METHODS:
+            return
+        token = request.headers.get(CSRF_HEADER, "")
+        if not token or not verify_csrf_token(
+            self.session_secret, session.id, token
+        ):
+            log.warning(
+                "CSRF check failed "
+                "(session_ref=%s method=%s).",
+                pseudonymous_log_reference("ses", session.id),
+                request.method,
+            )
+            raise HTTPException(status_code=403, detail=_CSRF_INVALID)
+
+    def _session_principal(self, session: AuthSession) -> Principal:
+        """The principal of a cookie session, bound to the log context."""
+        principal = Principal(
+            user_id=session.user_id,
+            kind="oidc_session",
+            tenant_id="default",
+            display_name=session.display_name,
+            email=session.email,
+            session_id=session.id,
+        )
+        # Stamp the subject onto the log context (stable pseudonym,
+        # never the raw id); the request task owns the binding.
+        bind_principal_context(principal)
+        return principal
+
+    async def _session_and_user_for(
+        self, request: Request
+    ) -> tuple[AuthSession, "MirroredUser | None"]:
+        """The cookie's session and its user row, from the same two lookups.
+
+        A session whose user is gone or disabled is deleted and answers 401.
+        The user row is ``None`` only without a user store.
+        """
         session_id = request.cookies.get(self.session_cookie, "")
         if not session_id:
             raise HTTPException(status_code=401, detail=_UNAUTHENTICATED)
         session = await self.sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=401, detail=_UNAUTHENTICATED)
+        user = None
         if self.users is not None:
             user = await self.users.find_by_user_id(
                 tenant_id="default", user_id=session.user_id
@@ -609,45 +599,54 @@ class OidcAuthProvider(AuthProvider):
             if user is None or user.disabled_at is not None:
                 await self.sessions.delete(session_id)
                 raise HTTPException(status_code=401, detail=_UNAUTHENTICATED)
+        return session, user
+
+    async def _session_for(self, request: Request) -> AuthSession:
+        session, _user = await self._session_and_user_for(request)
         return session
 
     async def session_payload(self, request: Request) -> dict[str, Any]:
-        """``/api/auth/session`` bootstrap payload for the SPA."""
+        """``/api/auth/session`` bootstrap payload for the SPA.
+
+        A still-live session whose user was disabled mid-session reads as
+        logged-out, so the SPA never renders a surface the disable cascade
+        already revoked server-side.
+        """
         try:
-            session = await self._session_for(request)
+            session, mirrored = await self._session_and_user_for(request)
         except HTTPException:
             return {"authenticated": False}
+        return await self.authenticated_payload(request, session, mirrored)
+
+    async def authenticated_payload(
+        self,
+        request: Request,
+        session: AuthSession,
+        mirrored: "MirroredUser | None",
+    ) -> dict[str, Any]:
+        """The signed-in payload of *session*, with role and namespace."""
         # Instance role drives the admin-UI gate. Resolved from the mirror;
         # absent mirror (or no users store) reads as the default "user", so
         # an older backend simply yields no admin surface (fail-closed).
         role = "user"
         # The user's canonical project namespace (cross-device). Resolved from
         # the mirror; adopted from the browser's namespace header on first boot
+        # unless a write without a namespace claimed one before
         # (see resolve_default_workspace). Stays None for an un-mirrored
         # identity or when no namespace header is present yet, so the SPA falls
         # back to its browser-local id.
         project_namespace: str | None = None
-        if self.users is not None:
-            mirrored = await self.users.find_by_user_id(
-                tenant_id="default", user_id=session.user_id
-            )
-            if mirrored is not None:
-                # A still-live session whose user was disabled mid-session
-                # reads as logged-out, so the SPA never renders a surface the
-                # disable cascade already revoked server-side (the cascade
-                # purges sessions; this also covers the brief purge race).
-                if mirrored.disabled_at is not None:
-                    return {"authenticated": False}
-                role = mirrored.instance_role
-                project_namespace = mirrored.default_workspace_id
-                if project_namespace is None:
-                    candidate = workspace_id_from_request(request)
-                    if candidate:
-                        project_namespace = await self.users.resolve_default_workspace(
-                            tenant_id="default",
-                            user_id=session.user_id,
-                            candidate=candidate,
-                        )
+        if mirrored is not None and self.users is not None:
+            role = mirrored.instance_role
+            project_namespace = mirrored.default_workspace_id
+            if project_namespace is None:
+                candidate = workspace_id_from_request(request)
+                if candidate:
+                    project_namespace = await self.users.resolve_default_workspace(
+                        tenant_id="default",
+                        user_id=session.user_id,
+                        candidate=candidate,
+                    )
         return {
             "authenticated": True,
             "user": {
@@ -670,7 +669,9 @@ class OidcAuthProvider(AuthProvider):
         Group extraction and the admission gates (group allowlist with a
         ``"*"`` wildcard, email-domain allowlist) are delegated to the
         IdP-agnostic claim mapper; admin elevation is a separate,
-        grant-only signal (see :meth:`map_admin`).
+        grant-only signal (see :meth:`map_admin`). ``display_name`` is
+        ``None`` without a username claim: login provisioning falls back to
+        the email or the subject only when the stored name is empty too.
 
         Raises:
             OidcExchangeError: When the subject is missing, the email is
@@ -692,7 +693,7 @@ class OidcAuthProvider(AuthProvider):
         email_value = claim_path(claims, cfg.email_claim)
         email = str(email_value) if email_value else None
         username = claim_path(claims, cfg.username_claim)
-        display_name = str(username) if username else (email or subject)
+        display_name = str(username) if username else None
         groups = extract_groups(claims, cfg)
         reason = admission_error(groups, email, cfg)
         if reason:

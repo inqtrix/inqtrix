@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
     from inqtrix.runs.upload_queue import ValkeyUploadQueue
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 _SOURCE_AUTHORITY = PostgresSourceLifecycleAuthority()
 
 

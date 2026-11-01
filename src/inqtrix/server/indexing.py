@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.principal import UserContext
     from inqtrix.settings import KnowledgeSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 __all__ = [
     "ACTIVE_INDEXING_STATUSES",

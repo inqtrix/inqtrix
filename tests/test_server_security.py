@@ -224,14 +224,12 @@ def test_make_cors_kwargs_parses_comma_separated_origins():
 def test_make_cors_kwargs_warns_on_wildcard(caplog):
     settings = _make_settings(cors_origins="*")
     inqtrix_logger = logging.getLogger("inqtrix")
-    inqtrix_logger.addHandler(caplog.handler)
     previous_level = inqtrix_logger.level
     inqtrix_logger.setLevel(logging.WARNING)
     try:
         with caplog.at_level(logging.WARNING, logger="inqtrix"):
             kwargs = make_cors_middleware_kwargs(settings.server)
     finally:
-        inqtrix_logger.removeHandler(caplog.handler)
         inqtrix_logger.setLevel(previous_level)
 
     assert kwargs is not None

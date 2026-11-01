@@ -111,7 +111,7 @@ primitive instead of an ad-hoc size; an ESLint rule in
 
 ## Logging and secrets
 
-- Use `logging.getLogger("inqtrix")`.
+- Use `logging.getLogger(__name__)`, so every module logs under its own name in the `inqtrix.` tree. A module that also runs under another name writes its import path out: as the main program (`python -m ...`) `__name__` is `"__main__"`, and Alembic loads the files under `storage/migrations/` from their paths under names such as `env_py`. The web gateway logs under `inqtrix.web_gateway`.
 - Route every potentially sensitive message through `sanitize_log_message(...)` from `inqtrix.urls` before logging.
 - Every fallback path emits all three of a `log.warning(...)`, a progress event on the user-visible queue, and an iteration-log marker, so no fallback is ever silent.
 - Never log raw API keys, tokens, endpoints with embedded credentials, or full prompt bodies.

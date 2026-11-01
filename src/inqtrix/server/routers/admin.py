@@ -1,6 +1,6 @@
 """Instance administration routes (``/v1/admin/*``).
 
-User management for the cookie-session modes (local/oidc): list
+User management for the cookie-session modes (local, oidc, gateway): list
 users, change the instance role, enable/disable, and (local mode) create
 accounts. Authorization is SESSION-ONLY and admin-gated — a PAT can never
 administer users (a leaked token must not be able to promote itself).
@@ -20,15 +20,23 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from functools import partial
 from typing import TYPE_CHECKING, Any, Callable
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from inqtrix.auth.log_redaction import log_authorization_denial
-from inqtrix.auth.lifecycle import AdminAuthorizationError, UserLifecycleStatus
+from inqtrix.auth.lifecycle import (
+    AdminActor,
+    AdminAuthorizationError,
+    ProvisioningActor,
+    UserLifecycleStatus,
+)
+from inqtrix.runs.deletion_execution import operation_principal
 from inqtrix.runs.deletion_operations import (
     DeletionOperationConflict,
+    DeletionOperationNotFound,
     DeletionOperationStatus,
     new_deletion_operation_id,
 )
@@ -40,16 +48,32 @@ if TYPE_CHECKING:
 
 TENANT = "default"
 _MIN_PASSWORD_LEN = 12
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
-def _user_payload(user: "MirroredUser") -> dict:
+def _user_payload(user: "MirroredUser", *, erasure_on_deprovision: bool = False) -> dict:
+    """The listing entry of *user*.
+
+    ``erasure_on_deprovision`` says that a SCIM DELETE also erases: a
+    deprovisioned account without a running erasure then waits for one,
+    and the erasure preview names what still blocks it.
+    """
     return {
         "id": str(user.user_id),
         "email": user.email,
         "display_name": user.display_name,
         "instance_role": user.instance_role,
         "disabled": user.disabled_at is not None,
+        # Who disabled the account (admin or provisioning) and whether
+        # provisioning deleted it: an enable lifts either, and the admin
+        # surface warns before it does.
+        "disabled_source": user.disabled_source,
+        "deprovisioned": user.scim_deleted_at is not None,
+        "erasure_pending": (
+            erasure_on_deprovision
+            and user.scim_deleted_at is not None
+            and user.erasure_operation_id is None
+        ),
         "last_login_at": user.last_login_at,
         # An account being erased is no longer disabled in the authorization
         # sense (the deletion machine acts as its owner) but can never sign
@@ -74,18 +98,34 @@ def _revoked_admin_response(
     return error_response(404, "Not found", "not_found")
 
 
+def build_router(container: Any) -> APIRouter:
+    """The admin routes of *container*, as the server mounts them."""
+    auth = container.settings.auth
+    return build_admin_router(
+        container.auth_provider,
+        container.principal_dependency,
+        deletions=container.asset_deletion_service,
+        erase_on_deprovision=(
+            auth.scim_enabled and auth.scim_delete_action == "erase"
+        ),
+    )
+
+
 def build_admin_router(
     provider: Any,
     principal_dependency: Callable[..., Any] | None = None,
     *,
     deletions: Any | None = None,
+    erase_on_deprovision: bool = False,
 ) -> APIRouter:
     """Bind the admin routes against one cookie-session provider.
 
     ``deletions`` is the deletion service; an account erasure is one of its
-    operations. Without it the erasure answers 503.
+    operations. Without it the erasure answers 503. ``erase_on_deprovision``
+    says that a SCIM DELETE also erases accounts.
     """
     router = APIRouter()
+    payload = partial(_user_payload, erasure_on_deprovision=erase_on_deprovision)
     users = provider.users
     lifecycle = provider.lifecycle
 
@@ -113,7 +153,7 @@ def build_admin_router(
         if error is not None:
             return error
         rows = await users.list_users(tenant_id=TENANT)
-        return {"users": [_user_payload(user) for user in rows]}
+        return {"users": [payload(user) for user in rows]}
 
     @router.patch("/v1/admin/users/{user_id}")
     async def set_role(user_id: uuid.UUID, request: Request):
@@ -173,7 +213,7 @@ def build_admin_router(
         if outcome is UserLifecycleStatus.NOT_FOUND:
             return error_response(404, "User not found", "not_found")
         updated = await _find_target(user_id)
-        return _user_payload(updated)
+        return payload(updated)
 
     async def _set_user_disabled(
         user_id: uuid.UUID, *, disabled: bool, request: Request
@@ -200,7 +240,7 @@ def build_admin_router(
                 tenant_id=TENANT,
                 user_id=target.user_id,
                 disabled_at=disabled_at,
-                actor_user_id=principal.user_id,
+                actor=AdminActor(principal.user_id),
             )
         except AdminAuthorizationError:
             return _revoked_admin_response(
@@ -219,7 +259,7 @@ def build_admin_router(
         if outcome is UserLifecycleStatus.NOT_FOUND:
             return error_response(404, "User not found", "not_found")
         updated = await _find_target(user_id)
-        return _user_payload(updated)
+        return payload(updated)
 
     @router.get("/v1/admin/users/{user_id}/erasure-preview")
     async def preview_user_erasure(user_id: uuid.UUID, request: Request):
@@ -251,6 +291,32 @@ def build_admin_router(
                 503, "The erasure scope cannot be counted", "server_error"
             )
         return preview
+
+    @router.get("/v1/admin/users/{user_id}/erasure")
+    async def read_user_erasure(user_id: uuid.UUID, request: Request):
+        """The erasure provisioning started for this account.
+
+        Such an erasure belongs to nobody, so the deletion operation routes,
+        which answer only to an operation's creator, never show it. Any
+        active administrator reads it here and repeats it through
+        ``DELETE /v1/admin/users/{user_id}``.
+        """
+        resolved, error = await _require_admin(request)
+        if error is not None:
+            return error
+        if deletions is None:
+            return error_response(503, "User management is unavailable", "server_error")
+        target = await _find_target(user_id)
+        if target is None or target.erasure_operation_id is None:
+            return error_response(404, "No erasure of this user", "not_found")
+        try:
+            return deletions.get(
+                target.erasure_operation_id,
+                principal=operation_principal(TENANT, None),
+                workspace_id=None,
+            )
+        except DeletionOperationNotFound:
+            return error_response(404, "No erasure of this user", "not_found")
 
     @router.delete("/v1/admin/users/{user_id}")
     async def erase_user_account(user_id: uuid.UUID, request: Request):
@@ -286,7 +352,7 @@ def build_admin_router(
             outcome, report = await lifecycle.begin_erasure(
                 tenant_id=TENANT,
                 user_id=target.user_id,
-                actor_user_id=principal.user_id,
+                actor=AdminActor(principal.user_id),
                 operation_id=new_deletion_operation_id(),
             )
         except AdminAuthorizationError:
@@ -308,16 +374,29 @@ def build_admin_router(
                 reasons=refused,
             )
         operation_id = str(report["operation_id"])
+        owner = AdminActor(principal.user_id)
         try:
-            summary = await deletions.start_user_erasure(
-                target.user_id,
-                principal=principal,
-                operation_id=operation_id,
-            )
+            try:
+                summary = await deletions.start_user_erasure(
+                    target.user_id,
+                    actor=owner,
+                    tenant_id=TENANT,
+                    operation_id=operation_id,
+                )
+            except DeletionOperationConflict:
+                # An erasure provisioning started belongs to nobody: every
+                # active administrator follows and repeats it.
+                owner = ProvisioningActor()
+                summary = await deletions.start_user_erasure(
+                    target.user_id,
+                    actor=owner,
+                    tenant_id=TENANT,
+                    operation_id=operation_id,
+                )
             if summary.get("status") == DeletionOperationStatus.DELETE_FAILED.value:
                 # Deleting again resumes the failed erasure where it stopped.
-                summary = await deletions.retry(
-                    operation_id, principal=principal, workspace_id=None
+                summary = await deletions.retry_user_erasure(
+                    operation_id, actor=owner, tenant_id=TENANT
                 )
         except DeletionOperationConflict:
             # The operation may be running or failed; only the
@@ -406,7 +485,7 @@ def build_admin_router(
                 return error_response(
                     409, "Email address is already in use", "duplicate_email"
                 )
-            return _user_payload(user)
+            return payload(user)
 
         @router.post("/v1/admin/users/{user_id}:reset-password")
         async def reset_password(user_id: uuid.UUID, request: Request):

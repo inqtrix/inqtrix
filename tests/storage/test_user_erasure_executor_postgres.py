@@ -22,10 +22,15 @@ import uuid
 import pytest
 import sqlalchemy as sa
 
-from inqtrix.auth.lifecycle import LoginCommand, UserDisabledError, UserLifecycleStatus
+from inqtrix.auth.directory import DELETED_ACCOUNT_ISSUER
+from inqtrix.auth.lifecycle import (
+    AdminActor,
+    LoginCommand,
+    UserDisabledError,
+    UserLifecycleStatus,
+)
 from inqtrix.auth.sessions import AuthSession
 from inqtrix.runs.deletion_operations import DeletionStage
-from inqtrix.services.user_erasure import DELETED_ACCOUNT_ISSUER
 from inqtrix.services.user_erasure_executor import (
     AggregateRef,
     ErasureResiduals,
@@ -228,7 +233,7 @@ def _begin(factory, tenant: str, admin: uuid.UUID, subject: uuid.UUID) -> str:
         _lifecycle(factory).begin_erasure(
             tenant_id=tenant,
             user_id=subject,
-            actor_user_id=admin,
+            actor=AdminActor(admin),
             operation_id=f"del_{uuid.uuid4().hex}",
         )
     )
@@ -509,7 +514,7 @@ def test_a_workspace_refuses_the_start_with_the_reason_the_preview_shows(
         _lifecycle(factory).begin_erasure(
             tenant_id=tenant,
             user_id=subject,
-            actor_user_id=admin,
+            actor=AdminActor(admin),
             operation_id="del_refused",
         )
     )
@@ -828,14 +833,14 @@ def test_the_start_cuts_the_account_off_and_keeps_it_off(factory, tenant) -> Non
         lifecycle.begin_erasure(
             tenant_id=tenant,
             user_id=subject,
-            actor_user_id=admin,
+            actor=AdminActor(admin),
             operation_id="del_second_click",
         )
     )
     assert again == (UserLifecycleStatus.UPDATED, {"operation_id": operation_id})
     for change in (
         lifecycle.set_disabled(
-            tenant_id=tenant, user_id=subject, disabled_at=None, actor_user_id=admin
+            tenant_id=tenant, user_id=subject, disabled_at=None, actor=AdminActor(admin)
         ),
         lifecycle.set_role(
             tenant_id=tenant, user_id=subject, role="admin", actor_user_id=admin
@@ -891,7 +896,7 @@ def test_an_admin_being_erased_is_no_longer_an_administrator(
             tenant_id=tenant,
             user_id=colleague,
             disabled_at=time.time(),
-            actor_user_id=admin,
+            actor=AdminActor(admin),
         )
     )
 

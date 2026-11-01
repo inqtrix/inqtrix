@@ -56,9 +56,15 @@ export class CleanupLedger {
     await this.flush()
   }
 
+  /** A failed cleanup stays failed: a later call in the same run, such as
+   * the orchestrator's cleaning between adapters, does not retry it. */
   async cleanupAll(): Promise<CleanupRecord[]> {
     for (const record of [...this.records].reverse()) {
-      if (record.status === 'cleaned' || record.status === 'retained') continue
+      if (
+        record.status === 'cleaned'
+        || record.status === 'retained'
+        || record.status === 'failed'
+      ) continue
       await this.setStatus(record, 'running')
       try {
         const disposition = await record.cleanup()

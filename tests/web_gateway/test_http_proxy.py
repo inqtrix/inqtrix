@@ -1,6 +1,7 @@
 """Regression tests for gateway http proxy responsibility."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -704,10 +705,11 @@ class _HangingTransport(httpx.AsyncBaseTransport):
     ids=["with-body", "without-body"],
 )
 async def test_client_disconnect_while_awaiting_upstream_aborts_upstream(
-    fake_dist: Path, method: str, body: bytes | None
+    fake_dist: Path, method: str, body: bytes | None, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A browser abort during the response wait must cancel the upstream
-    request instead of letting the backend compute to completion."""
+    request instead of letting the backend compute to completion. The
+    interface aborts outdated fetches itself: an INFO line, not a warning."""
     transport = _HangingTransport()
     app = gateway_app.build_app(
         fake_dist, "http://backend.invalid", transport=transport
@@ -737,12 +739,15 @@ async def test_client_disconnect_while_awaiting_upstream_aborts_upstream(
     async def send(message: dict) -> None:
         sent.append(message)
 
-    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    with caplog.at_level(logging.INFO, logger="inqtrix.web_gateway"):
+        await asyncio.wait_for(app(scope, receive, send), timeout=5)
 
     assert transport.cancelled.is_set()
     assert not transport.completed.is_set()
     start = next(m for m in sent if m["type"] == "http.response.start")
     assert start["status"] == 499
+    (aborted,) = [record for record in caplog.records if "Client disconnected" in record.getMessage()]
+    assert aborted.levelno == logging.INFO
 
 
 @pytest.mark.asyncio
@@ -830,3 +835,46 @@ async def test_aborted_upstream_connection_is_never_reused(
     )
     assert start["status"] == 200
     assert len(connections) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_proxy_call_cancels_its_backend_request() -> None:
+    """A stop after the shutdown deadline cancels requests that still wait for
+    the backend; the backend request must end with them."""
+    backend_waiting = asyncio.Event()
+    backend_cancelled = asyncio.Event()
+
+    class _WaitingBackend:
+        async def send(self, request: httpx.Request, *, stream: bool) -> httpx.Response:
+            backend_waiting.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Only a caller that awaits the cancelled request sees this.
+                await asyncio.sleep(0)
+                backend_cancelled.set()
+                raise
+            raise AssertionError("the backend never answers")
+
+    class _ConnectedBrowser:
+        async def receive(self) -> dict[str, str]:
+            await asyncio.Event().wait()
+            return {"type": "http.disconnect"}
+
+    body_done = asyncio.Event()
+    body_done.set()
+    call = asyncio.create_task(
+        http_proxy._send_watching_disconnect(
+            _WaitingBackend(),  # type: ignore[arg-type]
+            httpx.Request("GET", "http://backend.invalid/v1/slow"),
+            _ConnectedBrowser(),  # type: ignore[arg-type]
+            body_done,
+        )
+    )
+    await asyncio.wait_for(backend_waiting.wait(), timeout=5)
+
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(call, timeout=5)
+
+    assert backend_cancelled.is_set()

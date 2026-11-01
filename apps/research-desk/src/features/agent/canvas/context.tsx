@@ -4,6 +4,7 @@ import type { ClientOptions } from '@/api/inqtrixClient'
 import type { KnowledgeDataSource } from '@/features/knowledge/types'
 import type { CanvasViewDescriptor } from '@/features/canvas/types'
 import type { FileAssetRecord } from '@/features/project/types'
+import type { RunEventTransport } from '@/features/researchRuns/runEventChannel'
 import type { AgentRunRecord } from '../model'
 import type { AgentSessionArtifactIndex } from '../model'
 import type { CanvasSaveRegistry } from './saveRegistry'
@@ -37,7 +38,7 @@ export type AgentCanvasContextValue = {
     | { kind: 'conflict'; currentRevision: number | null }
   >
   clientOptions: ClientOptions | null
-  inspectChildRun: (runId: string, signal: AbortSignal, onTransport: (value: 'sse' | 'polling') => void) => Promise<void>
+  inspectChildRun: (runId: string, signal: AbortSignal, onTransport: (value: RunEventTransport) => void) => Promise<void>
   /** Knowledge document reader for the evidence view's knowledge
    * citations: the same reader the Knowledge Desk uses, so "verify the
    * source" is one experience across desks. */

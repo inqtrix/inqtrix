@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from inqtrix.services.knowledge_service import KnowledgeService
     from inqtrix.services.quota_service import QuotaService
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob"]):

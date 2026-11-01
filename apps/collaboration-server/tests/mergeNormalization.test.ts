@@ -34,7 +34,14 @@ import { InstanceLeaseManager } from '../src/instanceLease'
 import { normalizeEditMerge } from '../src/mergeNormalization'
 import { SidecarMetrics } from '../src/metrics'
 import { collectSuggestionRecords } from '../src/suggestPolicy'
-import { FakeCollaborationApi, documentState, settings, silentLogger } from './helpers'
+import {
+  FakeCollaborationApi,
+  documentState,
+  frameReferringInto,
+  highSurrogateOf,
+  settings,
+  silentLogger,
+} from './helpers'
 
 // An edit lease's update meets concurrent changes in the room. Where the
 // merge leaves a state the checks refuse, the service normalizes it in the
@@ -247,7 +254,12 @@ type Room = {
   reload: () => Promise<void>
   /** Whether replaying every stored row gives exactly the room's state. */
   replayMatchesRoom: () => Promise<boolean>
-  submit: (access: 'edit' | 'suggest', user: string, update: Uint8Array) => Promise<string>
+  submit: (
+    access: 'edit' | 'suggest',
+    user: string,
+    update: Uint8Array,
+    applied?: Uint8Array,
+  ) => Promise<string>
 }
 
 async function openRoom(initial: Uint8Array): Promise<Room> {
@@ -339,7 +351,7 @@ async function openRoom(initial: Uint8Array): Promise<Room> {
         replayed.document.destroy()
       }
     },
-    submit: async (access, user, update) => {
+    submit: async (access, user, update, applied = update) => {
       connections += 1
       const connectionId = `connection-${connections}`
       const context: ConnectionContext = {
@@ -373,7 +385,7 @@ async function openRoom(initial: Uint8Array): Promise<Room> {
         if (result !== 'pending') return result
         // The transport applies the client's own bytes after the service
         // prepared them, as Hocuspocus does.
-        Y.applyUpdate(room.document, update)
+        Y.applyUpdate(room.document, applied)
         const ack = coordinator.finishClientUpdate(connectionId, room.document)
         if (ack?.hash !== hashBytes(update)) return 'acknowledged under another hash'
         return `accepted ${api.persisted.at(-1)?.changeKind ?? 'unknown'}`
@@ -422,6 +434,27 @@ describe('normalizing the merge of an edit lease\'s update', () => {
       expect(row.hash).not.toBe(hashBytes(typed))
       expect(counter(room.metrics, 'inqtrix_collaboration_edit_merge_normalizations_total{rule="inherited_mark"}')).toBe(1)
       expect(await room.replayMatchesRoom()).toBe(true)
+    } finally {
+      await room.close()
+    }
+  })
+
+  it('finds out when what the transport applied after a normalized row changed the room', async () => {
+    const room = await openRoom(markdown('Alpha several words 😀 to edit end.'))
+    try {
+      const base = documentFrom(Y.encodeStateAsUpdate(room.document), 7)
+      const deletion = suggestionUpdate(base, 4002, REVIEWER, deleteText('words'))
+      const typed = editorUpdate(base, 4001, (state) => state.tr.insertText('X', range(state.doc, 'words').to))
+      base.destroy()
+      expect(await room.submit('suggest', REVIEWER, deletion)).toBe('accepted suggestion')
+      const { client, clock } = highSurrogateOf(room.document)
+      const splitting = frameReferringInto(client, Y.getState(room.document.store, client) - 1, clock)
+
+      expect(await room.submit('edit', WRITER, typed, splitting)).toBe('1011 internal_consistency')
+
+      expect(room.api.persisted.at(-1)?.hash).not.toBe(hashBytes(typed))
+      expect(room.coordinator.requiresReconstruction(ROOM)).toBe(true)
+      expect(room.logs.map((entry) => entry.event)).toContain('authoritative_apply_mismatch')
     } finally {
       await room.close()
     }

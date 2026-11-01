@@ -92,13 +92,14 @@ from inqtrix.services.request_parsing import (
     incognito_from_request,
     question_and_messages,
     ui_language_from_request,
+    workspace_id_for_write,
     workspace_id_from_request,
 )
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 TERMINAL_EVENTS = {
     "inqtrix.run.completed",
@@ -164,6 +165,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     run_store = container.run_store
     quota_service = container.quota_service
     principal_dep = container.principal_dependency
+    users = getattr(container.auth_provider, "users", None)
     user_context_dep = container.user_context_dependency
     share_service = container.share_service
     workspace_admin = container.workspace_admin
@@ -208,7 +210,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         resolution_body = dict(body)
 
         try:
-            workspace_id = workspace_id_from_request(req, body)
+            workspace_id = await workspace_id_for_write(req, principal, users, body)
             question, messages = question_and_messages(body, settings.server)
             incognito = incognito_from_request(body)
             resolved = resolver.resolve(resolution_body)
@@ -320,6 +322,16 @@ def build_router(container: "AppContainer") -> APIRouter:
                 400,
                 "autonomy must be strict, balanced or autonomous.",
                 "invalid_request_error",
+            )
+        if (
+            is_agent
+            and autonomy == "autonomous"
+            and not settings.agent_platform.allow_autonomous
+        ):
+            return error_response(
+                403,
+                "The autonomous permission mode is turned off on this server.",
+                "autonomy_not_allowed",
             )
         session_id = body.get("session_id")
         if session_id is not None and (
@@ -713,7 +725,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 400, "Invalid JSON body", "invalid_request_error"
             )
         try:
-            workspace_id = workspace_id_from_request(req, body)
+            workspace_id = await workspace_id_for_write(req, principal, users, body)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
 

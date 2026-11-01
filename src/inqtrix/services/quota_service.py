@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from inqtrix.quota.ports import QuotaStore
     from inqtrix.settings import QuotaSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _UNSCOPED_KINDS = frozenset({"anonymous", "static"})
 

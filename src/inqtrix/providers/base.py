@@ -42,7 +42,7 @@ from inqtrix.search_result import GroundedSearchResult
 if TYPE_CHECKING:
     from inqtrix.settings import ModelSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # =========================================================
 # Retry budget for OpenAI-SDK-based providers

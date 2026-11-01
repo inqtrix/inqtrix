@@ -2,10 +2,13 @@
 
 With ``INQTRIX_REGISTRATION=invite`` an IdP-authenticated stranger is
 NOT enough: a first-time login is admitted only when an open
-invitation matches the login email, and the acceptance simultaneously
-grants the invited workspace membership. The check runs at the OIDC
-callback BEFORE any user record or session exists — a rejected
-stranger leaves no trace beyond the audit entry.
+invitation matches an email address the identity provider confirms, and
+the acceptance simultaneously grants the invited workspace membership.
+The check runs at the OIDC callback BEFORE any user record or session
+exists: a rejected stranger leaves no user record and no session; the
+log names the reason. A login without a confirmed address is refused
+before any invitation is looked up, so neither the answer nor its
+timing tells whether an invitation exists.
 
 Semantics (binding design decisions):
 
@@ -41,7 +44,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.identity_memory import MemoryIdentityStore
     from inqtrix.auth.permissions import AuditSink
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 DEFAULT_INVITATION_TTL_DAYS = 14
 """Default invitation lifetime. Two weeks bridges vacations without
@@ -86,8 +89,29 @@ class DuplicateOpenInvitation(Exception):
     """Raised when an open invitation for the email already exists."""
 
 
+#: What a new account sees without a matching open invitation; it never
+#: says whether an invitation exists for the address.
+INVITATION_REQUIRED = "Registration requires an invitation. Contact the administrator."
+#: What a new account sees in invite mode when the identity provider
+#: confirms no email address; the same with and without an invitation.
+CONFIRMED_EMAIL_REQUIRED = (
+    "This sign-in needs an email address confirmed by the identity provider, "
+    "and it does not carry one. Contact the administrator."
+)
+
+RegistrationDenialReason = Literal["disabled", "no_invitation", "email_unverified"]
+
+
 class RegistrationDenied(Exception):
-    """Raised when admission policy rejects the login."""
+    """Raised when admission policy rejects the login.
+
+    The message is what the user sees; ``reason`` names the rule for the
+    log and lets the gateway mode answer with its own outcome.
+    """
+
+    def __init__(self, message: str, *, reason: RegistrationDenialReason) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class InvitationRepository(Protocol):
@@ -312,40 +336,45 @@ class RegistrationGate:
         return self._registration
 
     async def admit(
-        self, *, tenant_id: str, issuer: str, sub: str, email: str
+        self,
+        *,
+        tenant_id: str,
+        issuer: str,
+        sub: str,
+        email: str,
+        email_verified: bool,
     ) -> tuple[Invitation, ...]:
         """Admit one login; returns the invitations it consumed.
 
         Raises:
-            RegistrationDenied: Disabled user (every mode), or
-                first-time login without a matching open invitation
-                (``invite`` mode). The message is deliberately generic
-                — it must not confirm whether an invitation exists or
-                existed for the address.
+            RegistrationDenied: Disabled user (every mode); in ``invite``
+                mode a first-time login whose email the identity provider
+                does not confirm, refused before any invitation is looked
+                up, or one without a matching open invitation. Neither
+                message confirms whether an invitation exists or existed
+                for the address.
         """
         existing = await self._users.find_user(
             tenant_id=tenant_id, issuer=issuer, subject=sub
         )
         if existing is not None and existing.disabled_at is not None:
             await self._deny(tenant_id, sub, "disabled")
-            raise RegistrationDenied("Account is disabled.")
-        has_invitation = bool(
-            self._invitations is not None
-            and email
-            and await self._invitations.has_open_for_email(
+            raise RegistrationDenied("Account is disabled.", reason="disabled")
+        if self._registration != "invite" or existing is not None:
+            return ()
+        if not (email and email_verified):
+            await self._deny(tenant_id, sub, "email_unverified")
+            raise RegistrationDenied(
+                CONFIRMED_EMAIL_REQUIRED, reason="email_unverified"
+            )
+        has_invitation = self._invitations is not None and bool(
+            await self._invitations.has_open_for_email(
                 tenant_id=tenant_id, email=email, now=time.time()
             )
         )
-        if (
-            self._registration == "invite"
-            and existing is None
-            and not has_invitation
-        ):
+        if not has_invitation:
             await self._deny(tenant_id, sub, "no_invitation")
-            raise RegistrationDenied(
-                "Registration requires an invitation. Contact the "
-                "administrator."
-            )
+            raise RegistrationDenied(INVITATION_REQUIRED, reason="no_invitation")
         return ()
 
     async def accept(

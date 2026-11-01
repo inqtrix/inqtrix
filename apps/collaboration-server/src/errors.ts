@@ -1,5 +1,7 @@
 import { COLLABORATION_CAUSAL_GAP_CLOSE } from '@inqtrix/editor-schema'
 
+import type { SidecarLogger } from './contracts'
+
 export const CloseCodes = Object.freeze({
   accessRevoked: 4403,
   causalGap: COLLABORATION_CAUSAL_GAP_CLOSE.code,
@@ -131,6 +133,7 @@ export function isDeterministicRejection(error: unknown): boolean {
 
 export function collaborationError(error: unknown): CollaborationError {
   if (error instanceof CollaborationError) return error
+  if (error instanceof HookRejection) return error.refusal
   if (error instanceof ApiRequestError) {
     // One status stands for several refusals here: a 401 for an unknown,
     // expired or rotated lease, a signed-out session or a lowered
@@ -225,4 +228,73 @@ export function collaborationError(error: unknown): CollaborationError {
  * close reason may carry. */
 function withUpstreamReason(reason: CollaborationErrorReason, upstreamReason: string): string {
   return upstreamReason === reason ? reason : `${reason}:${upstreamReason}`
+}
+
+/** What Hocuspocus receives when one of our hooks refuses.
+ *
+ * Hocuspocus prints the message of every rejected hook to the console,
+ * outside the JSON log. It sends the client only `reason` and closes with
+ * `code`; this keeps both and carries no message. The sidecar's own callers
+ * of a hook, such as an internal operation that loads its room, get the
+ * refusal itself back through {@link collaborationError}. */
+export class HookRejection extends Error {
+  readonly code: number
+  readonly reason: CollaborationErrorReason
+  // Private, so that a library printing the rejection prints no more of it.
+  readonly #refusal: CollaborationError
+
+  constructor(error: CollaborationError) {
+    super('')
+    this.name = 'HookRejection'
+    this.code = error.code
+    this.reason = error.reason
+    this.#refusal = error
+  }
+
+  get refusal(): CollaborationError {
+    return this.#refusal
+  }
+}
+
+/** *hook* as Hocuspocus should call it: a refusal is logged once as
+ * `hook_refused` under the reason the socket closes with, and reaches
+ * Hocuspocus as a {@link HookRejection}; any other error stays as it is. */
+export function quietHook<Args extends unknown[], Result>(
+  name: string,
+  hook: (...args: Args) => Promise<Result>,
+  logger: SidecarLogger,
+): (...args: Args) => Promise<Result> {
+  return async (...args: Args): Promise<Result> => {
+    try {
+      return await hook(...args)
+    } catch (error) {
+      if (!(error instanceof CollaborationError)) throw error
+      logger.info('hook_refused', {
+        close_code: error.code,
+        close_reason: error.closeReason,
+        hook: name,
+        reason: error.reason,
+      })
+      throw new HookRejection(error)
+    }
+  }
+}
+
+/** Hocuspocus drops a rejection of this hook that carries no message, so a
+ * refusal there must keep its own. */
+const UNWRAPPED_HOOKS = new Set(['onStateless'])
+
+/** *configuration* with each of its hooks wrapped by {@link quietHook}. */
+export function quietHooks<Configuration extends object>(
+  configuration: Configuration,
+  logger: SidecarLogger,
+): Configuration {
+  return Object.fromEntries(
+    Object.entries(configuration).map(([name, value]) => [
+      name,
+      typeof value === 'function' && !UNWRAPPED_HOOKS.has(name)
+        ? quietHook(name, value as (...args: unknown[]) => Promise<unknown>, logger)
+        : value,
+    ]),
+  ) as Configuration
 }

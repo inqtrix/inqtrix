@@ -30,6 +30,18 @@ export type BoundedChangeSummary = {
 
 const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
 
+/** The document an update ends on is the one the next update starts from, and
+ * the same frozen object, so it is parsed once. */
+const parsedDocuments = new WeakMap<JSONContent, ProseMirrorNode>()
+
+function parsedDocument(json: JSONContent): ProseMirrorNode {
+  const known = parsedDocuments.get(json)
+  if (known) return known
+  const parsed = schema.nodeFromJSON(json)
+  if (Object.isFrozen(json)) parsedDocuments.set(json, parsed)
+  return parsed
+}
+
 export function summarizeEditorChange(input: {
   after: JSONContent
   before: JSONContent
@@ -37,8 +49,8 @@ export function summarizeEditorChange(input: {
   decision: 'accept' | 'reject' | null
   suggestions: readonly SuggestionDescriptor[]
 }): BoundedChangeSummary {
-  const beforeDocument = schema.nodeFromJSON(input.before)
-  const afterDocument = schema.nodeFromJSON(input.after)
+  const beforeDocument = parsedDocument(input.before)
+  const afterDocument = parsedDocument(input.after)
   if (beforeDocument.eq(afterDocument)) return { changesDocument: false, edits: [], omittedEditCount: 0 }
   const structural = structureSummaryEdits(
     input.changeKind === 'decision' ? beforeDocument : afterDocument,

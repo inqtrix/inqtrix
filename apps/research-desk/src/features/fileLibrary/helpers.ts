@@ -166,8 +166,8 @@ export function fileStatus(asset: FileAssetRecord): FileStatusKind {
  * until a real embedding backend reports actual counts. */
 export function chunkEstimate(asset: FileAssetRecord): number {
   return asset.pageCount != null
-    ? Math.max(40, Math.round(asset.pageCount * 4.3))
-    : Math.max(24, Math.round(asset.sizeBytes / 2600))
+    ? Math.max(1, Math.round(asset.pageCount * 4.3))
+    : Math.max(1, Math.round(asset.sizeBytes / 2600))
 }
 
 /** Display-only slug for a group's `@filegroups:` handle. ASCII-only (umlauts

@@ -14,5 +14,5 @@ export function countLabel(
   other: string,
   shown: string = String(count),
 ): string {
-  return (count === 1 ? one : other).replaceAll('{count}', shown)
+  return (count === 1 ? one : other).replaceAll('{count}', () => shown)
 }

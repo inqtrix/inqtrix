@@ -17,7 +17,12 @@ from typing import Any
 
 import pytest
 
-from inqtrix.storage.migration_contract import SchemaHeadMismatch
+from inqtrix.logging_config import InqtrixLogFilter
+from inqtrix.storage.migration_contract import (
+    SCHEMA_HEAD_REVISION,
+    SchemaHeadMismatch,
+    assert_schema_head,
+)
 from inqtrix.exceptions import (
     AgentRateLimited,
     AgentTimeout,
@@ -526,7 +531,37 @@ def test_database_claim_guard_immediate_probe_bypasses_success_cache(
     ]
 
 
-def test_schema_fence_after_blocking_read_latches_and_never_acks(monkeypatch):
+def _error_lines_as_logged(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The ERROR lines after the log filter, which shows an exception by its type."""
+    log_filter = InqtrixLogFilter(service="worker")
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    for record in errors:
+        log_filter.filter(record)
+    return [record.getMessage() for record in errors]
+
+
+@pytest.mark.parametrize(
+    ("stored", "named"),
+    [("0079_other_head", "0079_other_head"), (None, "missing")],
+    ids=["other_head", "no_row"],
+)
+def test_schema_fence_names_the_installed_and_the_expected_revision(stored, named):
+    class Result:
+        def scalar(self):
+            return stored
+
+    class Session:
+        async def execute(self, statement):
+            return Result()
+
+    with pytest.raises(SchemaHeadMismatch) as raised:
+        asyncio.run(assert_schema_head(Session()))
+
+    assert raised.value.installed == named
+    assert raised.value.expected == SCHEMA_HEAD_REVISION
+
+
+def test_schema_fence_after_blocking_read_latches_and_never_acks(monkeypatch, caplog):
     """The staleness window behind the blocking read is fenced IN the
     claim transaction, not by a forced pre-probe.
 
@@ -540,7 +575,7 @@ def test_schema_fence_after_blocking_read_latches_and_never_acks(monkeypatch):
     class FencedStore(StubStore):
         def claim_for_execution(self, run_id, tenant_id, *, allow_takeover):
             self.calls.append(("claim_blocked", run_id))
-            raise SchemaHeadMismatch("Schema-Kopf bewegt: 0079 statt 0078")
+            raise SchemaHeadMismatch(installed="0079", expected="0078")
 
     class OneJobQueue(StubQueue):
         loop: WorkerLoop | None = None
@@ -592,16 +627,20 @@ def test_schema_fence_after_blocking_read_latches_and_never_acks(monkeypatch):
     # sleeps this long between retries before the queue stops the loop.
     monkeypatch.setattr("inqtrix.worker.loop._ERROR_BACKOFF_SECONDS", 0.01)
 
-    with pytest.raises(WorkerClaimGuardError, match="Schema-Kopf"):
+    with pytest.raises(WorkerClaimGuardError, match="installed 0079, expected 0078"):
         loop.run_forever()
 
     assert guard.latched, "the fence hit must stick the shared guard shut"
+    assert _error_lines_as_logged(caplog) == [
+        "Worker worker-test: schema head changed under this process; no further "
+        "claims (installed=0079, expected=0078)."
+    ]
     assert ("ack", job().message_id) not in queue.calls, (
         "the entry belongs to an upgraded worker; acking it loses the job"
     )
 
 
-def test_schema_fence_on_successor_claim_latches_the_shared_guard(monkeypatch):
+def test_schema_fence_on_successor_claim_latches_the_shared_guard(monkeypatch, caplog):
     """The successor-activation path must honour the same process verdict.
 
     _activate_successor runs on an executor-finally thread where raising
@@ -613,7 +652,7 @@ def test_schema_fence_on_successor_claim_latches_the_shared_guard(monkeypatch):
     class FencedStore(StubStore):
         def claim_for_execution(self, run_id, tenant_id, *, allow_takeover):
             self.calls.append(("claim_blocked", run_id))
-            raise SchemaHeadMismatch("Schema-Kopf bewegt: 0079 statt 0078")
+            raise SchemaHeadMismatch(installed="0079", expected="0078")
 
     class Guard:
         def __init__(self) -> None:
@@ -646,6 +685,11 @@ def test_schema_fence_on_successor_claim_latches_the_shared_guard(monkeypatch):
         "a fence hit on the successor claim is a verdict about the process "
         "and must stick the shared guard shut"
     )
+    assert _error_lines_as_logged(caplog) == [
+        "Worker worker-test: schema head changed under this process; no further claims, "
+        f"and the follow-up dispatch for job {successor.run_id} remains unacknowledged "
+        "(installed=0079, expected=0078)."
+    ]
     assert ("ack", successor.message_id) not in queue.calls, (
         "the successor entry belongs to an upgraded worker"
     )

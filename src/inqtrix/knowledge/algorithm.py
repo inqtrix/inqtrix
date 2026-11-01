@@ -40,6 +40,7 @@ from inqtrix.knowledge.gate import GateDecision, evaluate_evidence
 from inqtrix.knowledge.grounding import (
     GroundingFailureCode,
     GroundingReport,
+    GroundingStatus,
     QuoteCheck,
     check_grounding,
     grounding_failure_message,
@@ -75,7 +76,7 @@ from inqtrix.sync_bridge import run_coro_sync
 if TYPE_CHECKING:
     from inqtrix.core.context import RunContext, RuntimeContext
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _EVIDENCE_BUDGET_FLOOR_CHARS = 8_000
 _PROMPT_RESERVED_TOKENS = 4_000
@@ -275,9 +276,11 @@ class KnowledgeAlgorithm:
             verified deterministically against the evidence. Only a fully
             parsed response whose every quote verifies is publishable; a
             malformed block or one unverifiable quote returns a typed terminal
-            failure with a safe explanation. Verified quote blocks are
-            stripped from the user-facing answer. ``False`` keeps the plain
-            single-section answer prompt in every profile.
+            failure with a safe explanation. A first answer whose quote block
+            is the single line ``NONE`` declares that no excerpt answers the
+            question and gets the honest no-evidence answer. Verified quote
+            blocks are stripped from the user-facing answer. ``False`` keeps
+            the plain single-section answer prompt in every profile.
         gate_max_rounds: Hard cap on gate rewrite-and-retrieve rounds
             for every profile; the deep profile requests up to this
             many, standard exactly one. Bounds the worst-case cost of
@@ -965,11 +968,14 @@ class KnowledgeAlgorithm:
             answer_language.code or "unresolved",
             answer_language.source,
         )
+        # The one no-evidence answer: no excerpt is left, the gate found the
+        # excerpts irrelevant, or the answer declares that none answers.
+        no_evidence_answer = t(
+            {"language": answer_language.code},
+            "knowledge_no_relevant_content",
+        )
         if not used_candidates:
-            answer = t(
-                {"language": answer_language.code},
-                "knowledge_no_relevant_content",
-            )
+            answer = no_evidence_answer
             usage: dict[str, Any] = {"prompt_tokens": 0, "completion_tokens": 0}
         else:
             provider_models = getattr(llm, "models", None)
@@ -1130,6 +1136,7 @@ class KnowledgeAlgorithm:
                     break
                 if not plan.grounding_enabled:
                     break
+                previous_report = report
                 # Verification runs against the chunks' SOURCE text:
                 # a "verbatim, verified" quote must exist in the cited
                 # document, not in the contextualization prefix or the
@@ -1197,6 +1204,33 @@ class KnowledgeAlgorithm:
                         ],
                     }
                 )
+                if report.status is GroundingStatus.NO_EVIDENCE:
+                    if previous_report is None:
+                        # The answer declares that no excerpt answers the
+                        # question: the same honest no-evidence answer as
+                        # without excerpts, with no references, and never
+                        # the model's own answer section.
+                        log.warning(
+                            "Knowledge-Grounding: the answer declares that no excerpt "
+                            "answers the question; returning an explicit no-evidence "
+                            "answer.",
+                        )
+                        answer = no_evidence_answer
+                        used_candidates = []
+                        terminal_failure = None
+                        break
+                    # A regeneration that declares no evidence never turns
+                    # the first attempt's quote failure into a refusal: that
+                    # verdict stays the outcome, as when the regeneration
+                    # fails or comes back incomplete.
+                    log.warning(
+                        "Knowledge-Grounding: the regeneration declares no evidence; "
+                        "the first attempt's verdict remains the outcome.",
+                    )
+                    report = previous_report
+                    unverified = [
+                        quote for quote in report.quotes if not quote.verified
+                    ]
                 if report.publishable:
                     terminal_failure = None
                     break
@@ -1256,9 +1290,14 @@ class KnowledgeAlgorithm:
                 )
                 break
             if plan.grounding_enabled and report is not None:
+                # A declared absence carries no quote verdict: the receipt
+                # names it by its marker with an empty status, so stored
+                # results stay readable after a rollback, and no
+                # ``grounding.checked`` is emitted, as without excerpts.
+                declared_absence = report.status is GroundingStatus.NO_EVIDENCE
                 grounding_state.update(
                     marker=report.marker,
-                    status=report.status.value,
+                    status=None if declared_absence else report.status.value,
                     failure_code=(
                         report.failure_code.value
                         if report.failure_code is not None
@@ -1278,22 +1317,23 @@ class KnowledgeAlgorithm:
                     ],
                     attempts=attempts_state,
                 )
-                emit(
-                    "inqtrix.knowledge.grounding.checked",
-                    {
-                        "marker": report.marker,
-                        "status": report.status.value,
-                        "failure_code": (
-                            report.failure_code.value
-                            if report.failure_code is not None
-                            else None
-                        ),
-                        "format_repaired": report.format_repaired,
-                        "quotes_total": len(report.quotes),
-                        "quotes_verified": len(report.quotes)
-                        - len(unverified),
-                    },
-                )
+                if not declared_absence:
+                    emit(
+                        "inqtrix.knowledge.grounding.checked",
+                        {
+                            "marker": report.marker,
+                            "status": report.status.value,
+                            "failure_code": (
+                                report.failure_code.value
+                                if report.failure_code is not None
+                                else None
+                            ),
+                            "format_repaired": report.format_repaired,
+                            "quotes_total": len(report.quotes),
+                            "quotes_verified": len(report.quotes)
+                            - len(unverified),
+                        },
+                    )
                 if report.publishable:
                     for quote in report.quotes:
                         published_quotes.setdefault(quote.label, []).append(

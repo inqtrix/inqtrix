@@ -24,17 +24,17 @@ a silent admit).
 
 This module is the lowest auth layer: it has no dependency on
 :mod:`inqtrix.auth.oidc`, so the shared primitives :func:`claim_path` and
-:class:`OidcExchangeError` are defined here and re-exported there for
-backward compatibility.
+:class:`OidcExchangeError` are defined here, and callers import them from this
+module.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 DEFAULT_CLAIM_SEPARATORS = " ,"
 """Characters a string-valued claim is split on by default: whitespace
@@ -196,13 +196,16 @@ def _extract_list(
     strip_path_prefix: bool,
     required: bool,
     what: str,
+    warn_unresolved: Callable[[str, str], None] | None = None,
 ) -> tuple[str, ...]:
     """Resolve and normalise a list-shaped claim, distributed-aware.
 
     When the claim is distributed: raise :class:`DistributedClaimError`
     if it is *required* for admission (cannot admit safely without it),
-    otherwise log a visible warning and return ``()`` (fail-safe: a value
+    otherwise report it visibly and return ``()`` (fail-safe: a value
     that only elevates degrades to no elevation, never to a silent admit).
+    The report is a WARNING here, or *warn_unresolved* ``(path, what)``
+    when the caller maps on every request and throttles its own lines.
     """
     if not path:
         return ()
@@ -214,17 +217,21 @@ def _extract_list(
                 "from the token. Configure the identity provider to include "
                 "the claim inline."
             )
-        log.warning(
-            "Claim '%s' is a distributed claim and was not resolved; "
-            "%s remains empty (no privilege escalation).",
-            path,
-            what,
-        )
+        (warn_unresolved or _log_unresolved)(path, what)
         return ()
     return normalise_claim_values(
         claim_path(claims, path),
         separators=separators,
         strip_path_prefix=strip_path_prefix,
+    )
+
+
+def _log_unresolved(path: str, what: str) -> None:
+    log.warning(
+        "Claim '%s' is a distributed claim and was not resolved; "
+        "%s remains empty (no privilege escalation).",
+        path,
+        what,
     )
 
 
@@ -240,7 +247,10 @@ def groups_gate_active(config: ClaimMappingConfig) -> bool:
 
 
 def extract_groups(
-    claims: dict[str, Any], config: ClaimMappingConfig
+    claims: dict[str, Any],
+    config: ClaimMappingConfig,
+    *,
+    warn_unresolved: Callable[[str, str], None] | None = None,
 ) -> tuple[str, ...]:
     """Extract the group values; distributed-required only when gating."""
     return _extract_list(
@@ -250,11 +260,15 @@ def extract_groups(
         strip_path_prefix=config.strip_group_path_prefix,
         required=groups_gate_active(config),
         what="groups",
+        warn_unresolved=warn_unresolved,
     )
 
 
 def extract_roles(
-    claims: dict[str, Any], config: ClaimMappingConfig
+    claims: dict[str, Any],
+    config: ClaimMappingConfig,
+    *,
+    warn_unresolved: Callable[[str, str], None] | None = None,
 ) -> tuple[str, ...]:
     """Extract the role values; never admission-gating (elevate only)."""
     return _extract_list(
@@ -264,6 +278,7 @@ def extract_roles(
         strip_path_prefix=False,
         required=False,
         what="roles",
+        warn_unresolved=warn_unresolved,
     )
 
 
@@ -278,6 +293,15 @@ def derive_is_admin(
     )
 
 
+def email_is_confirmed(claims: dict[str, Any], config: ClaimMappingConfig) -> bool:
+    """Whether the token confirms the email address it supplies.
+
+    ``email_verified`` speaks for the ``email`` claim only, so an address
+    taken from any other claim counts as unconfirmed.
+    """
+    return config.email_claim == "email" and claims.get("email_verified") is True
+
+
 def admission_error(
     groups: Iterable[str],
     email: str | None,
@@ -290,12 +314,28 @@ def admission_error(
     an email-domain allowlist. A login with no email is rejected by the
     domain gate (fail-closed), which is the safe default.
     """
+    return group_admission_error(groups, config) or domain_admission_error(
+        email, config
+    )
+
+
+def group_admission_error(
+    groups: Iterable[str], config: ClaimMappingConfig
+) -> str | None:
+    """The group gate alone: a reason, or ``None`` when it admits."""
     if groups_gate_active(config):
         if not config.allowed_groups & frozenset(groups):
             return (
                 "No group matches the configured access list "
                 "(INQTRIX_OIDC_ALLOWED_GROUPS)."
             )
+    return None
+
+
+def domain_admission_error(
+    email: str | None, config: ClaimMappingConfig
+) -> str | None:
+    """The domain gate alone: a reason, or ``None`` when it admits."""
     if config.allowed_domains:
         normalised = (email or "").strip()
         domain = (

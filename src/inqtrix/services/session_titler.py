@@ -18,7 +18,7 @@ from inqtrix.model_routing import describe_resolution
 from inqtrix.prompt_language import resolve_answer_language
 from inqtrix.quota.models import QuotaDimension
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 TITLE_MAX_CHARS = 60
 TITLE_MAX_WORDS = 6
 TITLE_TIMEOUT_SECONDS = 8.0

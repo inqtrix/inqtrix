@@ -1075,6 +1075,42 @@ services:
     assert f'{name}: "***REDACTED***"' in captured.out
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "INQTRIX_SESSION_SECRET",
+        "INQTRIX_PAT_PEPPER",
+        "INQTRIX_PSEUDONYM_PEPPER",
+        "INQTRIX_GATEWAY_SHARED_SECRET",
+        "INQTRIX_SCIM_TOKEN",
+    ],
+)
+def test_config_redacts_every_secret_of_the_gateway_mode(
+    name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The gateway mode adds a shared secret and a SCIM token to the secrets
+    # it shares with the other cookie modes; the redacted config hides all.
+    root, stack_env, secrets_env, _ = _project(tmp_path)
+    _install_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "FAKE_CONFIG_OUTPUT",
+        f"""
+services:
+  api:
+    environment:
+      {name}: GatewayModeSecretValue0123456789abcdef
+""",
+    )
+
+    assert main([*_arguments(root, stack_env, secrets_env), "config", "--redact"]) == 0
+    captured = capsys.readouterr()
+    assert "GatewayModeSecretValue0123456789abcdef" not in captured.out
+    assert f'{name}: "***REDACTED***"' in captured.out
+
+
 def test_key_seed_is_forbidden_in_non_secret_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

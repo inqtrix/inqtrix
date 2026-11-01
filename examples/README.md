@@ -22,18 +22,30 @@ The examples below show both launch forms. `uv run python path/to/script.py`
 and plain `python path/to/script.py` execute the same script; the latter uses
 the activated pip-installed environment.
 
-## Observability (file log + forensic)
+## Observability (logs + forensic)
 
-Most `provider_stacks/`, `custom_providers/`, and `webserver_stacks/` scripts call `configure_logging(...)` when `INQTRIX_LOG_ENABLED=true`. For the usual agent trace (round markers, fallbacks), set `INQTRIX_LOG_LEVEL` to `INFO` or `DEBUG` as needed.
+The `provider_stacks/` and `custom_providers/` scripts keep the terminal for their own output: they log only when `INQTRIX_LOG_TARGET` is set (`console`, `file` for `logs/inqtrix-script.log`, or `both`). The `webserver_stacks/` servers log like `python -m inqtrix`: `INFO` as JSON on stdout by default. `INQTRIX_LOG_LEVEL` and `INQTRIX_LOG_FORMAT` (`json` or `text`) work for both.
+
+Your own log format and logging stack:
+
+| Example | Shows |
+|---------|-------|
+| [`logging/organization_format.yaml`](logging/organization_format.yaml) | A `dictConfig` file for `INQTRIX_LOG_CONFIG` that replaces the built-in setup with your own format. |
+| [`logging/stdlib_json_lines.py`](logging/stdlib_json_lines.py) | An embedding application with its own handler and JSON formatter and `InqtrixLogFilter()` on the handler. |
+| [`logging/opentelemetry_logs.py`](logging/opentelemetry_logs.py) | `InqtrixLogFilter()` on the OpenTelemetry `LoggingHandler`, exported to the console. |
+| [`logging/structlog_processor_formatter.py`](logging/structlog_processor_formatter.py) | structlog renders the standard records through `ProcessorFormatter` on a filtered handler (needs structlog). |
+| [`logging/loguru_intercept.py`](logging/loguru_intercept.py) | loguru receives the standard records through a filtered intercept handler (needs loguru). |
+
+The standard-library script runs as it is; the OpenTelemetry script needs the `observability` extra (also part of `dev`); structlog and loguru are not dependencies of Inqtrix. [Logging](../docs/observability/logging.md#use-your-organizations-log-format) explains each pattern.
 
 Structured forensic lineage events (`query_record`, `source_record`, `answer_claim_binding`, and the rest) require:
 
 - `OBSERVABILITY_PROFILE=forensic`
-- `INQTRIX_LOG_LEVEL=DEBUG` (events are emitted at DEBUG on the `inqtrix` logger)
+- a trace sink: `INQTRIX_TRACING=file` or `otlp`
 
-They land in the same timestamped file under `logs/` as the rest of the run. For operator recipes and ID walkthroughs, see [Forensic cookbook](../docs/observability/forensic-cookbook.md). Full logger knobs (`INQTRIX_LOG_CONSOLE`, uvicorn mirroring, and the `OBSERVABILITY_PROFILE` values `summary` / `debug` / `forensic`) are documented in [Logging](../docs/observability/logging.md).
+They are recorded on the run's trace, never in the log. For operator recipes and ID walkthroughs, see [Forensic cookbook](../docs/observability/forensic-cookbook.md). All logging variables, the line fields and the `OBSERVABILITY_PROFILE` values `summary` / `debug` / `forensic` are documented in [Logging](../docs/observability/logging.md).
 
-Forensic events also flow into `iteration_logs` when testing mode is on (env `TESTING_MODE`, `AgentSettings(testing_mode=True)`, or HTTP `POST /v1/test/run`); see [Iteration log](../docs/observability/iteration-log.md) and [Web server mode](../docs/deployment/webserver-mode.md). The [`webserver_stacks/README.md`](webserver_stacks/README.md) matrix expands server-specific logging env vars.
+Forensic events also flow into `iteration_logs` when testing mode is on (env `TESTING_MODE`, `AgentSettings(testing_mode=True)`, or HTTP `POST /v1/test/run`); see [Iteration log](../docs/observability/iteration-log.md) and [Web server mode](../docs/deployment/webserver-mode.md). The [`webserver_stacks/README.md`](webserver_stacks/README.md) lists the server variables and logging recipes.
 
 ## Quickstart
 

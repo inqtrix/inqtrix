@@ -98,7 +98,7 @@ The switch is **capability-gated**. The server advertises
 `features.project_persistence` (true only when the durable backend is on:
 `INQTRIX_STORAGE_BACKEND=postgres`). How sync turns on then depends on the auth tier:
 
-- **Authenticated cookie session (`local`/`oidc`) — automatic, server-first.**
+- **Authenticated cookie session (`local`/`oidc`/`gateway`): automatic, server-first.**
   The desk derives `serverSyncEnabled` from the live session, so the project
   auto-hydrates from the server on every boot/reload and autosaves with **no button**.
   Data is scoped to a per-user namespace (below), so it survives reload + re-login and
@@ -134,7 +134,9 @@ row; the scoped conflict guards remain the database backstop.
 input (authorization is the canonical `users.id` UUID). A fresh browser mints a random `ws_…`; on
 the first authenticated boot the server **adopts** that id as the user's canonical
 `users.default_workspace_id` (idempotent, atomic set-only-when-NULL) and returns it as
-`project_namespace` from `/api/auth/session`. Every device then resolves the same
+`project_namespace` from `/api/auth/session`. A signed-in client that writes without a
+namespace first (a script with a personal access token) claims a server-made `ws_…`
+the same way, and the next boot returns that one instead of the browser id. Every device then resolves the same
 namespace from the session, so an authenticated user's project follows them with **zero
 migration** — the originating browser's id IS the adopted namespace, so the data
 reappears at once. The desk computes `effectiveWorkspaceId` (the namespace when
@@ -669,7 +671,8 @@ only by repeated identical hot queries (>5 req/s) or >50 ms queries.
 - Per-user namespace: `users.default_workspace_id`
   (`src/inqtrix/storage/identity_orm.py` + migration `0019`),
   `UserDirectory.resolve_default_workspace` (`src/inqtrix/auth/directory.py`,
-  `src/inqtrix/storage/auth_postgres.py`), surfaced as `project_namespace` by
+  `src/inqtrix/storage/auth_postgres.py`), claimed for writes without a namespace by
+  `workspace_id_for_write` (`src/inqtrix/services/request_parsing.py`), surfaced as `project_namespace` by
   `session_payload` (`src/inqtrix/auth/oidc.py`); the desk resolves
   `effectiveWorkspaceId` in `ResearchDesk.tsx` from `useAuthSession` +
   `useServerDiscovery`.

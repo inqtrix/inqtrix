@@ -30,7 +30,7 @@ from inqtrix.pagination import decode_cursor
 if TYPE_CHECKING:
     from inqtrix.agents.control_ports import AgentControlStore
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 RECENT_TURNS_VERBATIM = 3
 """Newest turns rendered with full question + answer body."""

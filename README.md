@@ -81,7 +81,8 @@ It comes in two halves you can adopt independently.
 library, or deploy the HTTP service with OpenAI-compatible chat completions,
 native runs with live progress, knowledge retrieval and agent orchestration.
 The server owns authentication, workspace access, quotas, sharing and durable
-state. It supports `none`, `apikey`, `local` and `oidc` authentication, Postgres
+state. It supports `none`, `apikey`, `local`, `oidc` and `gateway` (sign-in by an
+API gateway in front of Inqtrix) authentication, Postgres
 records, local or S3 file storage, Qdrant retrieval and optional worker processes.
 
 **The web workspace connects those capabilities.** The React frontend uses the
@@ -95,7 +96,7 @@ same API and brings research, conversations and authoring together.
 | **Agent Desk** | Give an assignment, request a named Canvas document, ask follow-up questions, and queue comments on selected passages for targeted changes. Attach a saved research report with `@` to bring its report and references into the conversation. |
 | **Chat** | Converse with the selected model and work with attached reports, files and reusable prompts. |
 | **Knowledge** | Index your documents and ask cited questions over permitted collections. In Agent Desk, `/wissen` enables the accessible collection scope; explicit collection chips narrow it. The web switch independently controls web access. |
-| **Canvas and Editor** | Revisit agent documents in Canvas, or write in Editor with AI revisions presented as **accept/reject tracked changes**. Export to Word; optionally collaborate on shared editor documents with `view`, `suggest` and `edit` permissions. |
+| **Canvas and Editor** | Revisit agent documents in Canvas, or write in Editor with AI revisions presented as **accept/reject tracked changes**. Export to Word, also [into your own Word template](docs/deployment/react-ui.md#export-into-a-word-template); optionally collaborate on shared editor documents with `view`, `suggest` and `edit` permissions. |
 | **Prompt Library and Skills** | Reuse prompts and context packs; attach skills with instructions, clarification points and tool constraints. Share supported resources through explicit recipient consent. |
 
 Agent Desk offers **Quick, Thorough and Deep** levels. They govern the
@@ -336,6 +337,10 @@ docker compose -f deploy/compose/compose.stack.yaml \
   --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack restart api web
 ```
 
+A restart keeps each container's environment. After a change in `deploy/.env.stack` or the
+secrets file, run the `up -d` command above instead, which re-creates the services whose
+configuration changed.
+
 Update after a `git pull` (rebuild and re-run migrations):
 
 ```bash
@@ -366,7 +371,7 @@ Backup, restore, and reset playbooks: [Runbooks](docs/deployment/runbooks.md). T
 - [Platform components](docs/getting-started/platform-components.md) maps each
   feature to its required service and distinguishes bundled Compose profiles
   from managed dependencies (Qdrant / Valkey / S3 / OIDC).
-- [Auth modes](docs/deployment/auth-modes.md) covers login setup: native accounts or SSO.
+- [Auth modes](docs/deployment/auth-modes.md) covers login setup: native accounts, SSO, or sign-in through an API gateway in front of Inqtrix.
 - [Stack quickstart](docs/getting-started/stack-quickstart.md) is the full step-by-step walkthrough.
 - [Kubernetes](docs/deployment/kubernetes.md) deploys the same stack on a cluster via the bundled Helm chart.
 
@@ -559,7 +564,7 @@ Each component, and the role it plays:
   development reference.
 
 > [!NOTE]
-> The simplest setups (`none`/`apikey` auth, in-memory storage) are perfectly usable for a single operator, but have no durable history, login, or sharing. Multi-user, invitations, and sharing require a cookie-session mode (`local` or `oidc`) plus Postgres. That trade-off is by design.
+> The simplest setups (`none`/`apikey` auth, in-memory storage) are perfectly usable for a single operator, but have no durable history, login, or sharing. Multi-user, invitations, and sharing require a cookie-session mode (`local`, `oidc` or `gateway`) plus Postgres. That trade-off is by design.
 
 **Deeper:** [Platform components](docs/getting-started/platform-components.md) (the full feature → component → auth-mode decision tree) · [Settings and env](docs/configuration/settings-and-env.md) (every variable).
 

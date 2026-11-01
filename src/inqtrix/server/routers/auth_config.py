@@ -50,6 +50,9 @@ def _login_methods(
                 "identifier": "email",
             }
         ]
+    if mode == "gateway":
+        # The gateway signs the user in; the SPA renders no form.
+        return [{"kind": "gateway", "label": "Gateway"}]
     return []
 
 
@@ -85,9 +88,16 @@ def build_router(container: "AppContainer") -> APIRouter:
             "auth_required": mode != "none",
             "login_methods": _login_methods(mode, provider_name),
             "provider_name": provider_name,
+            # The web gateway derives its duties at the edge from this.
+            "gateway_assertion": (
+                getattr(provider, "assertion", None) if mode == "gateway" else None
+            ),
             "registration": {
                 "self_service": self_service,
                 "needs_owner": needs_owner,
+                "invitations_accepted_by_login": bool(
+                    getattr(provider, "invitations_accepted_by_login", False)
+                ),
             },
             "pat_available": getattr(provider, "pat_service", None)
             is not None,

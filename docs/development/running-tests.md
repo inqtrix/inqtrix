@@ -14,7 +14,7 @@ purposes and should not be confused.
 | Layer | Command | Real provider calls | What it covers | Prerequisites |
 |-------|---------|---------------------|----------------|---------------|
 | Automated local test suite | `uv run pytest tests/ -v` or `python -m pytest tests/ -v` | No | Unit tests, replay tests, streaming, config, server routes, provider normalisation. Use collect-only for the current count. | Editable install with dev extras. |
-| Infrastructure-bound proof (mandatory before a release) | `INQTRIX_TEST_REQUIRE_INTEGRATION=1 uv run pytest tests/storage tests/test_qdrant_store.py` | No | Persistence, RLS and tenant isolation, fencing, sequence assignment, migration cutover. These tests are marked `postgres`/`qdrant` and are skipped in the run above. | Disposable Postgres in `INQTRIX_TEST_DATABASE_URL` and Qdrant in `INQTRIX_TEST_QDRANT_URL`, see [Local infrastructure](local-infrastructure.md). |
+| Infrastructure-bound proof (mandatory before a release) | `INQTRIX_TEST_REQUIRE_INTEGRATION=1 uv run pytest tests/storage tests/test_qdrant_store.py tests/test_qdrant_vector_index_live.py tests/test_qdrant_bm25_parity_live.py` | No | Persistence, RLS and tenant isolation, fencing, sequence assignment, migration cutover. These tests are marked `postgres`/`qdrant` and are skipped in the run above. | Disposable Postgres in `INQTRIX_TEST_DATABASE_URL` and Qdrant in `INQTRIX_TEST_QDRANT_URL`, see [Local infrastructure](local-infrastructure.md). |
 | Replay-only | `uv run pytest tests/replay/ -v` or `python -m pytest tests/replay/ -v` | No | Provider replay with VCR cassettes and `botocore.Stubber`. Offline. | Editable install with dev extras. |
 | Parity asset validation | `inqtrix-parity contract` | No | Canonical question set and local parity asset structure under `tests/integration/`. | Editable install plus a local `tests/integration/questions.json`; that directory is git-ignored and absent from a fresh clone, see [Parity tooling](parity-tooling.md). |
 | Local parity run against the HTTP test endpoint | `inqtrix-parity run --endpoint http://127.0.0.1:5100` | Yes | Runs canonical questions against a running server via `/v1/test/run`. | Running server, valid provider config, `TESTING_MODE=true`. |
@@ -23,6 +23,8 @@ purposes and should not be confused.
 | System/fault profiles and capacity load | `npm run verify:<profile> -- --fixture <private-file>` | Product stack only | Real multiuser UI, resilience, or fixed-capacity WebSocket load according to the selected profile. | Production-like stack and a disposable, uncommitted fixture. |
 | Local collaboration load smoke | `npm run verify:load-smoke` | Product stack only | Auto-provisioned 20-socket/five-writer WebSocket smoke with Run-ID-bound cleanup. | Production-like stack plus the documented admin and temporary-user password environment variables. |
 | Web-edge conformance | `npm run verify:edge -- --container-engine podman` or `docker` | No | Real Python/nginx images against a synthetic private backend, including normalized guest routes, streaming, WebSockets, limits, recovery, and hardening. | Explicit reachable container engine; no secret files. |
+
+The automated suite reads no `.env` file and needs no credentials. Before the tests are collected, `tests/conftest.py` sets `PYTHON_DOTENV_DISABLED=1`, which switches off every `load_dotenv` call (a dependency of the document parser makes one when it is imported), and makes the settings classes ignore a `.env` in the working folder. It also hides the machine's AWS setup: no `AWS_*` variable of the shell, no shared config or credentials file, no instance metadata, and fixed test credentials. Neither a `.env` nor the machine's AWS setup changes the counted result. A test that reads a `.env` on purpose switches the lookup back on for itself, and the opt-in tests that talk to a real account (the managed S3 smoke and the live agent eval) get the machine's AWS setup back for their duration.
 
 `pytest` is the automated regression gate. `tests/integration/` is local-only and git-ignored, so it does not exist in a fresh clone: `inqtrix-parity contract` fails with `FileNotFoundError` until you supply your own `questions.json` and import baselines as described in [Parity tooling](parity-tooling.md). It is not a fully automated live harness.
 
@@ -76,7 +78,7 @@ See [Testing strategy](testing-strategy.md) for the full record modes (`none`, `
    INQTRIX_TEST_DATABASE_URL=postgresql+asyncpg://user:pass@127.0.0.1:5432/inqtrix_test \
      INQTRIX_TEST_QDRANT_URL=http://127.0.0.1:6333 \
      INQTRIX_TEST_REQUIRE_INTEGRATION=1 \
-     uv run pytest tests/storage tests/test_qdrant_store.py
+     uv run pytest tests/storage tests/test_qdrant_store.py tests/test_qdrant_vector_index_live.py tests/test_qdrant_bm25_parity_live.py
    ```
 3. Run `inqtrix-parity contract` if you changed parity assets under `tests/integration/`.
 4. Start the local server in testing mode for structured end-to-end checks:

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from inqtrix.providers.base import LLMProvider
     from inqtrix.settings import AgentSettings
 
-_log = logging.getLogger("inqtrix")
+_log = logging.getLogger(__name__)
 
 
 def resolve_claim_extract_model(

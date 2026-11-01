@@ -52,15 +52,6 @@ def _run(
     )
 
 
-def _attach_inqtrix_caplog(caplog):
-    # gotcha #2: the inqtrix logger does not always propagate to root, so a
-    # caplog assertion needs the handler attached explicitly.
-    caplog.set_level(logging.WARNING, logger="inqtrix")
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    return logger
-
-
 class TestTokenizerMismatchMarker:
     def test_english_query_against_german_bm25_flags_mismatch(self, caplog):
         llm = ScriptedLLM()
@@ -68,17 +59,14 @@ class TestTokenizerMismatchMarker:
         # Simulate an active BM25 lexical branch (german tokenizer).
         store.sparse_language = "de"
         events: list[tuple[str, dict]] = []
-        logger = _attach_inqtrix_caplog(caplog)
-        try:
-            result = _run(
-                algorithm,
-                runtime,
-                context,
-                "How is the liability defined in the contract?",
-                events=events,
-            )
-        finally:
-            logger.removeHandler(caplog.handler)
+        caplog.set_level(logging.WARNING, logger="inqtrix")
+        result = _run(
+            algorithm,
+            runtime,
+            context,
+            "How is the liability defined in the contract?",
+            events=events,
+        )
 
         sparse = result.raw["result_state"]["knowledge_sparse"]
         assert sparse["marker"] == SPARSE_MARKER_TOKENIZER_MISMATCH
@@ -102,17 +90,14 @@ class TestTokenizerMismatchMarker:
         algorithm, store, context, runtime = make_algorithm(llm)
         store.sparse_language = "de"
         events: list[tuple[str, dict]] = []
-        logger = _attach_inqtrix_caplog(caplog)
-        try:
-            result = _run(
-                algorithm,
-                runtime,
-                context,
-                "Wie ist die Haftung im Vertrag geregelt?",
-                events=events,
-            )
-        finally:
-            logger.removeHandler(caplog.handler)
+        caplog.set_level(logging.WARNING, logger="inqtrix")
+        result = _run(
+            algorithm,
+            runtime,
+            context,
+            "Wie ist die Haftung im Vertrag geregelt?",
+            events=events,
+        )
 
         # Byte-/field-identity on the default same-language path.
         assert "knowledge_sparse" not in result.raw["result_state"]

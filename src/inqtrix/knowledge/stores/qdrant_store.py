@@ -74,7 +74,7 @@ from inqtrix.knowledge.stores.vector_index import (
 from inqtrix.knowledge.source_cleanup import SourceCleanupPlan
 from inqtrix.source_authority import SourceDeletionPermit
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 REGISTRY_COLLECTION = "inqtrix_registry"
 CHUNKS_PREFIX = "inqtrix_chunks__"

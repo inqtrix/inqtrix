@@ -4,25 +4,23 @@
 
 ## Scope
 
-How to reconstruct an answer end-to-end from the protected forensic run audit: which events are emitted, which fields each event carries, and how to follow IDs from `query_record` through `query_summary`, `claim_merge`, answer prompt inputs, generated sections, and finally to `answer_claim_binding`. Use this page when you need to explain "where did sentence X come from" or "why did the run stop in round N". Ordinary container/file logs expose only the content-minimized operational projection of these events.
+How to reconstruct an answer end-to-end from the protected forensic run audit: which events are emitted, which fields each event carries, and how to follow IDs from `query_record` through `query_summary`, `claim_merge`, answer prompt inputs, generated sections, and finally to `answer_claim_binding`. Use this page when you need to explain "where did sentence X come from" or "why did the run stop in round N". Container and file logs carry none of these events; the trace carries their content-minimized operational projection.
 
 This page is operator-facing. Public architectural rationale lives in the
 [Architecture overview](../architecture/overview.md).
 
 ## Enabling forensic mode
 
-Forensic events are recorded on the run's trace, not mirrored into the file log, so four switches matter: file logging on and the logger threshold at `DEBUG` for the operational file log, `OBSERVABILITY_PROFILE=forensic` for how deep the recording goes, and `INQTRIX_TRACING` for where the events land:
+Forensic events are recorded on the run's trace, never in the log, so two switches matter: `OBSERVABILITY_PROFILE=forensic` for how deep the recording goes, and `INQTRIX_TRACING` for where the events land. Logging needs no change:
 
 ```bash
-export INQTRIX_LOG_ENABLED=true
-export INQTRIX_LOG_LEVEL=DEBUG
 export OBSERVABILITY_PROFILE=forensic
 export INQTRIX_TRACING=file          # or otlp, see below
 ```
 
-Forensic lineage events are attached to the trace (set `INQTRIX_TRACING=file` or `otlp`), not written as `ITERATION ...` log lines. The complete redacted events are placed into `state["iteration_logs"]` (`AgentState` key, `list[dict[str, Any]]`) whenever testing mode is active (`TESTING_MODE=true` env, `AgentSettings(testing_mode=True)`, or HTTP `/v1/test/run`). Audit payloads first pass through `runtime_logging.sanitize_event_payload`; a separate fail-closed console projection then omits exact queries, provider answers, snippets, claim/evidence text, prompt views and every URL from ordinary logs. See [Logging](logging.md) for the boundary.
+Forensic lineage events are attached to the trace (set `INQTRIX_TRACING=file` or `otlp`), not written as `ITERATION ...` log lines. The complete redacted events are placed into `state["iteration_logs"]` (`AgentState` key, `list[dict[str, Any]]`) whenever testing mode is active (`TESTING_MODE=true` env, `AgentSettings(testing_mode=True)`, or HTTP `/v1/test/run`). Audit payloads first pass through `runtime_logging.sanitize_event_payload`; a separate fail-closed projection, the one attached to the span, then omits exact queries, provider answers, snippets, claim/evidence text, prompt views and every URL. See [Logging](logging.md) for the boundary.
 
-The file log is not the audit trail and cannot reconstruct private evidence by design. Authorized durable run artifacts (including the `web_search_ledger` carried by the evidence artifact) are the production audit source; testing/parity runs expose the same redacted event detail through `iteration_logs`. Compact `TRACE ...` and `RUN start:` / `RUN end:` file lines are content-minimized operational signposts joined through stable IDs; the structured events themselves live on the trace.
+The log is not the audit trail and cannot reconstruct private evidence by design. Authorized durable run artifacts (including the `web_search_ledger` carried by the evidence artifact) are the production audit source; testing/parity runs expose the same redacted event detail through `iteration_logs`. Compact `TRACE ...` and `RUN start:` / `RUN end:` log lines are content-minimized operational signposts joined through stable IDs; the structured events themselves live on the trace.
 
 ## Optional conversation titles
 
@@ -169,9 +167,9 @@ objects. Read `claim_extraction_filtered_claim_count` with care: it is the
 difference between the raw claims the extractor actually inspected (up to twice
 `claim_max_items`) and the claims finally returned, so it counts both objects
 dropped during local normalization and surplus claims trimmed back to the
-`claim_max_items` cap. After a provider migration, use these fields together
-with `scripts/debug_research_log.py` to confirm that the intended adapter path
-is active before comparing failure counts.
+`claim_max_items` cap. After a provider migration, compare these fields on the
+run's trace to confirm that the intended adapter path is active before
+comparing failure counts.
 
 ### `claim_record`
 
@@ -455,7 +453,7 @@ jq -r 'select(.event=="stop_cascade") | .final_stop_reason' run-events.jsonl | s
 
 ### Python recipe
 
-Forensic events never reach the `inqtrix` file log: `runtime_logging.emit_runtime_event` attaches each one to the active span, so they exist only as span events -- in the OTLP-JSON spool under `INQTRIX_TRACING=file`, at the OTLP endpoint under `otlp`, and additionally in the top-level `iteration_logs` list of a testing-mode run. Parse `iteration_logs` instead of `logs/inqtrix_*.log`:
+Forensic events never reach the `inqtrix` file log: `runtime_logging.emit_runtime_event` attaches each one to the active span, so they exist only as span events -- in the OTLP-JSON spool under `INQTRIX_TRACING=file`, at the OTLP endpoint under `otlp`, and additionally in the top-level `iteration_logs` list of a testing-mode run. Parse `iteration_logs` instead of the log:
 
 ```python
 import json
@@ -655,22 +653,20 @@ same cost coverage. The offline cases under `tests/eval/test_agent_desk_score_co
 protect publication and score wiring; semantic quality still requires reading
 real outputs and their supporting material.
 
-### Step zero: enable the file log
+### Step zero: keep the log
 
-All debugging flows below assume logs are on disk. The minimum setup:
+All debugging flows below read the log. The API server and the worker log
+`INFO` as JSON on stdout by default, so `docker compose logs api worker` or `kubectl logs` is
+the post-mortem source; uvicorn's lines are part of the same output. For a
+rotating file next to the console:
 
 ```bash
-export INQTRIX_LOG_ENABLED=true
-export INQTRIX_LOG_LEVEL=INFO
+export INQTRIX_LOG_TARGET=both       # writes logs/inqtrix-<service>.log
 ```
-
-Without the file sink, `grep`-based post-mortem is not possible. For the HTTP server, uvicorn output can be mirrored into the same file — see [Logging](logging.md).
 
 For full source-to-claim-to-answer reconstruction, enable forensic depth:
 
 ```bash
-export INQTRIX_LOG_ENABLED=true
-export INQTRIX_LOG_LEVEL=DEBUG
 export OBSERVABILITY_PROFILE=forensic
 export INQTRIX_TRACING=file          # or otlp, see below
 ```

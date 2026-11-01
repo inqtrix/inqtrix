@@ -54,6 +54,7 @@ from inqtrix.project.editor_guest_links import (
     EditorGuestAccess,
     EditorGuestIdentity,
     EditorGuestLinkExpired,
+    EditorGuestLinkUnavailable,
 )
 from inqtrix.storage.auth_orm import auth_sessions
 from inqtrix.storage.db import (
@@ -9059,3 +9060,91 @@ async def test_an_update_under_a_long_expired_lease_leaves_that_lease_unlocked(
             .where(editor_collaboration_leases.c.lease_id == stale_id)
         )
     assert swept == 0
+
+
+async def _set_owner_a(database: _DatabaseHarness, **values: object) -> None:
+    async with database.session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(users)
+                .where(users.c.tenant_id == TENANT_A, users.c.id == OWNER_A)
+                .values(**values)
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_state", ["disabled", "deprovisioned", "erasing"])
+async def test_a_guest_link_of_an_inactive_owner_is_unavailable_until_the_owner_is_back(
+    database: _DatabaseHarness, owner_state: str
+) -> None:
+    """A guest link is outside access that only an active owner manages.
+
+    While the owner is disabled, deprovisioned or being erased, the link's
+    landing page, its unlock, the guest's session and the guest's edits are
+    refused; the link and the session stay and work again once the owner
+    is active.
+    """
+    document_id = f"ed_collaboration_guest_owner_{owner_state}"
+    await _collaboration_document_of_owner_a(database, document_id)
+    instance, lease = await _authorize_guest(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        created_by_user_id=OWNER_A,
+        permission="edit",
+        display_name="Gina Gast",
+    )
+    link_id, identity_id = lease.guest_link_id, lease.guest_identity_id
+    assert link_id is not None and identity_id is not None
+    links = _guest_links(database)
+    link = await _resolve_guest_link(links, link_id=link_id, now=database.now + 1.0)
+    session_digest = _sha256(f"guest:{identity_id}".encode())
+    inactive = {
+        "disabled": {"disabled_at": func.now()},
+        "deprovisioned": {"disabled_at": func.now(), "scim_deleted_at": func.now()},
+        "erasing": {"erasure_operation_id": "del_owner_being_erased"},
+    }[owner_state]
+
+    await _set_owner_a(database, **inactive)
+    try:
+        with pytest.raises(EditorGuestLinkUnavailable):
+            await _resolve_guest_link(links, link_id=link_id, now=database.now + 1.0)
+        with pytest.raises(EditorGuestLinkUnavailable):
+            await _open_guest_session_with_verified_pair(
+                links, link, identity_id=uuid.uuid4(), now=database.now + 1.0
+            )
+        with pytest.raises(EditorGuestLinkUnavailable):
+            await links.resolve_guest_identity(
+                tenant_id=TENANT_A,
+                session_token_digest=session_digest,
+                now=database.now + 1.0,
+            )
+        with pytest.raises(CollaborationLeaseInvalid):
+            await database.store.append_update(
+                _guest_direct_update(
+                    document_id=document_id,
+                    instance=instance,
+                    lease=lease,
+                    payload=b"guest-update-while-the-owner-is-inactive",
+                    now=database.now + 1.0,
+                )
+            )
+    finally:
+        await _set_owner_a(
+            database, disabled_at=None, scim_deleted_at=None, erasure_operation_id=None
+        )
+
+    back = await _resolve_guest_link(links, link_id=link_id, now=database.now + 2.0)
+    access = await links.resolve_guest_identity(
+        tenant_id=TENANT_A, session_token_digest=session_digest, now=database.now + 2.0
+    )
+    persisted = await database.store.append_update(
+        _guest_direct_update(
+            document_id=document_id,
+            instance=instance,
+            lease=lease,
+            payload=b"guest-update-once-the-owner-is-back",
+            now=database.now + 2.0,
+        )
+    )
+    assert (back.id, access.identity.id, persisted.sequence) == (link_id, identity_id, 1)

@@ -19,18 +19,11 @@ import pytest_asyncio
 from sqlalchemy import insert, select, text
 
 from inqtrix.auth.invitations import DuplicateOpenInvitation
-from inqtrix.auth.pat import PersonalAccessToken
 from inqtrix.auth.permissions import WorkspaceRole
-from inqtrix.auth.sessions import AuthSession
-from inqtrix.storage.auth_postgres import (
-    PostgresSessionStore,
-    PostgresUserDirectory,
-)
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.identity_orm import workspace_members, workspaces
 from inqtrix.storage.invitations_postgres import PostgresInvitationRepository
 from inqtrix.storage.migrate import run_migrations
-from inqtrix.storage.pat_postgres import PostgresPatStore
 from tests.storage._canonical_users import (
     canonical_user_id,
     ensure_canonical_users,
@@ -41,7 +34,6 @@ TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
-ISSUER = "http://idp.example"
 OWNER_ID = canonical_user_id("invitation-owner")
 INVITEE_ID = canonical_user_id("invitation-recipient")
 
@@ -82,8 +74,6 @@ async def factory(engine):
                 "invitations",
                 "workspace_members",
                 "workspaces",
-                "personal_access_tokens",
-                "auth_sessions",
             ):
                 await session.execute(text(f"DELETE FROM {table}"))
             await ensure_canonical_users(session, (OWNER_ID, INVITEE_ID))
@@ -246,71 +236,3 @@ async def test_expired_and_revoked_never_accept(factory):
     )
     assert len(listed) == 2
     assert expired.id in {invitation.id for invitation in listed}
-
-
-@pytest.mark.asyncio
-async def test_disable_cascade_is_atomic(factory):
-    directory = PostgresUserDirectory(
-        session_factory=factory, app_role=APP_ROLE
-    )
-    sessions = PostgresSessionStore(
-        session_factory=factory, app_role=APP_ROLE
-    )
-    pat_store = PostgresPatStore(session_factory=factory, app_role=APP_ROLE)
-    subject = f"disable-cascade-{uuid.uuid4()}"
-    user = await directory.record_login(
-        tenant_id="default",
-        issuer=ISSUER,
-        subject=subject,
-        email="alice@example.com",
-        email_verified=True,
-        display_name="Alice",
-    )
-    await sessions.create(
-        AuthSession(
-            id="sess-1",
-            user_id=user.user_id,
-            issuer=ISSUER,
-            subject=subject,
-            email="alice@example.com",
-            display_name="Alice",
-            groups=(),
-            csrf_random="ab" * 16,
-            created_at=time.time(),
-            expires_at=time.time() + 3600,
-        )
-    )
-    await pat_store.create(
-        PersonalAccessToken(
-            token_id="tok1",
-            tenant_id="default",
-            owner_user_id=user.user_id,
-            name="ci",
-            secret_hmac="ab" * 32,
-            created_at=time.time(),
-            expires_at=None,
-            last_used_at=None,
-            revoked_at=None,
-        )
-    )
-    # The port method carrying the cascade today: disable_if_not_last_admin
-    # (the removed disable_user ancestor lacked the last-admin guard and the
-    # local_credentials write — this superset is the ONE disable cascade).
-    assert await directory.disable_if_not_last_admin(
-        tenant_id="default", user_id=user.user_id, disabled_at=time.time()
-    )
-    found = await directory.find_by_user_id(
-        tenant_id="default", user_id=user.user_id
-    )
-    assert found is not None and found.disabled_at is not None
-    assert await sessions.get("sess-1") is None
-    assert (await pat_store.get("tok1")).revoked_at is not None
-    # Unlike the removed ancestor's guarded no-op, the superset reports the
-    # row write on a repeat call — and the state stays disabled either way.
-    assert await directory.disable_if_not_last_admin(
-        tenant_id="default", user_id=user.user_id, disabled_at=time.time()
-    )
-    still = await directory.find_by_user_id(
-        tenant_id="default", user_id=user.user_id
-    )
-    assert still is not None and still.disabled_at is not None

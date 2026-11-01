@@ -114,7 +114,7 @@ def _node_collaboration_env_names() -> set[str]:
     ).read_text(encoding="utf-8")
     return set(
         re.findall(
-            r"INQTRIX_(?:API_INTERNAL_URL|COLLABORATION_[A-Z0-9_]+)",
+            r"INQTRIX_(?:API_INTERNAL_URL|LOG_LEVEL|COLLABORATION_[A-Z0-9_]+)",
             source,
         )
     )
@@ -454,6 +454,44 @@ def test_collaboration_is_absent_by_default() -> None:
     assert not any(
         item["name"] == "INQTRIX_COLLABORATION_SECRET" for item in api_env
     )
+
+
+def _container_env(docs: list[dict], suffix: str) -> dict[str, str]:
+    deployment = next(
+        d for d in _by_kind(docs, "Deployment") if d["metadata"]["name"].endswith(suffix)
+    )
+    env = deployment["spec"]["template"]["spec"]["containers"][0].get("env", [])
+    return {item["name"]: item.get("value") for item in env if "value" in item}
+
+
+def test_log_threshold_and_format_reach_each_service_one_by_one() -> None:
+    """Web and collaboration get the values as plain env entries (no
+    envFrom reaches them); api and worker only when set, because an empty
+    explicit value would hide config.INQTRIX_LOG_LEVEL."""
+    collaboration = (
+        "collaboration.enabled=true",
+        "collaboration.secret.existingSecret=collaboration-secret",
+    )
+    unset = _docs(_template(_EXTERNAL, *collaboration))
+    assert _container_env(unset, "-web")["INQTRIX_LOG_LEVEL"] == ""
+    assert _container_env(unset, "-web")["INQTRIX_LOG_FORMAT"] == ""
+    assert _container_env(unset, "-collaboration")["INQTRIX_LOG_LEVEL"] == ""
+    assert "INQTRIX_LOG_LEVEL" not in _container_env(unset, "-api")
+
+    configured = _docs(
+        _template(
+            _EXTERNAL,
+            *collaboration,
+            "observability.logLevel=WARNING",
+            "observability.logFormat=text",
+        )
+    )
+    for suffix in ("-web", "-api"):
+        env = _container_env(configured, suffix)
+        assert (env["INQTRIX_LOG_LEVEL"], env["INQTRIX_LOG_FORMAT"]) == ("WARNING", "text")
+    collaboration_env = _container_env(configured, "-collaboration")
+    assert collaboration_env["INQTRIX_LOG_LEVEL"] == "WARNING"
+    assert "INQTRIX_LOG_FORMAT" not in collaboration_env
 
 
 def test_collaboration_renders_one_private_recreate_replica() -> None:
@@ -1085,7 +1123,7 @@ def test_chart_version_tracks_chart_contract_changes() -> None:
     below is for.
     """
     chart = yaml.safe_load((_CHART / "Chart.yaml").read_text(encoding="utf-8"))
-    assert chart["version"] == "0.3.0"
+    assert chart["version"] == "0.5.5"
 
 
 def test_observability_tracing_env_renders_for_api_and_worker() -> None:
@@ -1675,6 +1713,71 @@ def _web_env(docs: list[dict]) -> dict[str, str | None]:
 
 
 
+_GATEWAY_HEADER_VARIABLES = (
+    "INQTRIX_GATEWAY_JWT_HEADER",
+    "INQTRIX_GATEWAY_SUBJECT_HEADER",
+    "INQTRIX_GATEWAY_EMAIL_HEADER",
+    "INQTRIX_GATEWAY_NAME_HEADER",
+    "INQTRIX_GATEWAY_GROUPS_HEADER",
+    "INQTRIX_GATEWAY_PROOF_HEADER",
+    "INQTRIX_GATEWAY_RESOLVER_HEADERS",
+)
+
+
+def test_the_web_pod_gets_the_identity_edge_but_never_the_secret() -> None:
+    """The web pod has no envFrom: the header names come from config, its own
+    peer list from web.gatewayTrustedProxies, and the shared secret stays in
+    the API pod's Secret."""
+    names = [f"config.{name}=X-Inqtrix-{index}" for index, name in enumerate(_GATEWAY_HEADER_VARIABLES)]
+    env = _web_env(
+        _docs(
+            _template(
+                "postgres.enabled=true",
+                *names,
+                "web.gatewayTrustedProxies=10.20.0.0/16",
+                "secret.data.INQTRIX_GATEWAY_SHARED_SECRET=" + "s" * 32,
+            )
+        )
+    )
+
+    for index, name in enumerate(_GATEWAY_HEADER_VARIABLES):
+        assert env[name] == f"X-Inqtrix-{index}"
+    assert env["INQTRIX_GATEWAY_TRUSTED_PROXIES"] == "10.20.0.0/16"
+    assert "INQTRIX_GATEWAY_SHARED_SECRET" not in env
+
+
+def test_a_changed_auth_mode_rolls_the_web_pods() -> None:
+    # The web gateway takes the identity header names from the configuration
+    # and asks the API server for the mode once; without a checksum a
+    # change would not restart it.
+    def web_checksum(*extra: str) -> str:
+        web = _deployment(_docs(_template("postgres.enabled=true", *extra)), "web")
+        assert web is not None
+        return web["spec"]["template"]["metadata"]["annotations"]["checksum/config"]
+
+    assert web_checksum() != web_checksum("config.INQTRIX_AUTH_MODE=oidc")
+
+
+def test_without_gateway_settings_the_web_pod_gets_no_identity_edge() -> None:
+    env = _web_env(_docs(_template("postgres.enabled=true")))
+
+    assert not [name for name in env if name.startswith("INQTRIX_GATEWAY_")]
+
+
+def test_the_gateway_mode_keeps_one_trusted_proxy_hop_behind_the_ingress() -> None:
+    """In gateway mode the web gateway appends nothing to the chain of its
+    trusted peer, so the API server reads the client with one hop."""
+    docs = _docs(
+        _template(_EXTERNAL, "ingress.enabled=true", "config.INQTRIX_AUTH_MODE=gateway")
+    )
+    config = [
+        d
+        for d in _by_kind(docs, "ConfigMap")
+        if d["metadata"]["name"] == "rel-inqtrix"
+    ][0]["data"]
+    assert "INQTRIX_TRUSTED_PROXY_HOPS" not in config
+
+
 def test_chart_edge_sets_two_trusted_proxy_hops() -> None:
     """Ingress plus web gateway put TWO hops into X-Forwarded-For.
 
@@ -1847,7 +1950,7 @@ def test_invalid_connection_ceiling_fails_the_render(value):
 #h.update(p.read_bytes()),h.update(b'\0')) for p in sorted(x for x in c.rglob('*') \
 #if x.is_file())];print(h.hexdigest())"
 _CHART_CONTRACT_DIGEST = (
-    "49ce17a4ead3a9060fc74d1b2364d9c15ebdf88623f5dc886f3a35c9bc3a8b83"
+    "dd9c8bb50051c8c5905b75f618e33642c64595ecb1c6b978c1b08b0e84da8d7e"
 )
 
 
@@ -2326,3 +2429,26 @@ def test_notes_describe_the_object_store_the_release_actually_uses() -> None:
         "worker.enabled=false",
     )
     assert "Single-pod variant (worker.enabled=false)" in single_pod
+
+
+def test_the_api_pod_mounts_the_folder_of_a_resolver_of_its_own_read_only() -> None:
+    docs = _docs(_template("postgres.enabled=true", "api.resolverVolume.configMap.name=firma-resolver"))
+    pod = _deployment(docs, "api")["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+
+    assert {"name": "gateway-resolver", "configMap": {"name": "firma-resolver"}} in pod["volumes"]
+    assert {
+        "name": "gateway-resolver",
+        "mountPath": "/opt/inqtrix-plugins",
+        "readOnly": True,
+    } in container["volumeMounts"]
+    assert {"name": "PYTHONPATH", "value": "/opt/inqtrix-plugins"} in container["env"]
+
+
+def test_without_a_resolver_volume_the_api_pod_mounts_nothing_more() -> None:
+    pod = _deployment(_docs(_template("postgres.enabled=true")), "api")["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+
+    assert all(volume["name"] != "gateway-resolver" for volume in pod["volumes"])
+    assert all(mount["name"] != "gateway-resolver" for mount in container["volumeMounts"])
+    assert all(item["name"] != "PYTHONPATH" for item in container["env"])

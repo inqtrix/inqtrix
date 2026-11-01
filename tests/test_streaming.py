@@ -324,3 +324,48 @@ async def test_stream_response_returns_timeout_chunk(monkeypatch):
 
     assert any("Request-Timeout erreicht" in chunk for chunk in chunks)
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_progress", "graph_seconds", "expected"),
+    [
+        # The progress loop polls in 0.3 s steps and must see the 1 s
+        # deadline before the run ends, so the run takes longer here.
+        (True, 2.0, "request deadline"),
+        (False, 1.2, "timed out waiting for the result"),
+    ],
+)
+async def test_a_stream_timeout_is_a_warning_line(
+    monkeypatch, caplog, include_progress: bool, graph_seconds: float, expected: str
+):
+    import logging
+
+    import inqtrix.research.web_research as web_research_module
+
+    def fake_run_web_graph(question, **kwargs):
+        time.sleep(graph_seconds)
+        return {"answer": "Zu spaet", "result_state": {}}
+
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run_web_graph)
+    settings = AgentSettings()
+    settings.max_total_seconds = -29
+
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        await _collect(
+            stream_response(
+                "Meine Frage",
+                algorithm=WebResearchAlgorithm(),
+                runtime=None,
+                run_request=_run_request(),
+                providers=None,
+                strategies=None,
+                settings=settings,
+                lanes=_LANES,
+                include_progress=include_progress,
+            )
+        )
+
+    lines = [record.getMessage() for record in caplog.records if expected in record.getMessage()]
+    assert len(lines) == 1
+    assert "mode=research" in lines[0]

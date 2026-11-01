@@ -34,6 +34,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
+from inqtrix.logging_config import configure_logging, log_status_line
+from inqtrix.settings import check_retired_settings
 from inqtrix.storage.migration_contract import (
     MIGRATION_TENANT_RLS_TABLES,
     RUNTIME_REQUIRED_FUNCTIONS,
@@ -48,7 +50,9 @@ from inqtrix.storage.migration_contract import (
     tenant_policy_expression_matches as _tenant_policy_expression_matches,
 )
 
-log = logging.getLogger("inqtrix")
+# Run as ``python -m inqtrix.storage.migrate`` this module's ``__name__`` is
+# ``"__main__"``; the logger keeps the import path either way.
+log = logging.getLogger("inqtrix.storage.migrate")
 
 _MIGRATIONS_PATH = Path(__file__).parent / "migrations"
 
@@ -2134,6 +2138,9 @@ def downgrade_migrations(
 
 def main() -> None:
     """Console entry point: migrate the configured database to head."""
+    # Progress lines go to stderr; stdout carries the --preflight-v02 report.
+    resolved = configure_logging(service="migrate")
+    log_status_line(resolved, retired=check_retired_settings())
     parser = argparse.ArgumentParser(
         prog="inqtrix-migrate",
         description=(
@@ -2229,7 +2236,6 @@ def main() -> None:
         args.confirm_services_quiesced
         or settings.migration_services_quiesced
     )
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if args.confirm_services_stopped and not args.terminalize_v02_work:
         parser.error(
             "--confirm-services-stopped is valid only with "

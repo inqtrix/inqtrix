@@ -1486,7 +1486,7 @@ function SecurityPanel({
               signedIn
                 ? t.settings.ssoSignedInAs.replace(
                     '{name}',
-                    authSession?.user?.displayName ?? authSession?.user?.email ?? '?',
+                    () => authSession?.user?.displayName ?? authSession?.user?.email ?? '?',
                   )
                 : t.settings.ssoTitle
             }

@@ -588,6 +588,15 @@ describe('MarkdownEditorSurface body-change wiring', () => {
     expect(firstStatement.trim()).toBe('if (!lifecyclePolicy.emitFullBodyChanges) return')
   })
 
+  it('hands the bubble menu the same props on every render', () => {
+    const menu = source.slice(source.indexOf('<BubbleMenu'))
+    const opening = menu.slice(0, menu.indexOf('>\n'))
+    expect(opening).toContain('appendTo={bubbleMenuContainer}')
+    expect(opening).toContain('options={BUBBLE_MENU_OPTIONS}')
+    expect(opening).toContain('shouldShow={shouldShowBubbleMenu}')
+    expect(source).toContain('const shouldShowBubbleMenu = useCallback<')
+  })
+
   it('switches editability without an update', () => {
     expect(source).toContain('editor.setEditable(editable, false)')
     // No call may omit the `false` that suppresses the empty update.

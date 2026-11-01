@@ -815,8 +815,10 @@ def test_a_basis_id_the_verdict_never_declared_is_still_kept_out_of_the_text(cap
         "Die Frist in „nicht zuordenbare Grundlage“ blieb ungeprüft.",
         "Kriterium offen: Fristen belegen — „nicht zuordenbare Grundlage“ fehlt.",
     ]
-    assert "source:ref_ungenannt" in caplog.text
-    assert "diagnostic:run_mission:t9" in caplog.text
+    # The ids are model text: the log counts them and never repeats them.
+    assert "basis id(s) it never declared" in caplog.text
+    assert "source:ref_ungenannt" not in caplog.text
+    assert "diagnostic:run_mission:t9" not in caplog.text
 
 
 def test_a_malformed_review_result_reaches_the_reader_as_one_sentence(caplog):
@@ -827,10 +829,12 @@ def test_a_malformed_review_result_reaches_the_reader_as_one_sentence(caplog):
     )
     with caplog.at_level("WARNING", logger="inqtrix"):
         activity = review_pass.unavailable_activity(review, "de")
-    assert "source:ref_kd1" in caplog.text
+    assert "source:ref_kd1" not in caplog.text
+    assert "reason=schema_invalid" in caplog.text
+    assert f"detail_chars={len(review.detail)}" in caplog.text
     assert activity["reason"] == "schema_invalid"
     assert activity["detail"] == (
-        "Die Prüfung lieferte kein auswertbares Ergebnis; der Rohtext steht "
+        "Die Prüfung lieferte kein auswertbares Ergebnis; der Grund steht "
         "im Serverprotokoll."
     )
 
@@ -1038,11 +1042,12 @@ def test_an_exhausted_budget_is_its_own_reason_and_not_model_debris(caplog):
     )
     with caplog.at_level("WARNING", logger="inqtrix"):
         activity = review_pass.unavailable_activity(review, "de")
-    assert "33 requested, maximum 30" in caplog.text
+    assert f"reason={WORK_RESULT_BUDGET_EXHAUSTED}" in caplog.text
+    assert "33 requested, maximum 30" not in caplog.text
     assert activity["reason"] == WORK_RESULT_BUDGET_EXHAUSTED
     assert activity["detail"] == (
         "Die Prüfung erreichte ihr Budget, bevor sie ein Urteil abgeben "
-        "konnte; die Einzelheiten stehen im Serverprotokoll."
+        "konnte; der Grund steht im Serverprotokoll."
     )
     # Distinct from the neighbouring states, in the machine field and in the
     # reader sentence alike.
@@ -1170,7 +1175,8 @@ def test_no_reason_lets_the_runtimes_own_language_reach_the_reader(caplog):
         )
     assert unknown == MESSAGES["review_unavailable_generic"]["de"]
     assert "no reader sentence exists" in caplog.text
-    assert "Raw runtime English." in caplog.text
+    assert "Raw runtime English." not in caplog.text
+    assert "detail_chars=20" in caplog.text
 
 
 # -- one result per finding ---------------------------------------------------- #

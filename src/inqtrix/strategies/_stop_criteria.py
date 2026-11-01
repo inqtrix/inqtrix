@@ -12,7 +12,7 @@ from inqtrix.settings import AgentSettings
 from inqtrix.state import emit_progress
 from inqtrix.text import is_none_value
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class StopCriteriaStrategy(ABC):

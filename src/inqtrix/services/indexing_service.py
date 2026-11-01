@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from inqtrix.services.knowledge_service import KnowledgeService
     from inqtrix.services.quota_service import QuotaService
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # Collection rebuilds use the same document concurrency as first ingestion.
 # This keeps the visible "three active, remaining queued" contract consistent

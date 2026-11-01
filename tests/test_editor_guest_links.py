@@ -21,6 +21,7 @@ from inqtrix.project.editor_guest_links import (
     EditorGuestLinkExpired,
     EditorGuestLinkNotFound,
     EditorGuestLinkRateLimited,
+    EditorGuestLinkUnavailable,
 )
 from inqtrix.services.editor_guest_link_service import EditorGuestLinkService
 from inqtrix.server.routers.editor_guest_links import build_router
@@ -840,3 +841,63 @@ def test_every_command_kind_the_service_writes_is_admitted_by_the_table() -> Non
     assert match is not None, "probe did not find the check constraint"
     admitted = set(re.findall(r"'([a-z_]+)'", match.group(1)))
     assert written <= admitted, f"not admitted by the table: {written - admitted}"
+
+
+def test_a_link_of_an_inactive_owner_answers_currently_unavailable() -> None:
+    """While the document's owner is not active, every guest path says so."""
+
+    class UnavailableGuestService:
+        def throttle_key(self, *, token: str, source_ip: str) -> str:
+            return "throttle-key"
+
+        async def describe_token(self, _token):
+            raise EditorGuestLinkUnavailable()
+
+        async def unlock(self, **_kwargs):
+            raise EditorGuestLinkUnavailable()
+
+        async def session(self, _token, **_kwargs):
+            raise EditorGuestLinkUnavailable()
+
+        async def create_collaboration_session(self, **_kwargs):
+            raise EditorGuestLinkUnavailable()
+
+    container = SimpleNamespace(
+        collaboration_service=object(),
+        editor_collaboration_service=object(),
+        editor_guest_link_service=UnavailableGuestService(),
+        principal_dependency=lambda: _principal(),
+        settings=SimpleNamespace(
+            auth=SimpleNamespace(trusted_proxy_hops=0),
+            editor_guest_links=SimpleNamespace(allow_insecure_http=False),
+            server=SimpleNamespace(public_base_url="https://desk.example.test"),
+        ),
+        share_service=object(),
+    )
+    app = FastAPI()
+    app.include_router(build_router(container))
+    origin = {"Origin": "https://desk.example.test"}
+
+    with TestClient(app, base_url="https://desk.example.test") as client:
+        client.cookies.set("inqtrix_editor_guest", "guest-session-token")
+        client.cookies.set("inqtrix_editor_guest_csrf", "guest-csrf")
+        responses = [
+            client.get("/v1/editor/share-links/public-token"),
+            client.post(
+                "/v1/editor/share-links/public-token:unlock",
+                headers=origin,
+                json={"password": "valid"},
+            ),
+            client.get("/v1/editor/guest/session"),
+            client.post(
+                "/v1/editor/guest/collaboration/session",
+                headers={**origin, "x-inqtrix-guest-csrf": "guest-csrf"},
+                json={"protocol_version": 1, "schema_version": 1},
+            ),
+            client.get("/v1/editor/guest/collaboration/comments"),
+        ]
+
+    assert [response.status_code for response in responses] == [423] * 5
+    assert {response.json()["error"]["type"] for response in responses} == {
+        "guest_link_unavailable"
+    }

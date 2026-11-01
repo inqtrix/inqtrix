@@ -77,8 +77,17 @@ function hasKeyedXmlFragmentState(fragment: Y.XmlFragment): boolean {
   return keyedState instanceof Map && keyedState.size > 0
 }
 
-export function validateEditorYDoc(document: Y.Doc): JSONContent {
-  assertCausallyCompleteYDoc(document)
+export function validateEditorYDoc(
+  document: Y.Doc,
+  options: {
+    /** The caller has just seen that the document holds no pending structs and
+     * no pending deletions. Such a document encodes only what it integrated,
+     * so the causal check could not find anything, and it costs one encoding
+     * and one decoding of the whole document. */
+    causallyComplete?: boolean
+  } = {},
+): JSONContent {
+  if (!options.causallyComplete) assertCausallyCompleteYDoc(document)
   const content = editorYDocToJson(document)
   const canonical = editorJsonToYDoc(content)
   try {

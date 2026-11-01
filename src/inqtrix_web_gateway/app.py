@@ -13,7 +13,8 @@ from fastapi import FastAPI
 
 from . import settings
 from .http_proxy import build_backend_client, register_http_routes
-from .logging import AccessLogMiddleware, configure_logging
+from .identity_edge import IdentityEdge
+from .logging import AccessLogMiddleware
 from .security_headers import SecurityHeadersMiddleware
 from .static import SpaStaticFiles
 from .websocket_proxy import register_websocket_route
@@ -31,8 +32,17 @@ def build_app(
     external_scheme: str | None = None,
     max_request_bytes: int | None = None,
     max_upstream_connections: int | None = None,
+    identity_policy: settings.IdentityEdgePolicy | None = None,
+    forwarded_allow_ips_set: bool = False,
 ) -> FastAPI:
-    """Compose validated policy, protocol adapters, and the SPA fallback."""
+    """Compose validated policy, protocol adapters, and the SPA fallback.
+
+    ``identity_policy`` is the identity edge of the gateway mode, which
+    :func:`create_app_from_env` always reads from the environment. Without it
+    the edge never asks the API server for its mode and removes nothing, as
+    the tests of the plain proxy mechanics need; the start says so in a
+    WARNING, so an embedding that forgot the policy shows up in its log.
+    """
     backend_url = settings._parse_backend_origin(backend_url)
     collaboration_settings = (
         collaboration_settings or settings.CollaborationProxySettings()
@@ -66,6 +76,12 @@ def build_app(
         max_connections=resolved_max_connections,
         transport=transport,
     )
+    edge = IdentityEdge(
+        identity_policy or settings.IdentityEdgePolicy(),
+        client,
+        forwarded_allow_ips_set=forwarded_allow_ips_set,
+        ask_mode=identity_policy is not None,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -75,6 +91,13 @@ def build_app(
             dist_dir,
             backend_url,
         )
+        edge.log_policy()
+        if identity_policy is None:
+            log.warning(
+                "Identity edge without a policy: identity headers are not removed "
+                "and the gateway mode is not detected. Use create_app_from_env or "
+                "pass IdentityEdgePolicy.from_env()."
+            )
         try:
             yield
         finally:
@@ -97,6 +120,7 @@ def build_app(
         public_origin=public_origin,
         external_scheme=external_scheme,
         settings=collaboration_settings,
+        edge=edge,
     )
     register_http_routes(
         app,
@@ -105,6 +129,7 @@ def build_app(
         external_scheme=external_scheme,
         max_request_bytes=resolved_max_request_bytes,
         max_upstream_connections=resolved_max_connections,
+        edge=edge,
     )
     app.mount(
         "/",
@@ -116,7 +141,6 @@ def build_app(
 
 def create_app_from_env() -> FastAPI:
     """Resolve the environment once and build the uvicorn factory app."""
-    configure_logging()
     settings._validate_web_adapter()
     return build_app(
         settings._resolve_dist_dir(),
@@ -129,4 +153,6 @@ def create_app_from_env() -> FastAPI:
             os.getenv("INQTRIX_MAX_UPSTREAM_CONNECTIONS"),
             env_var="INQTRIX_MAX_UPSTREAM_CONNECTIONS",
         ),
+        identity_policy=settings.IdentityEdgePolicy.from_env(),
+        forwarded_allow_ips_set="FORWARDED_ALLOW_IPS" in os.environ,
     )

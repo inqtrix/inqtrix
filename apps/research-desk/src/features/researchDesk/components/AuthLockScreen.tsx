@@ -9,27 +9,49 @@ import {
   Layers,
   LockKeyhole,
   PencilLine,
+  RefreshCw,
   Scale,
   SearchCheck,
   ShieldCheck,
   type LucideIcon,
 } from '@/components/icons'
 import { motion } from 'motion/react'
-import { type FormEvent } from 'react'
+import { type FormEvent, useEffect, useRef } from 'react'
 import { BrandMark } from '@/components/BrandMark'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import {
+  GATEWAY_ACTIONS,
+  GATEWAY_STATE_ROLES,
+  type GatewayAction,
+  type GatewayStateInfo,
+} from '@/features/auth/authMode'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 
+/** The desk locks the gateway mode only once its state is known; should the
+ * screen still meet it without one, a reload is the one safe action. */
+const GATEWAY_UNANSWERED: GatewayStateInfo = { state: 'renewGatewaySignIn', outcome: null }
+
+/** The element that holds the state text in gateway mode; it also describes
+ * the dialog. */
+const GATEWAY_STATE_ID = 'auth-lock-gateway-state'
+
 type AuthLockScreenProps = {
   error: string | null
+  /** A sign-in runs: the form's submission, or in gateway mode the new
+   * probe "Try again" started. */
   isSubmitting: boolean
   /** `apikey` renders the token form (historical behaviour); `sso` swaps
    * it for the OIDC login redirect; `local` renders the credential
-   * form (identifier + password) — same screen chrome throughout. */
-  mode?: 'apikey' | 'sso' | 'local'
+   * form (identifier + password); `gateway` renders no form, only the
+   * state of the gateway sign-in; the screen chrome is the same throughout. */
+  mode?: 'apikey' | 'sso' | 'local' | 'gateway'
+  /** Gateway mode: the state of the session start. */
+  gatewayState?: GatewayStateInfo | null
+  /** Gateway mode: runs the action the state offers. */
+  onGatewayAction?: (action: Exclude<GatewayAction, null>) => void
   /** SSO provider display name from `/api/auth/config`; labels the button
    * (e.g. "Okta") when set, else the generic localized SSO label. */
   providerName?: string | null
@@ -50,6 +72,8 @@ export function AuthLockScreen({
   error,
   isSubmitting,
   mode = 'apikey',
+  gatewayState,
+  onGatewayAction,
   providerName,
   onSsoLogin,
   onSubmit,
@@ -64,6 +88,17 @@ export function AuthLockScreen({
 }: AuthLockScreenProps) {
   const { locale, setLocale, t } = useLocale()
   const isCredentialMode = mode === 'local'
+  const gatewayInfo = mode === 'gateway' ? gatewayState ?? GATEWAY_UNANSWERED : null
+  const gatewayCopy = gatewayInfo ? t.authLock.gateway.states[gatewayInfo.state] : null
+  const gatewayAction = gatewayInfo ? GATEWAY_ACTIONS[gatewayInfo.state] : null
+  // Only "Try again" waits for an answer; a reload leaves the page.
+  const gatewayBusy = gatewayAction === 'retry' && isSubmitting
+  const gatewayActionRef = useRef<HTMLButtonElement>(null)
+  // The action takes the focus whenever a state appears, and again once a
+  // new probe has answered: disabling the button while it ran dropped it.
+  useEffect(() => {
+    if (!gatewayBusy) gatewayActionRef.current?.focus()
+  }, [gatewayInfo?.state, gatewayInfo?.outcome, gatewayBusy])
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -80,6 +115,7 @@ export function AuthLockScreen({
       <div className="inqtrix-auth-fade pointer-events-none absolute inset-0" />
       <motion.section
         animate={{ opacity: 1, scale: 1, y: 0 }}
+        aria-describedby={gatewayInfo ? GATEWAY_STATE_ID : undefined}
         aria-labelledby="auth-lock-title"
         // The lock screen covers the whole application, so it must also
         // CLAIM to: without aria-modal, assistive technology keeps
@@ -156,27 +192,63 @@ export function AuthLockScreen({
           </div>
 
           <div className="flex flex-col justify-center p-5 sm:p-7">
-            <div>
+            {/* In gateway mode this block is the state: announced when it
+                appears or changes, a failure at once, and the description
+                of the dialog. */}
+            <div
+              data-gateway-state={gatewayInfo?.state}
+              id={gatewayInfo ? GATEWAY_STATE_ID : undefined}
+              role={gatewayInfo ? GATEWAY_STATE_ROLES[gatewayInfo.state] : undefined}
+            >
               <div className="flex items-center gap-2">
                 <ShieldCheck className="size-4 shrink-0 text-brand" />
                 <p className="t-section text-foreground">
                   {isCredentialMode
                     ? t.authLock.credentialTitle
-                    : mode === 'sso'
-                      ? t.authLock.ssoTitle
-                      : t.authLock.accessTitle}
+                    : gatewayCopy
+                      ? gatewayCopy.title
+                      : mode === 'sso'
+                        ? t.authLock.ssoTitle
+                        : t.authLock.accessTitle}
                 </p>
               </div>
               <p className="t-meta mt-1.5 max-w-sm text-muted-foreground">
-                {mode === 'sso'
-                  ? t.authLock.ssoDescription
-                  : mode === 'local'
-                    ? t.authLock.credentialDescriptionLocal
-                    : t.authLock.accessDescription}
+                {gatewayCopy
+                  ? gatewayCopy.description
+                  : mode === 'sso'
+                    ? t.authLock.ssoDescription
+                    : mode === 'local'
+                      ? t.authLock.credentialDescriptionLocal
+                      : t.authLock.accessDescription}
               </p>
+              {gatewayInfo?.outcome ? (
+                <p className="t-meta-sm mt-3 text-muted-foreground">
+                  {t.authLock.gateway.outcomeLabel}:{' '}
+                  <code className="font-mono text-foreground">{gatewayInfo.outcome}</code>
+                </p>
+              ) : null}
             </div>
 
-            {isCredentialMode ? (
+            {gatewayInfo ? (
+              gatewayAction ? (
+                <div className="mt-6">
+                  <Button
+                    className="inqtrix-auth-action h-11 w-full gap-2"
+                    disabled={gatewayBusy}
+                    onClick={() => onGatewayAction?.(gatewayAction)}
+                    ref={gatewayActionRef}
+                    type="button"
+                  >
+                    {gatewayAction === 'signInAgain' ? (
+                      <LockKeyhole className="size-4" />
+                    ) : (
+                      <RefreshCw className="size-4" />
+                    )}
+                    {gatewayBusy ? t.authLock.signingIn : t.authLock.gateway.actions[gatewayAction]}
+                  </Button>
+                </div>
+              ) : null
+            ) : isCredentialMode ? (
               <form className="mt-6 space-y-3" onSubmit={handleCredentialSubmit}>
                 <div>
                   <label
@@ -286,10 +358,12 @@ export function AuthLockScreen({
             )}
 
             <div className="mt-6 space-y-2">
-              <p className="flex items-start gap-2 t-meta-sm text-muted-foreground" id="inqtrix-auth-help">
-                <LockKeyhole className="mt-0.5 size-3.5 shrink-0" />
-                <span>{t.authLock.memoryOnly}</span>
-              </p>
+              {gatewayInfo ? null : (
+                <p className="flex items-start gap-2 t-meta-sm text-muted-foreground" id="inqtrix-auth-help">
+                  <LockKeyhole className="mt-0.5 size-3.5 shrink-0" />
+                  <span>{t.authLock.memoryOnly}</span>
+                </p>
+              )}
               <p className="flex items-start gap-2 t-meta-sm text-muted-foreground">
                 <Info className="mt-0.5 size-3.5 shrink-0" />
                 <span>{t.authLock.experimentalNote}</span>

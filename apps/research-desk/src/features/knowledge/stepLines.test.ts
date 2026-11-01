@@ -30,6 +30,18 @@ describe('knowledgeStepLine', () => {
     })
   })
 
+  it('keeps a $ pattern in a profile name and a stage name as written', () => {
+    expect(line({
+      facts: { autoSelected: false, degradedStages: ['stufe $& 2'], profile: 'eigen $& profil' },
+      id: 'profile',
+      kind: 'profile',
+      status: 'done',
+    })).toMatchObject({
+      primary: expect.stringContaining('eigen $& profil'),
+      secondary: expect.stringContaining('stufe $& 2'),
+    })
+  })
+
   it('renders the deep RAG live ledger lines used by the demo twin', () => {
     const steps: KnowledgeRunStepRecord[] = [
       {

@@ -93,6 +93,15 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     INQTRIX_BACKEND_URL=http://api:5100 \
     INQTRIX_DIST_DIR=/app/apps/research-desk/dist
 
+# The base image still ships the operating system's trust store with the
+# compromised emSign ECC Root CA - G3, and the Anthropic and LangSmith clients
+# trust that store rather than certifi. Take Debian's fixed package until the
+# base image carries it; the last line fails the build if the root is still in.
+RUN apt-get update \
+    && apt-get install -y --only-upgrade --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && test ! -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem
+
 COPY --from=gateway-build /app/.venv /app/.venv
 COPY --from=ui-build /repo/apps/research-desk/dist /app/apps/research-desk/dist
 COPY src/inqtrix_web_gateway /app/src/inqtrix_web_gateway

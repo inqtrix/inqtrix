@@ -29,6 +29,7 @@ from inqtrix.agents.control_ports import (
     PlanTaskRecord,
 )
 from inqtrix.agents.markdown import normalize_agent_markdown
+from inqtrix.agents.plan_models import loggable_task_id
 from inqtrix.i18n import t
 from inqtrix.exceptions import (
     AgentCancelled,
@@ -39,7 +40,7 @@ from inqtrix.execution_failures import (
     RETRYABLE_AGENT_TASK_ORCHESTRATION_CODES,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class CheckpointSchemaError(RuntimeError):
@@ -564,10 +565,10 @@ def execute_wave(
 
     def _log_retry(task: PlanTaskRecord, outcome: TaskOutcome) -> None:
         log.warning(
-            "Task %s failed transiently (%s); retrying once with unchanged operator "
-            "limits.",
-            task.task_id,
-            outcome.failure_reason,
+            "Task %s failed transiently (failure_code=%s); retrying once with unchanged "
+            "operator limits.",
+            loggable_task_id(task.task_id),
+            outcome.failure_code or "-",
         )
 
     def _record(

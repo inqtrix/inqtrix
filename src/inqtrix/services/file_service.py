@@ -43,7 +43,7 @@ from inqtrix.content.ports import FileNotFound, FileRecord, FileRegistry
 from inqtrix.knowledge.parsing import DocumentParseError, DocumentParser, extract_file
 from inqtrix.storage.object_store import ObjectStore
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 FILE_RESOURCE_TYPE = "file"
 """Authorization label; it is deliberately not a shareable resource type."""

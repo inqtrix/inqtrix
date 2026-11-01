@@ -7,6 +7,7 @@ from typing import Callable
 
 import pytest
 
+from inqtrix.auth.lifecycle import AdminActor, ProvisioningActor
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.content.ports import FileNotFound
 from inqtrix.knowledge.source_cleanup import empty_source_cleanup_plan
@@ -16,6 +17,7 @@ from inqtrix.project.scoped_upsert import ResourceScope
 from inqtrix.project.vector_index_memory import MemoryVectorIndexStore
 from inqtrix.project.vector_index_ports import VectorIndexMember
 from inqtrix.quota.models import StockLifecycleState
+from inqtrix.runs.deletion_execution import operation_principal
 from inqtrix.runs.deletion_operations import DeletionOperationStore
 from inqtrix.services.asset_deletion_service import AssetDeletionService
 from inqtrix.services.asset_records_service import AssetRecordsService
@@ -861,7 +863,10 @@ async def test_an_account_erasure_runs_as_one_operation_of_the_administrator() -
     account = uuid.uuid4()
 
     started = await service.start_user_erasure(
-        account, principal=principal, operation_id="del_marked"
+        account,
+        actor=AdminActor(principal.user_id),
+        tenant_id="default",
+        operation_id="del_marked",
     )
     deadline = time.monotonic() + 2
     while (
@@ -873,6 +878,47 @@ async def test_an_account_erasure_runs_as_one_operation_of_the_administrator() -
 
     assert started["operation_id"] == "del_marked"
     assert erased == [("default", account, principal.user_id, "del_marked")]
+
+
+def _wait_for(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + 2
+    while not condition():
+        assert time.monotonic() < deadline, "the erasure operation never got there"
+        time.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_an_erasure_provisioning_started_belongs_to_nobody() -> None:
+    """It runs without a user, and a retry for nobody reopens it. (Which
+    start meets it and which conflicts is the rule of the Postgres store,
+    the only one that erases in production.)"""
+    service, *_unused, _principal, _visible = await _fixture()
+    attempts: list[tuple[str, uuid.UUID, uuid.UUID | None, str]] = []
+
+    class _Erasure:
+        def execute(self, handle, *, tenant_id, user_id, actor_user_id):
+            attempts.append((tenant_id, user_id, actor_user_id, handle.operation_id))
+            if len(attempts) == 1:
+                raise RuntimeError("the first attempt fails")
+            handle.complete()
+
+    service.bind_user_erasure(_Erasure())
+    account = uuid.uuid4()
+    nobody = operation_principal("default", None)
+
+    def status() -> str:
+        return service.get("del_scim", principal=nobody, workspace_id=None)["status"]
+
+    await service.start_user_erasure(
+        account, actor=ProvisioningActor(), tenant_id="default", operation_id="del_scim"
+    )
+    _wait_for(lambda: status() == "delete_failed")
+    await service.retry_user_erasure(
+        "del_scim", actor=ProvisioningActor(), tenant_id="default"
+    )
+    _wait_for(lambda: status() == "deleted")
+
+    assert attempts == [("default", account, None, "del_scim")] * 2
 
 
 def _orphaned_source(*, knowledge: "_KnowledgeService | None"):

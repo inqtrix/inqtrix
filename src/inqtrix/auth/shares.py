@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.principal import Principal
     from inqtrix.user_events import ResourceInvalidator
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 SHAREABLE_RESOURCE_TYPES = frozenset(SHARE_PERMISSIONS_BY_RESOURCE_TYPE)
 

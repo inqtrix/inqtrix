@@ -33,7 +33,7 @@ from inqtrix.provider_failure_contract import (
 from inqtrix.providers.base import sdk_retry_after
 from inqtrix.providers.embeddings import EmbeddingProviderError
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # ~25k tokens at the 4-chars/token heuristic used by quota metering
 # (inqtrix.quota.models.estimate_tokens). Below the smallest observed

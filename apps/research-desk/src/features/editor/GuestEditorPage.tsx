@@ -46,7 +46,13 @@ import {
   useCollaborationEditRefusal,
 } from './CollaborationNoticeBars'
 import { editorCopy } from './editorCopy'
-import { guestAccessEnd, guestSessionIsGone } from './guestAccessEnd'
+import {
+  guestAccessEnd,
+  guestLandingFailure,
+  guestLinkUnavailable,
+  guestSessionIsGone,
+  type GuestLandingFailure,
+} from './guestAccessEnd'
 import { guestUnlockErrorKey } from './guestUnlockErrors'
 import {
   localizeCollaborationEditRefusal,
@@ -78,7 +84,10 @@ export function GuestEditorPage({ token }: GuestEditorPageProps) {
   const [description, setDescription] = useState<EditorGuestLinkDescription | null>(null)
   const [access, setAccess] = useState<EditorGuestAccessSession | null>(null)
   const [status, setStatus] = useState<'loading' | 'locked' | 'ready' | 'error' | 'ended'>('loading')
-  const [error, setError] = useState<string | null>(null)
+  // Why the landing page cannot open the link.
+  const [landingFailure, setLandingFailure] = useState<GuestLandingFailure>('invalid')
+  // The link is paused while its owner is not active; it may work again.
+  const [linkPaused, setLinkPaused] = useState(false)
   const [unsavedChangesLost, setUnsavedChangesLost] = useState(false)
   // Bumped by "open the link again": the link is opened from the start, as
   // on first arrival, and never reconnected in place.
@@ -87,7 +96,6 @@ export function GuestEditorPage({ token }: GuestEditorPageProps) {
   useEffect(() => {
     let active = true
     setStatus('loading')
-    setError(null)
     void Promise.allSettled([
       describeEditorGuestLink(token),
       getEditorGuestSession(),
@@ -95,7 +103,7 @@ export function GuestEditorPage({ token }: GuestEditorPageProps) {
       if (!active) return
       if (descriptionResult.status === 'rejected') {
         setStatus('error')
-        setError(labels.invalid)
+        setLandingFailure(guestLandingFailure(descriptionResult.reason))
         return
       }
       setDescription(descriptionResult.value)
@@ -112,13 +120,15 @@ export function GuestEditorPage({ token }: GuestEditorPageProps) {
     return () => {
       active = false
     }
-  }, [labels.invalid, openRevision, token])
+  }, [openRevision, token])
 
   const endAccess = useCallback(({
     access: ended,
+    unavailable,
     unsavedChanges,
   }: {
     access: EditorGuestAccessSession
+    unavailable: boolean
     unsavedChanges: boolean
   }) => {
     discardGuestCollaborationLifecycle({
@@ -136,6 +146,7 @@ export function GuestEditorPage({ token }: GuestEditorPageProps) {
     setAccess(null)
     setDescription(null)
     setUnsavedChangesLost(unsavedChanges)
+    setLinkPaused(unavailable)
     setStatus('ended')
   }, [])
 
@@ -148,6 +159,7 @@ export function GuestEditorPage({ token }: GuestEditorPageProps) {
             setStatus('loading')
             setOpenRevision((revision) => revision + 1)
           }}
+          unavailable={linkPaused}
           unsavedChanges={unsavedChangesLost}
         />
       </GuestShell>
@@ -159,10 +171,7 @@ export function GuestEditorPage({ token }: GuestEditorPageProps) {
   if (status === 'error' || description === null) {
     return (
       <GuestShell>
-        <GuestError
-          description={error ?? labels.invalid}
-          title={labels.unavailable}
-        />
+        <GuestLandingError failure={landingFailure} />
       </GuestShell>
     )
   }
@@ -285,7 +294,11 @@ function GuestWorkspace({
   onAccessEnded,
 }: {
   access: EditorGuestAccessSession
-  onAccessEnded: (ended: { access: EditorGuestAccessSession; unsavedChanges: boolean }) => void
+  onAccessEnded: (ended: {
+    access: EditorGuestAccessSession
+    unavailable: boolean
+    unsavedChanges: boolean
+  }) => void
 }) {
   const { locale } = useLocale()
   const labels = guestCopy[locale]
@@ -294,6 +307,7 @@ function GuestWorkspace({
   const accessEnd = guestAccessEnd(collaboration)
   const endKind = accessEnd.kind
   const endUnsavedChanges = accessEnd.kind === 'continue' ? false : accessEnd.unsavedChanges
+  const endUnavailable = accessEnd.kind === 'ended' && accessEnd.unavailable
   const endReportedRef = useRef(false)
   const verificationRef = useRef<AbortController | null>(null)
 
@@ -304,7 +318,7 @@ function GuestWorkspace({
     if (endReportedRef.current) return
     if (endKind === 'ended') {
       endReportedRef.current = true
-      onAccessEnded({ access, unsavedChanges: endUnsavedChanges })
+      onAccessEnded({ access, unavailable: endUnavailable, unsavedChanges: endUnsavedChanges })
       return
     }
     if (endKind !== 'verify' || verificationRef.current !== null) return
@@ -318,10 +332,14 @@ function GuestWorkspace({
         if (verification.signal.aborted || endReportedRef.current) return
         if (!guestSessionIsGone(cause)) return
         endReportedRef.current = true
-        onAccessEnded({ access, unsavedChanges: endUnsavedChanges })
+        onAccessEnded({
+          access,
+          unavailable: guestLinkUnavailable(cause),
+          unsavedChanges: endUnsavedChanges,
+        })
       },
     )
-  }, [access, endKind, endUnsavedChanges, onAccessEnded])
+  }, [access, endKind, endUnavailable, endUnsavedChanges, onAccessEnded])
   useEffect(() => () => verificationRef.current?.abort(), [])
   // This guest session holds the browser now; no earlier guest returns here.
   useEffect(() => {
@@ -556,9 +574,12 @@ function GuestWorkspace({
  */
 export function GuestAccessEnded({
   onReopen,
+  unavailable = false,
   unsavedChanges,
 }: {
   onReopen: () => void
+  /** The link is paused, not ended: its owner is not active. */
+  unavailable?: boolean
   unsavedChanges: boolean
 }) {
   const { locale } = useLocale()
@@ -570,8 +591,12 @@ export function GuestAccessEnded({
         role="alert"
       >
         <LockKeyhole className="mx-auto size-8 text-warning" />
-        <h1 className="t-title mt-3">{labels.accessEndedTitle}</h1>
-        <p className="t-body mt-2 text-muted-foreground">{labels.accessEnded}</p>
+        <h1 className="t-title mt-3">
+          {unavailable ? labels.linkUnavailableTitle : labels.accessEndedTitle}
+        </h1>
+        <p className="t-body mt-2 text-muted-foreground">
+          {unavailable ? labels.linkUnavailable : labels.accessEnded}
+        </p>
         {unsavedChanges ? (
           <p className="t-body mt-2 font-medium">{labels.accessEndedUnsaved}</p>
         ) : null}
@@ -656,6 +681,23 @@ function GuestLoading({ label }: { label: string }) {
   )
 }
 
+/** What the landing page says when it cannot open the link: invalid only
+ * when the service does not know it, paused while its owner is not active,
+ * and otherwise temporarily unavailable. */
+export function GuestLandingError({ failure }: { failure: GuestLandingFailure }) {
+  const { locale } = useLocale()
+  const labels = guestCopy[locale]
+  if (failure === 'paused') {
+    return <GuestError description={labels.linkUnavailable} title={labels.linkUnavailableTitle} />
+  }
+  return (
+    <GuestError
+      description={failure === 'invalid' ? labels.invalid : labels.checkUnavailable}
+      title={labels.unavailable}
+    />
+  )
+}
+
 function GuestError({
   description,
   title,
@@ -687,6 +729,7 @@ const guestCopy = {
     accessEndedTitle: 'Kein Zugriff mehr',
     accessEndedUnsaved: 'Ihre letzten Änderungen konnten nicht mehr gespeichert werden und sind verloren.',
     anonymous: 'Gast',
+    checkUnavailable: 'Der Link kann gerade nicht geprüft werden. Bitte versuchen Sie es später erneut.',
     comments: 'Kommentare',
     connected: 'Verbunden',
     connecting: 'Verbinden …',
@@ -697,6 +740,8 @@ const guestCopy = {
     expires: 'Gültig bis',
     guestAs: 'Gast:',
     invalid: 'Dieser Freigabelink ist ungültig, abgelaufen oder wurde widerrufen.',
+    linkUnavailable: 'Dieser Link ist derzeit nicht verfügbar. Er kann später wieder genutzt werden; versuchen Sie es später erneut.',
+    linkUnavailableTitle: 'Link derzeit nicht verfügbar',
     loading: 'Freigabe wird geprüft …',
     nameHint: 'Der Name erscheint bei Kommentaren und Änderungen.',
     open: 'Dokument öffnen',
@@ -724,6 +769,7 @@ const guestCopy = {
     accessEndedTitle: 'You no longer have access',
     accessEndedUnsaved: 'Your latest changes could not be saved and are lost.',
     anonymous: 'Guest',
+    checkUnavailable: 'The link cannot be checked right now. Please try again later.',
     comments: 'Comments',
     connected: 'Connected',
     connecting: 'Connecting…',
@@ -734,6 +780,8 @@ const guestCopy = {
     expires: 'Expires',
     guestAs: 'Guest:',
     invalid: 'This shared link is invalid, expired, or has been revoked.',
+    linkUnavailable: 'This link is currently unavailable. It may work again later; please try again later.',
+    linkUnavailableTitle: 'Link currently unavailable',
     loading: 'Checking shared link…',
     nameHint: 'This name appears next to comments and changes.',
     open: 'Open document',

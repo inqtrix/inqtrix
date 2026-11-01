@@ -40,7 +40,14 @@ import { StatusBadge } from '@/features/settings/parts'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { countLabel } from '@/i18n/plural'
 import type { AccountErasureProgress } from './accountErasure'
-import { canDisable, canSetRole, isErasing, isSelf, sortUsers } from './adminModel'
+import {
+  canDisable,
+  canSetRole,
+  enableWarning,
+  isErasing,
+  isSelf,
+  sortUsers,
+} from './adminModel'
 import { useAccountErasures } from './useAccountErasures'
 import type { useAdminUsers } from './useAdminUsers'
 import { copyTextToClipboard } from '@/lib/clipboard'
@@ -77,6 +84,7 @@ export function UsersPanel({
   const [createOpen, setCreateOpen] = useState(false)
   const [resetTarget, setResetTarget] = useState<AdminUser | null>(null)
   const [eraseTarget, setEraseTarget] = useState<AdminUser | null>(null)
+  const [enableTarget, setEnableTarget] = useState<AdminUser | null>(null)
   const [retryError, setRetryError] = useState<string | null>(null)
   const rows = useMemo(() => sortUsers(state.users), [state.users])
   // Rows in their list order, so the erasures followed first are the ones
@@ -216,6 +224,7 @@ export function UsersPanel({
                       value={user.instance_role}
                     >
                       <SelectTrigger
+                        aria-label={`${t.adminUsers.colRole}: ${user.display_name || user.email || user.id}`}
                         className="w-32 border-border bg-background shadow-none disabled:bg-surface/60 disabled:text-muted-foreground disabled:opacity-100"
                         density="table"
                         title={lockReason(roleGuardUser)}
@@ -239,15 +248,7 @@ export function UsersPanel({
                         progress={erasures.progress[user.id]}
                       />
                     ) : (
-                      <StatusBadge
-                        density="table"
-                        label={
-                          user.disabled
-                            ? t.adminUsers.statusDisabled
-                            : t.adminUsers.statusActive
-                        }
-                        tone={user.disabled ? 'destructive' : 'success'}
-                      />
+                      <UserStatus user={user} />
                     )}
                   </TableCell>
                   <TableCell>
@@ -295,9 +296,15 @@ export function UsersPanel({
                         disabled={
                           erasing || (!user.disabled && !disableGuard.allowed)
                         }
-                        onCheckedChange={(checked) =>
+                        onCheckedChange={(checked) => {
+                          // Enabling what the identity system deleted or
+                          // locked asks first: see enableWarningCopy.
+                          if (checked && enableWarning(user)) {
+                            setEnableTarget(user)
+                            return
+                          }
                           void setDisabled(user.id, !checked)
-                        }
+                        }}
                         density="table"
                         title={
                           user.disabled ? undefined : lockReason(disableGuard)
@@ -311,6 +318,17 @@ export function UsersPanel({
           )}
         </TableBody>
       </Table>
+
+      {enableTarget ? (
+        <EnableWarningDialog
+          onCancel={() => setEnableTarget(null)}
+          onConfirm={() => {
+            void setDisabled(enableTarget.id, false)
+            setEnableTarget(null)
+          }}
+          user={enableTarget}
+        />
+      ) : null}
 
       {eraseTarget ? (
         <EraseUserDialog
@@ -338,6 +356,114 @@ export function UsersPanel({
         />
       ) : null}
     </div>
+  )
+}
+
+/**
+ * The state of an account that is not being erased: active, disabled and by
+ * whom, or a tombstone of the identity system and whether its erasure still
+ * waits for somebody to start it.
+ */
+export function UserStatus({ user }: { user: AdminUser }) {
+  const { t } = useLocale()
+  if (user.deprovisioned) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <StatusBadge
+          density="table"
+          label={t.adminUsers.statusDeprovisioned}
+          tone="destructive"
+        />
+        {user.erasure_pending ? (
+          <>
+            <StatusBadge
+              density="table"
+              label={t.adminUsers.statusErasurePending}
+              tone="warning"
+            />
+            <span className="t-meta-sm text-muted-foreground">
+              {t.adminUsers.erasurePendingHint}
+            </span>
+          </>
+        ) : null}
+      </div>
+    )
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      <StatusBadge
+        density="table"
+        label={user.disabled ? t.adminUsers.statusDisabled : t.adminUsers.statusActive}
+        tone={user.disabled ? 'destructive' : 'success'}
+      />
+      {user.disabled && user.disabled_source === 'provisioning' ? (
+        <span className="t-meta-sm text-muted-foreground">
+          {t.adminUsers.disabledByProvisioning}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * What an administrator reads before enabling an account the identity
+ * system deleted or locked; a tombstone names the role it comes back with,
+ * since its identifier may belong to another person by now. `null` when
+ * enabling needs no warning.
+ */
+export function enableWarningCopy(
+  user: AdminUser,
+  texts: ReturnType<typeof useLocale>['t'],
+): { description: string; title: string } | null {
+  const warning = enableWarning(user)
+  if (warning === 'tombstone') {
+    const role = user.instance_role === 'admin' ? texts.adminUsers.roleAdmin : texts.adminUsers.roleUser
+    return {
+      description: texts.adminUsers.enableTombstoneDescription(role),
+      title: texts.adminUsers.enableTombstoneTitle,
+    }
+  }
+  if (warning === 'provisioningLock') {
+    return {
+      description: texts.adminUsers.enableProvisioningLockDescription,
+      title: texts.adminUsers.enableProvisioningLockTitle,
+    }
+  }
+  return null
+}
+
+function EnableWarningDialog({
+  onCancel,
+  onConfirm,
+  user,
+}: {
+  onCancel: () => void
+  onConfirm: () => void
+  user: AdminUser
+}) {
+  const { t } = useLocale()
+  const copy = enableWarningCopy(user, t)
+  if (copy === null) return null
+  return (
+    <Dialog
+      closeLabel={t.adminTokens.cancel}
+      description={user.email ?? undefined}
+      onClose={onCancel}
+      open
+      title={copy.title}
+    >
+      <div className="space-y-4">
+        <p className="t-body text-foreground">{copy.description}</p>
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <Button onClick={onCancel} size="sm" type="button" variant="ghost">
+            {t.adminTokens.cancel}
+          </Button>
+          <Button onClick={onConfirm} size="sm" type="button">
+            {t.adminUsers.enableConfirm}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
   )
 }
 
@@ -724,6 +850,7 @@ function EraseUserDialog({
 
   return (
     <Dialog
+      closeLabel={t.common.close}
       // Mid-erasure the dialog must not be dismissable: the request is
       // already in flight and closing would hide its outcome.
       dismissable={!busy}
@@ -819,8 +946,8 @@ export function ErasePreviewSummary({ preview }: { preview: AdminErasurePreview 
     <div className="rounded-md border border-warning/25 bg-warning/10 p-3 space-y-1.5">
       <p className="t-meta text-foreground">
         {t.adminUsers.eraseSummary
-          .replace('{deleted}', countLabel(preview.deleted_rows, t.adminUsers.eraseDeletedRowsOne, t.adminUsers.eraseDeletedRows))
-          .replace('{cleared}', countLabel(preview.cleared_rows, t.adminUsers.eraseClearedRowsOne, t.adminUsers.eraseClearedRows))}
+          .replace('{deleted}', () => countLabel(preview.deleted_rows, t.adminUsers.eraseDeletedRowsOne, t.adminUsers.eraseDeletedRows))
+          .replace('{cleared}', () => countLabel(preview.cleared_rows, t.adminUsers.eraseClearedRowsOne, t.adminUsers.eraseClearedRows))}
       </p>
       {preview.delegated_rows > 0 ? (
         <p className="t-meta text-foreground" data-testid="erase-delegated">
@@ -857,9 +984,11 @@ export function ErasePreviewSummary({ preview }: { preview: AdminErasurePreview 
 
 /**
  * The status of an account being erased: how far its erasure got, or why it
- * stopped with a way to try again. Without a readable operation (another
- * administrator started it) the row says only that the account is being
- * erased.
+ * stopped with a way to try again. An erasure that is readable neither
+ * through its operation nor through the account (it never got one, or
+ * another administrator holds it) shows that the account is being erased
+ * with the same way to try again: erasing the account again resumes it or
+ * names who holds it.
  */
 export function ErasureStatus({
   onRetry,
@@ -869,6 +998,11 @@ export function ErasureStatus({
   progress: AccountErasureProgress | undefined
 }) {
   const { t } = useLocale()
+  const retry = (
+    <Button className="h-7 px-2" onClick={onRetry} size="sm" variant="outline">
+      {t.adminUsers.erasureRetry}
+    </Button>
+  )
   if (progress?.state === 'failed') {
     return (
       <div className="flex flex-col items-start gap-1">
@@ -880,9 +1014,7 @@ export function ErasureStatus({
         {progress.error ? (
           <span className="t-meta-sm text-muted-foreground">{progress.error}</span>
         ) : null}
-        <Button className="h-7 px-2" onClick={onRetry} size="sm" variant="outline">
-          {t.adminUsers.erasureRetry}
-        </Button>
+        {retry}
       </div>
     )
   }
@@ -900,6 +1032,7 @@ export function ErasureStatus({
       {detail ? (
         <span className="t-meta-sm tabular-nums text-muted-foreground">{detail}</span>
       ) : null}
+      {progress?.state === 'unknown' ? retry : null}
     </div>
   )
 }

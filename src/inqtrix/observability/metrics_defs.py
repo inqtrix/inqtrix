@@ -25,7 +25,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # Provider calls regularly run for minutes (deep research answers) —
 # buckets must resolve the long tail past 120s.
@@ -218,8 +218,34 @@ class CallMetrics:
     stream_viewers: Any
     indexing_pauses: Any
     indexing_auto_resumes: Any
+    gateway_rejections: Any
+    jwks_refresh_failures: Any
 
     # ---- recording helpers (fail-safe, never fail-silent) ---------- #
+
+    def count_gateway_rejection(self, outcome: str) -> None:
+        """Count one rejected gateway sign-in by its outcome class.
+
+        Every rejection counts, while the log reports each outcome at most
+        once per interval; the label is the fixed outcome name, never a
+        value from the request.
+        """
+        try:
+            self.gateway_rejections.labels(outcome=outcome).inc()
+        except Exception:  # noqa: BLE001 -- metrics never break the call
+            _warn_once("gateway_rejections")
+
+    def count_jwks_refresh_failure(self, cache: str) -> None:
+        """Count one failed key set refresh; the known keys stay in use.
+
+        ``cache`` is the fixed name of the key cache (``oidc`` or
+        ``gateway``), so an alert can tell which sign-in runs on keys
+        that may be out of date.
+        """
+        try:
+            self.jwks_refresh_failures.labels(cache=cache).inc()
+        except Exception:  # noqa: BLE001 -- metrics never break the call
+            _warn_once("jwks_refresh_failures")
 
     def observe_stream_viewers(
         self, *, job_kind: str, concurrent: int
@@ -458,6 +484,20 @@ def build_call_metrics(registry: Any) -> CallMetrics:
         registry=registry,
     )
 
+    gateway_rejections = Counter(
+        "inqtrix_gateway_rejections",
+        "Gateway sign-ins rejected, by outcome class (no request values).",
+        labelnames=("outcome",),
+        registry=registry,
+    )
+
+    jwks_refresh_failures = Counter(
+        "inqtrix_jwks_refresh_failures",
+        "Failed refreshes of a signing key set; the known keys stay in use.",
+        labelnames=("cache",),
+        registry=registry,
+    )
+
     return CallMetrics(
         llm_requests=llm_requests,
         llm_duration=llm_duration,
@@ -472,6 +512,8 @@ def build_call_metrics(registry: Any) -> CallMetrics:
         stream_viewers=stream_viewers,
         indexing_pauses=indexing_pauses,
         indexing_auto_resumes=indexing_auto_resumes,
+        gateway_rejections=gateway_rejections,
+        jwks_refresh_failures=jwks_refresh_failures,
     )
 
 

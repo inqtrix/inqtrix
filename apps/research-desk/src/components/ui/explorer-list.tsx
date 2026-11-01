@@ -284,6 +284,13 @@ const EXPLORER_HISTORY_ACTION_OFFSETS = ['right-1', 'right-7', 'right-13']
  * runway so the truncated title never collides with revealed icons. */
 const EXPLORER_HISTORY_ACTION_BACKDROP_WIDTHS = ['w-12', 'w-[4.75rem]', 'w-24']
 
+/** The second press of a double click: `detail` counts the presses at one spot.
+ * A list closes up under the pointer once its first press removed the row, so
+ * that press would land on the next row. A keyboard activation reports 0. */
+export function isRepeatPress(event: { detail: number }): boolean {
+  return event.detail > 1
+}
+
 function ExplorerHistoryActionButton({
   action,
   offset,
@@ -312,6 +319,7 @@ function ExplorerHistoryActionButton({
           disabled={action.disabled}
           onClick={(event) => {
             event.stopPropagation()
+            if (action.destructive && isRepeatPress(event)) return
             event.currentTarget.focus({ preventScroll: true })
             // The selected action may hand interaction to a portalled modal.
             // Removing the content in the same render prevents its exit

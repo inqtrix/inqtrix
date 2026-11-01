@@ -125,7 +125,7 @@ permission, and active Node fencing epoch.
 ## Authentication and authorization
 
 Collaboration sessions for platform accounts require a real cookie-backed
-`local` or `oidc` login. `create_session` rejects any principal whose kind is
+`local`, `oidc` or `gateway` session. `create_session` rejects any principal whose kind is
 not `oidc_session` or that carries no user and session id, so anonymous
 principals, the legacy static API key, and personal access tokens cannot
 obtain a collaboration lease. An opt-in second path exists for visitors
@@ -143,7 +143,11 @@ was changed, or the document was deleted), the guest page removes the document
 and its comments, discards the guest's local copy of the document, and shows
 one notice with a way to open the link again; it does not reconnect. Opening
 the link again starts from the beginning: a link with a new password asks for
-it, and a revoked link reports that it is no longer valid. Changes that were
+it, and a revoked link reports that it is no longer valid. The link page
+calls a link no longer valid only when the service answers that it does not
+know it (404); a paused link (423) reads as currently unavailable, and an
+outage, a rate limit or a lost connection as a link that cannot be checked
+right now. Changes that were
 not yet saved are named as lost; no copy of the document is offered for
 download, because none may leave the service after a revocation. Hiding the
 page is not the authorization: the service refuses the guest regardless.
@@ -229,7 +233,7 @@ sequenceDiagram
     participant A as FastAPI
     participant P as PostgreSQL
     B->>N: Yjs binary update + opaque lease
-    N->>N: clone, schema/size/role/suggestion validation
+    N->>N: check document, schema/size/role/suggestion validation
     N->>A: persist update + actor + fencing epoch
     A->>P: lock document, recheck access, allocate sequence, commit
     P-->>A: original update sequence + current persisted sequence
@@ -239,8 +243,26 @@ sequenceDiagram
     N-->>B: broadcast committed update to peers
 ```
 
-Each room has a serial queue. The coordinator validates on a clone before
-persistence. FastAPI locks the document row, rejects stale generation or
+Each room has a serial queue. The coordinator validates on a private copy of
+the room before persistence, its check document, and the schema round trip runs
+over the whole document for every update. The check document stays in the room
+between updates, because a new copy per update costs more than the validation
+on long documents. It stands at the last validated state: an update takes it out
+of the room and hands it back only when it was accepted. Any other outcome
+destroys it, and so does a frame of structs the room already holds, which can
+leave traces without being an update. The next update then builds a new one from
+the room, validates that copy and requires it to read what was last validated,
+so a room that drifted is found out there.
+
+Before each update the room is compared with the validated state by its state
+vector and delete set, and every 32 updates, before every snapshot and for every
+server command by its bytes (in the form a fresh decoding gives both sides, as a
+long-lived document keeps runs of collected items apart that a fresh decoding
+joins). A difference rebuilds the room from the store. Encoding the state and
+reading its size also wait for these comparisons; the document limit stays exact,
+because an upper bound of the size decides when the size has to be read.
+
+FastAPI locks the document row, rejects stale generation or
 fencing epochs, and writes the update plus suggestion/decision metadata in one
 transaction. Only then does Node apply and broadcast the update. Repeating an
 update hash returns its original sequence instead of inserting a duplicate,

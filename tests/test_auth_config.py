@@ -45,6 +45,15 @@ def test_config_none_mode_is_open_and_no_store():
     assert body["provider_name"] is None
 
 
+def test_other_modes_report_no_gateway_assertion():
+    from inqtrix.auth.api_key import ApiKeyAuthProvider
+    from inqtrix.auth.principal import NoneAuthProvider
+
+    for provider in (NoneAuthProvider(), ApiKeyAuthProvider(api_key="k")):
+        body = _client(provider).get("/api/auth/config").json()
+        assert body["gateway_assertion"] is None
+
+
 def test_config_apikey_mode():
     from inqtrix.auth.api_key import ApiKeyAuthProvider
 
@@ -104,3 +113,47 @@ def test_config_local_mode_reports_owner_setup_and_self_service():
     assert body["registration"]["self_service"] is True
     # Empty credential store -> first-run owner setup is still required.
     assert body["registration"]["needs_owner"] is True
+
+
+def test_config_reports_whether_a_login_accepts_invitations():
+    from inqtrix.auth.api_key import ApiKeyAuthProvider
+    from inqtrix.auth.credentials import (
+        LocalAuthenticator,
+        MemoryCredentialStore,
+    )
+    from inqtrix.auth.local import LocalAuthProvider
+    from inqtrix.auth.oidc import OidcAuthProvider
+    from inqtrix.auth.principal import NoneAuthProvider
+    from inqtrix.auth.sessions import MemoryFlowStore, MemorySessionStore
+
+    def accepted(provider: object) -> bool:
+        body = _client(provider).get("/api/auth/config").json()
+        return body["registration"]["invitations_accepted_by_login"]
+
+    def oidc(**overrides: object) -> OidcAuthProvider:
+        return OidcAuthProvider(
+            client=None,
+            sessions=MemorySessionStore(),
+            flows=MemoryFlowStore(),
+            session_secret="s",
+            session_max_age_seconds=3600,
+            secure_cookies=False,
+            **overrides,
+        )
+
+    credentials = MemoryCredentialStore()
+    local = LocalAuthProvider(
+        authenticator=LocalAuthenticator(store=credentials),
+        credentials=credentials,
+        sessions=MemorySessionStore(),
+        flows=MemoryFlowStore(),
+        session_secret="s",
+        session_max_age_seconds=3600,
+        secure_cookies=False,
+    )
+
+    assert accepted(oidc()) is True
+    assert accepted(oidc(skip_email_verified=True)) is False
+    assert accepted(local) is True
+    assert accepted(ApiKeyAuthProvider(api_key="k")) is False
+    assert accepted(NoneAuthProvider()) is False

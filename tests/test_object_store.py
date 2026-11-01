@@ -117,8 +117,11 @@ def test_s3_missing_key_raises_loudly(s3_store):
     not MANAGED_S3_BUCKET,
     reason="INQTRIX_TEST_S3_MANAGED_BUCKET not set (managed S3 smoke)",
 )
-def test_managed_s3_default_chain_existing_bucket_roundtrip(tmp_path) -> None:
+def test_managed_s3_default_chain_existing_bucket_roundtrip(tmp_path, monkeypatch) -> None:
     """Optional smoke for workload/default credentials and existing buckets."""
+    from tests._hermetic import restore_machine_aws_setup
+
+    restore_machine_aws_setup(monkeypatch)
     endpoint = os.environ.get("INQTRIX_TEST_S3_MANAGED_ENDPOINT_URL", "").strip()
     store = S3ObjectStore(
         endpoint_url=endpoint or None,

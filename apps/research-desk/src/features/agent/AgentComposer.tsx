@@ -594,7 +594,7 @@ export function AgentComposer({
         icon: empty.scope ? categoryIcon(empty.scope) : Search,
         primary: t.agent.composer.mentionNoMatch.replace('{query}', () => empty.query),
         secondary: empty.scope
-          ? t.agent.composer.mentionNoMatchIn.replace('{category}', categoryLabel(empty.scope))
+          ? t.agent.composer.mentionNoMatchIn.replace('{category}', () => categoryLabel(empty.scope!))
           : t.agent.composer.mentionNoMatchAll,
         tone: empty.scope ? categoryTone(empty.scope) : 'brand',
       }
@@ -626,7 +626,7 @@ export function AgentComposer({
         icon: categoryIcon(empty.scope),
         primary: t.agent.composer.mentionKernelOnly.replace(
           '{engine}',
-          engineModeLabel('agent_kernel', t),
+          () => engineModeLabel('agent_kernel', t),
         ),
         secondary: categoryLabel(empty.scope),
         tone: categoryTone(empty.scope),
@@ -747,7 +747,7 @@ export function AgentComposer({
   })
   const engineRefusalText = t.agent.composer.kernelOnlyAttached.replace(
     '{engine}',
-    engineModeLabel('agent_kernel', t),
+    () => engineModeLabel('agent_kernel', t),
   )
   const unavailableKey = unavailablePills.join('|')
   /** What a capsule cannot know itself: whether the engine refuses its kind
@@ -1276,7 +1276,7 @@ export function AgentComposer({
             data-testid="agent-submit-error"
             role="alert"
           >
-            {t.agent.composer.submitRefused.replace('{message}', submitError)}
+            {t.agent.composer.submitRefused.replace('{message}', () => submitError)}
           </div>
         )}
         {engineRefusal && (
@@ -1458,7 +1458,7 @@ export function AgentComposer({
                     : isOn
                       ? t.agent.composer.sourceOnShort
                       : t.agent.composer.sourceOffShort
-                ).replace('{source}', t.agent.composer.sourceWebLong)
+                ).replace('{source}', () => t.agent.composer.sourceWebLong)
                 return (
                   <SourceToggle
                     hint={stateHint}
@@ -1502,13 +1502,13 @@ export function AgentComposer({
                   ? t.agent.composer.sourceReasonStoreUnreachable
                   : t.agent.composer.sourceReasonOperatorDisabled
                 const stateHint = state === 'unavailable'
-                  ? t.agent.composer.sourceKnowledgeUnavailable.replace('{reason}', reason)
+                  ? t.agent.composer.sourceKnowledgeUnavailable.replace('{reason}', () => reason)
                   : t.agent.composer.sourceKnowledgeOff
                 const revealLabel = (
                   state === 'unavailable'
                     ? t.agent.composer.sourceUnavailableShort
                     : t.agent.composer.sourceOffShort
-                ).replace('{source}', t.agent.composer.sourceKnowledgeLong)
+                ).replace('{source}', () => t.agent.composer.sourceKnowledgeLong)
                 return (
                   <SourceToggle
                     hint={stateHint}
@@ -1848,13 +1848,13 @@ function agentModelOverviewValue(
       : ''
     return t.agent.overview.modelOverrideValue.replace(
       '{name}',
-      `${name}${effort}`,
+      () => `${name}${effort}`,
     )
   }
   if (picker.selectedTier) {
     return t.agent.overview.modelOverrideValue.replace(
       '{name}',
-      picker.selectedTier,
+      () => picker.selectedTier!,
     )
   }
   return t.agent.overview.modelAutoValue

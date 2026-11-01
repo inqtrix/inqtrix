@@ -79,7 +79,6 @@ def test_snapshot_keeps_the_knowledge_boundary_and_defaults_older_payloads() -> 
 def test_invalid_execution_snapshot_logs_validation_code_without_payload(caplog) -> None:
     logger = logging.getLogger("inqtrix")
     previous_level = logger.level
-    logger.addHandler(caplog.handler)
     logger.setLevel(logging.WARNING)
     private_invalid_value = "PRIVATE_INVALID_EXECUTION_VALUE"
 
@@ -96,7 +95,6 @@ def test_invalid_execution_snapshot_logs_validation_code_without_payload(caplog)
                 last_message="failed",
             )
     finally:
-        logger.removeHandler(caplog.handler)
         logger.setLevel(previous_level)
 
     assert "error_code=ValidationError" in caplog.text

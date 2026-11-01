@@ -30,15 +30,17 @@ from inqtrix.model_cards import build_models_catalog
 from inqtrix.model_routing import describe_chat_model_options, describe_node_resolutions
 from inqtrix.providers import instrument_providers
 from inqtrix.providers.base import ProviderContext
+from inqtrix.server.app import warn_placeholder_secrets
 from inqtrix.server.routes import create_router, register_routes
 from inqtrix.auth.api_key import build_auth_provider
+from inqtrix.auth.principal import AuthProvider
 from inqtrix.server.security import make_cors_middleware_kwargs
 from inqtrix.server.runs import RunStore
 from inqtrix.services.health_service import provider_label, provider_ready
 from inqtrix.settings import AgentSettings, Settings
 from inqtrix.strategies import StrategyContext, create_default_strategies, resolve_claim_extract_model
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 _STACK_NAME_PATTERN = re.compile(r"^[a-z0-9_]+$")
@@ -213,6 +215,7 @@ def create_multi_stack_app(
     settings: Settings,
     stacks: dict[str, StackBundle],
     default_stack: str,
+    auth_provider: AuthProvider | None = None,
 ) -> FastAPI:
     """Build a FastAPI app that hosts multiple Baukasten stacks.
 
@@ -239,6 +242,9 @@ def create_multi_stack_app(
             match ``^[a-z0-9_]+$``.
         default_stack: The key used when a request omits the
             ``"stack"`` body field. Must exist in ``stacks``.
+        auth_provider: A provider the caller built, for instance a gateway
+            provider with its own resolver; without one it is built from
+            ``settings``, as in ``create_app``.
 
     Returns:
         A fully wired FastAPI instance with multi-stack routing in
@@ -275,18 +281,11 @@ def create_multi_stack_app(
             description=bundle.description,
         )
 
-    # Configure logging as a last-resort default — see create_app for
-    # the rationale behind ``force=False``. A multi-stack example that
-    # set up its own ``configure_logging(...)`` keeps its handlers; the
-    # silent default is only installed when nothing was configured yet.
-    from inqtrix.logging_config import configure_logging, read_logging_env
-    configure_logging(
-        enabled=settings.agent.testing_mode,
-        level="DEBUG" if settings.agent.testing_mode else "WARNING",
-        console=True,
-        force=False,
-        json_format=read_logging_env().json_format,
-    )
+    # Same instance pepper as create_app and the worker: subject
+    # pseudonyms must correlate across processes and restarts.
+    from inqtrix.auth.log_redaction import configure_stable_pseudonyms
+
+    configure_stable_pseudonyms(settings.auth.pseudonym_pepper)
 
     _semaphore: asyncio.Semaphore | None = None
 
@@ -298,7 +297,9 @@ def create_multi_stack_app(
 
     run_store = RunStore.from_settings(settings.server)
 
-    auth_provider = build_auth_provider(settings)
+    if auth_provider is None:
+        auth_provider = build_auth_provider(settings)
+    warn_placeholder_secrets(settings)
     cors_kwargs = make_cors_middleware_kwargs(settings.server)
     api_key_active = auth_provider.mode == "apikey"
     cors_active = cors_kwargs is not None
@@ -385,6 +386,11 @@ def create_multi_stack_app(
             )
             if collaboration_service is not None:
                 await collaboration_service.aclose()
+            # The auth provider releases the HTTP clients of its identity
+            # provider; they reopen on use if the lifespan starts again.
+            close_auth = getattr(container.auth_provider, "aclose", None)
+            if close_auth is not None:
+                await close_auth()
             # Same release as the single-stack factory: request code still
             # unwinding above may hand work to a lane, so this goes last.
             lanes = getattr(container, "execution_lanes", None)
@@ -443,10 +449,6 @@ def create_multi_stack_app(
     if cors_kwargs is not None:
         app.add_middleware(CORSMiddleware, **cors_kwargs)
 
-    # Added LAST so Starlette places it OUTERMOST (see create_app).
-    from inqtrix.server.request_context import RequestContextMiddleware
-
-    app.add_middleware(RequestContextMiddleware)
     app.include_router(app_router)
     app.state.container = container
 
@@ -459,5 +461,14 @@ def create_multi_stack_app(
     from inqtrix.server.database_gate import install_database_contract_gate
 
     install_database_contract_gate(app, container=container)
+
+    # Registered LAST so it runs outermost and the gate's 503 carries a
+    # request id (see create_app); same proxy-hops policy as create_app.
+    from inqtrix.server.request_context import RequestContextMiddleware
+
+    app.add_middleware(
+        RequestContextMiddleware,
+        trusted_proxy_hops=settings.auth.trusted_proxy_hops,
+    )
 
     return app

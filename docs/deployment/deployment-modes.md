@@ -12,13 +12,14 @@ Inqtrix has one codebase and several ways to run it. This page is the decision m
 |---|---|---|---|---|
 | **Local demo** | Trying it out, presentations | none | none (in-memory) | [First research run](../getting-started/first-research-run.md) (UI demo mode) |
 | **Env server** | A quick HTTP service, single user | none / apikey | none (in-memory) | [First research run](../getting-started/first-research-run.md) |
-| **Stack mode** | Self-hosted stack, one command | local / oidc / apikey / none | Postgres (+ optional profiles) | [Stack quickstart](../getting-started/stack-quickstart.md) |
+| **Stack mode** | Self-hosted stack, one command | local / oidc / gateway / apikey / none | Postgres (+ optional profiles) | [Stack quickstart](../getting-started/stack-quickstart.md) |
 | **Library** | Embedding Inqtrix in Python | n/a | your choice | [Library mode](library-mode.md) |
 | **Custom provider** | Your own LLM/search/storage backend | n/a | your choice | [Writing a custom provider](../extending/provider.md) |
 | **Enterprise OIDC** | SSO via your IdP | oidc | Postgres + IdP | [Auth modes](auth-modes.md) |
+| **Behind an API gateway** | An API gateway in front signs people in | gateway | Postgres + API gateway + IdP | [Auth modes](auth-modes.md#mode-gateway) |
 | **Scaled workers** | Many concurrent / restart-surviving runs | any | Postgres + Valkey + workers | [Platform components](../getting-started/platform-components.md) |
-| **Collaborative editor** | Authenticated teams editing shared documents | local / oidc | Postgres + one private Node service | [Deploy editor collaboration](editor-collaboration.md) |
-| **Kubernetes** | Clusters | local / oidc / apikey / none | Managed Postgres + Valkey + S3 for the default worker topology (+ optional Qdrant; bundled services for a demo); the single-pod variant needs Postgres only | [Kubernetes](kubernetes.md) |
+| **Collaborative editor** | Authenticated teams editing shared documents | local / oidc / gateway | Postgres + one private Node service | [Deploy editor collaboration](editor-collaboration.md) |
+| **Kubernetes** | Clusters | local / oidc / gateway / apikey / none | Managed Postgres + Valkey + S3 for the default worker topology (+ optional Qdrant; bundled services for a demo); the single-pod variant needs Postgres only | [Kubernetes](kubernetes.md) |
 
 ## How to choose
 

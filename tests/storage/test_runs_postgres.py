@@ -1077,6 +1077,120 @@ def test_agent_session_tombstone_blocks_children_until_runs_are_terminal(
         durable.close()
 
 
+def _deleted_shared_session(store, kind: str) -> tuple[str, str, dict]:
+    """A finished session whose run was shared, then deleted by its owner."""
+
+    session_id = f"{kind}-session-shared-run"
+    workspace_id = "ws-shared-run"
+    if kind == "knowledge":
+        seed_knowledge_session(
+            store,
+            session_id,
+            created_by_user_id=OWNER_1,
+            workspace_id=workspace_id,
+        )
+    run_id = submit_noop(
+        store,
+        question="Geteilte Frage",
+        session_id=session_id,
+        created_by_user_id=OWNER_1,
+        created_by_tenant_id="default",
+        workspace_id=workspace_id,
+        **({"mode": "knowledge"} if kind == "knowledge" else {"kind": "agent"}),
+    )["run_id"]
+    wait_for_status(
+        store,
+        run_id,
+        {"completed"},
+        workspace_id=workspace_id,
+        visible_to=UserContext(
+            principal=Principal(
+                user_id=OWNER_1,
+                kind="oidc_session",
+                tenant_id="default",
+                role="member",
+            )
+        ),
+    )
+    _insert_run_share(store, run_id)
+    arguments = {
+        "tenant_id": "default",
+        "requester_user_id": OWNER_1,
+        "workspace_id": workspace_id,
+        "run_ids": (run_id,),
+    }
+    getattr(store, f"prepare_{kind}_session_aggregate_deletion")(session_id, **arguments)
+    getattr(store, f"delete_{kind}_session_aggregate")(session_id, **arguments)
+    return session_id, run_id, arguments
+
+
+def _insert_run_share(store, run_id: str) -> None:
+    async def _insert() -> None:
+        admin_engine = build_engine(TEST_DATABASE_URL)
+        factory = build_session_factory(admin_engine)
+        try:
+            async with factory() as session:
+                async with session.begin():
+                    await session.execute(
+                        resource_shares.insert().values(
+                            tenant_id="default",
+                            recipient_user_id=OWNER_2,
+                            resource_type="run",
+                            resource_id=run_id,
+                            permission="view",
+                            granted_by_user_id=OWNER_1,
+                            accepted_at=func.now(),
+                        )
+                    )
+        finally:
+            await admin_engine.dispose()
+
+    store._call(_insert())
+
+
+@pytest.mark.parametrize("kind", ("agent", "knowledge"))
+def test_session_deletion_finishes_for_a_run_that_was_shared(store, kind) -> None:
+    """Deletion ends a share by revoking it, so the revoked row is no residue."""
+
+    session_id, run_id, arguments = _deleted_shared_session(store, kind)
+
+    residuals = getattr(store, f"{kind}_session_residuals")(session_id, **arguments)
+
+    assert not any(residuals.values()), residuals
+
+    async def _shares() -> tuple[int, int]:
+        admin_engine = build_engine(TEST_DATABASE_URL)
+        factory = build_session_factory(admin_engine)
+        try:
+            async with factory() as session:
+                rows = (
+                    await session.execute(
+                        select(resource_shares.c.revoked_at).where(
+                            resource_shares.c.resource_id == run_id
+                        )
+                    )
+                ).all()
+            return len(rows), sum(row.revoked_at is not None for row in rows)
+        finally:
+            await admin_engine.dispose()
+
+    assert store._call(_shares()) == (1, 1)
+
+
+@pytest.mark.parametrize("kind", ("agent", "knowledge"))
+def test_session_deletion_residuals_count_a_share_that_is_still_active(
+    store, kind
+) -> None:
+    """The check keeps catching a recipient who could still reach the run."""
+
+    session_id, run_id, arguments = _deleted_shared_session(store, kind)
+    _insert_run_share(store, run_id)
+
+    residuals = getattr(store, f"{kind}_session_residuals")(session_id, **arguments)
+
+    assert residuals["shares"] == 1
+
+
 def test_knowledge_session_deletion_removes_only_its_owned_run_aggregate(
     store,
 ) -> None:

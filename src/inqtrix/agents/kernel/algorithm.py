@@ -133,6 +133,7 @@ from inqtrix.agents.tier_policy import (
     review_required,
 )
 from inqtrix.agents.web_execution_policy import derive_web_research_policy
+from inqtrix.content.skills import model_may_activate
 from inqtrix.execution_authority import pinned_knowledge_collection_ids
 from inqtrix.i18n import detect_ui_language, t, t_count
 from inqtrix.model_routing import (
@@ -151,7 +152,7 @@ if TYPE_CHECKING:
     from inqtrix.providers.base import ChatTurn
     from inqtrix.settings import AgentPlatformSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 #: Tools whose approval card names the run's knowledge boundary.
 _KNOWLEDGE_SCOPED_TOOLS = frozenset(
@@ -207,6 +208,15 @@ _WAITING_STATUS_BY_ORIGIN = {
 
 PHASE_CHANGED_EVENT = "inqtrix.agent.phase.changed"
 TODO_UPDATED_EVENT = "inqtrix.agent.todo.updated"
+
+#: LangGraph checkpoint durability of every kernel segment. ``"sync"``
+#: stores a superstep's checkpoint before the next superstep starts: a
+#: tool step always finds the model step that requested it in the stored
+#: state, and the loop cannot run ahead of LangGraph's background
+#: checkpoint chain. Under the library default ``"async"`` that chain waits
+#: on later delta-channel writes inside its own bounded thread pool; with
+#: enough fast supersteps every worker waits and the run never ends.
+_CHECKPOINT_DURABILITY = "sync"
 
 #: Character cap of a tool-result preview. A result is a raw dump that can
 #: carry a whole document body (a read returns the text it read), so it
@@ -980,7 +990,10 @@ class KernelAgentAlgorithm:
                 interrupts = [
                     item
                     for update in graph.stream(
-                        graph_input, config=config, stream_mode="updates"
+                        graph_input,
+                        config=config,
+                        stream_mode="updates",
+                        durability=_CHECKPOINT_DURABILITY,
                     )
                     if isinstance(update, dict)
                     for item in _observe_update(deps, update, execution_snapshot)
@@ -1054,6 +1067,8 @@ class KernelAgentAlgorithm:
                     StructuredOutputValidationError,
                 )
 
+                from inqtrix.execution_failures import safe_failure_detail
+
                 # A role never parks at the user: its limits and an
                 # unrepairable result are outcomes the parent reads.
                 failed = (
@@ -1070,7 +1085,7 @@ class KernelAgentAlgorithm:
                     )
                     return self._role_result(
                         request, deps, profile, graph.get_state(state_config),
-                        status=failed, detail=str(exc),
+                        status=failed, detail=safe_failure_detail(exc),
                     )
             if isinstance(exc, GraphRecursionError):
                 stopped = graph.get_state(state_config)
@@ -1980,8 +1995,8 @@ class KernelAgentAlgorithm:
                 review.transport or "none",
                 review.reason,
             )
-            # The reason's own sentence; the raw detail went to the log with
-            # the activity's reader detail.
+            # The reason's own sentence; the activity's reader detail logged
+            # the reason, the transport and the length of the detail.
             _review_narration(
                 t(_review_words, f"kernel_review_{review.reason}"), final=True
             )
@@ -2318,6 +2333,13 @@ class KernelAgentAlgorithm:
         A skill loaded BEFORE a park narrowed the tool surface; the
         resume segment must not forget that (a forgotten allowlist
         would silently widen what the model may call).
+
+        Re-arming restores what the run already activated and adds no
+        activation rule of its own: ``model_may_activate`` decides where
+        the model first loads a skill. An editor who resumes a shared run
+        is the segment's actor, so a skill the run loaded re-arms as far
+        as that editor may still see it, even when it is shared in to
+        them.
         """
         from inqtrix.agents.kernel.tools import SKILL_LOADED_MARKER
 
@@ -2388,14 +2410,15 @@ class KernelAgentAlgorithm:
             deps.activate_skill(record)
 
     def _skills_context(self, deps: KernelDeps) -> str:
-        """Attached-skill instructions + the model-facing disclosure list.
+        """The model-facing disclosure list of activatable skills.
 
-        The disclosure block names ONLY the caller-visible
-        ``model_allowed`` autocomplete skills under a deterministic
-        character budget; overflow is a VISIBLE "... und N weitere"
-        line, never a silent cut. Shared-in skills never appear (their
-        grants are not resolvable here, and recipients are structurally
-        ``user_only`` anyway).
+        The disclosure block names ONLY the autocomplete skills the model
+        may activate on its own (``model_may_activate``: the caller's own
+        ``model_allowed`` skills, ownerless ones in the modes without
+        user accounts) under a deterministic character budget; overflow
+        is a VISIBLE "... and N more" line, never a silent cut. Shared-in
+        skills never appear and spend no budget: the recipient may attach
+        them, the recipient's model may not activate them.
         """
         parts: list[str] = []
         if deps.skill_service is not None and deps.principal is not None:
@@ -2417,8 +2440,8 @@ class KernelAgentAlgorithm:
             activated = {skill.id for skill in deps.skills}
             candidates = [
                 record
-                for record, _shared in visible
-                if record.invocation == "model_allowed"
+                for record, access in visible
+                if model_may_activate(record, access)
                 and record.include_in_autocomplete
                 and record.id not in activated
             ]

@@ -610,7 +610,7 @@ def test_worker_shape_container_builds_with_guest_links_enabled():
 def test_worker_guest_links_still_fail_closed_without_cookie_auth():
     import pytest
 
-    with pytest.raises(RuntimeError, match="cookie-based"):
+    with pytest.raises(RuntimeError, match="cookie-session auth mode"):
         build_container(
             providers=_providers(),
             strategies=None,
@@ -684,7 +684,7 @@ def test_collaboration_still_fails_closed_without_cookie_auth():
     # keeps the loud fail-closed startup error.
     import pytest
 
-    with pytest.raises(RuntimeError, match="cookie-based"):
+    with pytest.raises(RuntimeError, match="cookie-session auth mode"):
         build_container(
             providers=_providers(),
             strategies=None,

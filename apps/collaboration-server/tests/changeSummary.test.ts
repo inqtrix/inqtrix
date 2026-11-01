@@ -1,4 +1,5 @@
 import { getSchema } from '@tiptap/core'
+import { Node } from '@tiptap/pm/model'
 import { EditorState } from '@tiptap/pm/state'
 import {
   createEditorSchemaExtensions,
@@ -8,12 +9,42 @@ import {
   type SuggestionDescriptor,
 } from '@inqtrix/editor-schema'
 
+import { vi } from 'vitest'
+
 import { summarizeEditorChange } from '../src/changeSummary'
 
 const AUTHOR_ID = '11111111-1111-4111-8111-111111111111'
 const PATCH_ID = '22222222-2222-4222-8222-222222222222'
 
 describe('bounded collaboration change summaries', () => {
+  it('parses the document an update ends on once, as the next update starts from it', () => {
+    const parse = vi.spyOn(Node, 'fromJSON')
+    try {
+      const first = Object.freeze(parseEditorMarkdown('One'))
+      const second = Object.freeze(parseEditorMarkdown('One two'))
+      const third = Object.freeze(parseEditorMarkdown('One two three'))
+      const change = { changeKind: 'direct', decision: null, suggestions: [] } as const
+
+      summarizeEditorChange({ ...change, after: second, before: first })
+      summarizeEditorChange({ ...change, after: third, before: second })
+      expect(parse.mock.calls.filter(([, json]) => json === second)).toHaveLength(1)
+    } finally {
+      parse.mockRestore()
+    }
+  })
+
+  it('reads a document that is not frozen anew, because it can change', () => {
+    const before = parseEditorMarkdown('Hello')
+    const after = parseEditorMarkdown('Hello one')
+    const change = { changeKind: 'direct', decision: null, suggestions: [] } as const
+    expect(summarizeEditorChange({ ...change, after, before }).edits[0]?.after).toBe('one')
+
+    const edited = parseEditorMarkdown('Hello two')
+    after.content = edited.content ?? []
+
+    expect(summarizeEditorChange({ ...change, after, before }).edits[0]?.after).toBe('two')
+  })
+
   it('shows a proposed paragraph without the anchors of its block break', () => {
     const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
     const before = schema.nodeFromJSON(parseEditorMarkdown('First paragraph.\n\nSecond.'))

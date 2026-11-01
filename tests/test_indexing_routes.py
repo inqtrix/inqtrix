@@ -397,6 +397,13 @@ def test_async_document_route_repairs_legacy_asset_from_server_original() -> Non
         )
         assert original.status_code == 201
         file_record = original.json()
+        # The section landed in the owner's project namespace; the seeded
+        # asset belongs there too.
+        owner = asyncio.run(
+            client.auth_provider.users.find_by_user_id(
+                tenant_id="default", user_id=OWNER
+            )
+        )
         # Seed the exact persisted shape produced by releases before durable
         # upload operations. The public asset PUT deliberately refuses clients
         # that try to bind arbitrary server_file_id values.
@@ -421,7 +428,7 @@ def test_async_document_route_repairs_legacy_asset_from_server_original() -> Non
                 created_at=1.0,
                 updated_at=1.0,
                 created_by_user_id=OWNER,
-                workspace_id=None,
+                workspace_id=owner.default_workspace_id,
             )
         )
         assert legacy.upload_operation_id is None

@@ -34,7 +34,7 @@ from inqtrix.providers.base import (
 )
 from inqtrix.urls import normalize_url
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _CLAIM_TYPES: set[str] = {"fact", "actor_claim", "forecast"}
 _CLAIM_POLARITY: set[str] = {"affirmed", "negated"}

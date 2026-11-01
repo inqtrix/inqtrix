@@ -30,11 +30,11 @@ from fastapi import Request
 if TYPE_CHECKING:
     from inqtrix.settings import AuthSettings, ServerSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
-AuthMode = Literal["none", "apikey", "oidc", "local"]
+AuthMode = Literal["none", "apikey", "oidc", "local", "gateway"]
 
-COOKIE_SESSION_MODES: frozenset[str] = frozenset({"oidc", "local"})
+COOKIE_SESSION_MODES: frozenset[str] = frozenset({"oidc", "local", "gateway"})
 """Modes whose identity rides a server-side cookie session.
 
 Sharing, collaboration, quota and admin all gate on this set. It is
@@ -42,10 +42,10 @@ defined once here because a mode dropping out of one copy and not the
 others disables those surfaces silently, with no error anywhere.
 """
 
-# ``oidc_session`` is the cookie-session kind for both session-cookie
-# providers: OIDC and local email/password. The kind names the transport,
-# not the identity provider -- local carries a synthetic ``"local"``
-# issuer, keeping every scoped surface working without a new kind.
+# ``oidc_session`` is the cookie-session kind for every session-cookie
+# provider: OIDC, local email/password and the gateway. The kind names the
+# transport, not the identity provider -- local carries a synthetic
+# ``"local"`` issuer, keeping every scoped surface working without a new kind.
 PrincipalKind = Literal["anonymous", "static", "oidc_session", "pat"]
 
 
@@ -162,6 +162,13 @@ class AuthProvider(ABC):
         """
         return make_principal_dependency(self)
 
+    async def aclose(self) -> None:
+        """Release what the provider holds open; nothing by default.
+
+        The app lifespan calls this on shutdown. A lifespan may start
+        again, so whatever this closes must reopen on its next use.
+        """
+
 
 class NoneAuthProvider(AuthProvider):
     """Open-server provider: every request is the anonymous principal.
@@ -229,7 +236,38 @@ async def resolve_live_principal(
         fastapi.HTTPException: The credential is no longer valid.
     """
     live_resolver = getattr(dependency, "__inqtrix_live_resolver__", dependency)
-    resolved = live_resolver(request)
+    return await _resolved_principal(live_resolver, request)
+
+
+async def resolve_request_principal(
+    dependency: Callable[..., object],
+    request: Request,
+) -> Principal:
+    """Run the full credential check for a request outside dependency injection.
+
+    A route that calls the principal dependency itself holds a fresh request,
+    so it needs the same check as the injected dependency. A provider whose
+    live resolver checks less for streams (the gateway reads no assertion
+    from frozen headers) names its full check ``__inqtrix_request_resolver__``;
+    otherwise the live resolver, or the dependency itself, is that check.
+
+    Raises:
+        TypeError: The configured dependency returned an invalid object.
+        fastapi.HTTPException: The credential is not valid for this request.
+    """
+    resolver = getattr(
+        dependency,
+        "__inqtrix_request_resolver__",
+        getattr(dependency, "__inqtrix_live_resolver__", dependency),
+    )
+    return await _resolved_principal(resolver, request)
+
+
+async def _resolved_principal(
+    resolver: Callable[..., object],
+    request: Request,
+) -> Principal:
+    resolved = resolver(request)
     if inspect.isawaitable(resolved):
         resolved = await resolved
     if not isinstance(resolved, Principal):
@@ -240,6 +278,8 @@ async def resolve_live_principal(
 def resolve_auth_mode(
     auth: "AuthSettings",
     server: "ServerSettings",
+    *,
+    storage_backend: str | None = None,
 ) -> AuthMode:
     """Decide the active auth mode with explicit-wins semantics.
 
@@ -249,7 +289,9 @@ def resolve_auth_mode(
        without its required connection settings (issuer, client id,
        client secret, session secret, PAT pepper) is a contradiction
        and rejected loudly; ``"local"`` likewise requires the
-       session-cookie secrets; ``"apikey"`` without a configured
+       session-cookie secrets; ``"gateway"`` requires the secrets of
+       ``"oidc"``, the postgres storage backend and, without SCIM, at
+       least one bound on personal access tokens; ``"apikey"`` without a configured
        ``INQTRIX_SERVER_API_KEY`` likewise; ``"none"`` with a
        configured key disables the gate deliberately and logs a
        WARNING so the override is visible.
@@ -259,14 +301,20 @@ def resolve_auth_mode(
        value, so settings objects survive ``model_dump`` /
        ``model_validate`` round-trips without changing behaviour.
 
+    SCIM provisioning (``INQTRIX_SCIM_ENABLED``) is valid only in
+    ``"gateway"`` mode, whichever way the mode was reached.
+
     Args:
         auth: The resolved :class:`~inqtrix.settings.AuthSettings`.
         server: The resolved :class:`~inqtrix.settings.ServerSettings`
             (only ``api_key`` is inspected).
+        storage_backend: ``INQTRIX_STORAGE_BACKEND`` of the process. The
+            gateway mode starts only with ``"postgres"``; ``None`` (not
+            supplied) never satisfies it.
 
     Returns:
-        The active mode: ``"none"``, ``"apikey"``, ``"oidc"``, or
-        ``"local"``.
+        The active mode: ``"none"``, ``"apikey"``, ``"oidc"``, ``"local"``
+        or ``"gateway"``.
 
     Raises:
         RuntimeError: On the contradictory explicit configurations
@@ -329,10 +377,77 @@ def resolve_auth_mode(
                 "INQTRIX_AUTH_MODE=apikey requires "
                 "INQTRIX_SERVER_API_KEY to be set."
             )
+        if explicit == "gateway":
+            check_gateway_deployment(auth, storage_backend)
         if explicit == "none" and api_key_set:
             log.warning(
                 "INQTRIX_AUTH_MODE=none disables the API key gate even though "
                 "INQTRIX_SERVER_API_KEY is set."
             )
-        return explicit
-    return "apikey" if api_key_set else "none"
+        mode: AuthMode = explicit
+    else:
+        mode = "apikey" if api_key_set else "none"
+    if auth.scim_enabled and mode != "gateway":
+        raise RuntimeError(
+            "INQTRIX_SCIM_ENABLED=true requires INQTRIX_AUTH_MODE=gateway; "
+            "SCIM provisions the users of a gateway sign-in only."
+        )
+    if auth.gateway_resolver.strip() and mode != "gateway":
+        raise RuntimeError(
+            "INQTRIX_GATEWAY_RESOLVER requires INQTRIX_AUTH_MODE=gateway; a "
+            "resolver of its own signs in gateway users only."
+        )
+    return mode
+
+
+_SCIM_TOKEN_MIN_LENGTH = 32
+
+
+def check_gateway_deployment(
+    auth: "AuthSettings", storage_backend: str | None
+) -> None:
+    """Start checks every process of a gateway deployment runs.
+
+    The identity source itself (assertion kind, issuer, headers) is checked
+    where it is built, in :func:`inqtrix.auth.gateway.build_gateway_provider`;
+    a process without an HTTP provider never builds one. Every problem is
+    named at once; secret values never appear in the message.
+    """
+    problems: list[str] = []
+    missing = [
+        name
+        for name, value in (
+            ("INQTRIX_SESSION_SECRET", auth.session_secret),
+            ("INQTRIX_PAT_PEPPER", auth.pat_pepper),
+            ("INQTRIX_PSEUDONYM_PEPPER", auth.pseudonym_pepper),
+        )
+        if not value.strip()
+    ]
+    if missing:
+        problems.append("configured values for " + ", ".join(missing))
+    if storage_backend != "postgres":
+        # Tombstones, the inactivity bound and SCIM need durable state.
+        problems.append("INQTRIX_STORAGE_BACKEND=postgres")
+    if auth.scim_enabled:
+        if len(auth.scim_token.strip()) < _SCIM_TOKEN_MIN_LENGTH:
+            problems.append(
+                f"an INQTRIX_SCIM_TOKEN of at least {_SCIM_TOKEN_MIN_LENGTH} "
+                "characters"
+            )
+        if auth.registration == "invite":
+            problems.append(
+                "INQTRIX_REGISTRATION=open, because with SCIM enabled SCIM "
+                "is the only way an account is created "
+                "(INQTRIX_REGISTRATION=invite is set)"
+            )
+    elif auth.gateway_pat_max_ttl_days == 0 and auth.gateway_pat_inactive_days == 0:
+        # Without SCIM nothing tells Inqtrix that a person left; a personal
+        # access token would then stay valid forever.
+        problems.append(
+            "INQTRIX_GATEWAY_PAT_MAX_TTL_DAYS or "
+            "INQTRIX_GATEWAY_PAT_INACTIVE_DAYS above 0 while SCIM is off"
+        )
+    if problems:
+        raise RuntimeError(
+            "INQTRIX_AUTH_MODE=gateway requires " + "; ".join(problems) + "."
+        )

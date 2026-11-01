@@ -45,9 +45,9 @@ export function knowledgeStepLine(
       const template = facts.autoSelected ? t.stepProfileAuto : t.stepProfile
       return {
         id: step.id,
-        primary: template.replace('{profile}', profileDisplayName(facts.profile ?? '', t)),
+        primary: template.replace('{profile}', () => profileDisplayName(facts.profile ?? '', t)),
         secondary: facts.degradedStages && facts.degradedStages.length > 0
-          ? t.stepDegraded.replace('{stages}', facts.degradedStages.join(', '))
+          ? t.stepDegraded.replace('{stages}', () => facts.degradedStages!.join(', '))
           : undefined,
         status: step.status,
       }
@@ -90,7 +90,7 @@ export function knowledgeStepLine(
           : undefined,
         primary: scope.replace(
           '{hits}',
-          countLabel(facts.candidateCount ?? 0, t.hitCountOne, t.hitCount),
+          () => countLabel(facts.candidateCount ?? 0, t.hitCountOne, t.hitCount),
         ),
         // Make both retrieval widths visible — top_k (per-query) and final_k
         // (surfaced evidence) — flagging an explicit final_k override.

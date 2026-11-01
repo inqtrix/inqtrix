@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     )
     from inqtrix.services.quota_service import QuotaService
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _CANCEL_POLL_SECONDS = 2.0
 _RECONCILE_SECONDS = 60.0
@@ -214,8 +214,10 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
 
     def request_stop(self) -> None:
         """Stop claiming new jobs; in-flight jobs keep executing."""
-        log.info(
-            "Worker %s: shutdown requested; no new claims.",
+        # DEBUG: every loop of the process gets this call at once; the
+        # signal handler already wrote the one INFO line.
+        log.debug(
+            "Worker %s: loop stops claiming new jobs.",
             self._store.worker_id,
         )
         self._stop.set()
@@ -291,9 +293,10 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 self._latch_claim_guard(str(exc))
                 log.error(
                     "Worker %s: schema head changed under this process; no further "
-                    "claims. %s",
+                    "claims (installed=%s, expected=%s).",
                     self._store.worker_id,
-                    exc,
+                    exc.installed,
+                    exc.expected,
                 )
                 raise WorkerClaimGuardError(str(exc)) from exc
             except Exception:  # noqa: BLE001 — survive transient outages
@@ -706,10 +709,12 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             self._latch_claim_guard(str(exc))
             log.error(
                 "Worker %s: schema head changed under this process; no further claims, "
-                "and the follow-up dispatch for job %s remains unacknowledged. %s",
+                "and the follow-up dispatch for job %s remains unacknowledged "
+                "(installed=%s, expected=%s).",
                 self._store.worker_id,
                 entity_id,
-                exc,
+                exc.installed,
+                exc.expected,
             )
         except BaseException:
             with self._lock:

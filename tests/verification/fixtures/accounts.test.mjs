@@ -4,6 +4,8 @@ import test from 'node:test'
 import {
   ensureTemporaryUsers,
   eraseTemporaryUser,
+  requireAccountLocale,
+  setAccountLocale,
   temporaryUserBelongsToRun,
   temporaryUserDescriptors,
 } from './accounts.mjs'
@@ -144,6 +146,84 @@ test('an account that is already gone completes its cleanup at once', async () =
 
   assert.equal(world.requests.length, 1)
   assert.deepEqual(world.completed, [['cleanup-1', 1]])
+})
+
+function preferenceWorld(saved, { serverLocale } = {}) {
+  const requests = []
+  let row = saved
+  const actor = {
+    context: {
+      request: {
+        async fetch(path, options) {
+          requests.push({ data: options.data, method: options.method, path })
+          if (options.method === 'PUT') {
+            row = { ...options.data, ...(serverLocale ? { locale: serverLocale } : {}) }
+            return jsonResponse(200, row)
+          }
+          return row
+            ? jsonResponse(200, row)
+            : jsonResponse(404, { error: { type: 'not_found' } })
+        },
+      },
+    },
+    csrf: 'csrf',
+    label: 'Fixture account',
+    user: { id: 'user-1' },
+    workspaceId: 'workspace',
+  }
+  return { actor, requests }
+}
+
+test('an account the run created gets the run language saved and read back', async () => {
+  const world = preferenceWorld(null)
+
+  await setAccountLocale(world.actor, 'de', { now: () => 1_700_000_000_500 })
+
+  assert.deepEqual(world.requests, [
+    {
+      data: { locale: 'de', updated_at: 1_700_000_000 },
+      method: 'PUT',
+      path: '/v1/account/preferences',
+    },
+    { data: undefined, method: 'GET', path: '/v1/account/preferences' },
+  ])
+
+  const ignored = preferenceWorld(null, { serverLocale: 'en' })
+  await assert.rejects(setAccountLocale(ignored.actor, 'de'), (error) => {
+    assert.equal(
+      error.message,
+      "Fixture account kept the interface language 'en' after saving 'de'.",
+    )
+    return true
+  })
+})
+
+test('a borrowed account is only read and must already show the run language', async () => {
+  const matching = preferenceWorld({ locale: 'de', theme: 'dark' })
+  await requireAccountLocale(matching.actor, 'de')
+  assert.deepEqual(matching.requests.map(({ method }) => method), ['GET'])
+
+  const other = preferenceWorld({ locale: 'en', theme: 'dark' })
+  await assert.rejects(requireAccountLocale(other.actor, 'de'), (error) => {
+    assert.equal(
+      error.message,
+      "Fixture account has the interface language 'en'; the run expects 'de'. Set it in that account's settings.",
+    )
+    return true
+  })
+
+  const unsaved = preferenceWorld(null)
+  await assert.rejects(requireAccountLocale(unsaved.actor, 'de'), (error) => {
+    assert.equal(
+      error.message,
+      "Fixture account has no saved interface language; the run expects 'de'. Set it in that account's settings.",
+    )
+    return true
+  })
+  assert.deepEqual(
+    [...other.requests, ...unsaved.requests].map(({ method }) => method),
+    ['GET', 'GET'],
+  )
 })
 
 function jsonResponse(status, body) {

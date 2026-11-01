@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # How long the product gate keeps its state through CONSECUTIVE
 # "unavailable" probe readings before failing closed. Well above one

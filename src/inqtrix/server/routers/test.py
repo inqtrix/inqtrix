@@ -25,7 +25,7 @@ from inqtrix.urls import sanitize_error
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 def build_router(container: "AppContainer") -> APIRouter:

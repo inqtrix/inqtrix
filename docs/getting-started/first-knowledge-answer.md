@@ -124,7 +124,7 @@ curl -N http://localhost:5100/v1/runs/run_.../events
 | `inqtrix.knowledge.retrieval.completed` | Retrieval pass finished, candidate counts. |
 | `inqtrix.knowledge.gate.evaluated` | Sufficiency-gate verdict per round. |
 | `inqtrix.knowledge.answer.retry` | The single visible answer regeneration after unverified quotes (`attempt`, `quotes_total`, `quotes_unverified`); at most one per run, never silent, never carrying quote text. |
-| `inqtrix.knowledge.grounding.checked` | Typed quote-verification verdict, bounded repair flag, and verified/total counts; it never carries quote or source text. |
+| `inqtrix.knowledge.grounding.checked` | Typed quote-verification verdict, bounded repair flag, and verified/total counts; it never carries quote or source text. Not emitted when no excerpt answers the question. |
 | `inqtrix.run.completed` / `failed` / `cancelled` | Terminal; `completed` carries the `result_url`. |
 
 Then fetch the result:
@@ -133,7 +133,7 @@ Then fetch the result:
 curl http://localhost:5100/v1/runs/run_.../result
 ```
 
-For a completed run, the payload carries `answer` (Markdown with `[K1]`-style citation labels), `usage`, and the flat top-level keys `references` (label, title, URL per cited chunk), `knowledge_gate`, `knowledge_grounding`, and `knowledge_profile`. Reference URLs use the internal `inqtrix://documents/<id>` scheme by default — the export pipeline normalizes URLs and strips fragments, so the chunk index does not survive in the URL (it is still carried by the separate `chunk_index` field). Set `INQTRIX_PUBLIC_BASE_URL` to turn them into clickable `<base>/v1/sources/<id>?chunk=<n>` links, where the chunk index travels as a query parameter and is preserved. If grounding cannot parse the required sections or verify every labelled quote, the run is `failed` with a stable grounding error type and safe message; a completion the provider cut short or left empty fails as `knowledge_answer_incomplete` instead. No result endpoint publishes the rejected completion. On the in-memory backend, terminal runs stay fetchable only for `RUN_COMPLETED_TTL_SECONDS` (default 300); the Postgres backend persists them.
+For a completed run, the payload carries `answer` (Markdown with `[K1]`-style citation labels), `usage`, and the flat top-level keys `references` (label, title, URL per cited chunk), `knowledge_gate`, `knowledge_grounding`, and `knowledge_profile`. Reference URLs use the internal `inqtrix://documents/<id>` scheme by default — the export pipeline normalizes URLs and strips fragments, so the chunk index does not survive in the URL (it is still carried by the separate `chunk_index` field). Set `INQTRIX_PUBLIC_BASE_URL` to turn them into clickable `<base>/v1/sources/<id>?chunk=<n>` links, where the chunk index travels as a query parameter and is preserved. When the excerpts do not answer the question at all, the run completes with the honest no-evidence answer and no references. If grounding cannot parse the required sections or verify every labelled quote, the run is `failed` with a stable grounding error type and safe message; a completion the provider cut short or left empty fails as `knowledge_answer_incomplete` instead. No result endpoint publishes the rejected completion. On the in-memory backend, terminal runs stay fetchable only for `RUN_COMPLETED_TTL_SECONDS` (default 300); the Postgres backend persists them.
 
 ## The same flow in the UI
 

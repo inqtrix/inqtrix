@@ -65,6 +65,7 @@ from inqtrix.storage.editor_guest_link_orm import (
     editor_document_guest_identities,
     editor_document_share_links,
 )
+from inqtrix.storage.editor_guest_link_postgres import document_owner_active
 from inqtrix.storage.editor_orm import editor_comments, editor_documents
 from inqtrix.storage.editor_patch_orm import (
     editor_patch_created_at_ms,
@@ -85,7 +86,7 @@ from inqtrix.storage.user_events_postgres import append_user_invalidation
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 SUGGESTION_REMOVED_BY_EDIT_ACTION = "editor.collaboration_suggestion.removed_by_edit"
@@ -693,6 +694,7 @@ async def _active_guest_access(
                 editor_document_share_links.c.generation == generation,
                 editor_document_share_links.c.revoked_at.is_(None),
                 editor_document_share_links.c.expires_at > now,
+                document_owner_active(tenant_id=tenant_id, document_id=document_id),
             )
         )
     ).one_or_none()

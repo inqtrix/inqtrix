@@ -113,7 +113,7 @@ Precedence, highest wins:
 | Field | Default | Purpose |
 |-------|---------|---------|
 | `testing_mode` | `False` | Exposes `/v1/test/run` in server mode and enables top-level `iteration_logs` export in test/parity payloads. |
-| `observability_profile` | `"summary"` | Detail level of the protected run audit: `summary` keeps the compact INFO/DEBUG behaviour, `debug` is reserved for future mid-level diagnostics, `forensic` emits provider-neutral source, citation, claim, stop, and answer lineage into the protected audit. Ordinary logs receive only its content-minimized projection. |
+| `observability_profile` | `"summary"` | Detail level of the protected run audit: `summary` keeps the compact INFO/DEBUG behaviour, `debug` is reserved for future mid-level diagnostics, `forensic` emits provider-neutral source, citation, claim, stop, and answer lineage into the protected audit. The trace receives only its content-minimized projection; logs never carry it. |
 
 ## Common setups
 

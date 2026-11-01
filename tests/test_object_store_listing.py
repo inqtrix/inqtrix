@@ -83,3 +83,62 @@ def test_s3_listing_paginates_and_wraps_backend_failures() -> None:
 
     with pytest.raises(ObjectStoreError):
         list(store.list_keys("tenants/"))
+
+
+def _s3_store_with_listing_error(code: str, status: int, **kwargs):
+    from botocore.exceptions import ClientError
+
+    from inqtrix.storage.object_store import S3ObjectStore
+
+    class _Paginator:
+        def paginate(self, **_kwargs):
+            raise ClientError(
+                {
+                    "Error": {"Code": code, "Message": "from the backend"},
+                    "ResponseMetadata": {"HTTPStatusCode": status},
+                },
+                "ListObjectsV2",
+            )
+
+    class _Client:
+        def get_paginator(self, _name: str):
+            return _Paginator()
+
+    store = S3ObjectStore(bucket="inqtrix-files", **kwargs)
+    store._s3 = lambda: _Client()  # type: ignore[method-assign]
+    return store
+
+
+def test_s3_listing_of_a_bucket_the_first_upload_creates_is_empty() -> None:
+    """Before the first upload there is nothing to list, and that is no failure."""
+    store = _s3_store_with_listing_error(
+        "NoSuchBucket", 404, bucket_provisioning="create_if_missing"
+    )
+
+    assert list(store.list_keys("tenants/")) == []
+
+
+def test_s3_listing_of_a_missing_bucket_that_must_exist_stays_loud() -> None:
+    import pytest
+
+    from inqtrix.storage.object_store import ObjectStoreError
+
+    store = _s3_store_with_listing_error(
+        "NoSuchBucket", 404, bucket_provisioning="existing"
+    )
+
+    with pytest.raises(ObjectStoreError):
+        list(store.list_keys("tenants/"))
+
+
+def test_s3_listing_without_access_stays_loud_when_it_may_create_the_bucket() -> None:
+    import pytest
+
+    from inqtrix.storage.object_store import ObjectStoreError
+
+    store = _s3_store_with_listing_error(
+        "AccessDenied", 403, bucket_provisioning="create_if_missing"
+    )
+
+    with pytest.raises(ObjectStoreError):
+        list(store.list_keys("tenants/"))

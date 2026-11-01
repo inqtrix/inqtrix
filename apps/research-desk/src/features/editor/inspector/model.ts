@@ -94,6 +94,8 @@ export const GERMAN_COLLABORATION_NOTICES: Readonly<Record<CollaborationNoticeCo
     'Die Verbindung zum Kollaborationsdienst ist unterbrochen. Inqtrix verbindet sich automatisch erneut.',
   limits_incompatible:
     'Die Grenzwerte des Kollaborationsdienstes sind mit dieser App-Version nicht kompatibel.',
+  link_unavailable:
+    'Dieser Freigabelink ist derzeit nicht verfügbar; er kann später wieder gelten.',
   origin_rejected:
     'Der Kollaborationsdienst hat die Adresse dieser Seite abgelehnt. Die Adresse im Browser stimmt nicht mit der konfigurierten öffentlichen Adresse des Servers überein.',
   protocol_incompatible:

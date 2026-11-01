@@ -27,7 +27,7 @@ from inqtrix.server.text_improvements import (
     text_looks_sensitive,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 EditorInstructLocale = Literal["de", "en"]
 EditorInstructPosition = Literal["replace", "before", "after", "append"]

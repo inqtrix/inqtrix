@@ -224,6 +224,10 @@ OTLP headers stay in a Secret because they carry the project keys.
 - name: INQTRIX_LOG_FORMAT
   value: {{ $observability.logFormat | quote }}
 {{- end }}
+{{- if $observability.logLevel }}
+- name: INQTRIX_LOG_LEVEL
+  value: {{ $observability.logLevel | quote }}
+{{- end }}
 {{- with $observability.retention }}
 {{- /* Same nil-vs-"" guard as the trace knobs: 0 (keep forever) renders,
        an unset value must not. */}}
@@ -427,7 +431,7 @@ replicaCount, or the autoscaler ceiling when autoscaling is enabled.
 {{/*
 Writable volumes/mounts for the api and worker pods under a read-only root
 filesystem: scratch /tmp, the XDG cache,
-/app/logs (so INQTRIX_LOG_ENABLED=true does not crash on the read-only root --
+/app/logs (so INQTRIX_LOG_TARGET=file or both does not crash on the read-only root --
 note these logs are ephemeral; container stdout is the durable sink), and the
 local object store. The object store mounts at the SAME path the app writes to
 (config.INQTRIX_OBJECT_STORE_PATH) so the two can never drift. Only the local

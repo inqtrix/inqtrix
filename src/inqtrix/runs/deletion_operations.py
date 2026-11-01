@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from inqtrix.pagination import keyset_page
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class DeletionOperationNotFound(KeyError):

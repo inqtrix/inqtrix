@@ -24,7 +24,7 @@ from typing import Any
 from inqtrix.observability.context import bind_purpose
 from inqtrix.prompts import build_knowledge_gate_prompt
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 GATE_MARKER_PARSED = "_knowledge_gate_parsed"
 GATE_MARKER_FALLBACK = "_knowledge_gate_fallback"

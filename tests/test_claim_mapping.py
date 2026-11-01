@@ -8,7 +8,6 @@ any per-provider branch, mirroring the module's design.
 
 from __future__ import annotations
 
-import logging
 
 import pytest
 
@@ -93,15 +92,10 @@ def test_wildcard_allowlist_admits_despite_distributed_groups():
 
 
 def test_extract_roles_distributed_degrades_to_empty_and_warns(caplog):
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    try:
-        cfg = ClaimMappingConfig()
-        claims = {"_claim_names": {"roles": "src1"}}
-        assert extract_roles(claims, cfg) == ()
-        assert any("distributed claim" in r.message for r in caplog.records)
-    finally:
-        logger.removeHandler(caplog.handler)
+    cfg = ClaimMappingConfig()
+    claims = {"_claim_names": {"roles": "src1"}}
+    assert extract_roles(claims, cfg) == ()
+    assert any("distributed claim" in r.message for r in caplog.records)
 
 
 def test_derive_is_admin_matches_roles_or_groups():

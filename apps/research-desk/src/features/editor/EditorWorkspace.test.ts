@@ -2,17 +2,134 @@ import { readFileSync } from 'node:fs'
 
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   advanceEditorIdentityPublication,
+  collaborationSourceViewMarkdown,
   editorDocumentShareDisabled,
+  editorDocumentShowsUnsavedMarker,
   editorDocumentStructuralLoadPhase,
   EditorDocumentRecoveryNotice,
   EditorRecoveryBar,
   editorRecoveryMarkdown,
+  recoverySnapshotMarkdown,
+  trackRecoveryTextOfEditor,
 } from './EditorWorkspace'
+import type { Editor } from '@tiptap/react'
+
 import type { EditorDocumentRecord } from '@/features/project/types'
+
+describe('recovery copy of unconfirmed changes', () => {
+  const liveEditor = (text: string) => {
+    const destroy: Array<() => void> = []
+    const editor = {
+      getJSON: vi.fn(() => ({
+        content: [{ content: [{ text, type: 'text' }], type: 'paragraph' }],
+        type: 'doc',
+      })),
+      isDestroyed: false,
+      markdown: { serialize: (json: { content: Array<{ content: Array<{ text: string }> }> }) => json.content[0]!.content[0]!.text },
+      on: (_event: 'destroy', listener: () => void) => { destroy.push(listener) },
+      schema: { marks: {}, nodes: {} },
+    }
+    return { destroy, editor: editor as never as Editor, getJSON: editor.getJSON }
+  }
+
+  it('writes nothing out while the editor lives and nobody asks', () => {
+    const { editor, getJSON } = liveEditor('Typed')
+    const snapshots = new Map([['doc', { documentMarkdown: 'Stored', editor }]])
+
+    trackRecoveryTextOfEditor(snapshots, editor)
+
+    expect(getJSON).not.toHaveBeenCalled()
+  })
+
+  it('reads the live text when it is asked for', () => {
+    const { editor } = liveEditor('Typed')
+    expect(recoverySnapshotMarkdown({ documentMarkdown: 'Stored', editor })).toBe('Typed')
+  })
+
+  it('keeps the text from the moment the editor goes away', () => {
+    const { destroy, editor } = liveEditor('Typed')
+    const snapshot: { documentMarkdown: string; editor: Editor | null } = { documentMarkdown: 'Stored', editor }
+    const snapshots = new Map([['doc', snapshot]])
+    trackRecoveryTextOfEditor(snapshots, editor)
+
+    destroy.forEach((listener) => listener())
+
+    expect(snapshot).toEqual({ documentMarkdown: 'Typed', editor: null })
+    expect(recoverySnapshotMarkdown(snapshot)).toBe('Typed')
+  })
+
+  it('leaves the snapshot of another editor alone when one goes away', () => {
+    const going = liveEditor('Going')
+    const staying = liveEditor('Staying')
+    const snapshot = { documentMarkdown: 'Stored', editor: staying.editor }
+    trackRecoveryTextOfEditor(new Map([['doc', snapshot]]), going.editor)
+
+    going.destroy.forEach((listener) => listener())
+
+    expect(snapshot).toEqual({ documentMarkdown: 'Stored', editor: staying.editor })
+    expect(staying.getJSON).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the last known text without a live editor', () => {
+    expect(recoverySnapshotMarkdown({ documentMarkdown: 'Stored', editor: null })).toBe('Stored')
+    const { editor } = liveEditor('Typed')
+    ;(editor as unknown as { isDestroyed: boolean }).isDestroyed = true
+    expect(recoverySnapshotMarkdown({ documentMarkdown: 'Stored', editor })).toBe('Stored')
+  })
+})
+
+describe('collaboration source view', () => {
+  const content = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Live' }] }] }
+
+  it('serializes nothing while the view is closed', () => {
+    const getJSON = vi.fn(() => content)
+    expect(collaborationSourceViewMarkdown({
+      bound: true,
+      editor: { getJSON } as never,
+      fallback: 'Stored',
+      open: false,
+    })).toBe('')
+    expect(getJSON).not.toHaveBeenCalled()
+  })
+
+  it('shows the live document of a bound editor while it is open', () => {
+    const getJSON = vi.fn(() => content)
+    expect(collaborationSourceViewMarkdown({
+      bound: true,
+      editor: { getJSON } as never,
+      fallback: 'Stored',
+      open: true,
+    })).toContain('Live')
+    expect(getJSON).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to the stored document without a bound editor', () => {
+    const getJSON = vi.fn(() => content)
+    expect(collaborationSourceViewMarkdown({
+      bound: false,
+      editor: { getJSON } as never,
+      fallback: 'Stored',
+      open: true,
+    })).toBe('Stored')
+    expect(getJSON).not.toHaveBeenCalled()
+  })
+})
+
+describe('editor unsaved marker', () => {
+  it('stays away on a server-synced desk, whose project flag never clears', () => {
+    expect(editorDocumentShowsUnsavedMarker({ canFlushForShare: true, isDirty: true })).toBe(false)
+    expect(editorDocumentShowsUnsavedMarker({ canFlushForShare: true, isDirty: false })).toBe(false)
+  })
+
+  it('names unsaved work of a local project and only that', () => {
+    expect(editorDocumentShowsUnsavedMarker({ canFlushForShare: false, isDirty: true })).toBe(true)
+    expect(editorDocumentShowsUnsavedMarker({ canFlushForShare: false, isDirty: false })).toBe(false)
+  })
+})
 
 describe('editor recovery markdown', () => {
   it('keeps the unconfirmed document body and appends unsent comment drafts', () => {

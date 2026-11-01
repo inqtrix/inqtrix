@@ -18,6 +18,12 @@ deterministic format repair may accept Markdown heading adornment around the
 two required section labels; it never invents a quote, changes evidence text,
 or calls another model.
 
+Declared absence: when the excerpts do not answer the question at all, the
+model writes the single line ``NONE`` as its quote block.  That is a verdict
+of its own (``NO_EVIDENCE``), not a publishable answer: the caller answers
+with its fixed no-evidence text, and the model's answer section is never
+shown, whatever it says.
+
 Page-break artifacts: PDF extraction (pdfminer) writes the printed page
 number and a form feed INTO sentences that span a page break
 (``…environments\n\n11\n\n\x0c in which…``).  A model quoting such a
@@ -48,6 +54,7 @@ from enum import StrEnum
 GROUNDING_MARKER_PARSED = "_knowledge_grounding_parsed"
 GROUNDING_MARKER_FALLBACK = "_knowledge_grounding_fallback"
 GROUNDING_MARKER_FORMAT_REPAIRED = "_knowledge_grounding_format_repaired"
+GROUNDING_MARKER_NO_EVIDENCE = "_knowledge_grounding_no_evidence"
 
 _STRICT_QUOTE_HEADER = re.compile(
     r"^[ \t]*(?:\*\*)?QUOTES:(?:\*\*)?[ \t]*$"
@@ -63,6 +70,10 @@ _REPAIRED_ANSWER_HEADER = re.compile(
 )
 _QUOTE_LINE = re.compile(
     r"^[ \t]*\[K(\d+)\][ \t]*(.+?)[ \t]*$"
+)
+# The one form of a declared absence of evidence, adorned like the headers.
+_NO_EVIDENCE_LINE = re.compile(
+    r"^[ \t]*(?:\*\*)?NONE(?:\*\*)?[ \t]*$"
 )
 _QUOTE_CHARS = "\"'„“”»«‚‘’"
 
@@ -107,9 +118,14 @@ class QuoteCheck:
 
 
 class GroundingStatus(StrEnum):
-    """Terminal decision of the deterministic Knowledge grounding gate."""
+    """Terminal decision of the deterministic Knowledge grounding gate.
+
+    ``NO_EVIDENCE`` is the model's declaration that no excerpt answers the
+    question: neither publishable nor a failure.
+    """
 
     VERIFIED = "verified"
+    NO_EVIDENCE = "no_evidence"
     REJECTED_FORMAT = "rejected_format"
     REJECTED_QUOTE = "rejected_quote"
 
@@ -152,12 +168,13 @@ class GroundingReport:
 
     Attributes:
         answer: Publishable user-facing answer with the quote block stripped.
-            Empty for every rejected result so callers cannot accidentally
-            expose the unchecked model completion.
+            Empty for every rejected result and for a declared absence of
+            evidence, so callers cannot accidentally expose the unchecked
+            model completion.
         quotes: Every parsed quote with its verification verdict —
             empty when the output shape cannot be parsed.
         marker: Stable audit marker for strict parse, deterministic format
-            repair, or format rejection.
+            repair, format rejection, or a declared absence of evidence.
         status: Typed terminal decision.  Only ``VERIFIED`` is publishable.
         failure_code: Stable run/task error type for rejected results.
         format_repaired: Whether the one bounded Markdown-heading repair was
@@ -185,6 +202,7 @@ class _ParsedGroundingShape:
     answer: str
     quotes: list[tuple[int, str]]
     format_repaired: bool
+    no_evidence: bool = False
 
 
 # Compatibility folding (NFKC) lets a verbatim quote survive how a text layer
@@ -369,9 +387,11 @@ def check_grounding(
     Returns:
         A :class:`GroundingReport`.  Missing/ambiguous headers, malformed quote
         lines, an empty quote block, or an empty answer are typed format
-        rejections with no publishable answer.  A fully parsed response is
-        still rejected unless every quote is verbatim in the evidence entry
-        named by its label.
+        rejections with no publishable answer.  A quote block that is the
+        single line ``NONE`` is a declared absence of evidence
+        (``NO_EVIDENCE``), whatever the answer section says.  A fully parsed
+        response is still rejected unless every quote is verbatim in the
+        evidence entry named by its label.
     """
     shape = _parse_grounding_shape(content, allow_heading_repair=False)
     if shape is None:
@@ -387,6 +407,14 @@ def check_grounding(
             marker=GROUNDING_MARKER_FALLBACK,
             status=GroundingStatus.REJECTED_FORMAT,
             failure_code=GroundingFailureCode.FORMAT_INVALID,
+        )
+    if shape.no_evidence:
+        return GroundingReport(
+            answer="",
+            quotes=[],
+            marker=GROUNDING_MARKER_NO_EVIDENCE,
+            status=GroundingStatus.NO_EVIDENCE,
+            format_repaired=shape.format_repaired,
         )
 
     surfaces = [_quote_surfaces(evidence) for evidence in evidence_texts]
@@ -449,6 +477,8 @@ def _parse_grounding_shape(
 
     The repair path differs only in accepting a Markdown heading prefix on
     both required headers.  All other grammar stays identical and fail-closed.
+    The quote section holds quote lines or the single line ``NONE``; a
+    ``NONE`` next to anything else is malformed.
     """
 
     lines = str(content or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -471,10 +501,18 @@ def _parse_grounding_shape(
         return None
     answer_index = answer_indexes[0]
 
+    quote_lines = [
+        line for line in lines[quote_index + 1 : answer_index] if line.strip()
+    ]
+    if len(quote_lines) == 1 and _NO_EVIDENCE_LINE.fullmatch(quote_lines[0]):
+        return _ParsedGroundingShape(
+            answer="",
+            quotes=[],
+            format_repaired=allow_heading_repair,
+            no_evidence=True,
+        )
     parsed_quotes: list[tuple[int, str]] = []
-    for line in lines[quote_index + 1 : answer_index]:
-        if not line.strip():
-            continue
+    for line in quote_lines:
         match = _QUOTE_LINE.fullmatch(line)
         if match is None:
             return None

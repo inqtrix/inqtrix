@@ -36,10 +36,11 @@ from inqtrix.auth.principal import (
     resolve_auth_mode,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from inqtrix.settings import Settings
+    from inqtrix.auth.mapping import ClaimMappingConfig
+    from inqtrix.settings import AuthSettings, Settings
 
 
 def build_bearer_guard(expected: str) -> Callable[[Request], None]:
@@ -259,6 +260,28 @@ def _csv_frozenset(value: str, *, lower: bool = False) -> frozenset[str]:
     return frozenset(item.lower() if lower else item for item in items if item)
 
 
+def claim_mapping_from_settings(auth: "AuthSettings") -> "ClaimMappingConfig":
+    """The claim mapping of the ``INQTRIX_OIDC_*`` claim settings.
+
+    The one place that reads these settings: the oidc mode and the gateway
+    mode both map their token claims with the object it builds.
+    """
+    from inqtrix.auth.mapping import ClaimMappingConfig
+
+    return ClaimMappingConfig(
+        username_claim=auth.oidc_username_claim,
+        email_claim=auth.oidc_email_claim,
+        groups_claim=auth.oidc_groups_claim,
+        roles_claim=auth.oidc_roles_claim,
+        separators=auth.oidc_claim_separators,
+        strip_group_path_prefix=auth.oidc_groups_strip_path_prefix,
+        allowed_groups=_csv_frozenset(auth.oidc_allowed_groups),
+        admin_groups=_csv_frozenset(auth.oidc_admin_groups),
+        admin_roles=_csv_frozenset(auth.oidc_admin_roles),
+        allowed_domains=_csv_frozenset(auth.oidc_allowed_domains, lower=True),
+    )
+
+
 def build_auth_provider(settings: "Settings") -> AuthProvider:
     """Settings bridge: translate env configuration into a provider.
 
@@ -272,27 +295,46 @@ def build_auth_provider(settings: "Settings") -> AuthProvider:
 
     Returns:
         :class:`NoneAuthProvider` for the open-server mode,
-        :class:`ApiKeyAuthProvider` for the static-key mode, or
-        :class:`~inqtrix.auth.oidc.OidcAuthProvider` for the BFF.
+        :class:`ApiKeyAuthProvider` for the static-key mode,
+        :class:`~inqtrix.auth.oidc.OidcAuthProvider` for the BFF, the local
+        provider for email/password, or the gateway provider built by
+        :func:`~inqtrix.auth.gateway.build_gateway_provider`.
     """
-    mode = resolve_auth_mode(settings.auth, settings.server)
+    mode = resolve_auth_mode(
+        settings.auth, settings.server, storage_backend=settings.storage.backend
+    )
     if mode == "apikey":
         return ApiKeyAuthProvider(api_key=settings.server.api_key)
     if mode == "oidc":
         return build_oidc_provider(settings)
     if mode == "local":
         return build_local_provider(settings)
-    return NoneAuthProvider()
+    if mode == "gateway":
+        from inqtrix.auth import gateway
+
+        return gateway.build_gateway_provider(settings)
+    if mode == "none":
+        return NoneAuthProvider()
+    # Every mode is dispatched by name: a mode without its own branch must
+    # never fall through to the open server.
+    raise RuntimeError(
+        f"INQTRIX_AUTH_MODE resolved to the unknown mode {mode!r}; the server "
+        "does not start without its authentication."
+    )
 
 
-def _build_session_backends(settings: "Settings"):
+def build_session_backends(
+    settings: "Settings", *, source_issuer: str | None = None
+):
     """Build the session/flow/user/PAT/invitation stores per storage backend.
 
-    Shared by every cookie-session provider (oidc/local) so the
+    Shared by every cookie-session provider (oidc/local/gateway) so the
     memory-vs-Postgres wiring lives in ONE place (No Redundancy). Returns
     the five stores plus the Postgres session factory (or ``None`` for the
-    memory backend) so a caller can build extra stores — e.g. the local
-    credential store — on the very same engine.
+    memory backend) so a caller can build extra stores, such as the local
+    credential store, on the very same engine. *source_issuer* is the
+    issuer key whose admins the Postgres lifecycle counts (the gateway
+    mode); ``None`` counts every issuer.
     """
     from inqtrix.auth.directory import MemoryUserDirectory
     from inqtrix.auth.pat import MemoryPatStore
@@ -343,7 +385,9 @@ def _build_session_backends(settings: "Settings"):
             ),
             session_factory,
             PostgresUserLifecycleTransaction(
-                session_factory=session_factory, app_role=app_role
+                session_factory=session_factory,
+                app_role=app_role,
+                source_issuer=source_issuer,
             ),
         )
     log.warning(
@@ -382,7 +426,7 @@ def _build_login_rate_limiter(settings: "Settings"):
 def build_local_provider(settings: "Settings") -> AuthProvider:
     """Construct the native local email/password provider (env bridge).
 
-    Reuses :func:`_build_session_backends` for the session machinery and
+    Reuses :func:`build_session_backends` for the session machinery and
     adds the credential store on the same backend. The credential store is
     the source of truth for the disabled flag; the OIDC ``RegistrationGate``
     is wired with ``registration="open"`` (it is reused only for future
@@ -407,7 +451,7 @@ def build_local_provider(settings: "Settings") -> AuthProvider:
         session_factory,
         lifecycle_transaction,
     ) = (
-        _build_session_backends(settings)
+        build_session_backends(settings)
     )
     if session_factory is not None:
         from inqtrix.storage.credentials_postgres import (
@@ -485,6 +529,7 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
     factory, used exclusively on the HTTP loop.
     """
     from inqtrix.auth.invitations import RegistrationGate
+    from inqtrix.auth.jwks import fetched_without_tls
     from inqtrix.auth.lifecycle import UserLifecycleService
     from inqtrix.auth.oidc import OidcAuthProvider, OidcClient
     from inqtrix.auth.pat import PatService, PatVerifier
@@ -508,6 +553,17 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
             "INQTRIX_AUTH_MODE=oidc requires INQTRIX_OIDC_REDIRECT_URL "
             "or INQTRIX_PUBLIC_BASE_URL to be set."
         )
+    for variable, url in (
+        ("INQTRIX_OIDC_ISSUER", auth.oidc_issuer),
+        ("INQTRIX_OIDC_DISCOVERY_URL", auth.oidc_discovery_url),
+    ):
+        if fetched_without_tls(url):
+            log.warning(
+                "%s does not use https: the signing keys of the identity provider "
+                "come through it, and whoever controls a plain-text path to them can "
+                "sign in as any person. Use https outside a local test setup.",
+                variable,
+            )
     client = OidcClient(
         issuer=auth.oidc_issuer,
         client_id=auth.oidc_client_id,
@@ -526,7 +582,7 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
         _session_factory,
         lifecycle_transaction,
     ) = (
-        _build_session_backends(settings)
+        build_session_backends(settings)
     )
     registration_gate = RegistrationGate(
         invitations=invitation_repo,
@@ -563,16 +619,7 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
         users=users,
         session_secret=auth.session_secret,
         session_max_age_seconds=auth.session_max_age_seconds,
-        username_claim=auth.oidc_username_claim,
-        email_claim=auth.oidc_email_claim,
-        groups_claim=auth.oidc_groups_claim,
-        allowed_groups=_csv_frozenset(auth.oidc_allowed_groups),
-        roles_claim=auth.oidc_roles_claim,
-        admin_roles=_csv_frozenset(auth.oidc_admin_roles),
-        admin_groups=_csv_frozenset(auth.oidc_admin_groups),
-        claim_separators=auth.oidc_claim_separators,
-        strip_group_path_prefix=auth.oidc_groups_strip_path_prefix,
-        allowed_domains=_csv_frozenset(auth.oidc_allowed_domains, lower=True),
+        claim_mapping=claim_mapping_from_settings(auth),
         provider_name=auth.oidc_provider_name,
         skip_email_verified=auth.oidc_skip_email_verified,
         userinfo_fallback=auth.oidc_userinfo_fallback,

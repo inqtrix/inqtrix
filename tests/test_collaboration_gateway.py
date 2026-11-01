@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -658,3 +659,35 @@ def test_gateway_propagates_upstream_application_close_code_and_reason(
             _assert_closed(websocket, code=4403, reason="access_revoked")
 
     assert len(connector.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("origin", "rejection"),
+    [
+        (None, "missing"),
+        ("https://zzmarker7.example", "not_allowed"),
+        ("http://testserver/zzmarker7", "malformed"),
+    ],
+)
+def test_origin_rejection_logs_a_class_and_a_count_only(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    origin: str | None,
+    rejection: str,
+) -> None:
+    """The header is client input and the allowed list is configuration."""
+    connector = _Connector(_FakeUpstream())
+    client = _gateway_client(monkeypatch, connector)
+    headers = {"Origin": origin} if origin is not None else {}
+
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        with client:
+            with client.websocket_connect("/collaboration", headers=headers) as websocket:
+                _assert_closed(websocket, code=4403, reason="origin_rejected")
+
+    lines = [record.getMessage() for record in caplog.records if "Origin" in record.getMessage()]
+    assert len(lines) == 1
+    assert f"class={rejection}" in lines[0]
+    assert "configured_origins=" in lines[0]
+    assert "zzmarker7" not in lines[0]
+    assert "testserver" not in lines[0]

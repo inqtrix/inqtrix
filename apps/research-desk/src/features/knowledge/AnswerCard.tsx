@@ -401,8 +401,8 @@ function MetaLine({ answer }: { answer: KnowledgeAnswerRecord }) {
     const profile = profileDisplayName(answer.profileId, t.knowledge)
     parts.push(
       answer.autoSelected
-        ? `${t.knowledge.profileRanLabel.replace('{profile}', profile)} (${t.knowledge.autoSelectedSuffix})`
-        : t.knowledge.profileRanLabel.replace('{profile}', profile),
+        ? `${t.knowledge.profileRanLabel.replace('{profile}', () => profile)} (${t.knowledge.autoSelectedSuffix})`
+        : t.knowledge.profileRanLabel.replace('{profile}', () => profile),
     )
   }
   if (typeof answer.evidenceUsed === 'number' && answer.evidenceUsed > 0) {
@@ -421,7 +421,7 @@ function MetaLine({ answer }: { answer: KnowledgeAnswerRecord }) {
     )
   }
   if (answer.degradedStages.length > 0) {
-    parts.push(t.knowledge.profileDegradedHint.replace('{stages}', answer.degradedStages.join(', ')))
+    parts.push(t.knowledge.profileDegradedHint.replace('{stages}', () => answer.degradedStages.join(', ')))
   }
   if (answer.grounding?.degraded) {
     parts.push(t.knowledge.groundingUnavailableMeta)

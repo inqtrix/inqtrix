@@ -19,14 +19,14 @@ Required environment variables
 - ``AWS_REGION`` (optional — defaults to ``eu-central-1``)
 
 Optional logging:
-- ``INQTRIX_LOG_ENABLED`` / ``INQTRIX_LOG_LEVEL`` / ``INQTRIX_LOG_CONSOLE``
-- ``INQTRIX_LOG_INCLUDE_WEB`` (default ``true``) — mirror uvicorn / FastAPI
-  logs into the same file when file logging is enabled
-- ``INQTRIX_LOG_WEB_LEVEL`` (default ``INFO``) — separate verbosity knob
-  for the uvicorn / FastAPI loggers
-- ``OBSERVABILITY_PROFILE`` (default ``summary``) — set ``forensic`` for structured
-  lineage ``EVENT`` JSON in the same log file; requires ``INQTRIX_LOG_LEVEL=DEBUG``.
-  See ``docs/observability/logging.md`` and ``docs/observability/forensic-cookbook.md``.
+- ``INQTRIX_LOG_TARGET`` (``console``, ``file``, ``both`` or ``none``; default
+  ``console``), ``INQTRIX_LOG_LEVEL`` (default ``INFO``) and
+  ``INQTRIX_LOG_FORMAT`` (``json`` or ``text``; default ``json``)
+- ``INQTRIX_LOG_WEB_LEVEL`` (default: the log level, never below ``INFO``) —
+  separate threshold for the uvicorn / FastAPI loggers
+- ``OBSERVABILITY_PROFILE`` (default ``summary``) — ``forensic`` keeps source,
+  citation, claim and answer lineage in the protected run audit; logs never
+  carry it. See ``docs/observability/logging.md``.
 
 Optional server bind:
 - ``INQTRIX_SERVER_HOST`` (default ``0.0.0.0``)
@@ -59,7 +59,7 @@ from inqtrix import (
     ReportProfile,
     ResearchAgent,
 )
-from inqtrix.logging_config import build_uvicorn_log_config, configure_logging
+from inqtrix.logging_config import configure_logging, log_status_line
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server import create_app
 from inqtrix.server.security import resolve_tls_paths
@@ -68,15 +68,7 @@ from inqtrix.settings import (
     ModelSettings,
     ServerSettings,
     Settings,
-)
-
-
-load_dotenv()
-
-_INQTRIX_LOG_PATH = configure_logging(
-    enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
-    level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
-    console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
+    check_retired_settings,
 )
 
 
@@ -150,6 +142,9 @@ def build_app() -> FastAPI:
 
 
 def main() -> None:
+    load_dotenv()
+    resolved = configure_logging(service="api")
+    log_status_line(resolved, retired=check_retired_settings())
     app = build_app()
     settings = _build_settings()
     tls = resolve_tls_paths(settings.server)
@@ -161,11 +156,9 @@ def main() -> None:
     )
     if tls is not None:
         uvicorn_kwargs["ssl_keyfile"], uvicorn_kwargs["ssl_certfile"] = tls
-    if os.getenv("INQTRIX_LOG_INCLUDE_WEB", "true").lower() != "false":
-        uvicorn_kwargs["log_config"] = build_uvicorn_log_config(
-            _INQTRIX_LOG_PATH,
-            web_level=os.getenv("INQTRIX_LOG_WEB_LEVEL", "INFO"),
-        )
+    uvicorn_kwargs["log_config"] = None
+    # Inqtrix reads X-Forwarded-For itself (INQTRIX_TRUSTED_PROXY_HOPS).
+    uvicorn_kwargs["proxy_headers"] = False
     uvicorn.run(app, **uvicorn_kwargs)
 
 

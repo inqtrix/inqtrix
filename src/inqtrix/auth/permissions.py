@@ -31,7 +31,7 @@ from typing import Mapping, Protocol, Sequence
 from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.auth.principal import Principal, UserContext
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class WorkspaceRole(StrEnum):
@@ -217,9 +217,11 @@ class AuditEntry:
         resource_id: Identifier of the resource acted on.
         detail: Small free-form context (requested permission, route).
             Must never contain secrets or full request bodies.
-        actor_type: ``user`` (default, every direct principal action) or
+        actor_type: ``user`` (default, every direct principal action),
             ``agent`` — actions a workspace-agent run performs on the
-            owner's behalf (``agent.*`` actions from the agent runtime).
+            owner's behalf (``agent.*`` actions from the agent runtime),
+            or ``provisioning`` for lifecycle changes the identity provider
+            makes through provisioning, without a user id.
             ``actor_user_id`` carries the effective actor's canonical UUID;
             the column distinguishes who acted, not resource ownership.
         outcome: ``success`` (default) | ``failure`` | ``denied`` —

@@ -399,13 +399,8 @@ def test_failure_does_not_copy_query_or_provider_error_to_logs(caplog):
     client = MagicMock()
     client.responses.create.side_effect = OpenAIError(provider_secret)
     provider = _provider(client)
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.ERROR, logger="inqtrix"):
-            provider.search(query_secret)
-    finally:
-        logger.removeHandler(caplog.handler)
+    with caplog.at_level(logging.ERROR, logger="inqtrix"):
+        provider.search(query_secret)
 
     notice = provider.consume_nonfatal_notice()
     assert query_secret not in caplog.text

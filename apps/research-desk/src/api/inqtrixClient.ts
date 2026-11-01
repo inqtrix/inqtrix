@@ -69,8 +69,8 @@ export type ClientOptions = {
    * JSON endpoints; event-stream callers send it as `Last-Event-ID`. */
   lastEventId?: string
   /** Keep a caller-owned recovery flow in control of an expected HTTP 401.
-   * Ordinary authenticated requests still hard-reload on an unexpected
-   * principal loss. */
+   * Ordinary authenticated requests still reload on an unexpected principal
+   * loss (`reloadAfterUnauthorized`). */
   reloadOnUnauthorized?: boolean
   signal?: AbortSignal
   workspaceId?: string
@@ -173,6 +173,7 @@ const EXPECTED_USER_ID_HEADER = 'X-Inqtrix-Expected-User-Id'
 let expectedUserIdentity: string | null = null
 let csrfRefreshInFlight: Promise<void> | null = null
 let sessionCsrfToken: string | null = null
+let unauthorizedReload: ((error: unknown) => void) | null = null
 
 /** Bind subsequent cookie-session requests to the SPA's rendered principal.
  * The value is a consistency generation, never an authentication credential. */
@@ -185,6 +186,29 @@ export function setExpectedUserIdentity(userId: string | null) {
     sessionCsrfToken = null
   }
   expectedUserIdentity = nextIdentity
+}
+
+/** Let *handler* decide about the reload after a 401 that took the identity
+ * the page shows (the gateway mode brakes repeated reloads); `null` reloads
+ * at once again. */
+export function setUnauthorizedReload(handler: ((error: unknown) => void) | null) {
+  unauthorizedReload = handler
+}
+
+/** Reload after a 401 that took the identity the page shows, through the
+ * installed handler when there is one. */
+export function reloadAfterUnauthorized(error: unknown) {
+  if (unauthorizedReload !== null) {
+    unauthorizedReload(error)
+    return
+  }
+  reloadPage()
+}
+
+function reloadPage() {
+  if (typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+    window.location.reload()
+  }
 }
 
 export type InqtrixRequestError = Error & {
@@ -3956,7 +3980,11 @@ type AuthSessionBase = {
 
 /** Session facts the SPA bootstraps from `GET /api/auth/session`. */
 export type AuthSessionInfo = AuthSessionBase & (
-  | { authenticated: false }
+  | {
+    authenticated: false
+    /** Why no session started (gateway mode: `assertion_missing`). */
+    reason?: string
+  }
   | {
     authenticated: true
     user: {
@@ -3984,7 +4012,11 @@ export async function fetchAuthSession(options: ClientOptions = {}) {
 
 /** Destroy the server-side OIDC session using the bootstrap/cookie CSRF token. */
 export async function logoutSession(options: ClientOptions = {}) {
-  const result = await requestJson<{ logged_out: boolean }>('/api/auth/logout', {
+  const result = await requestJson<{
+    logged_out: boolean
+    /** Gateway mode: where the browser signs out of the gateway next. */
+    redirect_url?: string | null
+  }>('/api/auth/logout', {
     ...options,
     body: {},
     method: 'POST',
@@ -4005,7 +4037,7 @@ export function buildLoginUrl(baseUrl?: string, next: string = '/') {
 
 /** One login method the SPA can render (an ordered list per deployment). */
 export type AuthLoginMethod = {
-  kind: 'sso' | 'password' | 'apikey'
+  kind: 'sso' | 'password' | 'apikey' | 'gateway'
   label: string
   image_url?: string
   identifier?: 'email' | 'username'
@@ -4017,7 +4049,7 @@ export type AuthLoginMethod = {
  * provider name and learn the session contract before authenticating.
  */
 export type AuthConfig = {
-  auth_mode: 'none' | 'apikey' | 'oidc' | 'local'
+  auth_mode: 'none' | 'apikey' | 'oidc' | 'local' | 'gateway'
   auth_required: boolean
   login_methods: AuthLoginMethod[]
   provider_name: string | null
@@ -4271,6 +4303,13 @@ export type AdminUser = {
   display_name: string | null
   instance_role: 'admin' | 'user'
   disabled: boolean
+  /** Who disabled the account: an administrator or provisioning (the
+   * identity system); enabling lifts either. */
+  disabled_source?: 'admin' | 'provisioning' | null
+  /** The identity system deleted the account; it waits as a tombstone. */
+  deprovisioned?: boolean
+  /** The tombstone waits for an erasure nobody started yet. */
+  erasure_pending?: boolean
   last_login_at: number | null
   /** The deletion operation erasing this account, or null. While set the
    * account is cut off and can no longer be changed. */
@@ -4344,6 +4383,19 @@ export async function previewAdminUserErasure(
 ) {
   return requestJson<AdminErasurePreview>(
     `/v1/admin/users/${encodeURIComponent(userId)}/erasure-preview`,
+    options,
+  )
+}
+
+/** The erasure an account is in, read through the account: one that
+ * provisioning started belongs to nobody, so the deletion operation routes
+ * never show it to an administrator. 404 when there is none. */
+export async function getAdminUserErasure(
+  userId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerDeletionOperation>(
+    `/v1/admin/users/${encodeURIComponent(userId)}/erasure`,
     options,
   )
 }
@@ -4642,17 +4694,14 @@ function throwParsedRequestError(
   status: number,
   reloadOnUnauthorized = true,
 ): never {
-  if (
-    (error.name === 'principal_changed'
-      || (
-        reloadOnUnauthorized
-        && status === 401
-        && expectedUserIdentity !== null
-      ))
-    && typeof window !== 'undefined'
-    && typeof window.location?.reload === 'function'
+  if (error.name === 'principal_changed') {
+    reloadPage()
+  } else if (
+    reloadOnUnauthorized
+    && status === 401
+    && expectedUserIdentity !== null
   ) {
-    window.location.reload()
+    reloadAfterUnauthorized(error)
   }
   throw error
 }

@@ -14,7 +14,7 @@ that says so and keeps serving.
 from __future__ import annotations
 
 import logging
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # A transaction pooler multiplexes many client connections onto few server
 # ones, so the app-side total is not the number to compare. These are the

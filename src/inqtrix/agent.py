@@ -76,7 +76,7 @@ from inqtrix.strategies import (
     StrategyContext,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------ #
@@ -438,10 +438,10 @@ class AgentConfig(BaseModel):
             "the compact INFO/DEBUG behavior, ``debug`` is reserved for "
             "future mid-level diagnostics, and ``forensic`` emits "
             "provider-neutral source, citation, claim, stop, and answer "
-            "lineage into the protected run audit. Ordinary logs receive "
-            "only its content-minimized operational projection; exact "
-            "queries, URLs, evidence, prompts, and provider prose stay out "
-            "of container/file logs."
+            "lineage into the protected run audit. The active span receives "
+            "only its content-minimized operational projection; logs never "
+            "carry these events, and exact queries, URLs, evidence, prompts, "
+            "and provider prose stay out of the trace."
         ),
     )
     """Control protected audit detail and its content-minimized log projection."""

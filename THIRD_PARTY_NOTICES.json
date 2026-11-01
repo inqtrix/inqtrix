@@ -31,7 +31,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "anyio",
-      "version": "4.13.0"
+      "version": "4.15.1"
     },
     {
       "dependency_surface": "python",
@@ -127,7 +127,7 @@
       "license": "Mozilla Public License 2.0 (MPL 2.0)",
       "metadata_source": "python package metadata: classifiers",
       "name": "certifi",
-      "version": "2026.2.25"
+      "version": "2026.10.23"
     },
     {
       "dependency_surface": "python",
@@ -159,7 +159,7 @@
       "license": "Apache-2.0 OR BSD-3-Clause",
       "metadata_source": "python package metadata: License-Expression",
       "name": "cryptography",
-      "version": "46.0.7"
+      "version": "50.0.2"
     },
     {
       "dependency_surface": "python",
@@ -191,7 +191,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "filelock",
-      "version": "3.32.5"
+      "version": "4.2.4"
     },
     {
       "dependency_surface": "python",
@@ -200,6 +200,14 @@
       "metadata_source": "python package metadata: classifiers",
       "name": "flatbuffers",
       "version": "25.12.19"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT AND PSF-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "greenlet",
+      "version": "3.5.1"
     },
     {
       "dependency_surface": "python",
@@ -223,7 +231,7 @@
       "license": "BSD-3-Clause",
       "metadata_source": "python package metadata: License-Expression",
       "name": "httpcore2",
-      "version": "2.3.0"
+      "version": "2.16.0"
     },
     {
       "dependency_surface": "python",
@@ -239,7 +247,7 @@
       "license": "BSD-3-Clause",
       "metadata_source": "python package metadata: License-Expression",
       "name": "httpx2",
-      "version": "2.3.0"
+      "version": "2.16.0"
     },
     {
       "dependency_surface": "python",
@@ -247,7 +255,7 @@
       "license": "BSD-3-Clause",
       "metadata_source": "python package metadata: License-Expression",
       "name": "idna",
-      "version": "3.11"
+      "version": "3.20"
     },
     {
       "dependency_surface": "python",
@@ -327,7 +335,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "langgraph-checkpoint",
-      "version": "4.1.1"
+      "version": "4.3.1"
     },
     {
       "dependency_surface": "python",
@@ -343,7 +351,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "langgraph-sdk",
-      "version": "0.4.2"
+      "version": "0.4.10"
     },
     {
       "dependency_surface": "python",
@@ -415,7 +423,7 @@
       "license": "MIT License",
       "metadata_source": "python package metadata: classifiers",
       "name": "msal",
-      "version": "1.35.1"
+      "version": "1.39.0"
     },
     {
       "dependency_surface": "python",
@@ -519,15 +527,15 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "pydantic-settings",
-      "version": "2.13.1"
+      "version": "2.16.2"
     },
     {
       "dependency_surface": "python",
       "ecosystem": "python",
-      "license": "BSD License",
-      "metadata_source": "python package metadata: classifiers",
+      "license": "BSD-2-Clause",
+      "metadata_source": "python package metadata: License-Expression",
       "name": "pygments",
-      "version": "2.19.2"
+      "version": "2.21.0"
     },
     {
       "dependency_surface": "python",
@@ -535,7 +543,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "pyjwt",
-      "version": "2.12.1"
+      "version": "2.15.1"
     },
     {
       "dependency_surface": "python",
@@ -631,7 +639,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "soupsieve",
-      "version": "2.8.4"
+      "version": "3.0.4"
     },
     {
       "dependency_surface": "python",
@@ -647,7 +655,7 @@
       "license": "BSD-3-Clause",
       "metadata_source": "python package metadata: License-Expression",
       "name": "starlette",
-      "version": "1.0.0"
+      "version": "1.10.0"
     },
     {
       "dependency_surface": "python",
@@ -687,7 +695,7 @@
       "license": "PSF-2.0",
       "metadata_source": "python package metadata: License-Expression",
       "name": "typing-extensions",
-      "version": "4.15.0"
+      "version": "4.16.0"
     },
     {
       "dependency_surface": "python",
@@ -703,7 +711,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "urllib3",
-      "version": "2.6.3"
+      "version": "2.8.0"
     },
     {
       "dependency_surface": "python",
@@ -863,7 +871,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "langgraph-checkpoint-postgres",
-      "version": "3.1.0"
+      "version": "3.2.0"
     },
     {
       "dependency_surface": "python-dev",
@@ -871,7 +879,23 @@
       "license": "Apache-2.0",
       "metadata_source": "python package metadata: License-Expression",
       "name": "opentelemetry-api",
-      "version": "1.44.0"
+      "version": "1.45.2"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "opentelemetry-exporter-http-transport",
+      "version": "0.66b2"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "opentelemetry-exporter-otlp-common",
+      "version": "0.66b2"
     },
     {
       "dependency_surface": "python-dev",
@@ -879,7 +903,7 @@
       "license": "Apache-2.0",
       "metadata_source": "python package metadata: License-Expression",
       "name": "opentelemetry-exporter-otlp-proto-common",
-      "version": "1.44.0"
+      "version": "1.45.2"
     },
     {
       "dependency_surface": "python-dev",
@@ -887,7 +911,7 @@
       "license": "Apache-2.0",
       "metadata_source": "python package metadata: License-Expression",
       "name": "opentelemetry-exporter-otlp-proto-http",
-      "version": "1.44.0"
+      "version": "1.45.2"
     },
     {
       "dependency_surface": "python-dev",
@@ -895,7 +919,7 @@
       "license": "Apache-2.0",
       "metadata_source": "python package metadata: License-Expression",
       "name": "opentelemetry-proto",
-      "version": "1.44.0"
+      "version": "1.45.2"
     },
     {
       "dependency_surface": "python-dev",
@@ -903,7 +927,7 @@
       "license": "Apache-2.0",
       "metadata_source": "python package metadata: License-Expression",
       "name": "opentelemetry-sdk",
-      "version": "1.44.0"
+      "version": "1.45.2"
     },
     {
       "dependency_surface": "python-dev",
@@ -911,7 +935,7 @@
       "license": "Apache-2.0",
       "metadata_source": "python package metadata: License-Expression",
       "name": "opentelemetry-semantic-conventions",
-      "version": "0.65b0"
+      "version": "0.66b2"
     },
     {
       "dependency_surface": "python-dev",
@@ -959,7 +983,7 @@
       "license": "BSD-2-Clause",
       "metadata_source": "python package metadata: License",
       "name": "pyasn1",
-      "version": "0.6.3"
+      "version": "0.6.5"
     },
     {
       "dependency_surface": "python-dev",
@@ -2511,7 +2535,7 @@
       "license": "MIT",
       "metadata_source": "package-lock.json metadata",
       "name": "@types/node",
-      "version": "25.9.5"
+      "version": "26.6.6"
     },
     {
       "dependency_surface": "react-prod",
@@ -3143,7 +3167,7 @@
       "license": "MIT",
       "metadata_source": "package-lock.json metadata",
       "name": "docx",
-      "version": "9.7.1"
+      "version": "9.11.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -3151,7 +3175,7 @@
       "license": "(MPL-2.0 OR Apache-2.0)",
       "metadata_source": "package-lock.json metadata",
       "name": "dompurify",
-      "version": "3.4.13"
+      "version": "3.4.17"
     },
     {
       "dependency_surface": "react-prod",
@@ -4063,7 +4087,7 @@
       "license": "MIT",
       "metadata_source": "package-lock.json metadata",
       "name": "nanoid",
-      "version": "5.1.16"
+      "version": "6.0.2"
     },
     {
       "dependency_surface": "react-prod",
@@ -4671,7 +4695,7 @@
       "license": "MIT",
       "metadata_source": "package-lock.json metadata",
       "name": "undici-types",
-      "version": "7.24.6"
+      "version": "8.9.0"
     },
     {
       "dependency_surface": "react-prod",

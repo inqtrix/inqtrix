@@ -35,9 +35,11 @@ import {
   retryUploadOperation,
   resumeIndexingJob,
   resumeIndexingJobWithoutContext,
+  reloadAfterUnauthorized,
   searchKnowledge,
   saveEditorCommentSuggestionDraft,
   setExpectedUserIdentity,
+  setUnauthorizedReload,
   submitAgentRunFeedback,
   streamChatCompletion,
   streamServerSentEvents,
@@ -363,6 +365,101 @@ describe('browser principal generation', () => {
     )).rejects.toMatchObject({ status: 401 })
 
     expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('reloads the page when a request loses the identity the page shows', async () => {
+    const reload = vi.fn()
+    vi.stubGlobal('window', { location: { reload } })
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(
+      { detail: { error: { message: 'Not signed in', type: 'unauthorized' } } },
+      401,
+    )))
+    setExpectedUserIdentity('00000000-0000-4000-8000-000000000001')
+
+    await expect(
+      fetchServerFileInfo('file-1', { baseUrl: 'http://api.test' }),
+    ).rejects.toMatchObject({ name: 'unauthorized', status: 401 })
+
+    expect(reload).toHaveBeenCalledOnce()
+  })
+})
+
+describe('a brake on the reload after an unexpected 401', () => {
+  afterEach(() => {
+    setUnauthorizedReload(null)
+    setExpectedUserIdentity(null)
+    vi.unstubAllGlobals()
+  })
+
+  function unauthorizedFetch() {
+    return vi.fn(async () => jsonResponse(
+      { detail: { error: { message: 'Not signed in', type: 'unauthorized' } } },
+      401,
+    ))
+  }
+
+  it('decides about the reload instead of the page reloading at once', async () => {
+    const reload = vi.fn()
+    const brake = vi.fn()
+    vi.stubGlobal('window', { location: { reload } })
+    vi.stubGlobal('fetch', unauthorizedFetch())
+    setExpectedUserIdentity('00000000-0000-4000-8000-000000000001')
+    setUnauthorizedReload(brake)
+
+    await expect(
+      fetchServerFileInfo('file-1', { baseUrl: 'http://api.test' }),
+    ).rejects.toMatchObject({ name: 'unauthorized', status: 401 })
+
+    expect(brake).toHaveBeenCalledOnce()
+    expect(brake.mock.calls[0]?.[0]).toMatchObject({ name: 'unauthorized', status: 401 })
+    expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('is not asked while the page shows no identity', async () => {
+    const brake = vi.fn()
+    vi.stubGlobal('window', { location: { reload: vi.fn() } })
+    vi.stubGlobal('fetch', unauthorizedFetch())
+    setUnauthorizedReload(brake)
+
+    await expect(
+      fetchServerFileInfo('file-1', { baseUrl: 'http://api.test' }),
+    ).rejects.toMatchObject({ status: 401 })
+
+    expect(brake).not.toHaveBeenCalled()
+  })
+
+  it('never holds back the reload for another principal', async () => {
+    const reload = vi.fn()
+    const brake = vi.fn()
+    vi.stubGlobal('window', { location: { reload } })
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(
+      { error: { message: 'session changed', type: 'principal_changed' } },
+      409,
+    )))
+    setExpectedUserIdentity('00000000-0000-4000-8000-000000000001')
+    setUnauthorizedReload(brake)
+
+    await expect(
+      fetchServerFileInfo('file-1', { baseUrl: 'http://api.test' }),
+    ).rejects.toMatchObject({ name: 'principal_changed', status: 409 })
+
+    expect(reload).toHaveBeenCalledOnce()
+    expect(brake).not.toHaveBeenCalled()
+  })
+
+  it('also decides about the reload another caller asks for after a 401', () => {
+    const reload = vi.fn()
+    const brake = vi.fn()
+    vi.stubGlobal('window', { location: { reload } })
+    const lost = Object.assign(new Error('Not signed in'), { name: 'unauthorized', status: 401 })
+
+    reloadAfterUnauthorized(lost)
+    expect(reload).toHaveBeenCalledOnce()
+
+    setUnauthorizedReload(brake)
+    reloadAfterUnauthorized(lost)
+    expect(brake).toHaveBeenCalledWith(lost)
+    expect(reload).toHaveBeenCalledOnce()
   })
 })
 

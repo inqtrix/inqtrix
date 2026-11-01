@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto'
 
-import { settingsFromEnv } from './config'
+import { logLevelFromEnv, settingsFromEnv, startFailureFields } from './config'
 import { createJsonLogger, routeEditorSchemaWarnings } from './logger'
 import { CollaborationSidecar } from './sidecar'
 import { verificationFaultGateFromEnv } from './verificationFault'
 
 async function main(): Promise<void> {
-  const logger = createJsonLogger()
+  const logger = createJsonLogger(console, logLevelFromEnv(process.env))
   routeEditorSchemaWarnings(logger)
   const settings = settingsFromEnv(process.env, randomUUID())
   const verificationFaults = verificationFaultGateFromEnv(process.env)
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   if (closing) await closing
 }
 
-main().catch(() => {
-  createJsonLogger().error('collaboration_sidecar_start_failed')
+main().catch((error: unknown) => {
+  createJsonLogger().error('collaboration_sidecar_start_failed', startFailureFields(error))
   process.exitCode = 1
 })

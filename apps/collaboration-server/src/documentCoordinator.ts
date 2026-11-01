@@ -22,11 +22,13 @@ import type {
 import { summarizeEditorChange } from './changeSummary'
 import {
   cloneDocument,
+  documentTooLarge,
   hashBytes,
   reconstructValidatedDocument,
-  sameBytes,
+  sameEncodedState,
   type ValidatedDocument,
   validateDocument,
+  validateDocumentContent,
 } from './documentState'
 import {
   ApiRequestError,
@@ -54,18 +56,37 @@ type Release = () => void
 
 type RoomPhase = 'loading' | 'ready' | 'awaiting_apply' | 'reconstruction_required'
 
-type ValidatedDocumentState = Pick<
-  ValidatedDocument,
-  'canonicalJson' | 'encodedState' | 'stateHash'
->
+/** What a validation found: the document's content, and which structs and
+ * deletions it held, which a room can be compared with cheaply. */
+type ValidatedDocumentState = Pick<ValidatedDocument, 'canonicalJson'> & {
+  snapshot: Y.Snapshot
+}
 
 type BoundValidatedDocumentState = ValidatedDocumentState & {
   authoritativeSequence: number
   reconstructionEpoch: number
 }
 
+/**
+ * A private copy of the room on which each update is applied and validated
+ * before anything else sees it. It always stands at the last validated state:
+ * whoever works on it takes it out of the room and hands it back only when
+ * the update was accepted. Any other way out destroys it, and the next update
+ * builds a new one from the room and validates that.
+ */
+type CheckDocument = {
+  /** The bytes of the updates applied since `comparedBytes` was read. */
+  bytesSinceCompare: number
+  /** The size of the encoded state at the last byte comparison with the room. */
+  comparedBytes: number
+  document: Y.Doc
+  /** The updates applied since that comparison. */
+  updatesSinceCompare: number
+}
+
 type RoomState = {
   authoritativeSequence: number
+  checkDocument: CheckDocument | null
   gate: SerialGate
   initialized: boolean
   /** Suggestions this room saw leave the document durably, by id, with how
@@ -96,7 +117,22 @@ const KNOWN_SUGGESTIONS_PER_ROOM = 4_096
 /** How many normalized rows of unknown outcome a room remembers. */
 const UNRESOLVED_NORMALIZATIONS_PER_ROOM = 64
 
+/** How many updates may pass before a room and its check document are compared
+ * byte for byte. In between their structs and deletions are compared at every
+ * update, which leaves only different content under the same ids to this. */
+const UPDATES_BETWEEN_BYTE_COMPARISONS = 32
+
+/** How much one byte of an update can at most add to the encoded state: a
+ * deletion of a few bytes can split a long run into three structs, each with
+ * its origins. The size limit is checked exactly once this bound reaches it. */
+export const ENCODED_GROWTH_PER_UPDATE_BYTE = 64
+
 type PendingUpdate = {
+  /** The check document at the state of this update, until it is handed back. */
+  checkDocument: CheckDocument | null
+  /** The transport applies the client's bytes to a room that already holds a
+   * normalized row of them, so only the bytes can tell they changed nothing. */
+  comparesBytesAfterTransport: boolean
   /** Suggestions the update removed durably, registered once it is applied. */
   decided: KnownSuggestion[]
   gateEnteredAt: number
@@ -215,7 +251,7 @@ export class DocumentCoordinator {
     room: string,
     persistedSequence: number,
     tail: { bytes: number; updates: number } = { bytes: 0, updates: 0 },
-    validatedDocument: ValidatedDocumentState | null = null,
+    validatedDocument: ValidatedDocument | null = null,
   ): void {
     const state = this.room(room)
     if (
@@ -232,8 +268,13 @@ export class DocumentCoordinator {
     state.loaded = true
     state.phase = 'ready'
     this.resetTail(state, tail.bytes, tail.updates)
+    dropCheckDocument(state)
     state.validatedDocument = validatedDocument
-      ? bindValidatedDocument(state, persistedSequence, validatedDocument)
+      ? bindValidatedDocument(
+          state,
+          persistedSequence,
+          validatedState(validatedDocument.canonicalJson, validatedDocument.document),
+        )
       : null
   }
 
@@ -355,9 +396,17 @@ export class DocumentCoordinator {
         input.room,
         roomState,
         input.document,
+        'structs',
       )
       const before = beforeValidated.canonicalJson
-      clone = cloneDocument(input.document, beforeValidated.encodedState)
+      const check = roomState.checkDocument
+      if (!check) {
+        throw new CollaborationError('internal_consistency', {
+          closeCode: CloseCodes.internalConsistency,
+        })
+      }
+      roomState.checkDocument = null
+      clone = check.document
       const appliedUpdates: Uint8Array[] = []
       const captureAppliedUpdate = (update: Uint8Array): void => {
         appliedUpdates.push(update)
@@ -396,8 +445,8 @@ export class DocumentCoordinator {
         clone.off('update', captureAppliedUpdate)
         clone.off('afterTransaction', observeTransaction)
       }
-      // The clone started from the validated, causally complete room state,
-      // so anything Yjs had to park as pending was caused by this update: it
+      // The check document stood at the validated, causally complete room
+      // state, so anything Yjs had to park as pending was caused by this update: it
       // depends on structs or deletions the room does not hold. That is a gap
       // in what the client sent, not a document that violates the schema, and
       // the client recovers from it by resending its unconfirmed updates in
@@ -413,9 +462,9 @@ export class DocumentCoordinator {
       // an edit lease's update is held back until the normalization below
       // has had its chance.
       let refusal: CollaborationError | null = null
-      let validated: ValidatedDocument | null = null
+      let validated: ValidatedDocumentState | null = null
       try {
-        validated = validateDocument(clone, this.settings.documentLimitBytes)
+        validated = this.validateCheckDocument(check, preparedUpdate.byteLength)
       } catch (error) {
         if (!isNormalizableRefusal(error, input.context.access)) throw error
         refusal = error
@@ -434,10 +483,22 @@ export class DocumentCoordinator {
         // The room holds all of the update: whatever an earlier preparation
         // sent for it is settled.
         roomState.unresolvedNormalizations.delete(unresolvedKey)
+        // Structs the room already holds can still leave a trace without any
+        // update: their root names enter `share`, and one that refers into the
+        // middle of an emoji splits it. The room takes the same trace from the
+        // transport. So a check document that went through such a frame is
+        // given up, and the next update rebuilds it and sees what the room
+        // reads now. A frame of deletions alone, as a client answers the sync
+        // of its connection, splits nothing that is already deleted.
+        const kept = Y.decodeUpdate(preparedUpdate).structs.length === 0 ? check : null
+        if (kept) clone = null
         if (
           input.context.access === 'view'
           || input.allowNoop
-        ) return 'noop'
+        ) {
+          roomState.checkDocument = kept
+          return 'noop'
+        }
         assertPreparationCurrent(preparing, roomState)
         const durable = await this.api.lookupUpdates({
           documentId: input.context.documentId,
@@ -452,11 +513,14 @@ export class DocumentCoordinator {
           // The store holds no row under this hash, yet every effect of the
           // update is already in the room: another writer made the same
           // change first, or the update repeats changes that reached the
-          // store in another update. The clone started from the validated
+          // store in another update. The check document stood at the validated
           // room state, which equals the store at the room's durable
           // sequence, so the update is durable there. A room without any
           // durable update has no sequence an acknowledgement could name.
-          if (roomState.authoritativeSequence < 1) return 'noop'
+          if (roomState.authoritativeSequence < 1) {
+            roomState.checkDocument = kept
+            return 'noop'
+          }
           sequence = roomState.authoritativeSequence
         } else {
           const replay = durable[0]
@@ -475,6 +539,8 @@ export class DocumentCoordinator {
         }
         roomState.phase = 'awaiting_apply'
         this.pending.set(input.connectionId, {
+          checkDocument: kept,
+          comparesBytesAfterTransport: false,
           decided: [],
           gateEnteredAt,
           hash,
@@ -522,13 +588,15 @@ export class DocumentCoordinator {
           before,
           followUps: appliedUpdates.slice(1),
           merged: clone,
-          roomState: beforeValidated,
           update: preparedUpdate,
         })
         clone.destroy()
         clone = normalization.state
         try {
-          validated = validateDocument(clone, this.settings.documentLimitBytes)
+          validated = validatedState(
+            validateDocument(clone, this.settings.documentLimitBytes).canonicalJson,
+            clone,
+          )
           policy = validateSuggestionUpdate(
             before,
             validated.canonicalJson,
@@ -626,15 +694,25 @@ export class DocumentCoordinator {
         // then change nothing. Every connection, the writer's included,
         // receives one frame for it and never the state the checks refused.
         Y.applyUpdate(input.document, persistedUpdate, { source: 'local' })
-        if (!matchesValidatedDocument(input.document, validated)) {
+        const checkedBytes = Y.encodeStateAsUpdate(clone)
+        if (!sameEncodedState(Y.encodeStateAsUpdate(input.document), checkedBytes)) {
           this.logger.error('authoritative_apply_mismatch', { room: input.room })
           throw new CollaborationError('internal_consistency', {
             closeCode: CloseCodes.internalConsistency,
           })
         }
+        check.comparedBytes = checkedBytes.byteLength
+        check.bytesSinceCompare = 0
+        check.updatesSinceCompare = 0
+      } else {
+        check.bytesSinceCompare += persistedUpdate.byteLength
+        check.updatesSinceCompare += 1
       }
       if (normalization) this.recordNormalization(input.room, normalization)
+      check.document = clone
       this.pending.set(input.connectionId, {
+        checkDocument: check,
+        comparesBytesAfterTransport: normalized,
         decided,
         hash,
         persistedSequence: persisted.persistedSequence,
@@ -650,9 +728,10 @@ export class DocumentCoordinator {
         startedAt: performance.now(),
         update: persisted.duplicate ? null : persistedUpdate,
         updateBytes: persistedUpdate.byteLength,
-        validatedDocument: validatedDocumentState(validated),
+        validatedDocument: validated,
         wasDuplicate: persisted.duplicate,
       })
+      clone = null
       release = null
       return 'pending'
     } catch (error) {
@@ -698,11 +777,12 @@ export class DocumentCoordinator {
       before: ValidatedDocumentState['canonicalJson']
       followUps: readonly Uint8Array[]
       merged: Y.Doc
-      roomState: ValidatedDocumentState
       update: Uint8Array
     },
   ): EditMergeNormalization {
     const startedAt = performance.now()
+    // The room is the validated state here: nothing else writes under the gate.
+    const roomBytes = Y.encodeStateAsUpdate(input.document)
     const result = normalizeEditMerge({
       actorUserId: input.context.user.id,
       before: merge.before,
@@ -711,8 +791,8 @@ export class DocumentCoordinator {
       known: (suggestionId) => roomState.knownSuggestions.get(suggestionId),
       merged: merge.merged,
       room: input.document,
-      roomState: merge.roomState.encodedState,
-      roomStateHash: merge.roomState.stateHash,
+      roomState: roomBytes,
+      roomStateHash: hashBytes(roomBytes),
       update: merge.update,
     })
     this.metrics.observeMilliseconds(
@@ -813,10 +893,10 @@ export class DocumentCoordinator {
           closeCode: CloseCodes.internalConsistency,
         })
       }
-      if (
-        !matchesValidatedDocument(document, pending.validatedDocument)
-        && !this.applyCommittedUpdate(pending, roomState, document)
-      ) {
+      const applied = pending.comparesBytesAfterTransport && pending.checkDocument
+        ? sameState(document, pending.checkDocument.document)
+        : sameStructsAndDeletions(document, pending.validatedDocument)
+      if (!applied && !this.applyCommittedUpdate(pending, roomState, document)) {
         this.logger.error('authoritative_apply_mismatch', { room: pending.room })
         throw new CollaborationError('internal_consistency', {
           closeCode: CloseCodes.internalConsistency,
@@ -837,6 +917,10 @@ export class DocumentCoordinator {
         pending.persistedSequence,
         pending.validatedDocument,
       )
+      if (roomState.initialized) {
+        roomState.checkDocument = pending.checkDocument
+        pending.checkDocument = null
+      }
       roomState.phase = 'ready'
       if (pending.redundant) {
         this.metrics.increment('inqtrix_collaboration_redundant_updates_acknowledged_total')
@@ -860,6 +944,7 @@ export class DocumentCoordinator {
       this.requireReconstruction(pending.room)
       throw error
     } finally {
+      pending.checkDocument?.document.destroy()
       pending.release()
     }
   }
@@ -882,11 +967,12 @@ export class DocumentCoordinator {
     const before = roomState.validatedDocument
     if (
       pending.update === null
+      || pending.checkDocument === null
       || before === null
-      || !matchesValidatedDocument(document, before)
+      || !sameStructsAndDeletions(document, before)
     ) return false
     Y.applyUpdate(document, pending.update, { source: 'local' })
-    if (!matchesValidatedDocument(document, pending.validatedDocument)) return false
+    if (!sameState(document, pending.checkDocument.document)) return false
     this.metrics.increment('inqtrix_collaboration_committed_updates_applied_by_coordinator_total')
     this.logger.warn('committed_update_applied_by_coordinator', { room: pending.room })
     return true
@@ -973,6 +1059,7 @@ export class DocumentCoordinator {
     const pending = this.pending.get(connectionId)
     if (!pending) return
     this.pending.delete(connectionId)
+    pending.checkDocument?.document.destroy()
     pending.release()
     this.requireReconstruction(pending.room)
   }
@@ -1020,7 +1107,7 @@ export class DocumentCoordinator {
           authoritativeApplyStarted = false
           this.notifyAuthoritativeApplySuccess(input.room)
         } else {
-          this.authoritativeDocumentState(input.room, roomState, input.document)
+          this.authoritativeDocumentState(input.room, roomState, input.document, 'bytes')
         }
         return {
           ack: {
@@ -1050,9 +1137,12 @@ export class DocumentCoordinator {
         input.room,
         roomState,
         input.document,
+        'bytes',
       )
-      clone = cloneDocument(input.document, beforeValidated.encodedState)
-      const beforeStateHash = beforeValidated.stateHash
+      clone = cloneDocument(input.document)
+      // Of the clone, not the room: the clone's validation below reads the
+      // form a fresh decoding has, which the room's bytes may not have.
+      const beforeStateHash = hashBytes(Y.encodeStateAsUpdate(clone))
       const before = beforeValidated.canonicalJson
       const beforeVector = Y.encodeStateVector(clone)
       const mutation = input.mutate(clone)
@@ -1107,6 +1197,7 @@ export class DocumentCoordinator {
       verifyPersistedResult(roomState, persisted)
       roomState.phase = 'awaiting_apply'
       authoritativeApplyStarted = true
+      dropCheckDocument(roomState)
       Y.applyUpdate(input.document, update, {
         context: { actorUserId: input.actorUserId, commandId: input.commandId },
         source: 'local',
@@ -1122,7 +1213,7 @@ export class DocumentCoordinator {
       roomState.validatedDocument = bindValidatedDocument(
         roomState,
         persisted.persistedSequence,
-        validated,
+        validatedState(validated.canonicalJson, input.document),
       )
       roomState.phase = 'ready'
       authoritativeApplyStarted = false
@@ -1189,6 +1280,7 @@ export class DocumentCoordinator {
     })
     const recovered = recoveredValidation.document
     try {
+      dropCheckDocument(roomState)
       const update = Y.encodeStateAsUpdate(recovered, Y.encodeStateVector(input.document))
       Y.applyUpdate(input.document, update, {
         context: { commandId: input.commandId },
@@ -1210,7 +1302,7 @@ export class DocumentCoordinator {
       roomState.validatedDocument = bindValidatedDocument(
         roomState,
         loaded.persistedSequence,
-        recoveredValidation,
+        validatedState(recoveredValidation.canonicalJson, recovered),
       )
       this.metrics.increment('inqtrix_collaboration_command_reconciliations_total')
       this.logger.warn('command_replay_reconciled', {
@@ -1245,8 +1337,8 @@ export class DocumentCoordinator {
           closeCode: CloseCodes.internalConsistency,
         })
       }
-      const validated = this.authoritativeDocumentState(room, roomState, document)
-      const captured = cloneDocument(document, validated.encodedState)
+      this.authoritativeDocumentState(room, roomState, document, 'bytes')
+      const captured = cloneDocument(document)
       return {
         document: captured,
         sequence: roomState.authoritativeSequence,
@@ -1317,6 +1409,7 @@ export class DocumentCoordinator {
     state.loaded = false
     state.initialized = false
     state.validatedDocument = null
+    dropCheckDocument(state)
     if (state.phase === 'reconstruction_required') {
       this.resetTail(state, 0, 0)
     } else if (state.gate.isIdle()) {
@@ -1330,6 +1423,7 @@ export class DocumentCoordinator {
     if (existing) return existing
     const created: RoomState = {
       authoritativeSequence: 0,
+      checkDocument: null,
       gate: new SerialGate(() => this.updateQueueMetrics()),
       initialized: false,
       knownSuggestions: new Map(),
@@ -1380,6 +1474,7 @@ export class DocumentCoordinator {
     state.phase = 'reconstruction_required'
     this.resetTail(state, 0, 0)
     state.validatedDocument = null
+    dropCheckDocument(state)
   }
 
   /** Assigns the tail counters; every assignment starts a new accounting
@@ -1390,26 +1485,34 @@ export class DocumentCoordinator {
     state.updatesSinceSnapshot = updates
   }
 
+  /**
+   * The room's validated state, once the room has proven to still be it: with
+   * `structs` by its structs and deletions, and by its bytes whenever those are
+   * due; with `bytes` by its bytes. Leaves a check document in the room.
+   */
   private authoritativeDocumentState(
     room: string,
     state: RoomState,
     document: Y.Doc,
+    comparison: 'bytes' | 'structs',
   ): ValidatedDocumentState {
     const cached = state.validatedDocument
     if (!cached) {
-      const validated = validateDocument(document, this.settings.documentLimitBytes)
-      const value = validatedDocumentState(validated)
+      const validated = this.validatedRoomCopy(document)
+      const value = validatedState(validated.canonicalJson, document)
       state.validatedDocument = bindValidatedDocument(
         state,
         state.authoritativeSequence,
         value,
       )
+      dropCheckDocument(state)
+      state.checkDocument = checkDocumentFrom(validated)
       return value
     }
     if (
       cached.authoritativeSequence !== state.authoritativeSequence
       || cached.reconstructionEpoch !== state.reconstructionEpoch
-      || !matchesValidatedDocument(document, cached)
+      || !this.roomStillMatches(state, document, cached, comparison)
     ) {
       this.logger.error('authoritative_state_mismatch', { room })
       this.requireReconstruction(room)
@@ -1418,6 +1521,78 @@ export class DocumentCoordinator {
       })
     }
     return cached
+  }
+
+  private roomStillMatches(
+    state: RoomState,
+    document: Y.Doc,
+    cached: ValidatedDocumentState,
+    comparison: 'bytes' | 'structs',
+  ): boolean {
+    if (!sameStructsAndDeletions(document, cached)) return false
+    const check = state.checkDocument
+    if (!check) return this.rebuildCheckDocument(state, document, cached)
+    if (
+      comparison === 'structs'
+      && check.updatesSinceCompare < UPDATES_BETWEEN_BYTE_COMPARISONS
+    ) return true
+    const checkedBytes = Y.encodeStateAsUpdate(check.document)
+    if (!sameEncodedState(Y.encodeStateAsUpdate(document), checkedBytes)) return false
+    check.comparedBytes = checkedBytes.byteLength
+    check.bytesSinceCompare = 0
+    check.updatesSinceCompare = 0
+    return true
+  }
+
+  /** A new check document after the last one was given up, for a refused
+   * update or a change it did not take part in. Nothing proves by itself that
+   * the room's content is still what was validated, so the room is validated
+   * again and has to read the same. */
+  private rebuildCheckDocument(
+    state: RoomState,
+    document: Y.Doc,
+    cached: ValidatedDocumentState,
+  ): boolean {
+    let validated: ValidatedDocument
+    try {
+      validated = this.validatedRoomCopy(document)
+    } catch {
+      return false
+    }
+    if (JSON.stringify(validated.canonicalJson) !== JSON.stringify(cached.canonicalJson)) {
+      validated.document.destroy()
+      return false
+    }
+    state.checkDocument = checkDocumentFrom(validated)
+    this.metrics.increment('inqtrix_collaboration_check_document_rebuilds_total')
+    return true
+  }
+
+  /** A validated copy of the room. The copy and not the room: a frame of
+   * structs the room already holds can leave a root name in its `share`, which
+   * no state carries, and the room stays fit for its next update. */
+  private validatedRoomCopy(document: Y.Doc): ValidatedDocument {
+    const copy = cloneDocument(document)
+    try {
+      return validateDocument(copy, this.settings.documentLimitBytes)
+    } catch (error) {
+      copy.destroy()
+      throw error
+    }
+  }
+
+  /** The checks of `validateDocument` on the check document, which holds no
+   * pending structs or deletions at this point. Its size is read only once
+   * the upper bound of it reaches the limit. */
+  private validateCheckDocument(check: CheckDocument, updateBytes: number): ValidatedDocumentState {
+    const canonicalJson = validateDocumentContent(check.document, { causallyComplete: true })
+    const limit = this.settings.documentLimitBytes
+    const upperBound = check.comparedBytes
+      + ENCODED_GROWTH_PER_UPDATE_BYTE * (check.bytesSinceCompare + updateBytes)
+    if (upperBound >= limit && Y.encodeStateAsUpdate(check.document).byteLength > limit) {
+      throw documentTooLarge()
+    }
+    return validatedState(canonicalJson, check.document)
   }
 
   private notifyAuthoritativeApplyFailure(room: string): void {
@@ -1515,14 +1690,11 @@ function boundedSet<V>(
   }
 }
 
-function validatedDocumentState(
-  validated: ValidatedDocumentState,
+function validatedState(
+  canonicalJson: ValidatedDocumentState['canonicalJson'],
+  document: Y.Doc,
 ): ValidatedDocumentState {
-  return {
-    canonicalJson: validated.canonicalJson,
-    encodedState: validated.encodedState,
-    stateHash: validated.stateHash,
-  }
+  return { canonicalJson, snapshot: Y.snapshot(document) }
 }
 
 function bindValidatedDocument(
@@ -1531,19 +1703,41 @@ function bindValidatedDocument(
   validated: ValidatedDocumentState,
 ): BoundValidatedDocumentState {
   return {
-    ...validatedDocumentState(validated),
+    ...validated,
     authoritativeSequence,
     reconstructionEpoch: state.reconstructionEpoch,
   }
 }
 
+function checkDocumentFrom(validated: ValidatedDocument): CheckDocument {
+  return {
+    bytesSinceCompare: 0,
+    comparedBytes: validated.encodedState.byteLength,
+    document: validated.document,
+    updatesSinceCompare: 0,
+  }
+}
+
+function dropCheckDocument(state: RoomState): void {
+  state.checkDocument?.document.destroy()
+  state.checkDocument = null
+}
+
+/** Whether the document holds exactly the structs and deletions of a validated
+ * state: the state vector and the delete set, without encoding the document. */
+function sameStructsAndDeletions(document: Y.Doc, validated: ValidatedDocumentState): boolean {
+  return Y.equalSnapshots(Y.snapshot(document), validated.snapshot)
+}
+
+function sameState(left: Y.Doc, right: Y.Doc): boolean {
+  return sameEncodedState(Y.encodeStateAsUpdate(left), Y.encodeStateAsUpdate(right))
+}
+
 function matchesValidatedDocument(
   document: Y.Doc,
-  validated: ValidatedDocumentState,
+  validated: Pick<ValidatedDocument, 'encodedState'>,
 ): boolean {
-  const encodedState = Y.encodeStateAsUpdate(document)
-  return hashBytes(encodedState) === validated.stateHash
-    && sameBytes(encodedState, validated.encodedState)
+  return sameEncodedState(Y.encodeStateAsUpdate(document), validated.encodedState)
 }
 
 function assertPreparationCurrent(

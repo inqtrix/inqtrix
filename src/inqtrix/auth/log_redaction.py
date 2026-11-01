@@ -33,7 +33,7 @@ import re
 import secrets
 from typing import Final
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _PROCESS_LOG_KEY: Final = secrets.token_bytes(32)
 _SAFE_LABEL: Final = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")

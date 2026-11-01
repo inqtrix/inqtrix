@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from inqtrix.services.quota_service import QuotaService
     from inqtrix.server.execution import ExecutionLanes
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 
@@ -307,6 +307,11 @@ async def stream_response(
     progress_emitted = False
     while include_progress and progress_queue is not None and not agent_future.done():
         if time.monotonic() >= request_deadline:
+            log.warning(
+                "Streamed chat reached its request deadline (mode=%s); the stream ends "
+                "with a timeout notice.",
+                run_request.mode,
+            )
             await _shutdown_watcher()
             await _audit_terminal("request_deadline")
             yield make_chunk(chat_id, t(ui_state, "sse_request_timeout"))
@@ -360,13 +365,14 @@ async def stream_response(
         await _shutdown_watcher()
         # The agent thread keeps running to completion (it cannot be
         # cancelled mid-call), but its usage is never read here, so the
-        # spend goes unbilled. Make that visible rather than silent
-        # — only relevant when metering is active.
-        if quota_service is not None:
-            log.warning(
-                "Streamed run timed out; abandoned token spend not "
-                "booked toward quota."
-            )
+        # spend goes unbilled. Make that visible rather than silent.
+        log.warning(
+            "Streamed chat timed out waiting for the result (mode=%s)%s.",
+            run_request.mode,
+            "; its token spend is not booked toward the quota"
+            if quota_service is not None
+            else "",
+        )
         await _audit_terminal("timeout")
         yield make_chunk(chat_id, t(ui_state, "sse_request_timeout"))
         yield make_chunk(chat_id, "", finish_reason="stop")

@@ -102,8 +102,11 @@ precedence: config > extraConfig > derived).
        party spraying failed logins at a victim's email would lock the victim
        out). The chart knows its own two-hop topology, so it sets the depth in
        the derived layer; explicit config/extraConfig still wins (e.g. 3 with
-       an additional cloud load balancer in front). */}}
-{{- if .Values.ingress.enabled }}
+       an additional cloud load balancer in front). In the gateway mode the
+       web gateway appends nothing to the chain of its trusted peer, so the
+       app default of one hop is right and nothing is derived. */}}
+{{- $authMode := toString (coalesce .Values.config.INQTRIX_AUTH_MODE .Values.extraConfig.INQTRIX_AUTH_MODE "") }}
+{{- if and .Values.ingress.enabled (ne $authMode "gateway") }}
 {{- $_ := set $derived "INQTRIX_TRUSTED_PROXY_HOPS" "2" }}
 {{- end }}
 {{- if .Values.qdrant.enabled }}

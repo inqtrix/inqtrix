@@ -27,6 +27,16 @@ export function isErasing(
   return user.erasure_operation_id != null
 }
 
+/** What an administrator must know before enabling *user*: a tombstone of
+ * the identity system may stand for a person who got its identifier since,
+ * and a lock of the identity system may come back with the next sync.
+ * `null` when enabling needs no warning. */
+export function enableWarning(user: AdminUser): 'tombstone' | 'provisioningLock' | null {
+  if (user.deprovisioned) return 'tombstone'
+  if (user.disabled && user.disabled_source === 'provisioning') return 'provisioningLock'
+  return null
+}
+
 /** Whether *user* can still administer: admin role, enabled, not being
  * erased (the server's last-admin guard counts the same way). */
 function isActiveAdmin(user: AdminUser): boolean {

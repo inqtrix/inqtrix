@@ -170,28 +170,57 @@ export function cloneDocument(document: Y.Doc, encodedState?: Uint8Array): Y.Doc
   return clone
 }
 
-export function validateDocument(
+/** Whether the document is what the editor schema can round-trip, without its
+ * encoded form. A caller that has just seen the document free of pending
+ * structs and deletions says so. */
+export function validateDocumentContent(
   document: Y.Doc,
-  documentLimitBytes: number,
-): ValidatedDocument {
-  let canonicalJson: JSONContent
+  options: { causallyComplete?: boolean } = {},
+): JSONContent {
   try {
-    canonicalJson = validateEditorYDoc(document)
+    return freezeJson(validateEditorYDoc(document, options))
   } catch {
     throw new CollaborationError('invalid_schema', {
       closeCode: CloseCodes.incompatible,
       httpStatus: 409,
     })
   }
-  const encodedState = Y.encodeStateAsUpdate(document)
-  if (encodedState.byteLength > documentLimitBytes) {
-    throw new CollaborationError('document_too_large', {
-      closeCode: CloseCodes.messageTooLarge,
-      httpStatus: 413,
-    })
+}
+
+/** Whether two encoded states hold the same document. Two such states can
+ * differ in their bytes: a long-lived document keeps runs of collected items
+ * apart that a fresh decoding joins. Decoded and encoded once, both have the
+ * same form. */
+export function sameEncodedState(left: Uint8Array, right: Uint8Array): boolean {
+  return sameBytes(left, right) || sameBytes(reencoded(left), reencoded(right))
+}
+
+function reencoded(state: Uint8Array): Uint8Array {
+  const document = new Y.Doc()
+  try {
+    Y.applyUpdate(document, state)
+    return Y.encodeStateAsUpdate(document)
+  } finally {
+    document.destroy()
   }
+}
+
+export function documentTooLarge(): CollaborationError {
+  return new CollaborationError('document_too_large', {
+    closeCode: CloseCodes.messageTooLarge,
+    httpStatus: 413,
+  })
+}
+
+export function validateDocument(
+  document: Y.Doc,
+  documentLimitBytes: number,
+): ValidatedDocument {
+  const canonicalJson = validateDocumentContent(document)
+  const encodedState = Y.encodeStateAsUpdate(document)
+  if (encodedState.byteLength > documentLimitBytes) throw documentTooLarge()
   return {
-    canonicalJson: freezeJson(canonicalJson),
+    canonicalJson,
     document,
     encodedState,
     stateHash: hashBytes(encodedState),

@@ -28,7 +28,7 @@ import logging
 import time
 from typing import Awaitable, Callable
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # Guaranteed upper bound between FULL authorization re-checks on a quiet
 # generation. Sized for the un-bumped paths (session expiry): well below

@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import '@fontsource-variable/inter/index.css'
 
 import { AuthLockScreen } from '../AuthLockScreen'
+import type { GatewayState } from '@/features/auth/authMode'
 import { OwnerSetupScreen } from '@/features/onboarding/OwnerSetupScreen'
 import { LocaleProvider } from '@/i18n/LocaleProvider'
 import { ThemeProvider } from '@/theme/ThemeProvider'
@@ -16,7 +17,11 @@ for (const key of ['theme', 'themePreset', 'contrastMode']) {
   else localStorage.removeItem(`inqtrix.researchDesk.${key}`)
 }
 const locale = params.get('locale') === 'de' ? 'de' : 'en'
-const mode = params.get('mode') === 'sso' ? 'sso' : params.get('mode') === 'apikey' ? 'apikey' : 'local'
+const modes = ['sso', 'apikey', 'gateway'] as const
+const mode = modes.find((candidate) => candidate === params.get('mode')) ?? 'local'
+const gatewayState = mode === 'gateway'
+  ? { state: (params.get('state') ?? 'noGatewaySignIn') as GatewayState, outcome: params.get('outcome') || null }
+  : null
 
 function Fixture() {
   const [identifier, setIdentifier] = useState('')
@@ -26,7 +31,8 @@ function Fixture() {
   if (params.get('view') === 'setup') return <OwnerSetupScreen onCreated={() => undefined} />
   return <AuthLockScreen
     error={params.has('error') ? (locale === 'de' ? 'Anmeldedaten wurden nicht akzeptiert.' : 'Those credentials were not accepted.') : null}
-    identifier={identifier} isSubmitting={submitting} mode={mode}
+    gatewayState={gatewayState} identifier={identifier} isSubmitting={submitting} mode={mode}
+    onGatewayAction={() => setSubmitting(true)}
     onCredentialSubmit={() => setSubmitting(true)} onIdentifierChange={setIdentifier}
     onPasswordChange={setPassword} onSsoLogin={() => setSubmitting(true)}
     onSubmit={() => setSubmitting(true)} onTokenChange={setToken}

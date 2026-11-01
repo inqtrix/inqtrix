@@ -66,7 +66,6 @@ def test_explicit_none_wins_over_configured_key(caplog):
     import logging
 
     inqtrix_logger = logging.getLogger("inqtrix")
-    inqtrix_logger.addHandler(caplog.handler)
     previous_level = inqtrix_logger.level
     inqtrix_logger.setLevel(logging.WARNING)
     try:
@@ -75,7 +74,6 @@ def test_explicit_none_wins_over_configured_key(caplog):
                 AuthSettings(mode="none"), ServerSettings(api_key="secret")
             )
     finally:
-        inqtrix_logger.removeHandler(caplog.handler)
         inqtrix_logger.setLevel(previous_level)
 
     assert mode == "none"

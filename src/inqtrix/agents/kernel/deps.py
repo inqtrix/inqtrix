@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from inqtrix.providers.base import LLMProvider
     from inqtrix.settings import AgentPlatformSettings
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 

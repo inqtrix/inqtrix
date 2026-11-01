@@ -17,11 +17,16 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.invitations import MemoryInvitationStore, RegistrationGate
+from inqtrix.auth.invitations import (
+    CONFIRMED_EMAIL_REQUIRED,
+    MemoryInvitationStore,
+    RegistrationGate,
+)
 from inqtrix.auth.lifecycle import (
     MemoryUserLifecycleTransaction,
     UserLifecycleService,
 )
+from inqtrix.auth.mapping import ClaimMappingConfig
 from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
@@ -31,15 +36,16 @@ from inqtrix.settings import ServerSettings, Settings, StorageSettings
 
 from tests.contract._app import StubSearch
 from tests.test_knowledge_routes import KnowledgeStubLLM
+from tests.test_oidc_bff import ISSUER as IDP_ISSUER
 from tests.test_oidc_bff import FakeIdp, make_provider, run_login
 
 
-def make_world(registration="invite"):
+def make_world(registration="invite", **provider_overrides):
     """One identity store backing permissions, gate, and admin alike."""
     identity = MemoryIdentityStore()
     invitations = MemoryInvitationStore(identity)
     idp = FakeIdp()
-    provider, users = make_provider(idp)
+    provider, users = make_provider(idp, **provider_overrides)
     provider.invitations = invitations
     provider.registration_gate = RegistrationGate(
         invitations=invitations,
@@ -135,6 +141,199 @@ def test_open_mode_keeps_admitting_everyone():
     client, idp, _identity, _invitations, _users = make_world(registration="open")
     response, _ = login(client, idp)
     assert response.status_code == 303
+
+
+def _invite_alice(invitations, loop) -> None:
+    import time as _time
+
+    from inqtrix.auth.permissions import WorkspaceRole
+
+    loop.run_until_complete(
+        invitations.create(
+            tenant_id="default",
+            workspace_id="ws-1",
+            email="alice@example.com",
+            role=WorkspaceRole.EDITOR,
+            invited_by_user_id=uuid.uuid5(uuid.NAMESPACE_URL, "inqtrix-test:owner"),
+            expires_at=_time.time() + 3600,
+        )
+    )
+
+
+@pytest.mark.parametrize("case", ["invited", "not-invited", "no-email"])
+def test_an_unconfirmed_first_login_gets_one_answer_before_any_invitation_lookup(case):
+    client, idp, identity, invitations, users = make_world(
+        registration="invite", skip_email_verified=True
+    )
+    identity.add_workspace("ws-1", name="Team A")
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    if case == "invited":
+        _invite_alice(invitations, loop)
+    if case == "no-email":
+        idp.omit_claims.add("email")
+    idp.claims_override["email_verified"] = False
+    lookups = []
+    original = invitations.has_open_for_email
+
+    async def counted(**kwargs):
+        lookups.append(kwargs)
+        return await original(**kwargs)
+
+    invitations.has_open_for_email = counted
+
+    response, _csrf = login(client, idp)
+
+    assert response.status_code == 403
+    error = response.json()["error"]
+    assert (error["type"], error["message"]) == ("registration_denied", CONFIRMED_EMAIL_REQUIRED)
+    assert lookups == []
+    assert users.users == {}
+
+
+def test_a_confirmed_first_login_with_an_invitation_gets_in_despite_the_switch():
+    client, idp, identity, invitations, _users = make_world(
+        registration="invite", skip_email_verified=True
+    )
+    identity.add_workspace("ws-1", name="Team A")
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    _invite_alice(invitations, loop)
+
+    response, _csrf = login(client, idp)
+
+    from inqtrix.auth.permissions import WorkspaceRole
+
+    assert response.status_code == 303
+    user_id = uuid.UUID(client.get("/api/auth/session").json()["user"]["id"])
+    assert loop.run_until_complete(
+        identity.role_in_workspace(tenant_id="default", user_id=user_id, workspace_id="ws-1")
+    ) is WorkspaceRole.EDITOR
+
+
+def test_an_existing_user_without_a_confirmed_email_still_signs_in_with_invitations():
+    client, idp, _identity, _invitations, users = make_world(
+        registration="invite", skip_email_verified=True
+    )
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    loop.run_until_complete(
+        users.record_login(
+            tenant_id="default",
+            issuer=IDP_ISSUER,
+            subject="user-1234",
+            email="alice@example.com",
+            email_verified=False,
+            display_name="Alice",
+        )
+    )
+    idp.claims_override["email_verified"] = False
+
+    response, _csrf = login(client, idp)
+
+    assert response.status_code == 303
+
+
+def test_an_email_from_another_claim_accepts_no_invitation():
+    client, idp, identity, invitations, _users = make_world(
+        registration="open",
+        claim_mapping=ClaimMappingConfig(email_claim="preferred_username"),
+    )
+    identity.add_workspace("ws-1", name="Team A")
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    _invite_alice(invitations, loop)
+    idp.claims_override["preferred_username"] = "alice@example.com"
+
+    response, _csrf = login(client, idp)
+
+    import time as _time
+
+    assert response.status_code == 303
+    assert loop.run_until_complete(
+        invitations.has_open_for_email(
+            tenant_id="default", email="alice@example.com", now=_time.time()
+        )
+    )
+
+
+def test_the_oidc_domain_gate_checks_an_unconfirmed_address_with_the_switch():
+    # A named limit: with the switch the oidc mode checks the domain of an
+    # address the identity provider does not confirm.
+    client, idp, _identity, _invitations, _users = make_world(
+        registration="open",
+        skip_email_verified=True,
+        claim_mapping=ClaimMappingConfig(allowed_domains=frozenset({"example.com"})),
+    )
+    idp.claims_override["email_verified"] = False
+
+    response, _csrf = login(client, idp)
+
+    assert response.status_code == 303
+
+
+def test_a_login_without_a_confirmed_email_leaves_the_invitation_open():
+    """Entra-like sign-in: the IdP confirms no email, so the login passes
+    with ``skip_email_verified`` but accepts no invitation."""
+    client, idp, identity, invitations, _users = make_world(
+        registration="open", skip_email_verified=True
+    )
+    identity.add_workspace("ws-1", name="Team A")
+    import time as _time
+
+    from inqtrix.auth.permissions import WorkspaceRole
+
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    loop.run_until_complete(
+        invitations.create(
+            tenant_id="default",
+            workspace_id="ws-1",
+            email="alice@example.com",
+            role=WorkspaceRole.EDITOR,
+            invited_by_user_id=uuid.uuid5(
+                uuid.NAMESPACE_URL, "inqtrix-test:owner"
+            ),
+            expires_at=_time.time() + 3600,
+        )
+    )
+    idp.claims_override["email_verified"] = False
+
+    response, _csrf = login(client, idp)
+
+    assert response.status_code == 303
+    user_id = uuid.UUID(client.get("/api/auth/session").json()["user"]["id"])
+    assert loop.run_until_complete(
+        identity.role_in_workspace(
+            tenant_id="default", user_id=user_id, workspace_id="ws-1"
+        )
+    ) is None
+    assert loop.run_until_complete(
+        invitations.has_open_for_email(
+            tenant_id="default", email="alice@example.com", now=_time.time()
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("skip_email_verified", "accepted"), [(False, True), (True, False)]
+)
+def test_creating_an_invitation_says_whether_a_login_can_accept_it(
+    skip_email_verified, accepted
+):
+    client, idp, _identity, _invitations, _users = make_world(
+        registration="open", skip_email_verified=skip_email_verified
+    )
+    _response, csrf = login(client, idp)
+    workspace_id = client.post(
+        "/v1/workspaces",
+        json={"name": "Team"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["workspace_id"]
+
+    created = client.post(
+        f"/v1/workspaces/{workspace_id}/invitations",
+        json={"email": "bob@example.com", "role": "viewer"},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert created.status_code == 201
+    assert created.json()["accepted_by_login"] is accepted
 
 
 def test_create_workspace_requires_instance_admin():

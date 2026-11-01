@@ -328,7 +328,6 @@ def test_bounded_probe_timeout_names_the_bound(monkeypatch, caplog):
     ``str(TimeoutError())`` is empty on Python >= 3.11; the log line has to
     name the bound and point at the backend's own detailed warning.
     """
-    import logging
 
     monkeypatch.setattr(
         system_runtime_module, "_RUNTIME_PROBE_TIMEOUT_SECONDS", 0.05
@@ -338,14 +337,9 @@ def test_bounded_probe_timeout_names_the_bound(monkeypatch, caplog):
         await asyncio.sleep(1.0)
         return True
 
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    try:
-        result = asyncio.run(
-            system_runtime_module._bounded_probe("object_store", hanging_probe)
-        )
-    finally:
-        logger.removeHandler(caplog.handler)
+    result = asyncio.run(
+        system_runtime_module._bounded_probe("object_store", hanging_probe)
+    )
 
     assert result is False
     assert any(
@@ -355,19 +349,13 @@ def test_bounded_probe_timeout_names_the_bound(monkeypatch, caplog):
 
 
 def test_bounded_probe_names_exception_type(caplog):
-    import logging
 
     async def broken_probe() -> bool:
         raise ValueError("boom")
 
-    logger = logging.getLogger("inqtrix")
-    logger.addHandler(caplog.handler)
-    try:
-        result = asyncio.run(
-            system_runtime_module._bounded_probe("vector_store", broken_probe)
-        )
-    finally:
-        logger.removeHandler(caplog.handler)
+    result = asyncio.run(
+        system_runtime_module._bounded_probe("vector_store", broken_probe)
+    )
 
     assert result is False
     assert any(

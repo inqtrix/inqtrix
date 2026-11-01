@@ -19,7 +19,7 @@ from inqtrix.agents.memory_ports import (
     AgentMemoryUnavailable,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class Mem0AgentMemoryProvider:

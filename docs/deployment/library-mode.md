@@ -145,6 +145,29 @@ Progress messages look like `Analysiere Frage...`, `Plane Suchanfragen (Runde 1/
 
 Runnable versions of both paths live in [`examples/quickstart/`](../../examples/quickstart): `basic_env.py` for the blocking call and `streaming.py` for the streaming loop.
 
+## Logging when Inqtrix is embedded
+
+Your application owns its logging, as the Python logging HOWTO recommends for libraries: importing Inqtrix attaches no handler, and neither `ResearchAgent` nor `create_app` configures logging. Inqtrix records go to the `inqtrix` logger tree and propagate to your root handlers; without any handler, Python prints only `WARNING` and above to stderr.
+
+Do not call `configure_logging(...)` in an application that has its own logging: it configures the root logger of the whole process. Attach `InqtrixLogFilter()` to your handlers instead, not to the `inqtrix` logger: a filter on a logger only sees the records created on that logger, and every Inqtrix module logs under its own name below it. For the same reason `disabled` on `inqtrix` does not silence Inqtrix; set a level on it instead. The parts of the content rule that do not depend on the call site (exceptions only as type and frames, no client addresses or query strings in uvicorn lines, known secret shapes scrubbed) hold only with this filter:
+
+```python
+import logging
+
+from inqtrix import InqtrixLogFilter
+
+handler = logging.StreamHandler()
+handler.addFilter(InqtrixLogFilter())
+logging.basicConfig(level=logging.WARNING, handlers=[handler])
+logging.getLogger("inqtrix").setLevel(logging.INFO)
+```
+
+Each module logs under its own name in this tree, for example `inqtrix.providers.bedrock`, so one area can get its own level: `logging.getLogger("inqtrix.providers").setLevel(logging.DEBUG)`.
+
+Without a `service` the filter projects only `inqtrix`, `uvicorn` and `fastapi` records and stamps the correlation fields on every record. Your other loggers keep their levels and messages; only known secret shapes are scrubbed from them. A script that is the whole process, like the scripts under [`examples/provider_stacks/`](../../examples/provider_stacks), may call `configure_logging(service="script")` instead. See [Logging](../observability/logging.md#logging-when-inqtrix-is-embedded).
+
+[`examples/logging/stdlib_json_lines.py`](../../examples/logging/stdlib_json_lines.py) turns the snippet above into a runnable application with its own JSON formatter that reads the correlation fields as record attributes. The same pattern for OpenTelemetry logs, structlog and loguru is in [Logging: use your organization's log format](../observability/logging.md#use-your-organizations-log-format), and [Logging: architecture](../observability/logging.md#architecture) shows which process configures logging how and the path of one record.
+
 ## Related docs
 
 - [Providers overview](../configuration/providers.md)
@@ -152,3 +175,4 @@ Runnable versions of both paths live in [`examples/quickstart/`](../../examples/
 - [Agent config](../configuration/agent-config.md)
 - [Web server mode](webserver-mode.md)
 - [React UI](react-ui.md)
+- [Logging](../observability/logging.md)

@@ -100,12 +100,6 @@ async def test_same_external_subject_is_isolated_between_tenants() -> None:
     assert await users.find_by_user_id(
         tenant_id="tenant-b", user_id=first.user_id
     ) is None
-    assert await users.promote_if_no_admin(
-        tenant_id="tenant-a", user_id=first.user_id
-    )
-    assert await users.promote_if_no_admin(
-        tenant_id="tenant-b", user_id=second.user_id
-    )
 
 
 def test_postgres_user_mapping_preserves_non_default_tenant() -> None:
@@ -125,6 +119,11 @@ def test_postgres_user_mapping_preserves_non_default_tenant() -> None:
             last_login_at=None,
             default_workspace_id=None,
             erasure_operation_id=None,
+            disabled_source=None,
+            scim_user_name=None,
+            scim_name=None,
+            scim_deleted_at=None,
+            created_at=None,
         ),
         MirroredUser,
     )

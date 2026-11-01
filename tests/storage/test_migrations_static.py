@@ -961,3 +961,167 @@ def test_user_erasure_migration_marks_accounts_and_extends_the_deletion_vocabula
         "aggregates_removed",
         "rows_removed",
     }
+
+
+def _record_scim_users_upgrade(monkeypatch):
+    """Run the SCIM users upgrade against a recording ``op``."""
+    migration = importlib.import_module(
+        "inqtrix.storage.migrations.versions." "0097_scim_users"
+    )
+    added: list[tuple[str, sa.Column]] = []
+    checks: dict[str, tuple[str, str]] = {}
+    indexes: list[tuple[str, str, list[str], bool, str]] = []
+    monkeypatch.setattr(
+        migration.op, "add_column", lambda table, column: added.append((table, column))
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "create_check_constraint",
+        lambda name, table, condition: checks.setdefault(name, (table, condition)),
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "create_index",
+        lambda name, table, columns, unique=False, postgresql_where=None: indexes.append(
+            (name, table, [str(column) for column in columns], unique, str(postgresql_where))
+        ),
+    )
+    migration.upgrade()
+    return migration, added, checks, indexes
+
+
+def test_scim_users_migration_adds_four_nullable_columns_and_a_case_insensitive_index(
+    monkeypatch,
+) -> None:
+    """SCIM state lives in four nullable columns on the account row, without
+    a backfill. A user name is unique per tenant and issuer without regard
+    to case, and only bound accounts take part in that index."""
+    migration, added, checks, indexes = _record_scim_users_upgrade(monkeypatch)
+
+    assert migration.down_revision == "0096_orphaned_source_deletion"
+    assert [
+        (table, column.name, type(column.type).__name__, column.nullable)
+        for table, column in added
+    ] == [
+        ("users", "scim_user_name", "Text", True),
+        ("users", "scim_name", "JSONB", True),
+        ("users", "scim_deleted_at", "DateTime", True),
+        ("users", "disabled_source", "Text", True),
+    ]
+    assert added[2][1].type.timezone is True
+    assert all(column.server_default is None for _table, column in added)
+    table, condition = checks["ck_users_disabled_source"]
+    assert table == "users"
+    assert set(re.findall(r"'([a-z_]+)'", condition)) == {"admin", "provisioning"}
+    assert indexes == [
+        (
+            "uq_users_scim_user_name",
+            "users",
+            ["tenant_id", "issuer", "lower(scim_user_name)"],
+            True,
+            "scim_user_name IS NOT NULL",
+        )
+    ]
+
+
+def test_scim_users_downgrade_drops_nothing_while_scim_state_exists(
+    monkeypatch,
+) -> None:
+    """Without SCIM state the downgrade removes the index, the check and the
+    columns; with any of it, it refuses before the first change and names
+    numbers only."""
+    migration = importlib.import_module(
+        "inqtrix.storage.migrations.versions." "0097_scim_users"
+    )
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        migration.op,
+        "drop_index",
+        lambda name, table_name: dropped.append(name),
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "drop_constraint",
+        lambda name, table, type_: dropped.append(name),
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "drop_column",
+        lambda table, name: dropped.append(name),
+    )
+
+    class _Bind:
+        def __init__(self, counts: dict[str, int]) -> None:
+            self.counts = counts
+
+        def execute(self, statement):
+            counts = self.counts
+            return type(
+                "_Result",
+                (),
+                {
+                    "mappings": lambda _self: type(
+                        "_Mappings", (), {"one": lambda _self: counts}
+                    )()
+                },
+            )()
+
+    empty = {
+        "scim_user_names": 0,
+        "scim_names": 0,
+        "tombstones": 0,
+        "provisioning_disables": 0,
+    }
+    monkeypatch.setattr(migration.op, "get_bind", lambda: _Bind(empty))
+    migration.downgrade()
+    assert dropped == [
+        "uq_users_scim_user_name",
+        "ck_users_disabled_source",
+        "disabled_source",
+        "scim_deleted_at",
+        "scim_name",
+        "scim_user_name",
+    ]
+
+    dropped.clear()
+    monkeypatch.setattr(
+        migration.op, "get_bind", lambda: _Bind({**empty, "tombstones": 3})
+    )
+    with pytest.raises(RuntimeError, match="Restore") as refused:
+        migration.downgrade()
+    assert dropped == []
+    assert "tombstones=3" in str(refused.value)
+    assert "scim_user_names=0" in str(refused.value)
+
+
+def test_users_table_declares_what_the_scim_users_migration_adds(monkeypatch) -> None:
+    """The live table declaration agrees with the revision, so queries see
+    the columns, the check and the index the schema has."""
+    from inqtrix.storage.identity_orm import users
+
+    _migration, added, checks, indexes = _record_scim_users_upgrade(monkeypatch)
+
+    for _table, column in added:
+        declared = users.c[column.name]
+        assert type(declared.type) is type(column.type), column.name
+        assert declared.nullable is column.nullable, column.name
+        assert declared.server_default is None, column.name
+    assert users.c.scim_deleted_at.type.timezone is True
+    declared_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in users.constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+    assert declared_checks["ck_users_disabled_source"] == (
+        checks["ck_users_disabled_source"][1]
+    )
+    (declared_index,) = (
+        index for index in users.indexes if index.name == "uq_users_scim_user_name"
+    )
+    _name, _table, columns, unique, where = indexes[0]
+    assert declared_index.unique is unique
+    assert [
+        getattr(expression, "name", None) or str(expression)
+        for expression in declared_index.expressions
+    ] == columns
+    assert str(declared_index.dialect_options["postgresql"]["where"]) == where

@@ -754,15 +754,17 @@ export function useEditorSuggestions({
   // server rows stay invisible after the tool approval and nobody can
   // accept or reject them. Collaboration documents keep their own
   // shared-changes review surface. A demo desk runs without the server, so
-  // it holds no server patches and asks for none. Fetched once per document
-  // focus; already-mirrored patch ids (any status, this session) are
-  // skipped so re-opening never duplicates groups.
+  // it holds no server patches and asks for none, and neither does a document
+  // the server has not acknowledged yet: its first save reruns this. Fetched
+  // once per document focus; already-mirrored patch ids (any status, this
+  // session) are skipped so re-opening never duplicates groups.
   const demoDesk = state.connection.kind === 'demo'
   useEffect(() => {
     const document = activeDocument
     if (
       !document
       || document.contentMode === 'collaboration'
+      || document.serverSynced !== true
       || !activeEditor
       || demoDesk
     ) {
@@ -831,7 +833,7 @@ export function useEditorSuggestions({
     }
     // Deliberately narrow deps: fetch once per document focus;
     // suggestion state is read through the ref above.
-  }, [activeDocument?.id, activeDocument?.contentMode, activeEditor, demoDesk])
+  }, [activeDocument?.id, activeDocument?.contentMode, activeDocument?.serverSynced, activeEditor, demoDesk])
   const aiReadOnlyReason = editorCollaborationActionDisabledReason(
     activeDocument,
     collaboration,

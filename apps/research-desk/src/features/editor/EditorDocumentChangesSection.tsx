@@ -54,7 +54,7 @@ export function EditorDocumentChangesSection({
         )).length
         return (
           <div className="rounded-md border border-border bg-background p-2" key={group.groupId}>
-            <div className="mb-2 flex items-center justify-end gap-1.5">
+            <div className="mb-2 flex flex-wrap items-center justify-end gap-1.5">
               <Button
                 className="h-7"
                 disabled={rejectableCount === 0 || Boolean(publishDisabledReason)}
@@ -166,7 +166,7 @@ function DocumentChangeCard({
           {labels.stale}
         </p>
       ) : null}
-      <div className="mt-2 flex items-center justify-end gap-1.5">
+      <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
         <Button
           className="h-7"
           disabled={Boolean(publishDisabledReason)}

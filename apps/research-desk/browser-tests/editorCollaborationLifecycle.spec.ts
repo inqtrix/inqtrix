@@ -356,10 +356,10 @@ test('narrow topbar keeps long title and four-participant status in separate bou
   await expect(status.locator('[data-participant-id]')).toHaveCount(3)
   await expect(status).toContainText('+1')
 
-  const geometry = await page.evaluate(() => {
+  const measure = () => page.evaluate(() => {
     const rect = (selector: string) => {
       const value = document.querySelector<HTMLElement>(selector)!.getBoundingClientRect()
-      return { left: value.left, right: value.right, width: value.width }
+      return { bottom: value.bottom, left: value.left, right: value.right, top: value.top }
     }
     const title = document.querySelector<HTMLElement>('[data-testid="long-title"]')!
     return {
@@ -371,13 +371,27 @@ test('narrow topbar keeps long title and four-participant status in separate bou
     }
   })
 
-  expect(geometry.header.left).toBeGreaterThanOrEqual(0)
-  expect(geometry.header.right).toBeLessThanOrEqual(360)
-  expect(geometry.leading.left).toBeGreaterThanOrEqual(geometry.header.left)
-  expect(geometry.leading.right).toBeLessThanOrEqual(geometry.toolbar.left + 0.5)
-  expect(geometry.toolbar.right).toBeLessThanOrEqual(geometry.actions.left + 0.5)
-  expect(geometry.actions.right).toBeLessThanOrEqual(geometry.header.right)
-  expect(geometry.titleClipped).toBe(true)
+  // Below the one-row width the bar wraps: title and actions share the first
+  // row without touching, the toolbar starts the second.
+  for (const width of [360, 450]) {
+    await page.setViewportSize({ height: 800, width })
+    const geometry = await measure()
+    expect(geometry.header.left).toBeGreaterThanOrEqual(0)
+    expect(geometry.header.right).toBeLessThanOrEqual(width)
+    expect(geometry.leading.left).toBeGreaterThanOrEqual(geometry.header.left)
+    expect(geometry.leading.right).toBeLessThanOrEqual(geometry.actions.left + 0.5)
+    expect(geometry.actions.right).toBeLessThanOrEqual(geometry.header.right)
+    expect(geometry.toolbar.top).toBeGreaterThanOrEqual(geometry.leading.bottom - 0.5)
+    expect(geometry.titleClipped).toBe(true)
+  }
+
+  // From the one-row width on, the cells sit side by side in one row.
+  await page.setViewportSize({ height: 800, width: 470 })
+  const wide = await measure()
+  expect(wide.leading.right).toBeLessThanOrEqual(wide.toolbar.left + 0.5)
+  expect(wide.toolbar.right).toBeLessThanOrEqual(wide.actions.left + 0.5)
+  expect(wide.toolbar.top).toBeLessThan(wide.leading.bottom)
+  expect(wide.actions.right).toBeLessThanOrEqual(wide.header.right)
 })
 
 test('save status suppresses acknowledgement flicker and keeps its label track stable', async ({ page }) => {

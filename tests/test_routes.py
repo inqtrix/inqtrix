@@ -751,20 +751,9 @@ def test_create_app_lifespan_logs_provider_init(caplog):
     providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
     app = create_app(settings=Settings(), providers=providers)
 
-    # configure_logging() sets propagate=False on the inqtrix logger so the
-    # standard root-handler caplog setup does not see records. Attach the
-    # capture handler directly to the inqtrix logger for this test.
-    inqtrix_logger = logging.getLogger("inqtrix")
-    inqtrix_logger.addHandler(caplog.handler)
-    previous_level = inqtrix_logger.level
-    inqtrix_logger.setLevel(logging.INFO)
-    try:
-        with caplog.at_level(logging.INFO, logger="inqtrix"):
-            with TestClient(app) as client:
-                client.get("/health")
-    finally:
-        inqtrix_logger.removeHandler(caplog.handler)
-        inqtrix_logger.setLevel(previous_level)
+    with caplog.at_level(logging.INFO, logger="inqtrix"):
+        with TestClient(app) as client:
+            client.get("/health")
 
     messages = [rec.getMessage() for rec in caplog.records]
     startup = [m for m in messages if "Inqtrix server starting" in m]
@@ -773,6 +762,28 @@ def test_create_app_lifespan_logs_provider_init(caplog):
     assert "_DummyLLM" in startup[0]
     assert "_DummySearch" in startup[0]
     assert shutdown, f"Shutdown log not emitted; got: {messages}"
+
+
+def test_the_app_lifespan_closes_the_auth_provider():
+    from inqtrix.auth.api_key import ApiKeyAuthProvider
+
+    class _ClosingProvider(ApiKeyAuthProvider):
+        closed = 0
+
+        async def aclose(self) -> None:
+            self.closed += 1
+
+    provider = _ClosingProvider(api_key="key")
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers, auth_provider=provider)
+
+    with TestClient(app):
+        assert provider.closed == 0
+    with TestClient(app):
+        pass
+
+    # Every shutdown releases the clients; they reopen when used again.
+    assert provider.closed == 2
 
 
 def test_upload_reconciler_is_owned_by_restartable_app_lifespan():
@@ -1291,3 +1302,26 @@ def test_upload_reconciler_starts_even_when_database_contract_is_not_ready(
         assert reconciler.running is True
     assert reconciler.running is False
     reconciler.close()
+
+
+def test_a_chat_timeout_is_a_warning_line(monkeypatch, caplog):
+    import logging
+
+    client = _make_app(agent_max_total_seconds=-29)
+
+    def fake_run(*args, **kwargs):
+        time.sleep(1.2)
+        return {"answer": "Zu spaet", "result_state": {}}
+
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
+
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "Hallo"}], "stream": False},
+        )
+
+    assert response.status_code == 504
+    lines = [record.getMessage() for record in caplog.records if "504" in record.getMessage()]
+    assert len(lines) == 1
+    assert "mode=" in lines[0]

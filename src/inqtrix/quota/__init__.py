@@ -1,4 +1,4 @@
-"""Per-user usage quotas for oidc multi-user deployments.
+"""Per-user usage quotas for multi-user deployments.
 
 The quota layer caps how much a single authenticated user may consume
 per calendar month (runs, LLM tokens, embedding tokens) plus a stock
@@ -9,8 +9,9 @@ admin UI sets a tenant default and per-user overrides within it, and
 
 The subject is the canonical ``(tenant_id, user_id)`` pair (request
 workspace ids are the non-authoritative ui_namespace).
-Quotas bind only in oidc mode; the anonymous/static principals bypass
-entirely, so existing deployments stay byte-identical.
+Quotas bind only in the cookie-session modes (local, oidc, gateway); the
+anonymous/static principals bypass entirely, so existing deployments stay
+byte-identical.
 """
 
 from inqtrix.quota.models import (

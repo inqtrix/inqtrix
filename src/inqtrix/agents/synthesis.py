@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from inqtrix.core.results import HandoverClarification
     from inqtrix.providers.base import LLMProvider
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 __all__ = [
     "CitationValidationFailed",

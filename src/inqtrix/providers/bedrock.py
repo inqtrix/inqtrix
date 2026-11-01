@@ -90,7 +90,7 @@ from botocore.exceptions import (  # type: ignore[import-untyped]
     ReadTimeoutError,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Retry & backoff constants

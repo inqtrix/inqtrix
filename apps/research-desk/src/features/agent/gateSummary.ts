@@ -99,10 +99,10 @@ export function toolGateHeadline(
     case 'write_canvas':
       return t.agent.timeline.gateGenericTitle.replace(
         '{tool}',
-        kernelToolLabel(tool, t),
+        () => kernelToolLabel(tool, t),
       )
     default:
-      return t.agent.timeline.gateGenericTitle.replace('{tool}', tool)
+      return t.agent.timeline.gateGenericTitle.replace('{tool}', () => tool)
   }
 }
 
@@ -246,9 +246,9 @@ export function replanGateSummary(
   })
   return {
     hint: t.agent.tray.childReplanHint
-      .replace('{version}', version)
-      .replace('{reason}', reason),
-    heading: t.agent.tray.childReplanTasks.replace('{version}', version),
+      .replace('{version}', () => version)
+      .replace('{reason}', () => reason),
+    heading: t.agent.tray.childReplanTasks.replace('{version}', () => version),
     rows,
   }
 }

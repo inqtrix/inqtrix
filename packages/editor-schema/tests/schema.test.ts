@@ -6,6 +6,7 @@ import { initProseMirrorDoc, ySyncPluginKey } from '@tiptap/y-tiptap'
 import * as Y from 'yjs'
 import { describe, expect, it } from 'vitest'
 import {
+  EDITOR_YJS_FRAGMENT,
   EDITOR_BLOCK_SUGGESTIONS_SUPPORTED,
   INQTRIX_STRUCTURE_COMMAND_META,
   INQTRIX_STRUCTURE_SUGGESTION_ATTR,
@@ -192,6 +193,25 @@ describe('editor schema gate', () => {
     expect(editorYDocToJson(document)).toEqual(content)
     expect(() => validateEditorYDoc(document)).toThrow(/not canonical/)
     document.destroy()
+  })
+
+  it('leaves out the causal check only for a caller that vouches for it', () => {
+    const replica = editorJsonToYDoc(parseEditorMarkdown('Canonical content'))
+    const later = new Y.Doc()
+    Y.applyUpdate(later, Y.encodeStateAsUpdate(replica))
+    const text = (later.getXmlFragment(EDITOR_YJS_FRAGMENT).get(0) as Y.XmlElement).get(0) as Y.XmlText
+    text.insert(0, 'a')
+    const vector = Y.encodeStateVector(later)
+    text.insert(0, 'b')
+    Y.applyUpdate(replica, Y.encodeStateAsUpdate(later, vector))
+
+    expect(replica.store.pendingStructs).not.toBeNull()
+    expect(() => validateEditorYDoc(replica)).toThrow(/unresolved/)
+    expect(validateEditorYDoc(replica, { causallyComplete: true })).toEqual(
+      parseEditorMarkdown('Canonical content'),
+    )
+    replica.destroy()
+    later.destroy()
   })
 
   it('writes one empty text node into every textblock without content, and accepts it', () => {

@@ -51,7 +51,7 @@ from inqtrix.prompts import (
     build_knowledge_followup_context_prompt,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 CONTEXT_MARKER_APPLIED = "_chunk_context_applied"
 # Some chunks carry no context: the provider's content filter blocked their
@@ -619,10 +619,9 @@ class LLMChunkContextualizer(ChunkContextualizer):
             # document restarts from scratch, visibly, instead of failing the
             # revision or publishing a mixture.
             log.warning(
-                "contextualization checkpoints discarded for %r: %d of %d "
+                "contextualization checkpoints discarded: %d of %d "
                 "stored batches no longer match the current prompt, model or "
                 "batch plan; the document is contextualized from scratch",
-                document_title,
                 len(stale),
                 len(checkpoint_by_number),
             )
@@ -667,7 +666,6 @@ class LLMChunkContextualizer(ChunkContextualizer):
                     submit_context.run,
                     functools.partial(
                         self._batch_contexts,
-                        document_title=document_title,
                         prompt=plan.prompt,
                         expected=len(plan.chunks),
                         batch_number=batch_number,
@@ -935,7 +933,6 @@ class LLMChunkContextualizer(ChunkContextualizer):
     def _batch_contexts(
         self,
         *,
-        document_title: str,
         prompt: str,
         expected: int,
         batch_number: int,
@@ -950,7 +947,6 @@ class LLMChunkContextualizer(ChunkContextualizer):
         """
         call = functools.partial(
             self._contexts_for,
-            document_title=document_title,
             prompt=prompt,
             expected=expected,
             batch_number=batch_number,
@@ -960,31 +956,25 @@ class LLMChunkContextualizer(ChunkContextualizer):
             return call(), None
         except ContextualizationContentFiltered as filtered:
             if not filtered.repeatable:
-                return self._omitted_batch(
-                    document_title, batch_number, expected, "refused"
-                )
+                return self._omitted_batch(batch_number, expected, "refused")
             log.warning(
-                "contextualization batch %d of %r was blocked by the provider "
+                "contextualization batch %d was blocked by the provider "
                 "content filter (finish_reason=content_filter); one visible retry",
                 batch_number,
-                document_title,
             )
         try:
             return call(), None
         except ContextualizationContentFiltered:
-            return self._omitted_batch(
-                document_title, batch_number, expected, "blocked twice"
-            )
+            return self._omitted_batch(batch_number, expected, "blocked twice")
 
     @staticmethod
-    def _omitted_batch(
-        document_title: str, batch_number: int, expected: int, how: str
-    ) -> tuple[list[str], str]:
+    def _omitted_batch(batch_number: int, expected: int, how: str) -> tuple[list[str], str]:
+        # The document is named by the indexing job's log context; its title
+        # is user text and never reaches this line.
         log.warning(
-            "contextualization batch %d of %r was %s by the provider content "
+            "contextualization batch %d was %s by the provider content "
             "filter; its %d chunks are indexed without context",
             batch_number,
-            document_title,
             how,
             expected,
         )
@@ -993,14 +983,12 @@ class LLMChunkContextualizer(ChunkContextualizer):
     def _contexts_for(
         self,
         *,
-        document_title: str,
         prompt: str,
         expected: int,
         batch_number: int,
         cancel_check: Callable[[], None] | None = None,
     ) -> list[str]:
         """Return one batch's contexts or raise a typed visible failure."""
-        del document_title
         if cancel_check is not None:
             cancel_check()
         resolved_model = self._resolved_model()

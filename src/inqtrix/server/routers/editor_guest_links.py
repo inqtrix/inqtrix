@@ -19,6 +19,7 @@ from inqtrix.project.editor_guest_links import (
     EditorGuestLinkExpired,
     EditorGuestLinkNotFound,
     EditorGuestLinkRateLimited,
+    EditorGuestLinkUnavailable,
 )
 from inqtrix.project.editor_collaboration_ports import CollaborationConflict
 from inqtrix.services.editor_collaboration_service import (
@@ -335,6 +336,8 @@ def build_router(container: "AppContainer") -> APIRouter:
     async def describe_link(token: str):
         try:
             payload = await service.describe_token(token)
+        except EditorGuestLinkUnavailable:
+            return _guest_link_unavailable()
         except (EditorGuestLinkNotFound, EditorGuestLinkExpired):
             return _guest_error(404, "This link is invalid or has expired.")
         return _guest_json(payload)
@@ -373,6 +376,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 429,
                 "Too many attempts. Please try again later.",
             )
+        except EditorGuestLinkUnavailable:
+            return _guest_link_unavailable()
         except (EditorGuestLinkNotFound, EditorGuestLinkExpired):
             return _guest_error(401, "Invalid link or password.")
         except ValueError:
@@ -441,6 +446,8 @@ def build_router(container: "AppContainer") -> APIRouter:
             return _guest_error(401, "Guest session required.")
         try:
             access = await service.session(token)
+        except EditorGuestLinkUnavailable:
+            return _guest_link_unavailable()
         except (EditorGuestLinkNotFound, EditorGuestLinkExpired):
             return _guest_error(401, "Guest session has expired.")
         return _guest_json(service.guest_payload(access))
@@ -480,6 +487,8 @@ def build_router(container: "AppContainer") -> APIRouter:
             return _guest_error(400, str(exc))
         except CollaborationAuthenticationRequired:
             return _guest_error(401, "Guest session is no longer valid.")
+        except EditorGuestLinkUnavailable:
+            return _guest_link_unavailable()
         except (EditorGuestLinkNotFound, EditorGuestLinkExpired):
             return _guest_error(401, "Guest session has expired.")
         return _guest_json(result)
@@ -701,14 +710,25 @@ def _guest_json(payload: dict[str, Any], status_code: int = 200) -> JSONResponse
     )
 
 
-def _guest_error(status: int, message: str) -> JSONResponse:
+def _guest_error(
+    status: int, message: str, error_type: str = "guest_access_error"
+) -> JSONResponse:
     return _guest_json(
-        {"error": {"message": message, "type": "guest_access_error"}},
+        {"error": {"message": message, "type": error_type}},
         status_code=status,
     )
 
 
+def _guest_link_unavailable() -> JSONResponse:
+    """The link is live, but its owner is not active; it may work again."""
+    return _guest_error(
+        423, "This link is currently unavailable.", "guest_link_unavailable"
+    )
+
+
 def _guest_collaboration_error(exc: Exception) -> JSONResponse | None:
+    if isinstance(exc, EditorGuestLinkUnavailable):
+        return _guest_link_unavailable()
     if isinstance(exc, (EditorGuestLinkNotFound, EditorGuestLinkExpired)):
         return _guest_error(401, "Guest session has expired.")
     if isinstance(exc, CollaborationAuthenticationRequired):

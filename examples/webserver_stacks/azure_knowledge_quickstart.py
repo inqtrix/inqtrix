@@ -106,7 +106,7 @@ from inqtrix import (
     PerplexitySearch,
     ReportProfile,
 )
-from inqtrix.logging_config import build_uvicorn_log_config, configure_logging
+from inqtrix.logging_config import configure_logging, log_status_line
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server import create_app
 from inqtrix.server.security import resolve_tls_paths
@@ -116,15 +116,7 @@ from inqtrix.settings import (
     ModelSettings,
     ServerSettings,
     Settings,
-)
-
-
-load_dotenv()
-
-_INQTRIX_LOG_PATH = configure_logging(
-    enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
-    level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
-    console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
+    check_retired_settings,
 )
 
 
@@ -210,6 +202,9 @@ def build_app() -> FastAPI:
 
 def main() -> None:
     """Build the app and start uvicorn (with optional TLS)."""
+    load_dotenv()
+    resolved = configure_logging(service="api")
+    log_status_line(resolved, retired=check_retired_settings())
     app = build_app()
     settings = _build_settings()
     tls = resolve_tls_paths(settings.server)
@@ -221,11 +216,9 @@ def main() -> None:
     )
     if tls is not None:
         uvicorn_kwargs["ssl_keyfile"], uvicorn_kwargs["ssl_certfile"] = tls
-    if os.getenv("INQTRIX_LOG_INCLUDE_WEB", "true").lower() != "false":
-        uvicorn_kwargs["log_config"] = build_uvicorn_log_config(
-            _INQTRIX_LOG_PATH,
-            web_level=os.getenv("INQTRIX_LOG_WEB_LEVEL", "INFO"),
-        )
+    uvicorn_kwargs["log_config"] = None
+    # Inqtrix reads X-Forwarded-For itself (INQTRIX_TRUSTED_PROXY_HOPS).
+    uvicorn_kwargs["proxy_headers"] = False
     uvicorn.run(app, **uvicorn_kwargs)
 
 

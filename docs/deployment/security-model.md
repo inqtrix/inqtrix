@@ -1,6 +1,6 @@
 # Security model
 
-> Files: `src/inqtrix/server/security.py`, `src/inqtrix/server/routes.py`, `src/inqtrix/auth/api_key.py`
+> Files: `src/inqtrix/server/security.py`, `src/inqtrix/server/routes.py`, `src/inqtrix/auth/api_key.py`, `src/inqtrix/auth/gateway.py`, `src/inqtrix/auth/scim.py`
 
 ## Scope
 
@@ -12,9 +12,11 @@ authority, how resource access is decided and re-decided, when revocation takes
 effect, and which processes are allowed to hold the migration and object-store
 credentials.
 
-Authentication is mode-driven (`none` | `apikey` | `local` | `oidc`); this page
-covers the `apikey` gate. For the full mode matrix, the inference rule, and
-browser sessions see [Authentication modes](auth-modes.md).
+Authentication is mode-driven (`none` | `apikey` | `local` | `oidc` |
+`gateway`); this page covers the `apikey` gate and the identity boundaries
+below. For the full mode matrix, the inference rule, browser sessions, and
+the duties of an API gateway in front of Inqtrix see
+[Authentication modes](auth-modes.md).
 
 > Inqtrix is explicitly experimental. The root `README.md` disclaimer applies.
 > Secure configuration, hardening, deployment architecture, access control,
@@ -57,10 +59,12 @@ The optional editor transport has a separate, fail-closed boundary. Browsers
 connect only to same-origin `/collaboration`; the Vite development proxy or
 production web adapter (the Python gateway, unless another is explicitly
 selected) forwards it to FastAPI, which validates `Origin` and relays binary
-frames to private Node. `INQTRIX_COLLABORATION_ALLOWED_ORIGINS` adds explicit
-origins when TLS termination or a trusted external frontend makes derived
-same-origin insufficient. CORS configuration does not replace this WebSocket
-Origin check. Node must have no public host port or database credentials.
+frames to private Node. Behind a TLS proxy the browser's origin is admitted
+through `INQTRIX_PUBLIC_BASE_URL`
+([Scheme behind a TLS proxy](auth-modes.md#scheme-behind-a-tls-proxy));
+`INQTRIX_COLLABORATION_ALLOWED_ORIGINS` adds further explicit origins, for
+example that of a trusted external frontend. CORS configuration does not
+replace this WebSocket Origin check. Node must have no public host port or database credentials.
 See [Deploy editor collaboration](editor-collaboration.md#security-and-limits)
 for the collaboration secret, the default limits, and close codes.
 
@@ -74,7 +78,7 @@ All of these are explicit non-goals for this family of settings. They are tracke
 
 If any of these is a hard requirement, a reverse proxy or an API gateway in front of Inqtrix is the recommended route.
 
-Covered elsewhere: OIDC browser sessions are a first-class auth mode ([Authentication modes](auth-modes.md)); durable run persistence across restarts is provided by `INQTRIX_STORAGE_BACKEND=postgres` together with the `valkey` queue backend ([Settings and env](../configuration/settings-and-env.md)).
+Covered elsewhere: OIDC browser sessions and sign-in through an API gateway in front of Inqtrix are first-class auth modes ([Authentication modes](auth-modes.md)); durable run persistence across restarts is provided by `INQTRIX_STORAGE_BACKEND=postgres` together with the `valkey` queue backend ([Settings and env](../configuration/settings-and-env.md)).
 
 Request tracing and correlation IDs are covered: every request carries a validated or freshly minted request id, bound into the log context and echoed as the `X-Request-ID` response header, and the same middleware opens an OpenTelemetry server span that continues an incoming `traceparent`.
 
@@ -86,7 +90,7 @@ The lifespan log records the active layers on startup in a single line:
 Inqtrix server starting | llm=... ready=True | search=... ready=True | report_profile=compact | max_concurrent=100 | run_max_concurrent=100 | run_queue_max_size=100 | run_completed_ttl_seconds=300 | api_key_gate=on | auth_mode=apikey | cors=on
 ```
 
-`api_key_gate` reflects whether the resolved auth mode is `apikey`; `auth_mode` names the resolved mode (`none` | `apikey` | `local` | `oidc`). Any deviation from the expected line is a deployment mistake; fail the smoke test fast.
+`api_key_gate` reflects whether the resolved auth mode is `apikey`; `auth_mode` names the resolved mode (`none` | `apikey` | `local` | `oidc` | `gateway`). Any deviation from the expected line is a deployment mistake; fail the smoke test fast. In mode `gateway` a second line names the sub-mode, the issuer key, the number of trusted peers, whether a sign-out URL is set, the first-user rule and whether SCIM is on, never a header value or secret; the web gateway logs its own line with `identity_header_policy` and the header names it removes from untrusted peers.
 
 ## Identity, authorization, and revocation boundaries
 
@@ -96,6 +100,35 @@ provenance, not resource ids. Session and PAT verification resolves the user
 and checks that the account is still active on every request. Disabling a user
 revokes their sessions and PATs; enabling the user later does not reactivate
 those credentials.
+
+In mode `gateway` an account is bound to the identity source: the issuer
+key (the pinned token issuer in sub-mode `jwt`,
+`INQTRIX_GATEWAY_ISSUER_KEY` otherwise) and the subject. The subject must
+be an immutable id. The subject claim may never be `email`, `upn`,
+`preferred_username`, `unique_name` or the configured email claim, and a
+subject in the form of an email address is refused (`subject_is_email`):
+such values change or pass to another person, who would then inherit the
+account. Inqtrix never links accounts across issuers or by email, and
+in this mode it accepts sessions and personal access tokens only of
+accounts bound under the identity source. The session never stands in
+for the API gateway's assertion: every request must assert the person
+the session belongs to, otherwise the session ends. Disabling a user, by
+an admin or through SCIM (`active: false`), ends their sessions and
+tokens at once. When the API gateway merely stops asserting a person, for
+example after they left the identity provider and no SCIM reports it,
+their session stays until it expires and their tokens stay until the
+lifetime cap or the inactivity bound; the
+[revocation table](auth-modes.md#revoking-access) lists which event ends
+what, and when. A SCIM `DELETE` disables the account and leaves an
+account tombstone that neither a sign-in nor provisioning brings back; a
+SCIM create for the same subject is a conflict until an admin enables the
+account, which lifts the tombstone, or an erasure removes the account.
+After an erasure the subject can be provisioned again as a new, empty
+account. With `INQTRIX_SCIM_DELETE_ACTION=erase` the `DELETE` also
+starts the erasure described below, at most ten times an hour; beyond
+that, the account stays disabled until an admin erases it. Every state of
+an account and its effect on sessions, tokens and guest links:
+[The lifecycle of an account](create-and-manage-users.md#the-lifecycle-of-an-account).
 
 Resource access is owner-or-direct-share. Accepted shares for runs, knowledge
 collections, prompt templates, and skill templates remain `view`/`edit`.
@@ -117,17 +150,22 @@ each data frame as before. None of this claims that bytes already sent to
 a browser or an external provider can be recalled.
 
 Erasing an account (`DELETE /v1/admin/users/{id}`, instance admins with a
-browser session only) cuts the account off in the transaction that starts
+browser session only, or a SCIM `DELETE` with the `erase` action in mode
+`gateway`) cuts the account off in the transaction that starts
 the erasure: its sessions end, its tokens are revoked, its password is
 refused, and every later sign-in, enable or role change of the account is
 refused while the erasure runs. An account being erased never counts as an
 administrator, neither for the last-admin invariant nor for administrative
-notifications. The deletion worker then removes the account's data as its
+notifications. A run or reindex job the account carries stops at its next
+safepoint with `authorization_revoked`, as it does for a disabled account. The
+deletion worker then removes the account's data as its
 owner, through the same deletion operations and access checks as the owner's
 own delete; at that point nobody else holds a session or token for the
 account. The audit log keeps its entries under the actor's pseudonym, and
-every source the erasure deleted keeps its content-free tombstone, so no late
-request can bring it back. See
+every source the erasure deleted keeps its content-free source tombstone (a
+row in `source_lifecycles`), so no late request can bring it back. Span content
+captured for tracing is not touched: it stays until the trace retention below
+removes it. See
 [Erasing an account](create-and-manage-users.md#erasing-an-account).
 
 Deleting a source (an uploaded file, a knowledge document or a collection)

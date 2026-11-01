@@ -85,10 +85,16 @@ class _HeaderUsers:
     """Live-user lookup for the scoped principals emitted by the fixture."""
 
     async def find_by_user_id(self, *, tenant_id, user_id):
-        return SimpleNamespace(user_id=user_id, disabled_at=None)
+        return SimpleNamespace(
+            user_id=user_id, disabled_at=None, erasure_operation_id=None
+        )
 
     async def has_user_id(self, *, tenant_id, user_id):
         return True
+
+    async def resolve_default_workspace(self, *, tenant_id, user_id, candidate):
+        # Every scoped principal already has its project namespace.
+        return f"ws_{user_id.hex}"
 
 
 def make_visibility_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:

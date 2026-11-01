@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class PeriodicSweep:

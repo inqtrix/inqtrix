@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-SCHEMA_HEAD_REVISION: Final = "0096_orphaned_source_deletion"
+SCHEMA_HEAD_REVISION: Final = "0098_project_namespace_backfill"
 """Single Alembic head shipped by this source tree."""
 
 TENANT_RLS_POLICY: Final = "tenant_isolation"
@@ -27,7 +27,17 @@ class SchemaHeadMismatch(RuntimeError):
     migration still in flight carries the old revision until its step
     commits and is therefore out of scope -- the canonical migration
     workflow stops the clients first.
+
+    ``installed`` and ``expected`` are revision ids, which a log line may
+    name; the log filter shows the exception itself only by its type.
     """
+
+    def __init__(self, *, installed: str, expected: str) -> None:
+        super().__init__(
+            f"""Schema head changed under the worker: installed {installed}, expected {expected}. The claim was not taken; the entry remains unacknowledged for an updated worker."""
+        )
+        self.installed = installed
+        self.expected = expected
 
 
 async def assert_schema_head(session: "object") -> None:
@@ -51,7 +61,7 @@ async def assert_schema_head(session: "object") -> None:
     ).scalar()
     if revision != SCHEMA_HEAD_REVISION:
         raise SchemaHeadMismatch(
-            f"""Schema head changed under the worker: installed {revision or 'missing'}, expected {SCHEMA_HEAD_REVISION}. The claim was not taken; the entry remains unacknowledged for an updated worker."""
+            installed=revision or "missing", expected=SCHEMA_HEAD_REVISION
         )
 
 _TENANT_POLICY_EXPRESSION: Final[re.Pattern[str]] = re.compile(

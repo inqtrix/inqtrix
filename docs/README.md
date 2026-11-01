@@ -18,6 +18,7 @@ Start here when you know what you want to do but not which page owns it. The roo
 | Decide which infrastructure I need (Postgres, S3, Qdrant, workers, OIDC) | [Platform components](getting-started/platform-components.md) |
 | Operate the stack (start/stop/update/backup) | [Runbooks](deployment/runbooks.md) |
 | Enable and operate live editor collaboration | [Deploy editor collaboration](deployment/editor-collaboration.md) |
+| Export an editor document into my own Word template | [Export into a Word template](deployment/react-ui.md#export-into-a-word-template) |
 | Get a cited answer from my own documents | [First knowledge answer](getting-started/first-knowledge-answer.md), [Knowledge engine](architecture/knowledge-engine.md), [Retrieval profiles](configuration/knowledge-profiles.md) |
 | Choose or connect an authentication mode | [Auth modes](deployment/auth-modes.md) |
 | Create or manage users (owner setup, roles, disabling, PATs) | [Create and manage users](deployment/create-and-manage-users.md) |

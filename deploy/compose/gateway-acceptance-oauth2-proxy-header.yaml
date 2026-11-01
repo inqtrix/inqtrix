@@ -1,0 +1,56 @@
+# oauth2-proxy for the local gateway acceptance, assertion header (alpha configuration).
+# Used only by compose.gateway-acceptance.yaml; every other setting is a flag there.
+# The identity of the person's sign-in reaches Inqtrix in identity headers with the
+# shared secret as proof; oauth2-proxy removes any header of these names a client sent.
+server:
+  bindAddress: 0.0.0.0:4180
+upstreamConfig:
+  upstreams:
+    - id: inqtrix
+      path: /
+      uri: http://web:8080/
+      passHostHeader: true
+      proxyWebSockets: true
+      flushInterval: 1s
+      # Above the longest request without data flow (a chat answer without
+      # streaming waits up to 3,630 s); the default of 30 s would cut it off.
+      timeout: 3700s
+injectRequestHeaders:
+  # With userIDClaim sub the session's user is the immutable id of the person.
+  # oauth2-proxy then also fills its email field with that id, so no email
+  # header is passed on: the name header names the person (an identity header
+  # Inqtrix reads must be one oauth2-proxy sets and therefore clears).
+  - name: X-Inqtrix-Subject
+    values:
+      - claimSource:
+          claim: user
+  - name: X-Inqtrix-Name
+    values:
+      - claimSource:
+          claim: preferred_username
+  - name: X-Inqtrix-Groups
+    values:
+      - claimSource:
+          claim: groups
+  - name: X-Inqtrix-Proof
+    values:
+      - secretSource:
+          fromFile: /run/secrets/gateway_acceptance_shared_secret
+providers:
+  - id: keycloak
+    provider: keycloak-oidc
+    clientID: inqtrix-gateway
+    clientSecretFile: /run/secrets/gateway_acceptance_client_secret
+    scope: openid email profile inqtrix.user
+    code_challenge_method: S256
+    # Signing out also ends the Keycloak session, server to server: the ID
+    # token names the session, so Keycloak asks no confirmation and no other
+    # tab of the browser signs in again through it.
+    backendLogoutURL: http://keycloak.localhost:8180/realms/inqtrix-acceptance/protocol/openid-connect/logout?id_token_hint={id_token}
+    oidcConfig:
+      issuerURL: http://keycloak.localhost:8180/realms/inqtrix-acceptance
+      emailClaim: email
+      groupsClaim: groups
+      userIDClaim: sub
+      audienceClaims:
+        - aud

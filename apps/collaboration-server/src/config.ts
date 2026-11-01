@@ -5,9 +5,53 @@ import {
   EDITOR_SCHEMA_VERSION,
 } from '@inqtrix/editor-schema'
 
-import type { CollaborationSettings } from './contracts'
+import type { CollaborationSettings, LogFields } from './contracts'
+import { LOG_LEVELS, type LogLevel } from './logger'
 
 const MEBIBYTE = 1024 * 1024
+
+/** A setting the operator has to fix. Its message names the variable and
+ * the allowed values, never the value itself, so a failed start may say it. */
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ConfigError'
+  }
+}
+
+/** ``INQTRIX_LOG_LEVEL`` as the Python services read it: any case, empty is
+ * ``INFO``. */
+export function logLevelFromEnv(env: Readonly<Record<string, string | undefined>>): LogLevel {
+  const raw = env.INQTRIX_LOG_LEVEL?.trim().toUpperCase() ?? ''
+  if (!raw) return 'INFO'
+  const level = LOG_LEVELS.find((candidate) => candidate === raw)
+  if (!level) throw new ConfigError(`INQTRIX_LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')}`)
+  return level
+}
+
+/** The shape the Python services accept as a stable exception code. */
+const STABLE_ERROR_CODE = /^[A-Za-z0-9_.:+-]{1,120}$/
+
+function typeAndCode(prefix: 'cause' | 'error', error: unknown): LogFields {
+  const fields: LogFields = {
+    [`${prefix}_type`]: error instanceof Error ? error.name : typeof error,
+  }
+  const code = error !== null && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  if ((typeof code === 'string' || typeof code === 'number') && STABLE_ERROR_CODE.test(String(code))) {
+    fields[`${prefix}_code`] = String(code)
+  }
+  return fields
+}
+
+/** What the start failure line may say: a configuration error by its
+ * message, anything else by the type and stable code of the error and of its
+ * direct cause, never by a text. So a taken port (``EADDRINUSE``) and a refused
+ * connection (``ECONNREFUSED`` behind ``fetch failed``) read differently. */
+export function startFailureFields(error: unknown): LogFields {
+  if (error instanceof ConfigError) return { reason: error.message }
+  const cause = error instanceof Error ? error.cause : undefined
+  return { ...typeAndCode('error', error), ...(cause === undefined ? {} : typeAndCode('cause', cause)) }
+}
 
 export function settingsFromEnv(
   env: Readonly<Record<string, string | undefined>>,
@@ -15,7 +59,7 @@ export function settingsFromEnv(
 ): CollaborationSettings {
   const secret = required(env, 'INQTRIX_COLLABORATION_SECRET')
   if (Buffer.byteLength(secret, 'utf8') < 32) {
-    throw new Error('INQTRIX_COLLABORATION_SECRET must contain at least 32 UTF-8 bytes')
+    throw new ConfigError('INQTRIX_COLLABORATION_SECRET must contain at least 32 UTF-8 bytes')
   }
 
   const apiBaseUrl = parseApiUrl(required(env, 'INQTRIX_API_INTERNAL_URL'))
@@ -34,7 +78,7 @@ export function settingsFromEnv(
     300_000,
   )
   if (snapshotRetryMaxMs < snapshotRetryBaseMs) {
-    throw new Error(
+    throw new ConfigError(
       'INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS must be greater than or equal to INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS',
     )
   }
@@ -53,7 +97,7 @@ export function settingsFromEnv(
     60,
   )
   if (instanceRenewSeconds >= instanceLeaseSeconds) {
-    throw new Error(
+    throw new ConfigError(
       'INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS must be lower than INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS',
     )
   }
@@ -161,7 +205,7 @@ export function settingsFromEnv(
 function tenantId(env: Readonly<Record<string, string | undefined>>): string {
   const value = env.INQTRIX_COLLABORATION_TENANT_ID?.trim() || 'default'
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value)) {
-    throw new Error('INQTRIX_COLLABORATION_TENANT_ID must be a valid tenant identifier')
+    throw new ConfigError('INQTRIX_COLLABORATION_TENANT_ID must be a valid tenant identifier')
   }
   return value
 }
@@ -171,7 +215,7 @@ function required(
   name: string,
 ): string {
   const value = env[name]?.trim()
-  if (!value) throw new Error(`${name} is required`)
+  if (!value) throw new ConfigError(`${name} is required`)
   return value
 }
 
@@ -184,18 +228,25 @@ function integer(
 ): number {
   const raw = env[name]
   if (raw === undefined || raw.trim() === '') return defaultValue
-  if (!/^[0-9]+$/.test(raw.trim())) throw new Error(`${name} must be an integer`)
+  if (!/^[0-9]+$/.test(raw.trim())) throw new ConfigError(`${name} must be an integer`)
   const value = Number(raw)
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
-    throw new Error(`${name} must be between ${minimum} and ${maximum}`)
+    throw new ConfigError(`${name} must be between ${minimum} and ${maximum}`)
   }
   return value
 }
 
 function parseApiUrl(value: string): string {
-  const url = new URL(value)
+  const invalid = new ConfigError('INQTRIX_API_INTERNAL_URL must be an HTTP(S) URL without credentials')
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    // The URL error carries the rejected value as ``input``.
+    throw invalid
+  }
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
-    throw new Error('INQTRIX_API_INTERNAL_URL must be an HTTP(S) URL without credentials')
+    throw invalid
   }
   url.pathname = url.pathname.replace(/\/$/, '')
   url.search = ''

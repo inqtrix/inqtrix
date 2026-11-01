@@ -90,6 +90,7 @@ async def api(request):
         execution_lanes=lanes,
         asset_deletion_service=None,
         agent_control_service=None,
+        auth_provider=None,
     )
     app = FastAPI()
     app.include_router(session_titles.build_router(container))

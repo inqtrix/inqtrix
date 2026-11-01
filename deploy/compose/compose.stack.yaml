@@ -56,6 +56,15 @@
 
 name: inqtrix
 
+# Container log rotation for the application services. Docker honours
+# both options; Podman's json-file driver caps each container log at
+# max-size and ignores max-file.
+x-app-logging: &app-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   postgres:
     # Docker Official Image, PostgreSQL 18.4 on Debian Trixie. Not published
@@ -157,6 +166,7 @@ services:
     # and exits 0. Compose starts it automatically and the api/worker wait for
     # successful completion; an operator does not normally invoke it by hand.
     # The packaged command remains available only for break-glass recovery.
+    logging: *app-logging
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.api
@@ -173,6 +183,10 @@ services:
       INQTRIX_DATABASE_URL: postgresql+asyncpg://${INQTRIX_PG_USER:-inqtrix}:${INQTRIX_PG_PASSWORD:-}@postgres:5432/${INQTRIX_PG_DB:-inqtrix}
       INQTRIX_MIGRATION_RLS_MODE: ${INQTRIX_MIGRATION_RLS_MODE:-auto}
       INQTRIX_MIGRATION_SERVICES_QUIESCED: ${INQTRIX_MIGRATION_SERVICES_QUIESCED:-false}
+      # migrate has no env_file: logging values are passed one by one. Empty
+      # keeps the job's own default and leaves room for INQTRIX_LOG_CONFIG.
+      INQTRIX_LOG_LEVEL: ${INQTRIX_LOG_LEVEL:-}
+      INQTRIX_LOG_FORMAT: ${INQTRIX_LOG_FORMAT:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -182,6 +196,7 @@ services:
   api:
     # The FastAPI server (python -m inqtrix) on the internal network port
     # 5100. Not published on the host: the web container is the only ingress.
+    logging: *app-logging
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.api
@@ -227,6 +242,10 @@ services:
       # silently hide worker spans from the admin export and drop
       # recordings on recreate. Relocate by editing volume+path together.
       INQTRIX_TRACE_SPOOL_DIR: /var/lib/inqtrix/traces
+      # Gateway mode with a resolver of its own (INQTRIX_GATEWAY_RESOLVER):
+      # its module comes from the folder mounted below. Without
+      # INQTRIX_GATEWAY_RESOLVER_DIR the bind is /dev/null, which Python skips.
+      PYTHONPATH: /opt/inqtrix-plugins
     volumes:
       - objectstore:/var/lib/inqtrix/objects
       - trace_spool:/var/lib/inqtrix/traces
@@ -234,12 +253,24 @@ services:
         source: ${INQTRIX_S3_CA_BUNDLE_HOST:-/dev/null}
         target: /etc/inqtrix/object-store/ca.pem
         read_only: true
+      - type: bind
+        source: ${INQTRIX_GATEWAY_RESOLVER_DIR:-/dev/null}
+        target: /opt/inqtrix-plugins
+        read_only: true
     depends_on:
       postgres:
         condition: service_healthy
         required: false
       migrate:
         condition: service_completed_successfully
+      # Stop order only: Compose stops the API before the stores its
+      # availability probes read, so a stop logs no failed probe.
+      qdrant:
+        condition: service_started
+        required: false
+      valkey:
+        condition: service_started
+        required: false
     healthcheck:
       # The slim python image ships no curl; probe with the stdlib instead.
       test:
@@ -260,6 +291,7 @@ services:
     # INQTRIX_WEB_BIND_ADDRESS=0.0.0.0 for an explicit LAN test or put a TLS
     # reverse proxy in front for production remote access (see
     # docs/deployment/production-checklist.md).
+    logging: *app-logging
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.web
@@ -276,9 +308,13 @@ services:
       INQTRIX_WEB_ADAPTER: python
       INQTRIX_DIRECT_TLS: "false"
       INQTRIX_BACKEND_URL: http://api:5100
+      # Logging: threshold and format only; empty keeps the gateway default.
+      INQTRIX_LOG_LEVEL: ${INQTRIX_LOG_LEVEL:-}
+      INQTRIX_LOG_FORMAT: ${INQTRIX_LOG_FORMAT:-}
       # The gateway derives forwarded Host/Proto only from these
       # operator-owned public-boundary values. X-Forwarded-For retains the
-      # normal append-only proxy chain. Keep HTTP for the normal LAN stack.
+      # normal append-only proxy chain, except in the gateway mode (below).
+      # Keep HTTP for the normal LAN stack.
       # Edge/direct TLS deployments set an exact HTTPS public base URL.
       INQTRIX_EXTERNAL_SCHEME: ${INQTRIX_EXTERNAL_SCHEME:-}
       INQTRIX_PUBLIC_BASE_URL: ${INQTRIX_PUBLIC_BASE_URL:-}
@@ -291,6 +327,22 @@ services:
       INQTRIX_COLLABORATION_MAX_FRAME_BYTES: ${INQTRIX_COLLABORATION_MAX_FRAME_BYTES:-2097152}
       INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES: ${INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES:-32}
       RESEARCH_DESK_WORKERS: ${RESEARCH_DESK_WORKERS:-1}
+      # Gateway mode: the gateway removes these identity headers from peers
+      # outside its own trusted list, the API gateway in front of it, and
+      # takes a forwarded client chain only from them. That list differs from
+      # the API server's (which trusts this gateway), hence its own source
+      # variable. The mode itself is passed only for the nginx alternative,
+      # which refuses it; this gateway asks the API server. The shared
+      # secret stays with the API server.
+      INQTRIX_AUTH_MODE: ${INQTRIX_AUTH_MODE:-}
+      INQTRIX_GATEWAY_JWT_HEADER: ${INQTRIX_GATEWAY_JWT_HEADER:-}
+      INQTRIX_GATEWAY_SUBJECT_HEADER: ${INQTRIX_GATEWAY_SUBJECT_HEADER:-}
+      INQTRIX_GATEWAY_EMAIL_HEADER: ${INQTRIX_GATEWAY_EMAIL_HEADER:-}
+      INQTRIX_GATEWAY_NAME_HEADER: ${INQTRIX_GATEWAY_NAME_HEADER:-}
+      INQTRIX_GATEWAY_GROUPS_HEADER: ${INQTRIX_GATEWAY_GROUPS_HEADER:-}
+      INQTRIX_GATEWAY_PROOF_HEADER: ${INQTRIX_GATEWAY_PROOF_HEADER:-}
+      INQTRIX_GATEWAY_RESOLVER_HEADERS: ${INQTRIX_GATEWAY_RESOLVER_HEADERS:-}
+      INQTRIX_GATEWAY_TRUSTED_PROXIES: ${INQTRIX_WEB_GATEWAY_TRUSTED_PROXIES:-}
     depends_on:
       api:
         condition: service_healthy
@@ -318,6 +370,7 @@ services:
     # enter the Node process. The service validates the secret and API URL at
     # startup and fails loudly when the profile is enabled incompletely.
     profiles: ["collaboration"]
+    logging: *app-logging
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.collaboration
@@ -356,6 +409,8 @@ services:
       # Test-only fault decisions remain absent unless an operator explicitly
       # enables the local verification profile for this container.
       INQTRIX_COLLABORATION_VERIFICATION_FAULTS: ${INQTRIX_COLLABORATION_VERIFICATION_FAULTS:-0}
+      # The server always writes JSON; only the threshold is configurable.
+      INQTRIX_LOG_LEVEL: ${INQTRIX_LOG_LEVEL:-}
     depends_on:
       api:
         condition: service_healthy
@@ -378,6 +433,7 @@ services:
     # INQTRIX_QUEUE_BACKEND=valkey + INQTRIX_VALKEY_URL in deploy/.env.stack.
     # Shares the object-store volume so worker runs reach uploaded blobs.
     profiles: ["workers"]
+    logging: *app-logging
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.api

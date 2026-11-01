@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.principal import AuthProvider
     from inqtrix.storage.object_store import ObjectStore
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 def db_integrity_response(request: Request, exc: IntegrityError):
@@ -74,7 +74,7 @@ _PLACEHOLDER_SECRET_MARKER = "CHANGE_ME"
 def _placeholder_secret_fields(settings: Settings) -> list[str]:
     """Env names of secret settings still holding a ``CHANGE_ME`` placeholder.
 
-    Returns the variable NAMES only — never the value. Lets ``create_app``
+    Returns the variable NAMES only, never the value. Lets the app factories
     warn loudly at startup so a placeholder secret (the values shipped in
     ``deploy/.env.stack.example``) cannot be deployed silently
     (no silent fallbacks).
@@ -86,6 +86,8 @@ def _placeholder_secret_fields(settings: Settings) -> list[str]:
         "INQTRIX_SERVER_API_KEY": settings.server.api_key,
         "INQTRIX_DATABASE_URL": settings.storage.database_url,
         "INQTRIX_OIDC_CLIENT_SECRET": settings.auth.oidc_client_secret,
+        "INQTRIX_GATEWAY_SHARED_SECRET": settings.auth.gateway_shared_secret,
+        "INQTRIX_SCIM_TOKEN": settings.auth.scim_token,
     }
     return [
         name
@@ -93,6 +95,22 @@ def _placeholder_secret_fields(settings: Settings) -> list[str]:
         if isinstance(value, str)
         and _PLACEHOLDER_SECRET_MARKER in value.upper()
     ]
+
+
+def warn_placeholder_secrets(settings: Settings) -> None:
+    """Flag any secret still left at its CHANGE_ME placeholder.
+
+    Both app factories call this: a placeholder secret is a silent insecurity,
+    so it must be visible at startup. Names only, never the value.
+    """
+    placeholder_secrets = _placeholder_secret_fields(settings)
+    if placeholder_secrets:
+        log.warning(
+            "INSECURE: %d secret(s) still hold a CHANGE_ME placeholder value "
+            "(%s); set real secrets before production.",
+            len(placeholder_secrets),
+            ", ".join(placeholder_secrets),
+        )
 
 
 def create_app(
@@ -161,23 +179,6 @@ def create_app(
     else:
         settings = Settings()
 
-    # Configure logging as a last-resort default. The webserver-stack
-    # examples (and any caller that already ran ``configure_logging``
-    # before invoking ``create_app``) keep their handlers — passing
-    # ``force=False`` makes this call a no-op when a real handler is
-    # already attached (see ``logging_config.is_configured``). Without
-    # this guard the previous unconditional reset silently dropped every
-    # INFO-level marker (``_classify_fallback``, ``Round 1``, ...) that
-    # keeps every fallback visible in the log.
-    from inqtrix.logging_config import configure_logging, read_logging_env
-    configure_logging(
-        enabled=settings.agent.testing_mode,
-        level="DEBUG" if settings.agent.testing_mode else "WARNING",
-        console=True,
-        force=False,
-        json_format=read_logging_env().json_format,
-    )
-
     # Install the instance-wide pseudonym key so every subject reference
     # in logs (and later traces/audit correlation) is stable across the
     # API server, the workers, and restarts. An empty pepper keeps the
@@ -239,17 +240,7 @@ def create_app(
     # replacement seam for a custom AuthProvider (no need to edit the
     # build_auth_provider dispatch). See how-to/writing-a-custom-auth-provider.
     auth_provider = auth_provider or build_auth_provider(settings)
-    # Loudly flag any secret still left at its CHANGE_ME placeholder — a
-    # placeholder secret is a silent insecurity, so it must be visible at
-    # startup. Names only, never the value.
-    placeholder_secrets = _placeholder_secret_fields(settings)
-    if placeholder_secrets:
-        log.warning(
-            "INSECURE: %d secret(s) still hold a CHANGE_ME placeholder value "
-            "(%s) — set real secrets before production.",
-            len(placeholder_secrets),
-            ", ".join(placeholder_secrets),
-        )
+    warn_placeholder_secrets(settings)
     cors_kwargs = make_cors_middleware_kwargs(settings.server)
     api_key_active = auth_provider.mode == "apikey"
     cors_active = cors_kwargs is not None
@@ -258,25 +249,8 @@ def create_app(
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # Startup — log resolved provider identity, reachability and the
         # behavioural envelope so operators can confirm the deployment
-        # took effect without grepping a separate log file.
-        # Also emit a terminal-visible banner about the active logging
-        # configuration so operators see at a glance whether file
-        # logging is enabled and where the log file lives. Printed
-        # directly to stderr (not through the inqtrix logger) so the
-        # banner stays visible even when file logging is disabled or
-        # the logger is silent.
-        from inqtrix.logging_config import print_logging_banner
-        logging_state = print_logging_banner()
-        log.info(
-            "Logging status | file_enabled=%s | log_file=%s | level=%s "
-            "| console=%s | web_mirrored=%s",
-            logging_state["file_enabled"],
-            logging_state["file_path"] or "-",
-            logging_state["level"],
-            logging_state["console_enabled"],
-            logging_state["web_mirrored"],
-        )
-
+        # took effect without grepping a separate log file. How the
+        # process logs is the entry point's status line.
         llm_label = provider_label(providers.llm)
         search_label = provider_label(providers.search)
         llm_ready = provider_ready(providers.llm, label=llm_label)
@@ -574,6 +548,11 @@ def create_app(
             )
             if collaboration_service is not None:
                 await collaboration_service.aclose()
+            # The auth provider releases the HTTP clients of its identity
+            # provider; they reopen on use if the lifespan starts again.
+            close_auth = getattr(container.auth_provider, "aclose", None)
+            if close_auth is not None:
+                await close_auth()
             # Last: request code still unwinding above may hand work to a
             # lane, and a closed executor would reject it. Nothing here
             # depends on the lanes, so releasing them at the end is free.
@@ -619,17 +598,6 @@ def create_app(
     if cors_kwargs is not None:
         app.add_middleware(CORSMiddleware, **cors_kwargs)
 
-    # Added LAST so Starlette places it OUTERMOST: the request id must
-    # wrap every other middleware and error path, and the context reset
-    # must be the final thing that runs. The proxy-hops policy is the
-    # SAME one the login throttle trusts (XFF from the right).
-    from inqtrix.server.request_context import RequestContextMiddleware
-
-    app.add_middleware(
-        RequestContextMiddleware,
-        trusted_proxy_hops=settings.auth.trusted_proxy_hops,
-    )
-
     @app.exception_handler(IntegrityError)
     async def _db_integrity_handler(
         request: Request, exc: IntegrityError
@@ -652,5 +620,18 @@ def create_app(
     from inqtrix.server.metrics import setup_metrics
 
     setup_metrics(app, container=container, settings=settings)
+
+    # Registered LAST: Starlette inserts each middleware in front of the
+    # previous ones, so the last one added runs outermost. The request id
+    # then wraps every other middleware, including the database gate's
+    # 503, and its context reset is the final thing that runs. The
+    # proxy-hops policy is the SAME one the login throttle trusts (XFF
+    # from the right).
+    from inqtrix.server.request_context import RequestContextMiddleware
+
+    app.add_middleware(
+        RequestContextMiddleware,
+        trusted_proxy_hops=settings.auth.trusted_proxy_hops,
+    )
 
     return app

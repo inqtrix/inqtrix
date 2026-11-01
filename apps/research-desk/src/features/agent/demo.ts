@@ -1587,7 +1587,7 @@ export function createAgentDemo(
         content = `${content.trimEnd()}\n\n${edit.text}`
         appliedEditIds.push(edit.id)
       } else if (edit.find && content.includes(edit.find)) {
-        content = content.replace(edit.find, edit.text)
+        content = content.replace(edit.find, () => edit.text)
         appliedEditIds.push(edit.id)
       }
     }

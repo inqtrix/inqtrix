@@ -28,7 +28,7 @@ import io
 import logging
 import re
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _PDF_MAGIC = b"%PDF"
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")

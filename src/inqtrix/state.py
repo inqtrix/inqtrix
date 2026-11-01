@@ -19,7 +19,7 @@ from inqtrix.runtime_logging import (
     sanitize_event_payload,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class AgentState(TypedDict):

@@ -1,6 +1,6 @@
 # Settings and environment variables
 
-> Files: `src/inqtrix/settings.py`, `src/inqtrix/server/container.py`, `.env.example`
+> Files: `src/inqtrix/settings.py`, `src/inqtrix/server/container.py`, `src/inqtrix/auth/principal.py` and `src/inqtrix/auth/gateway.py` (start checks of the auth modes), `src/inqtrix_web_gateway/settings.py`, `.env.example`
 
 ## Scope
 
@@ -16,6 +16,8 @@ Deep-dive pages (provider recipes, auth modes, logging, knowledge profiles) cove
 
 When the same variable exists in both process env and `.env`, the process environment wins. Do not commit `.env` and do not rely on checked-in config files for production credentials.
 
+**A `.env` above the installation.** With the default document parser, the API and the worker import `magika`, which loads a `.env` it finds by walking up from its installation folder into the process environment. A service started from a checkout therefore gets every variable of such a file in its environment, not only the Inqtrix settings; whatever it builds afterwards can see them. The settings read their `.env` independently of this, and the container images contain no such file on that path. To prevent it, set `PYTHON_DOTENV_DISABLED=1` in the start command of the service (python-dotenv 1.2 or later). That switches off every `load_dotenv` call in the process, uvicorn's `--env-file` included, but not the settings' own `.env`.
+
 ### Who reads a variable — and how to set it yourself
 
 A variable that never reaches its reader looks like a setting and is not
@@ -27,7 +29,7 @@ templates:
 | Reader | What reads it | How to set it in your own deployment |
 | --- | --- | --- |
 | **api + worker** (the `Settings` groups on this page) | Both processes load the identical `Settings` object; whether a knob does anything is a property of which code runs in that process, not of the variable name. | Helm: a `config:`/`extraConfig:` entry — the ConfigMap is mounted into api **and** worker via `envFrom`. Raw manifests: set the env var on both pods. |
-| **web gateway** (`src/inqtrix_web_gateway/`) | Raw `os.getenv`, no pydantic. `INQTRIX_MAX_UPSTREAM_CONNECTIONS`, `RESEARCH_DESK_*`, `INQTRIX_BACKEND_URL`, … | Helm: the web pod has **no `envFrom`** — `config:` never reaches it. Use the typed value where one exists (`web.maxUpstreamConnections`) or `web.extraEnv`. Raw manifests: env var on the web pod. |
+| **web gateway** (`src/inqtrix_web_gateway/`) | Raw `os.getenv`, no pydantic. `INQTRIX_MAX_UPSTREAM_CONNECTIONS`, `RESEARCH_DESK_*`, `INQTRIX_BACKEND_URL`, … and, for `gateway` mode, the identity header names and its own `INQTRIX_GATEWAY_TRUSTED_PROXIES` ([Gateway mode: web gateway variables](#gateway-mode-web-gateway-variables)). | Helm: the web pod has **no `envFrom`**, so `config:` reaches it only for the keys the chart re-emits there (the public base URL, the file and collaboration frame limits, and the identity header names of `gateway` mode). Use the typed value where one exists (`web.maxUpstreamConnections`, `web.gatewayTrustedProxies`) or `web.extraEnv`. Raw manifests: env var on the web pod. |
 | **collaboration server** (`apps/collaboration-server/`) | Its own config parser; several `INQTRIX_COLLABORATION_*` names have no `Settings` counterpart. | Helm: via `config:` — the chart re-emits the relevant keys onto the collaboration container explicitly. Raw manifests: env vars on that pod. |
 | **process bootstrap** (outside `Settings`) | `INQTRIX_LOG_*`, `INQTRIX_SERVER_HOST/PORT`, `OTEL_*`, and the Helm-job-only `INQTRIX_K8S_*` group ([below](#process-level-variables-outside-settings)). | Same as api/worker; the `INQTRIX_K8S_*` group is set only on the chart's maintenance job. |
 | **Compose interpolation** | `${VAR}` in `deploy/compose/*.yaml` — configures containers, never the app. `INQTRIX_BUNDLED_POSTGRES_MAX_CONNECTIONS`, `INQTRIX_WEB_PORT`, `INQTRIX_PG_*`, … | Shell/env-file at `podman compose` invocation time. **These names do nothing on Kubernetes** — see the per-variable notes. |
@@ -117,7 +119,7 @@ Tunes a single research run: loop bounds, stop thresholds, timeouts, input limit
 | `CLAIM_EXTRACT_TIMEOUT` | `600` | Logical claim-extraction budget (and `/v1/text` improvement call), including retries. |
 | `SKIP_SEARCH` | `false` | Short-circuits the entire research graph — classify, plan, search, evaluate and the answer node never run — and answers directly from the LLM provider with the question plus conversation history. No citations, `round` stays `0`. |
 | `TESTING_MODE` | `false` | Expose `/v1/test/run` (used by `inqtrix-parity run`). Never enable in production: no rate limiting, returns full iteration logs. |
-| `OBSERVABILITY_PROFILE` | `summary` | `summary`, `debug` (reserved), or `forensic` (full source/citation/claim/stop/answer lineage in the protected run audit; ordinary logs receive only IDs, states and metrics). See [Logging](../observability/logging.md). |
+| `OBSERVABILITY_PROFILE` | `summary` | `summary`, `debug` (reserved), or `forensic` (full source/citation/claim/stop/answer lineage in the protected run audit; the trace receives only IDs, states and metrics, and logs never carry it). See [Logging](../observability/logging.md). |
 
 Further tuning: `FIRST_ROUND_QUERIES` (6), `REQUIRED_CONTEXT_WINDOW_TOKENS` (128000), `MAX_QUESTION_LENGTH` (60000 — generous because the chat composer inlines attached file content), `HIGH_RISK_SCORE_THRESHOLD` (4 — observability signal only), `SEARCH_CACHE_MAXSIZE` (256; `0` disables), `SEARCH_CACHE_TTL` (3600), `MODEL_TIER` / `MODEL_OVERRIDE` / `EFFORT_OVERRIDE` (per-request model routing, normally sent by API clients rather than set globally). `ANSWER_PROMPT_CITATIONS_MAX` (60) is still accepted and profile-overridden but no runtime code reads it, so setting it changes nothing. The per-call/run timeouts and how the HTTP and client waits derive from them are detailed under "Timeout dependency chain" below.
 
@@ -177,7 +179,7 @@ Configures the FastAPI surface started by `python -m inqtrix`: the upstream LLM 
 | `INQTRIX_METRICS_ENABLED` | `false` | Mount the Prometheus `/metrics` endpoint (run-queue gauges, admission rejections by reason, per-route request latency, plus the shared call metrics: LLM request/duration/token series, search, retrieval steps, run durations, queue wait, worker jobs, indexed documents; bounded cardinality, no run-id/subject/session labels). Needs the image built with the `metrics` extra (the stack image bakes it in); the flag alone otherwise logs a WARNING and stays off. Bearer-gated with the API key when one is set, else keep it cluster-internal. Worker processes get their own exporter via `INQTRIX_WORKER_METRICS_PORT` (Queue section). See [Metrics](../observability/metrics.md). |
 | `INQTRIX_SERVER_CORS_ORIGINS` | *(empty)* | Comma-list of allowed origins; installs `CORSMiddleware` with credentials. `*` is accepted but WARNs (browsers reject wildcard with credentials). |
 | `INQTRIX_ENABLE_OPENAPI` | `false` | Serve `/openapi.json`, `/docs`, `/redoc`. Documentation routes only; never changes API behaviour. |
-| `INQTRIX_PUBLIC_BASE_URL` | *(empty)* | Externally reachable base URL. It anchors collaboration same-origin checks behind TLS proxies, OIDC callback derivation, and clickable `/v1/sources/...` citations. Empty keeps internal `inqtrix://` citations and forwarded headers cannot authorize a collaboration origin. Helm derives it from an enabled Ingress; explicit config wins. |
+| `INQTRIX_PUBLIC_BASE_URL` | *(empty)* | Externally reachable base URL. It anchors collaboration same-origin checks behind TLS proxies, OIDC callback derivation, guest-link URLs, SCIM `location` values, and clickable `/v1/sources/...` citations. The web gateway reads it as well: it forwards the scheme and host of this URL to the API server instead of the values a client sent, and it refuses to start when the value has a path. Behind a TLS proxy: [Scheme behind a TLS proxy](../deployment/auth-modes.md#scheme-behind-a-tls-proxy). Empty keeps internal `inqtrix://` citations and forwarded headers cannot authorize a collaboration origin. Helm derives it from an enabled Ingress; explicit config wins. |
 | `INQTRIX_MAX_TOTAL_INPUT_TOKENS` | `500000` | Approximate-token DoS cap on `question` + `messages[]` (estimated `len(text) // 4`). |
 
 Further tuning: `RUN_COMPLETED_TTL_SECONDS` (300 — how long finished native runs stay queryable in memory), `RUN_DURABLE_RETENTION_SECONDS` (7776000 — 90-day retention for terminal native run records in the DURABLE Postgres store, so completed reports survive reloads, re-logins and other devices; distinct from `RUN_COMPLETED_TTL_SECONDS`, which bounds only the in-memory replay window, and ignored by the in-memory store. `0` evicts on the next cleanup), `RUN_INCOGNITO_RETENTION_SECONDS` (900 — how long a finished incognito Knowledge Desk ask stays in either run store before the run, its events and its result are deleted at the next cleanup, which the API process runs at least once a minute; ahead of both retentions above, at least 60 so the answer stays fetchable for the browser that asked), `RUN_EVENT_BUFFER_SIZE` (200 — replay buffer for late SSE subscribers), `INQTRIX_DELETION_MAX_CONCURRENT` (2 — aggregate deletion workers admitted in one process; the distributed worker ceiling still applies), `INQTRIX_UPLOAD_MAX_CONCURRENT` (6 — uploads executed at once by a WORKER process; unlike `INQTRIX_DELETION_MAX_CONCURRENT` beside it, this one has no effect in the API process, where uploads are reconciled one at a time on a path that is not configurable. A research run spends its thread waiting on a provider, but an upload extracts text from the file itself and spends real CPU, so it is capped independently of `INQTRIX_WORKER_CONCURRENCY`, which remains an additional upper bound), `INQTRIX_DELETION_DISPATCH_TIMEOUT_SECONDS` (240 — after this long unclaimed in `queued`, a deletion operation fails with `dispatch_timeout` so it stops being a dead end and becomes retryable; keep it above the worker reconciler's re-dispatch window of 120 s plus its 60 s tick, and lower it to about 60 s only without the Valkey queue, where no reconciler exists), `INQTRIX_DELETION_RECEIPT_RETENTION_SECONDS` (2592000 — 30-day retention for terminal technical deletion receipts without source content), `MAX_MESSAGES_HISTORY` (20), `INQTRIX_MAX_MESSAGE_COUNT` (200 — HTTP 413 above), `PERPLEXITY_BASE_URL`, `INQTRIX_SERVER_TLS_KEYFILE` / `INQTRIX_SERVER_TLS_CERTFILE` (both or neither; partial setup raises `RuntimeError`). See [Security model](../deployment/security-model.md).
@@ -188,32 +190,171 @@ Further tuning: `RUN_COMPLETED_TTL_SECONDS` (300 — how long finished native ru
 
 ## Auth (`AuthSettings`)
 
-Selects how every HTTP request resolves to a `Principal`. Four modes exist: `none` (anonymous principal), `apikey` (static Bearer gate, byte-identical to the legacy behaviour), `oidc` (browser session via authorization code + PKCE through a backend-for-frontend; Dex is the reference IdP in the dev compose stack), and `local` (native email/password accounts with a first-run owner setup). The built-in default is `infer`, which resolves to `apikey` or `none` and never to `local`; the shipped Compose stack sets `INQTRIX_AUTH_MODE=local` explicitly in `deploy/.env.stack.example`. The two cookie-session modes (`oidc`/`local`) share the same session/CSRF/PAT machinery; `local` rides a synthetic issuer and so reuses it verbatim. Inqtrix speaks only generic OIDC for `oidc` — discovery plus claim mapping, no hardwired provider. Per-mode walkthroughs: [Auth modes](../deployment/auth-modes.md), [Create and manage users](../deployment/create-and-manage-users.md).
+Selects how every HTTP request resolves to a `Principal`. Five modes exist: `none` (anonymous principal), `apikey` (static Bearer gate, byte-identical to the legacy behaviour), `oidc` (browser session via authorization code + PKCE through a backend-for-frontend; Dex is the reference IdP in the dev compose stack), `local` (native email/password accounts with a first-run owner setup), and `gateway` (an API gateway in front of Inqtrix signs people in, and Inqtrix checks the assertion it adds to every request; see [Gateway mode](#gateway-mode)). The built-in default is `infer`, which resolves to `apikey` or `none` and never to `local` or `gateway`; the shipped Compose stack sets `INQTRIX_AUTH_MODE=local` explicitly in `deploy/.env.stack.example`. The three cookie-session modes (`oidc`, `local`, `gateway`) share the same session/CSRF/PAT machinery; `local` rides a synthetic issuer and so reuses it verbatim, and `gateway` starts its sessions from the assertion instead of a login. Inqtrix speaks only generic OIDC for `oidc`: discovery plus claim mapping, no hardwired provider. Per-mode walkthroughs: [Auth modes](../deployment/auth-modes.md), [Create and manage users](../deployment/create-and-manage-users.md).
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `INQTRIX_AUTH_MODE` | `infer` | `none`, `apikey`, `oidc`, `local`, or `infer`. `infer` derives the mode for backwards compatibility: non-empty `INQTRIX_SERVER_API_KEY` means `apikey`, empty means `none`. An explicit value wins over inference. |
-| `INQTRIX_OIDC_ISSUER` | *(empty)* | Issuer URL; discovery comes from `{issuer}/.well-known/openid-configuration` and must echo this exact value. Required for `oidc`. |
+| `INQTRIX_AUTH_MODE` | `infer` | `none`, `apikey`, `oidc`, `local`, `gateway`, or `infer`. `infer` derives the mode for backwards compatibility: non-empty `INQTRIX_SERVER_API_KEY` means `apikey`, empty means `none`; it never yields `oidc`, `local` or `gateway`. An explicit value wins over inference. Any other value fails at `Settings()` construction. `gateway` needs the variables of [Gateway mode](#gateway-mode). |
+| `INQTRIX_OIDC_ISSUER` | *(empty)* | Issuer URL; discovery comes from `{issuer}/.well-known/openid-configuration` and must echo this exact value. Required for `oidc`. An issuer or discovery URL that does not use `https` logs a WARNING at start. |
 | `INQTRIX_OIDC_CLIENT_ID` / `INQTRIX_OIDC_CLIENT_SECRET` | *(empty)* | Confidential client registered at the IdP; tokens never reach the browser. Required for `oidc`. |
-| `INQTRIX_SESSION_SECRET` | *(empty)* | Server-side secret for CSRF-token derivation (signed double-submit). Required for `oidc` and `local`. |
-| `INQTRIX_PAT_PEPPER` | *(empty)* | HMAC pepper for personal access tokens. Required for `oidc` and `local`; rotation invalidates every issued token. |
-| `INQTRIX_PSEUDONYM_PEPPER` | *(empty)* | Instance-wide secret behind the pseudonymous `usr_<hex16>` subject references in logs and audit correlation. Set the SAME value for the API server and every worker: one person then carries ONE stable reference across processes and restarts, and admins can resolve a reference via `POST /v1/admin/audit/resolve-pseudonym` (each resolution is itself audit-logged). Empty keeps the historical per-process references and logs a startup WARNING. Required for `oidc`; rotation deliberately unlinks all previously written pseudonyms. |
-| `INQTRIX_REGISTRATION` | `open` | First-login admission: `invite` requires a matching open invitation (and the postgres storage backend); `open` keeps the historical behaviour. |
+| `INQTRIX_SESSION_SECRET` | *(empty)* | Server-side secret for CSRF-token derivation (signed double-submit). Required for `oidc`, `local` and `gateway`. |
+| `INQTRIX_PAT_PEPPER` | *(empty)* | HMAC pepper for personal access tokens. Required for `oidc`, `local` and `gateway`; rotation invalidates every issued token. |
+| `INQTRIX_PSEUDONYM_PEPPER` | *(empty)* | Instance-wide secret behind the pseudonymous `usr_<hex16>` subject references in logs and audit correlation. Set the SAME value for the API server and every worker: one person then carries ONE stable reference across processes and restarts, and admins can resolve a reference via `POST /v1/admin/audit/resolve-pseudonym` (each resolution is itself audit-logged). Empty keeps the historical per-process references and logs a startup WARNING. Required for `oidc` and `gateway`; rotation deliberately unlinks all previously written pseudonyms. |
+| `INQTRIX_REGISTRATION` | `open` | First-login admission for `oidc` and `gateway`: `invite` requires a matching open invitation (and the postgres storage backend); `open` keeps the historical behaviour. In `gateway` mode `invite` works only with the `jwt` assertion and without SCIM ([Variables reused in gateway mode](#variables-reused-in-gateway-mode)). |
 | `INQTRIX_PAT_MAX_PER_USER` | `10` | Active-token cap per user (sprawl guardrail). |
 | `INQTRIX_PAT_DEFAULT_TTL_DAYS` | `0` | Default token lifetime when no explicit expiry is given; `0` = non-expiring. |
 | `INQTRIX_OIDC_REDIRECT_URL` | *(derived)* | Callback URL registered at the IdP (byte-for-byte match). Empty derives `{INQTRIX_PUBLIC_BASE_URL}/api/auth/callback`. |
-| `INQTRIX_OIDC_ALLOWED_GROUPS` | *(empty)* | Comma-separated group allowlist; non-matching logins get a visible, audit-logged 403 at the callback. Empty admits every authenticated user. |
-| `INQTRIX_SESSION_MAX_AGE_SECONDS` | `28800` | Absolute session lifetime (8 h); expiry resolves to 401 and the SPA re-runs the login redirect. |
+| `INQTRIX_OIDC_ALLOWED_GROUPS` | *(empty)* | Comma-separated group allowlist; non-matching logins get a visible, audit-logged 403 at the callback. Empty admits every authenticated user. In `gateway` mode the same gate runs whenever a new session starts and answers 403 `admission_denied`. |
+| `INQTRIX_SESSION_MAX_AGE_SECONDS` | `28800` | Absolute session lifetime (8 h); expiry resolves to 401 and the SPA re-runs the login redirect. In `gateway` mode the next `GET /api/auth/session` starts a new session from the assertion. |
 | `INQTRIX_LOCAL_REGISTRATION` | `closed` | `local` only: `closed` (owner + admin-created accounts) or `open`. `open` mounts no route; it only sets `registration.self_service: true` in `GET /api/auth/config` as an advisory hint. |
-| `INQTRIX_OIDC_ADMIN_ROLES` / `INQTRIX_OIDC_ADMIN_GROUPS` | *(empty)* | Comma-separated role/group claim values that grant instance-admin on `oidc` login (grant-only — a non-match never demotes). |
+| `INQTRIX_OIDC_ADMIN_ROLES` / `INQTRIX_OIDC_ADMIN_GROUPS` | *(empty)* | Comma-separated role/group claim values that grant instance-admin on `oidc` login and, with the `jwt` assertion, when a `gateway` session starts (grant-only: a non-match never demotes). With the `header` assertion or a resolver of its own a set value is a start error. |
 | `INQTRIX_LOGIN_RATE_LIMIT_ENABLED` | `true` | Login brute-force throttle for `local`, keyed per identifier + client IP (sliding window + lockout). Tune with `INQTRIX_LOGIN_RATE_LIMIT_MAX_ATTEMPTS` (10), `INQTRIX_LOGIN_RATE_LIMIT_WINDOW_SECONDS` (300), `INQTRIX_LOGIN_RATE_LIMIT_LOCKOUT_SECONDS` (60). |
-| `INQTRIX_TRUSTED_PROXY_HOPS` | `1` | Trusted reverse-proxy count for resolving the throttle client IP from the **right** of `X-Forwarded-For`. `1` fits the bundled Python web gateway and is not client-spoofable. The Helm chart derives `2` automatically when its own Ingress fronts the web pod (edge + gateway = two hops). Set the exact chain length for multiple proxies (too high re-opens spoofing); set `0` for a directly-exposed API server (socket peer only). |
+| `INQTRIX_TRUSTED_PROXY_HOPS` | `1` | Trusted reverse-proxy count for resolving the throttle client IP from the **right** of `X-Forwarded-For`. `1` fits the bundled Python web gateway and is not client-spoofable. The Helm chart derives `2` automatically when its own Ingress fronts the web pod (edge + web gateway = two hops), except in `gateway` mode, where the web gateway appends nothing to the chain of a trusted peer ([Gateway mode: peer lists and client address](#gateway-mode-peer-lists-and-client-address)). Set the exact chain length for multiple proxies (too high re-opens spoofing); set `0` for a directly-exposed API server (socket peer only). |
 
 Further tuning (IdP exchangeability): `INQTRIX_OIDC_SCOPES` (`openid profile email`; add `groups` for Okta/Dex), `INQTRIX_OIDC_USERNAME_CLAIM` (`preferred_username`, dot paths descend into nested claims), `INQTRIX_OIDC_EMAIL_CLAIM` (`email`), `INQTRIX_OIDC_GROUPS_CLAIM` (`groups`), `INQTRIX_OIDC_ROLES_CLAIM` (`roles`; the claim used for admin elevation, dot paths supported), `INQTRIX_OIDC_ALLOWED_DOMAINS` (*(empty)*; comma-separated email-domain allowlist orthogonal to the group allowlist — a login without a listed email domain gets a visible 403, and a login without any email is rejected fail-closed), `INQTRIX_OIDC_CLAIM_SEPARATORS` (`" ,"`; characters a string-valued group/role claim is split on, a JSON array is used as-is), `INQTRIX_OIDC_GROUPS_STRIP_PATH_PREFIX` (`false`; strip a single leading `/` from Keycloak full-path groups), `INQTRIX_OIDC_PROVIDER_NAME` (*(empty)*; SSO login-button label surfaced by the auth-config endpoint), `INQTRIX_OIDC_SKIP_EMAIL_VERIFIED` (`false`; required for Entra ID), `INQTRIX_OIDC_DISCOVERY_URL`, `INQTRIX_OIDC_USERINFO_FALLBACK` (`true`), `INQTRIX_OIDC_CA_CERT`, `INQTRIX_OIDC_INSECURE_DEV_COOKIES` (`false`; loopback-HTTP dev only, WARNs at startup).
 
-**Interactions.** Mode inference reads `INQTRIX_SERVER_API_KEY` from the Server block. Misconfiguration fails loudly at startup: `apikey` without a configured key and `oidc` without issuer + client id + client secret + session secret + PAT pepper + pseudonym pepper are rejected; `local` without `INQTRIX_SESSION_SECRET` + `INQTRIX_PAT_PEPPER` is rejected; `none` with a configured key disables the gate deliberately and logs a WARNING. The cookie-session modes register the `/api/auth/*` routes — `oidc` adds `login|callback`, `local` adds `POST /api/auth/login/local` and the `/api/setup/*` owner gate — sharing the `session|logout` and PAT routes; the dev compose stack starts Dex only under the `oidc` profile. Both want the postgres storage backend for durable accounts/sessions (memory works but logins evaporate on restart).
+**Interactions.** Mode inference reads `INQTRIX_SERVER_API_KEY` from the Server block. Misconfiguration fails loudly at startup: `apikey` without a configured key and `oidc` without issuer + client id + client secret + session secret + PAT pepper + pseudonym pepper are rejected; `local` without `INQTRIX_SESSION_SECRET` + `INQTRIX_PAT_PEPPER` is rejected; `gateway` without session secret + PAT pepper + pseudonym pepper, without `INQTRIX_STORAGE_BACKEND=postgres` or with an incomplete assertion is rejected (every check in [Gateway mode](#gateway-mode)); `INQTRIX_SCIM_ENABLED=true` or a set `INQTRIX_GATEWAY_RESOLVER` in any other mode is rejected; `none` with a configured key disables the gate deliberately and logs a WARNING. The cookie-session modes register the `/api/auth/*` routes: `oidc` adds `login|callback`, `local` adds `POST /api/auth/login/local` and the `/api/setup/*` owner gate, and `gateway` has no login route, because a session starts only in `GET /api/auth/session` from the assertion; all three share the `session|logout` and PAT routes. The dev compose stack starts Dex only under the `oidc` profile. `oidc` and `local` want the postgres storage backend for durable accounts/sessions (memory works but logins evaporate on restart); `gateway` requires it. In `gateway` mode the claim mapping and admission variables above keep their meaning with the changes listed in [Variables reused in gateway mode](#variables-reused-in-gateway-mode).
 
 **When this block is OFF.** Mode `none`: every request resolves to the anonymous principal and all routes are open — acceptable only on trusted networks. The mode is reported by the auth provider, not by re-reading the raw `INQTRIX_AUTH_MODE` value.
+
+### Gateway mode
+
+With `INQTRIX_AUTH_MODE=gateway`, an API gateway in front of Inqtrix signs people in, and Inqtrix checks the assertion the API gateway adds to every request: `jwt` (a signed user token in a header of its own), `header` (identity headers plus a proof header that carries a shared secret) or a resolver of its own. Every identity becomes an ordinary Inqtrix account, bound by issuer and subject and never by email. Its Inqtrix cookie session starts only in `GET /api/auth/session`, and every later request with that cookie must carry the assertion of the same person again. How the mode works, the duties of the API gateway and the known limits: [Auth modes: `gateway`](../deployment/auth-modes.md#mode-gateway).
+
+The start checks fail loudly; each names all the problems it finds at once, never a secret value. The API server runs all of them when it builds its auth provider. The worker resolves the mode as well and runs the checks every process of the deployment shares (secrets, storage backend, SCIM, token bounds); it builds no resolver, so the checks of the assertion run in the API server only.
+
+**Every assertion.**
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `INQTRIX_GATEWAY_ASSERTION` | *(empty)* | `jwt` (recommended) or `header`; any other value fails at `Settings()` construction. Required unless a resolver of its own is configured: empty without one is a start error, and so is a value next to `INQTRIX_GATEWAY_RESOLVER`. [Auth modes](../deployment/auth-modes.md) calls the three choices sub-modes; the start line (`assertion=`) and `GET /api/auth/config` (`gateway_assertion`) name the same choice `jwt`, `header` or, for a resolver of its own, `resolver`. |
+| `INQTRIX_GATEWAY_TRUSTED_PROXIES` | *(empty)* | Comma-separated IP networks in CIDR form of the peers that may hand **this process** identity headers: on the API server the web gateway, on the web gateway the API gateway (both lists side by side: [Gateway mode: peer lists and client address](#gateway-mode-peer-lists-and-client-address)). A single address may be written bare or with `/32` (`/128` for IPv6). Only the socket peer counts, never a forwarded address. Required for `header` and for a resolver of its own. Optional for `jwt`, where the token's signature is the proof: the API server then checks the entries at start and counts them in its start line (`trusted_proxies=<n>`), but does not use the list for requests. An entry that is no CIDR network, `0.0.0.0/0` and `::/0` are start errors. |
+| `INQTRIX_GATEWAY_LOGOUT_URL` | *(empty)* | Where the browser goes after signing out of Inqtrix, usually the API gateway's own sign-out, as a path on the same host (for example `/oauth2/sign_out?rd=%2F`) or an http(s) URL; `POST /api/auth/logout` returns it as `redirect_url`. Empty logs a WARNING at start: the browser then stays on the signed-out page, and the session at the API gateway lives on. |
+| `INQTRIX_GATEWAY_FIRST_USER_OWNER` | `false` | `true` makes the first person who signs in an instance admin, but only while the identity source has no active admin. It works in every sub-mode (in `jwt` an admin group or role is the better way); with SCIM that person must be provisioned first. Once the source has an active admin, the switch changes nothing; set it back to `false` then, because a new identity source (another issuer key) would otherwise make its first person admin again. When neither this switch nor an admin group or role (`jwt` only) can produce the first admin, a WARNING at start says so. See [First administrator](../deployment/auth-modes.md#first-administrator). |
+
+**`jwt`: a signed user token.**
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `INQTRIX_GATEWAY_JWT_HEADER` | *(empty)* | Required. Request header with the raw token, without a `Bearer` prefix; a token above 16 KiB or a header sent twice is rejected. The Python web gateway in front answers 400 (`Invalid HTTP request received.` in its log) when more than 16 KiB of a request's line and headers arrive before the header block is complete, so keep the token, the cookies and every other header below 16 KiB together. The value must be a header name as written, and never `Authorization`, `Cookie`, `Host`, a hop-by-hop header, an `X-Forwarded-*` header or a header the web gateway passes on unchanged (`Origin`, `X-CSRF-Token`, `X-Inqtrix-Expected-User-Id`, `X-Inqtrix-Workspace-Id`, `X-Inqtrix-Guest-CSRF`). |
+| `INQTRIX_GATEWAY_JWT_ISSUER` | *(empty)* | Required. Exact `iss` of the tokens, compared byte for byte, a trailing `/` included. It is also the issuer the accounts are bound under, so it is at most 255 characters long and never `local` or `inqtrix:system`. Keep it stable: another value (a new host or realm name of the identity provider) is a new identity source, so every person gets a new, empty account at the next sign-in (with SCIM: 403 `not_provisioned` until provisioned again), and nothing moves the old accounts over. |
+| `INQTRIX_GATEWAY_JWT_AUDIENCE` | *(empty)* | Required. Value the token's `aud` must name. |
+| `INQTRIX_GATEWAY_JWT_USER_SCOPE` | *(empty)* | Required: one scope value without spaces that only a person's sign-in receives, read from the token's `scope` or `scp` claim. A validly signed token without it, such as a token of a service identity, creates neither account nor session. |
+| `INQTRIX_GATEWAY_JWKS_URL` | *(empty)* | JWKS endpoint with the signing keys. Set exactly one of this and `INQTRIX_GATEWAY_JWT_PUBLIC_KEY_FILE`. A fetched key set counts as current for one hour; a token with an unknown key id refreshes it at most once per five minutes for the whole cache. When a refresh fails, the known keys stay in use until they are 24 hours old; without usable keys a request answers 503 (`keys_unavailable`). A URL that does not use `https` logs a WARNING at start. |
+| `INQTRIX_GATEWAY_JWT_PUBLIC_KEY_FILE` | *(empty)* | Path of a JWK Set file (`{"keys": [...]}`) with one or more public keys, each with a `kid`. It is read once at start, so a key rotation is a restart. A missing or unreadable file, a set without keys, a key without `kid` or one that cannot be imported, and private key material are start errors. A token signed with a key outside the file fails its signature check. |
+| `INQTRIX_GATEWAY_CA_CERT` | *(empty)* | CA bundle for fetching `INQTRIX_GATEWAY_JWKS_URL`; empty uses the system trust store. |
+| `INQTRIX_GATEWAY_JWT_ALGORITHMS` | `RS256,ES256` | Comma-separated signature algorithms the tokens may use: a subset of `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256` and `ES384`. `none`, the HMAC algorithms, any other value and an empty list are start errors. A token that brings its own key (`jwk`, `jku`, `x5u` or `x5c` in its header) is never accepted. |
+| `INQTRIX_GATEWAY_JWT_LEEWAY_SECONDS` | `30` | Clock tolerance in seconds for the token's `exp`, `nbf` and `iat`, from `0` to `120`; a value outside that range fails at `Settings()` construction. |
+| `INQTRIX_GATEWAY_SUBJECT_CLAIM` | `sub` | Claim with the person's immutable id; dot paths descend into nested claims. Never the claim named by `INQTRIX_OIDC_EMAIL_CLAIM` and never `email`, `upn`, `preferred_username` or `unique_name`, which can change or pass to another person (start error). A token whose subject has the form of an email address, or equals the token's email, is refused. |
+
+**`header`: identity headers with a proof.**
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `INQTRIX_GATEWAY_ISSUER_KEY` | *(empty)* | Required, also for a resolver of its own. Issuer the accounts are bound under, for example `gateway:sso`; at most 255 characters and never `local` or `inqtrix:system`. Keep it stable for the same reason as `INQTRIX_GATEWAY_JWT_ISSUER`. |
+| `INQTRIX_GATEWAY_SUBJECT_HEADER` | *(empty)* | Required. Header with the person's stable id. It is the identity, so it is never the email header. |
+| `INQTRIX_GATEWAY_EMAIL_HEADER` | *(empty)* | Header with the email address: profile data, never identity, and never a confirmed address. |
+| `INQTRIX_GATEWAY_NAME_HEADER` | *(empty)* | Header with the display name. At least one of the name and email headers is required, so that admins and the share search can find the person. |
+| `INQTRIX_GATEWAY_GROUPS_HEADER` | *(empty)* | Optional header with the groups, split by `INQTRIX_OIDC_CLAIM_SEPARATORS`. Used for the group gate only, never for admin rights. |
+| `INQTRIX_GATEWAY_HEADER_DECODING` | `none` | `percent` decodes percent-encoded name and group values; `none` takes them as sent. Any other value fails at `Settings()` construction. |
+| `INQTRIX_GATEWAY_PROOF_HEADER` | *(empty)* | Required, also for a resolver of its own. Header that carries the shared secret. Identity headers count only when a socket peer from `INQTRIX_GATEWAY_TRUSTED_PROXIES` sends the secret in it exactly once. |
+| `INQTRIX_GATEWAY_SHARED_SECRET` | *(empty)* | Required, also for a resolver of its own: at least 32 characters, surrounding whitespace not counted, compared in constant time. It belongs in the secrets file (the deploy CLI refuses it in the non-secret stack config); the web gateway never receives it. |
+
+With `header`, `INQTRIX_GATEWAY_TRUSTED_PROXIES` is required. In every sub-mode, each identity header variable that is set follows the rules of `INQTRIX_GATEWAY_JWT_HEADER`, and all of them must be pairwise distinct, because the web gateway strips every one of them. `INQTRIX_REGISTRATION=invite`, `INQTRIX_OIDC_ALLOWED_DOMAINS`, `INQTRIX_OIDC_ADMIN_GROUPS` and `INQTRIX_OIDC_ADMIN_ROLES` are start errors here: identity headers carry no confirmed email and never grant admin.
+
+**A resolver of its own.**
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `INQTRIX_GATEWAY_RESOLVER` | *(empty)* | Import path `module:Class` of a resolver of its own, used instead of `INQTRIX_GATEWAY_ASSERTION`, which then stays empty. The class is loaded once at start from `PYTHONPATH` and built without arguments. A malformed path, a missing module, a module that fails to import and a class that cannot be built are start errors that name the variable and the path, never the error text; a failed import and a failed construction also name the error type, a missing module names the module; so a resolver names a missing variable of its own in a log line before it raises ([example](../extending/auth-provider.md#example)). Outside `gateway` mode a set value is a start error in every process that resolves the mode. |
+| `INQTRIX_GATEWAY_RESOLVER_HEADERS` | *(empty)* | Required with a resolver of its own: the comma-separated names of the headers it reads. It must name every header the resolver declares in its `header_names` and may name more, which the web gateway strips as well and the resolver never sees; it names no header that carries credentials or routing, no `X-Forwarded-*` header, not the proof header and no header the web gateway passes on unchanged. The web gateway strips these headers from untrusted peers as well. |
+
+A resolver of its own gets the trust of the `header` assertion: `INQTRIX_GATEWAY_ISSUER_KEY`, `INQTRIX_GATEWAY_TRUSTED_PROXIES`, `INQTRIX_GATEWAY_PROOF_HEADER` and `INQTRIX_GATEWAY_SHARED_SECRET` are required as above, all six identity header variables follow the name rules, and `INQTRIX_REGISTRATION=invite`, `INQTRIX_OIDC_ALLOWED_DOMAINS`, `INQTRIX_OIDC_ADMIN_GROUPS` and `INQTRIX_OIDC_ADMIN_ROLES` are start errors. These settings are checked before the module is imported. The module's folder reaches the API server read-only at `/opt/inqtrix-plugins`, which is on its `PYTHONPATH`: Compose binds `INQTRIX_GATEWAY_RESOLVER_DIR` there ([Compose-only variables](#compose-only-variables)), Helm mounts `api.resolverVolume`. Writing one: [Auth provider](../extending/auth-provider.md).
+
+**Personal access tokens.**
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `INQTRIX_GATEWAY_PAT_MAX_TTL_DAYS` | `90` | Longest life of a personal access token in days, counted from its creation and applied to existing tokens as well; `0` removes the bound. A new token without an expiry, or with a longer `INQTRIX_PAT_DEFAULT_TTL_DAYS`, gets this lifetime; a longer explicit expiry answers 400 `pat_ttl_exceeds_cap`. |
+| `INQTRIX_GATEWAY_PAT_INACTIVE_DAYS` | `0` | A token counts only while its owner started a gateway session within this many days; `0` turns the check off. It stops the tokens, not the account. |
+
+A personal access token does not depend on the API gateway's sign-in (in this mode `Authorization: Bearer` always carries such a token, never an assertion), so without SCIM nothing tells Inqtrix that a person left. Both bounds at `0` while SCIM is off is therefore a start error; with SCIM both may be `0`. A token also counts only while its owner's account belongs to the identity source. Negative values fail at `Settings()` construction.
+
+**SCIM.**
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `INQTRIX_SCIM_ENABLED` | `false` | Serves the SCIM 2.0 `Users` endpoints under `/v1/scim/v2`, so that the identity system creates, updates, deactivates and removes the accounts of the identity source. Only in `gateway` mode: in any other mode `true` is a start error. With SCIM a sign-in never creates an account (an identity SCIM has not provisioned gets 403 `not_provisioned`), so `INQTRIX_REGISTRATION=invite` is a start error. The steps, client and entrance: [Switching SCIM on](../deployment/create-and-manage-users.md#switching-scim-on). |
+| `INQTRIX_SCIM_TOKEN` | *(empty)* | Bearer token of the SCIM client, required with SCIM: at least 32 characters, surrounding whitespace not counted (start error otherwise). It is compared through SHA-256 digests in constant time and opens only the SCIM routes; a missing or wrong token answers 401. A new value takes effect at the next start. It belongs in the secrets file; the deploy CLI refuses it in the stack configuration, like every name that ends in `_TOKEN`. |
+| `INQTRIX_SCIM_DELETE_ACTION` | `disable` | What `DELETE /Users/{id}` does: `disable` deactivates the account and keeps a tombstone; `erase` also starts the account erasure, at most 10 per tenant and hour. Beyond that limit the account stays deactivated until an administrator erases it. Any other value fails at `Settings()` construction. |
+
+The `location` of a SCIM resource uses `INQTRIX_PUBLIC_BASE_URL` when it is set. Endpoints, attribute mapping and administration: [Create and manage users: Administration in `gateway` mode](../deployment/create-and-manage-users.md#administration-in-gateway-mode). The columns behind SCIM come with schema revision `0097_scim_users` ([Database migrations](../deployment/database-migrations.md#scim-provisioning-state-0097_scim_users)).
+
+### Variables reused in gateway mode
+
+| Variable | In `gateway` mode |
+|----------|-------------------|
+| `INQTRIX_SESSION_SECRET`, `INQTRIX_PAT_PEPPER`, `INQTRIX_PSEUDONYM_PEPPER` | Required, as for `oidc`; a missing value is a start error in the API server and the worker. |
+| `INQTRIX_STORAGE_BACKEND` | Must be `postgres` (start error otherwise): tombstones, the inactivity bound and SCIM need durable state. |
+| `INQTRIX_SESSION_MAX_AGE_SECONDS` | Absolute lifetime of the Inqtrix session; the assertion is checked on every request besides. After expiry the next `GET /api/auth/session` starts a new session from the assertion. |
+| `INQTRIX_REGISTRATION` | `invite` admits an unknown person only with an open invitation for an email address the token confirms (the claim `email` with `email_verified=true`). Only `jwt` can prove that: with `header` or a resolver of its own, and with SCIM enabled, `invite` is a start error. |
+| `INQTRIX_OIDC_USERNAME_CLAIM`, `INQTRIX_OIDC_EMAIL_CLAIM`, `INQTRIX_OIDC_GROUPS_CLAIM`, `INQTRIX_OIDC_ROLES_CLAIM` | With `jwt`, read the display name, the email, the groups and the roles from the token. An email counts as confirmed only from the claim `email` with `email_verified=true`. |
+| `INQTRIX_OIDC_CLAIM_SEPARATORS`, `INQTRIX_OIDC_GROUPS_STRIP_PATH_PREFIX` | Apply to the groups claim of a token and to the value of `INQTRIX_GATEWAY_GROUPS_HEADER`. |
+| `INQTRIX_OIDC_ALLOWED_GROUPS` | Group gate whenever a new session starts, for every assertion; a refused person gets 403 `admission_denied`. |
+| `INQTRIX_OIDC_ALLOWED_DOMAINS` | With `jwt` only a confirmed email counts: without one the session start answers 403 `email_unverified`, with an unlisted domain 403 `admission_denied`. With `header` or a resolver of its own a set value is a start error. |
+| `INQTRIX_OIDC_ADMIN_GROUPS`, `INQTRIX_OIDC_ADMIN_ROLES` | With `jwt`, grant instance admin when a new session starts (grant-only). With `header` or a resolver of its own a set value is a start error: neither ever grants admin. |
+| `INQTRIX_OIDC_SKIP_EMAIL_VERIFIED` | No effect; a set value logs a WARNING at start. |
+| `INQTRIX_OIDC_INSECURE_DEV_COOKIES` | Applies to the session cookies of this mode as well. |
+| `INQTRIX_PAT_MAX_PER_USER`, `INQTRIX_PAT_DEFAULT_TTL_DAYS` | Apply; `INQTRIX_GATEWAY_PAT_MAX_TTL_DAYS` caps the default lifetime. |
+| `INQTRIX_TRUSTED_PROXY_HOPS` | `1`, unless a proxy in front of the API gateway writes the client address and the API gateway appends that proxy's address after it. The web gateway passes on the `X-Forwarded-For` chain of a peer in its own trusted list unchanged and replaces the chain of any other peer with that peer's address, so the count starts at the layers in front of the web gateway; a worked example is in [Gateway mode: peer lists and client address](#gateway-mode-peer-lists-and-client-address). The Helm chart does not derive `2` in this mode. A value other than `1` logs a WARNING at start, which is expected in that layout. |
+| `INQTRIX_OIDC_ISSUER`, `INQTRIX_OIDC_CLIENT_ID`, `INQTRIX_OIDC_CLIENT_SECRET`, `INQTRIX_OIDC_REDIRECT_URL`, `INQTRIX_OIDC_SCOPES`, `INQTRIX_OIDC_DISCOVERY_URL`, `INQTRIX_OIDC_USERINFO_FALLBACK`, `INQTRIX_OIDC_CA_CERT`, `INQTRIX_OIDC_PROVIDER_NAME` | Not read: this mode runs no OIDC client. |
+
+### Gateway mode: web gateway variables
+
+The web gateway (`inqtrix_web_gateway`, Compose service `web`) is the edge in front of the API server. It removes identity headers that come from peers it does not trust, so it reads the names of these headers, never the shared secret:
+
+| Variable | Effect at the web gateway |
+|----------|---------------------------|
+| `INQTRIX_GATEWAY_JWT_HEADER`, `INQTRIX_GATEWAY_SUBJECT_HEADER`, `INQTRIX_GATEWAY_EMAIL_HEADER`, `INQTRIX_GATEWAY_NAME_HEADER`, `INQTRIX_GATEWAY_GROUPS_HEADER`, `INQTRIX_GATEWAY_PROOF_HEADER`, `INQTRIX_GATEWAY_RESOLVER_HEADERS` | The same values as on the API server. A request whose socket peer is not in the web gateway's list loses every one of these headers before it reaches the API server. A name the edge must pass on (credentials, routing, `X-Forwarded-*`, the CSRF, expected-user, workspace and guest headers, `Origin`) and an entry that is no header name are never stripped; the readiness rules below name them. |
+| `INQTRIX_GATEWAY_TRUSTED_PROXIES` | The web gateway's **own** peer list: the CIDR networks allowed to send it identity headers, normally the API gateway. The API server's list names the web gateway instead. An entry that is no CIDR network, `0.0.0.0/0` and `::/0` stop the start of the web gateway. With an empty list nothing is removed. In `gateway` mode the web gateway takes an `X-Forwarded-For` chain only from a peer in this list. |
+| `FORWARDED_ALLOW_IPS` | Retired (see below): a set value logs a WARNING at start and, in `gateway` mode, keeps the web gateway unready. |
+
+The Compose service `web` has no `env_file` and the Helm web pod no `envFrom`, so neither receives these values by itself; both pass them explicitly. Compose interpolates the header names from the same env files the API server loads and sets the web gateway's list from `INQTRIX_WEB_GATEWAY_TRUSTED_PROXIES` ([Compose-only variables](#compose-only-variables)). Helm copies the header names from `config:` or `extraConfig:` to the web pod and sets its list from `web.gatewayTrustedProxies`. Neither passes the shared secret.
+
+**Readiness.** The web gateway learns the mode and the assertion from the API server (`GET /api/auth/config`, fields `auth_mode` and `gateway_assertion`), never from its own environment; until the API server answers, it asks again at most every 5 seconds, and it keeps the answer until it restarts (the Helm chart rolls the web pods when the configuration changes). While the API server runs `gateway` mode, the web gateway stays unready when:
+
+- none of the identity header variables is set, or one of the six `INQTRIX_GATEWAY_*_HEADER` variables names a header the web gateway may not strip or holds an entry that is no header name;
+- the API server reports no assertion the web gateway knows (`jwt`, `header`, `resolver`);
+- with `header`: its own peer list is empty, or the subject or proof header name is missing;
+- with a resolver of its own: its own peer list is empty, the proof header name is missing, or `INQTRIX_GATEWAY_RESOLVER_HEADERS` is empty, names a header the web gateway may not strip (the proof header included) or holds an entry that is no header name;
+- `FORWARDED_ALLOW_IPS` is set.
+
+Unready means that `/health` and `/readyz` of the web gateway answer 503 with the reason instead of forwarding the probe, and one ERROR line names the reason; the Compose health check of `web` fails with it. With `jwt` an empty peer list is allowed, because the token's signature is the proof. The nginx alternative of the `web` service refuses `INQTRIX_AUTH_MODE=gateway` at start, because it does not remove identity headers.
+
+**`FORWARDED_ALLOW_IPS`.** The API server and the web gateway start uvicorn with `proxy_headers=False` in every mode: Inqtrix reads `X-Forwarded-For` itself (`INQTRIX_TRUSTED_PROXY_HOPS` on the API server, the peer list at the web gateway), and uvicorn must not replace the socket peer or the scheme from forwarding headers. uvicorn's allow list `FORWARDED_ALLOW_IPS` therefore has no effect and is a retired setting. The services of the `inqtrix` package (API server, worker, migration job) log a WARNING and list it under `retired_settings=` in their status line; with `INQTRIX_AUTH_MODE=gateway` in the environment or `.env` they do not start while it is set, even to an empty value. The web gateway logs a WARNING at start and, in `gateway` mode, stays unready until the variable is removed.
+
+### Gateway mode: peer lists and client address
+
+Two processes check their direct peer, the socket peer of the connection, each against a list of its own. Inside both processes the list is read from `INQTRIX_GATEWAY_TRUSTED_PROXIES`; Compose and Helm set the web gateway's copy under another name, because the two lists name different peers:
+
+| List | Set with | Names | Effect | When empty |
+|---|---|---|---|---|
+| API server | `INQTRIX_GATEWAY_TRUSTED_PROXIES` in the env files (Helm: `config:`) | the web gateway | `header` and a resolver of its own: identity headers count only from a peer in the list that sends the shared secret in the proof header. `jwt`: the entries are checked at start and counted in the start line (`trusted_proxies=<n>`), but not used for requests. | a start error, except with `jwt` |
+| web gateway | Compose `INQTRIX_WEB_GATEWAY_TRUSTED_PROXIES`, Helm `web.gatewayTrustedProxies` | its own direct peer: the API gateway, or a proxy between the API gateway and the web gateway | from a peer outside the list, every configured identity, proof and assertion header is removed, and the `X-Forwarded-For` chain is replaced by the peer's own address; a peer in the list keeps both | `jwt`: nothing is removed, and the client address of every request is the web gateway's direct peer, so for example all guests of a link share one unlock throttle. `header` and a resolver of its own: the web gateway stays unready. |
+
+Both lists hold addresses as the process sees them. In Kubernetes the API pods see the pod addresses of the web pods, which change, so their list is usually the pod network ([Kubernetes: Auth modes](../deployment/kubernetes.md#auth-modes)). In Compose the addresses come from the project network; to keep them fixed, give that network a subnet of its own and each service an `ipv4_address`, as the test overlay `deploy/compose/compose.gateway-acceptance.yaml` does. How to find the right addresses in each setup: [Auth modes](../deployment/auth-modes.md).
+
+**Client address.** The API server takes the client address from the right of `X-Forwarded-For`, `INQTRIX_TRUSTED_PROXY_HOPS` entries in. In this mode it keys the guest-link unlock throttle and is the `ip` in the `origin` of an audit entry (`GET /v1/admin/audit`). A proxy that handles `X-Forwarded-For` writes the address of its own peer on the right, and the API gateway must do so; in this mode the web gateway adds nothing to the chain of a peer in its list. The value is therefore the number of entries that the proxies in front of the web gateway write, counted from the one that writes the client address. With a TLS load balancer in front of oauth2-proxy as the API gateway:
+
+```text
+client 203.0.113.7 sends                   X-Forwarded-For: 198.51.100.9                        (forged)
+TLS load balancer writes its peer          X-Forwarded-For: 198.51.100.9, 203.0.113.7
+oauth2-proxy writes its peer (10.0.0.5)    X-Forwarded-For: 198.51.100.9, 203.0.113.7, 10.0.0.5
+web gateway (oauth2-proxy is in its list)  passes the chain on unchanged
+API server, INQTRIX_TRUSTED_PROXY_HOPS=2   second entry from the right: 203.0.113.7
+```
+
+With `1` the API server would read `10.0.0.5`, the load balancer, for every client; with `3` it would read the forged `198.51.100.9`. Without the load balancer, oauth2-proxy writes `203.0.113.7` itself and `1` is right. The value `2` holds only while every request reaches oauth2-proxy through the load balancer: a client that reaches oauth2-proxy directly chooses the entry the API server reads. A proxy between the API gateway and the web gateway (for example an Ingress) adds one more when it writes its own peer, the API gateway, on the right; it adds nothing when it keeps the client address on the right. In the layout of the example the start WARNING about `INQTRIX_TRUSTED_PROXY_HOPS` is expected.
 
 ## Storage (`StorageSettings`)
 
@@ -293,7 +434,7 @@ The internal document-retrieval engine: collections, document ingestion, hybrid 
 | `INQTRIX_KNOWLEDGE_SPARSE` | `bm25_german` | Lexical branch for the qdrant backend: BM25 sparse vectors computed inside the Qdrant server (core inference, server >= 1.15.3; nothing downloads at runtime) and fused with the dense branch via RRF. `off` runs dense-only. Ignored by the memory backend. |
 | `INQTRIX_RERANKER_PROVIDER` | `none` | Rerank stage after retrieval. `none` skips it (a visible capability flag, never a silent downgrade); `cohere` calls a Cohere-rerank-schema endpoint (native or Azure AI Foundry serverless) and requires `INQTRIX_RERANKER_BASE_URL` / `INQTRIX_RERANKER_API_KEY` / `INQTRIX_RERANKER_MODEL`; `llm` ranks listwise through the deployment's own LLM. |
 | `INQTRIX_KNOWLEDGE_GATE` | `on` | Sufficiency gate for `mode=knowledge`: a fast-tier LLM call judges the evidence and may trigger another retrieval pass; insufficient evidence yields an honest no-evidence answer. |
-| `INQTRIX_KNOWLEDGE_GROUNDING` | `on` | Fail-closed quote-then-answer grounding: labelled verbatim quotes are required and verified deterministically against original evidence. One bounded header-format repair is allowed; malformed grounding or any unverifiable quote terminally rejects the completion instead of publishing unchecked model text. |
+| `INQTRIX_KNOWLEDGE_GROUNDING` | `on` | Fail-closed quote-then-answer grounding: labelled verbatim quotes are required and verified deterministically against original evidence; a quote block that is the single line `NONE` declares that no excerpt answers the question and ends in the honest no-evidence answer. One bounded header-format repair is allowed; malformed grounding or any unverifiable quote terminally rejects the completion instead of publishing unchecked model text. |
 | `INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS` | `3` | Hard operator cap (1-5) on gate rewrite-and-retrieve rounds for every retrieval profile; `tief` requests up to this many, `standard` always uses one. |
 | `INQTRIX_KNOWLEDGE_CONTEXTUALIZE` | `off` | Contextual retrieval: dynamic fast-tier batches of at most 25 contiguous chunks, bounded by the resolved model's complete prompt/output budget. Validated batches checkpoint; dependency/validation failures pause without publication, and a raw build requires an explicit user choice. Existing active generations are unchanged until a revision/rebuild publishes. |
 | `INQTRIX_CONTEXTUALIZATION_CIRCUIT_COOLDOWN_SECONDS` | `60` | Cooldown for the tenant/provider/model contextualization circuit after a transient provider failure. Calls are rejected into a visible dependency pause during the window; this is not an indexing deadline and never publishes a fallback. |
@@ -339,11 +480,11 @@ every explicit knowledge request (see
 
 ## Quota (`QuotaSettings`)
 
-Per-user usage quotas for multi-user deployments — the operator-ceiling layer of a two-level rule: the admin UI sets the middle layer (a tenant default and per-user overrides) within these bounds. Each flow dimension has a `*_default` (the out-of-box per-user allowance) and a `*_max` (the hard ceiling no admin-set value may exceed). A value of `0` means UNLIMITED, so the all-zero default leaves every deployment byte-identical until an operator sets real numbers. Quotas apply ONLY when enabled and the active auth mode is one of the cookie-session modes (`oidc`, `local`); the anonymous/static principals are never metered.
+Per-user usage quotas for multi-user deployments, the operator-ceiling layer of a two-level rule: the admin UI sets the middle layer (a tenant default and per-user overrides) within these bounds. Each flow dimension has a `*_default` (the out-of-box per-user allowance) and a `*_max` (the hard ceiling no admin-set value may exceed). A value of `0` means UNLIMITED, so the all-zero default leaves every deployment byte-identical until an operator sets real numbers. Quotas apply ONLY when enabled and the active auth mode is one of the cookie-session modes (`oidc`, `local`, `gateway`); the anonymous/static principals are never metered.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `INQTRIX_QUOTA_ENABLED` | `false` | Master switch. Even when on, quotas bind only in `oidc` or `local` mode — the single-operator `none`/`apikey` modes are never metered. Advertised in `/v1/capabilities` as `features.quota`. |
+| `INQTRIX_QUOTA_ENABLED` | `false` | Master switch. Even when on, quotas bind only in the cookie-session modes `oidc`, `local` and `gateway`; the single-operator `none`/`apikey` modes are never metered. Advertised in `/v1/capabilities` as `features.quota`. |
 | `INQTRIX_QUOTA_RUNS_PER_MONTH` | `0` | Default native research runs a user may start per calendar month. `0` = unlimited. Checked exactly at submission. |
 | `INQTRIX_QUOTA_RUNS_PER_MONTH_MAX` | `0` | Hard ceiling for the monthly-run allowance; no admin default or override may exceed it. `0` = no ceiling. |
 | `INQTRIX_QUOTA_LLM_TOKENS_PER_MONTH` | `0` | Default LLM tokens (prompt + completion, summed across runs, chat, editor) per user per calendar month. `0` = unlimited. Recorded post-hoc: the current call finishes and the NEXT submission is blocked once the budget is reached. |
@@ -360,7 +501,7 @@ Per-user usage quotas for multi-user deployments — the operator-ceiling layer 
 
 ## Sharing (`SharingSettings`)
 
-Resource-sharing policy for the cookie-session multi-user modes (`oidc`/`local`). Sharing is otherwise tenant-wide: any authenticated user may be a share target and the share typeahead searches the whole tenant.
+Resource-sharing policy for the cookie-session multi-user modes (`oidc`, `local`, `gateway`). Sharing is otherwise tenant-wide: any authenticated user may be a share target and the share typeahead searches the whole tenant.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -391,7 +532,7 @@ procedure are in [Deploy editor collaboration](../deployment/editor-collaboratio
 | `INQTRIX_COLLABORATION_TOKEN_REFRESH_SECONDS` | `30` | Browser lease-refresh interval returned by the session API and honored by the collaboration controller. It must be lower than the lease TTL. |
 | `INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS` | `15` | Lifetime of the single-writer Node fencing lease. Python validates 6-120 seconds, Node 5-300 — the narrower Python bound is what you get, because the API process refuses to start outside it. |
 | `INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS` | `5` | Fencing-lease renewal interval; must be lower than the instance lease. Range 1-60 seconds. |
-| `INQTRIX_COLLABORATION_PROVIDER_FLUSH_MS` | `50` | Browser update-batching interval returned by the session API and honored by the collaboration controller: the delay before a local update is sent while no earlier update waits for its acknowledgement. Range 10-1000 ms. |
+| `INQTRIX_COLLABORATION_PROVIDER_FLUSH_MS` | `10` | Browser update-batching interval returned by the session API and honored by the collaboration controller: the delay before a local update is sent while no earlier update waits for its acknowledgement. Range 10-1000 ms. |
 | `INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS` | `5` | Idle interval after which Node stores a verified snapshot. Range 1-300 seconds. |
 | `INQTRIX_COLLABORATION_SNAPSHOT_UPDATE_COUNT` | `256` | Durable tail update count that triggers a snapshot. |
 | `INQTRIX_COLLABORATION_SNAPSHOT_TAIL_BYTES` | `1048576` | Durable update-tail byte size that triggers a snapshot (1 MiB by default). |
@@ -441,7 +582,7 @@ browser that receives a value outside the range the service validates stops
 with an incompatibility notice instead of guessing; a value the session does
 not return falls back to the service default, with one warning in the browser
 console. Collaboration requires `INQTRIX_STORAGE_BACKEND=postgres` and a
-cookie-session `INQTRIX_AUTH_MODE` (`local` or `oidc`). Anonymous, static-key,
+cookie-session `INQTRIX_AUTH_MODE` (`local`, `oidc` or `gateway`). Anonymous, static-key,
 and PAT principals cannot obtain a document lease. The feature uses the
 existing PostgreSQL database and `user_events`; it does not require SQLite,
 Redis/Valkey, a second database, or a Node data volume. Version 1 is fixed to
@@ -493,6 +634,36 @@ Unrevoked link records remain stored, but active guest leases fail live
 revalidation and no retry loop is started. Signed-in collaboration continues
 unchanged.
 
+### Switching guest links on
+
+A guest link hands one editor document to people without an account: a link
+of the form `{INQTRIX_PUBLIC_BASE_URL}/s/{token}` with a password of its own.
+The API server checks every requirement at start, and a missing one stops the
+start with a message that names it:
+
+1. A cookie-session auth mode (`local`, `oidc` or `gateway`) with
+   `INQTRIX_STORAGE_BACKEND=postgres`, and direct sharing on
+   (`INQTRIX_SHARING_ENABLED=true`, the default).
+2. Live editor collaboration: `INQTRIX_COLLABORATION_ENABLED=true` with its
+   service ([Deploy editor collaboration](../deployment/editor-collaboration.md)).
+3. `INQTRIX_VALKEY_URL`, through which every API replica shares the password
+   throttle. In the Compose stack, Valkey comes with the `workers` profile.
+4. An `https` `INQTRIX_PUBLIC_BASE_URL`: the links are built from it, and
+   unlocking a link and every guest change require `Origin` equal to it.
+5. `INQTRIX_EDITOR_GUEST_LINK_TOKEN_SECRET` in the secrets file: at least 32
+   characters, and neither `INQTRIX_SESSION_SECRET` nor
+   `INQTRIX_COLLABORATION_SECRET`.
+6. `INQTRIX_EDITOR_GUEST_LINKS_ENABLED=true`, then re-create the API server
+   and the worker (Compose: `up -d`, because a `restart` keeps the old environment), which run the same checks.
+
+Owners then create links for their editor documents. In mode `gateway`
+guests use the same host as staff but not the API gateway's sign-in, so the
+API gateway lets `/s/*`, `/v1/editor/share-links/*`, `/v1/editor/guest/*`,
+`/collaboration` and the UI files pass without it; the paths, and why this is
+safe, are in [Auth modes](../deployment/auth-modes.md). A link pauses while
+its owner is disabled or being erased
+([Guest links of inactive owners](../deployment/create-and-manage-users.md#guest-links-of-inactive-owners)).
+
 ## Agent platform (`AgentPlatformSettings`)
 
 Workspace-agent limits (`mode=workspace_agent`), enforced server-side:
@@ -536,6 +707,7 @@ Workspace-agent limits (`mode=workspace_agent`), enforced server-side:
 | `INQTRIX_AGENT_SYNTHESIS_SECTION_REGISTER_BUDGET` | *(unset)* | Operator override for how many references a memo section lists as a one-line register beside the ones its outline entry preselected. Unset, the run's Stufe decides: `schnell` 20, `gruendlich` 60, `tief` 180, and 60 for a run that names no Stufe (the `section_register` column of the Stufe table, published under `agent.tiers`). A number replaces every Stufe's width and is published in its place. The preselected references are rendered in full and are never cut; the register bounds what a section may additionally cite; a cut logs a WARNING and raises the `inqtrix.truncation` span event with `limit_name=section_register`. `0` switches the register off, which brings back the state in which an outline that preselected nothing left the section believing the run had no evidence — the section still reports itself as `section_without_preselection` then. Deliberately separate from `INQTRIX_AGENT_SYNTHESIS_EVIDENCE_BUDGET`: a register line costs a fraction of a full-text entry. |
 | `INQTRIX_AGENT_MAX_CLARIFICATION_ROUNDS` | `2` | User-question rounds before the agent proceeds on its best assumption, named in the transcript and the plan's assumptions. A Stufe caps it tighter, never wider (`schnell` 0, `gruendlich` 1, `tief` 2); the effective number is published under `agent.tiers` and in the run snapshot's `limits.clarification_rounds`. |
 | `INQTRIX_AGENT_ALLOW_WEB_DISCOVERY_PREVIEW` | `true` | Permit one instant web search during discovery. Only effective in `autonomous` mode — Standard keeps all web contact behind the plan gate — and only when the assignment needs the web and the question is the user's own (a delegated mission sends none). |
+| `INQTRIX_AGENT_ALLOW_AUTONOMOUS` | `true` | Offer the autonomous permission mode (Auto). With `false` the Agent Desk offers Standard only, `/v1/capabilities` no longer publishes the mode, and `POST /v1/runs` answers 403 `autonomy_not_allowed` for an agent run that asks for it. Runs already started keep their mode. The start fails if `INQTRIX_AGENT_DEFAULT_AUTONOMY=autonomous` is set at the same time. |
 | `INQTRIX_AGENT_ADVANCED_AUTONOMY` | `false` | Show the legacy three-way autonomy control (incl. `strict`) in the UI instead of the two-mode Standard/Auto toggle. Wire vocabulary is unchanged either way. |
 | `INQTRIX_AGENT_ALLOW_VOLATILE` | `false` | Dev escape: register without Postgres using an in-memory checkpointer (interrupted runs die with the process; logged loudly, `workspace_agent_durable: false`). |
 | `INQTRIX_AGENT_SKILLS_MAX_ATTACHED` | `3` | How many skills one run may attach (`skill_ids`); the runs router rejects excess with a loud 400. Published as `agent.skills.max_attached`. |
@@ -549,7 +721,8 @@ Requires the `agent` dependency extra; deployments should also set
 `LANGGRAPH_STRICT_MSGPACK=true`. See
 [Agent platform](../architecture/agent-platform.md).
 
-Long-term memory requires a real per-user principal (`oidc_session` or
+Long-term memory requires a real per-user principal (`oidc_session`, the
+session principal of the `oidc`, `local` and `gateway` modes, or
 PAT). It stays disabled for anonymous and legacy static-key principals to
 avoid shared anonymous memory. Memory endpoints derive `(tenant_id, user_id)`
 from auth and reject owner fields in the request body or query string.
@@ -727,14 +900,16 @@ A few variables are read by the process bootstrap rather than the Pydantic group
 |----------|---------|--------|
 | `INQTRIX_SERVER_HOST` | `0.0.0.0` | Bind host for uvicorn in `python -m inqtrix`. |
 | `INQTRIX_SERVER_PORT` | `5100` | Bind port for uvicorn in `python -m inqtrix`. |
-| `INQTRIX_LOG_ENABLED` | `false` | Master switch for persistent file logging (`true` activates it); otherwise the library only attaches a `NullHandler`. Read by both the server and `inqtrix-worker`. |
-| `INQTRIX_LOG_LEVEL` | `INFO` | Logging level for the `inqtrix` logger: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Structured runtime events are emitted at `DEBUG`. |
-| `INQTRIX_LOG_CONSOLE` | `false` | `true` mirrors WARNING+ records onto stderr in addition to any file sink. |
-| `INQTRIX_LOG_INCLUDE_WEB` | `true` | When file logging is on, also route uvicorn/FastAPI logs into the same file. Set `false` to opt out. |
-| `INQTRIX_LOG_WEB_LEVEL` | `INFO` | Level for the uvicorn/FastAPI loggers (used by `build_uvicorn_log_config`). |
-| `INQTRIX_LOG_FORMAT` | `text` | `text` keeps the historical pipe format byte-identical; `json` renders one machine-readable object per line (Loki/SIEM/jq) carrying `ts`, `level`, `logger`, `event`, `message`, `request_id`, `run_id`, the pseudonymous `user`, `workspace`, `tenant`, and — once tracing is active — `trace_id`/`span_id`. Applies to the `inqtrix` logger AND the mirrored uvicorn/FastAPI loggers; the secret-redaction filter runs unchanged in both formats. Recommended in containers. |
+| `INQTRIX_LOG_TARGET` | `console` | `console` (stdout; stderr in `inqtrix-migrate`), `file`, `both` or `none`. Read by the server, the worker and the migration job. |
+| `INQTRIX_LOG_LEVEL` | `INFO` | Threshold for the `inqtrix` loggers: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Also read by the web gateway and the collaboration server. |
+| `INQTRIX_LOG_FORMAT` | `json` | `json` (one object per line with `ts`, `level`, `service`, `logger`, `message` and the correlation fields `request_id`, `run_id`, `user`, `tenant`, `trace_id`, `span_id`) or `text` (one readable line per record). Also read by the web gateway; the collaboration server always writes JSON. |
+| `INQTRIX_LOG_DIR` | `logs` | Directory of the file target; each service writes `inqtrix-<service>.log`. |
+| `INQTRIX_LOG_MAX_BYTES` | `20971520` | Rotation threshold per file. |
+| `INQTRIX_LOG_BACKUP_COUNT` | `5` | Rotated files kept per service. |
+| `INQTRIX_LOG_WEB_LEVEL` | *(empty)* | `INFO`, `WARNING` or `ERROR` for uvicorn and FastAPI; empty follows `INQTRIX_LOG_LEVEL`, but never below `INFO`. |
+| `INQTRIX_LOG_CONFIG` | *(empty)* | Path to an organization's own `dictConfig` file (`.json`, `.yaml`, `.yml`); excludes every other `INQTRIX_LOG_*` value. |
 
-Full logging behaviour, file paths, and forensic-event interaction with `OBSERVABILITY_PROFILE`: [Logging](../observability/logging.md).
+`INQTRIX_LOG_ENABLED`, `INQTRIX_LOG_CONSOLE` and `INQTRIX_LOG_INCLUDE_WEB` are retired: a service does not start while one of them is set, even to an empty value, and names its replacement. uvicorn's `FORWARDED_ALLOW_IPS` is retired as well; it only logs a WARNING, except in `gateway` mode, where the services of the `inqtrix` package do not start while it is set and the web gateway stays unready ([details](#gateway-mode-web-gateway-variables)). For the variables in the table, an empty value counts as unset. The web gateway and the collaboration server read only `INQTRIX_LOG_LEVEL` (and the gateway `INQTRIX_LOG_FORMAT`) and log only to the console. Full logging behaviour, the line fields, your own log format and the interaction with `OBSERVABILITY_PROFILE`: [Logging](../observability/logging.md).
 
 The Helm chart's schema-maintenance job (`job-owner-maintenance.yaml`) reads
 its own group, set only on that one-shot pod and never on api/worker
@@ -751,7 +926,7 @@ its own group, set only on that one-shot pod and never on api/worker
 ## Compose-only variables
 
 These names are read by `deploy/compose/*.yaml` interpolation — they
-configure **containers**, never the Inqtrix application,, although several are
+configure **containers**, never the Inqtrix application, although several are
 production controls of the Compose stack. **None of them does anything on
 Kubernetes**; the per-entry notes name the Helm equivalent where one
 exists. Set them in the invoking shell or the paired env files at
@@ -796,6 +971,24 @@ Production-relevant:
 - `INQTRIX_S3_CA_BUNDLE_HOST` (`/dev/null`) is the HOST path mounted into
   api and worker so `INQTRIX_S3_CA_BUNDLE` can name a private CA inside the
   container.
+- `INQTRIX_WEB_GATEWAY_TRUSTED_PROXIES` (empty) is used only in `gateway`
+  mode: it becomes `INQTRIX_GATEWAY_TRUSTED_PROXIES` of the `web` service,
+  the CIDR networks allowed to send the web gateway identity headers
+  (normally the API gateway). The API server reads its own
+  `INQTRIX_GATEWAY_TRUSTED_PROXIES` from the env files; that list names the
+  web gateway instead. See
+  [Gateway mode: web gateway variables](#gateway-mode-web-gateway-variables);
+  how to fix the addresses in the Compose stack:
+  [Peer addresses](../deployment/auth-modes.md#peer-addresses).
+  **Helm equivalent: `web.gatewayTrustedProxies`.**
+- `INQTRIX_GATEWAY_RESOLVER_DIR` (empty, which binds `/dev/null`) is the
+  HOST folder with the module of a resolver of its own
+  (`INQTRIX_GATEWAY_RESOLVER`), as an absolute path (Compose resolves a
+  relative one against `deploy/compose/`) that the API container, user 1001
+  in group 0, can read, mounted read-only into `api` at
+  `/opt/inqtrix-plugins`, which is on its `PYTHONPATH`. **Helm equivalent:
+  `api.resolverVolume`** (a Kubernetes volume source, for example a
+  ConfigMap).
 - `INQTRIX_COLLABORATION_VERIFICATION_FAULTS` (`0`) injects
   snapshot-verification faults into the collaboration container; keep it at
   `0` outside fault-injection tests.
@@ -818,6 +1011,28 @@ Development conveniences:
   `INQTRIX_QDRANT_GRPC_PORT` (`6334`), `INQTRIX_VALKEY_PORT` (`6379`),
   `INQTRIX_S3_PORT` (`8333`), and `INQTRIX_COLLABORATION_PORT` (`1234`). They change host ports only; every bind
   remains on `127.0.0.1`.
+- `compose.gateway-acceptance.yaml`, the local acceptance setup of mode
+  `gateway` with Keycloak and oauth2-proxy
+  ([Auth modes](../deployment/auth-modes.md)), reads its values from a
+  private env file per run, never from the repository:
+  `INQTRIX_GATEWAY_ACCEPTANCE_ASSERTION` (`jwt` or `header`; it selects the
+  sub-mode of the API server and the matching oauth2-proxy file),
+  `INQTRIX_GATEWAY_ACCEPTANCE_CLIENT_SECRET` (the sign-in client
+  `inqtrix-gateway`), `INQTRIX_GATEWAY_ACCEPTANCE_SERVICE_SECRET` (the
+  client-credentials client `inqtrix-service`),
+  `INQTRIX_GATEWAY_ACCEPTANCE_USER_PASSWORD` (the password of the two test
+  users: `alice`, a member of the group `inqtrix-admins`, and `bob`, in no
+  group), `INQTRIX_GATEWAY_ACCEPTANCE_ADMIN_PASSWORD` (the Keycloak bootstrap
+  admin `acceptance-admin`), `INQTRIX_GATEWAY_ACCEPTANCE_COOKIE_SECRET` (the
+  oauth2-proxy cookie secret, 32 characters),
+  `INQTRIX_GATEWAY_ACCEPTANCE_SHARED_SECRET` (the proof secret of `header`, at
+  least 32 characters), `INQTRIX_GATEWAY_ACCEPTANCE_ADMIN_GROUPS`
+  (`inqtrix-admins` with `jwt`, empty with `header`), and
+  `INQTRIX_GATEWAY_ACCEPTANCE_SCIM` with
+  `INQTRIX_GATEWAY_ACCEPTANCE_SCIM_TOKEN` (`true` and a token of at least 32
+  characters turn SCIM on). With `jwt`, `alice` signs in as an admin through
+  the group and `bob` as a user; with `header` both sign in as users, because
+  headers never grant admin.
 
 The bundled Langfuse profile has its own Compose-only set, documented next
 to the observability group:
@@ -857,11 +1072,18 @@ inside the Python image; another image validates its own sentinel),
 `RESEARCH_DESK_HOST`/`_PORT`/`_WORKERS`,
 `RESEARCH_DESK_SSL_CERTFILE`/`_KEYFILE`/`_KEYFILE_PASSWORD`,
 `INQTRIX_PUBLIC_BASE_URL`, `INQTRIX_EXTERNAL_SCHEME`,
-`INQTRIX_MAX_UPSTREAM_CONNECTIONS`, `INQTRIX_PROXY_MAX_BODY_BYTES`, and the
-collaboration frame limits. `WEB_CONCURRENCY` is deliberately not a second
+`INQTRIX_MAX_UPSTREAM_CONNECTIONS`, `INQTRIX_PROXY_MAX_BODY_BYTES`, the
+collaboration frame limits, and for `gateway` mode the identity header names,
+its own `INQTRIX_GATEWAY_TRUSTED_PROXIES` and the retired
+`FORWARDED_ALLOW_IPS`
+([Gateway mode: web gateway variables](#gateway-mode-web-gateway-variables)).
+`WEB_CONCURRENCY` is deliberately not a second
 worker control: when it conflicts with `RESEARCH_DESK_WORKERS`, the gateway
-ignores it and emits a warning. The full table with defaults lives in
-[React UI: gateway environment variables](../deployment/react-ui.md#gateway-environment-variables).
+ignores it and emits a warning. The full table with defaults of the other
+variables lives in
+[React UI: gateway environment variables](../deployment/react-ui.md#gateway-environment-variables);
+the variables of `gateway` mode are in
+[Gateway mode: web gateway variables](#gateway-mode-web-gateway-variables).
 
 Optional deployment CLI (`python -m inqtrix.deploy` / `inqtrix-deploy`):
 `INQTRIX_DEPLOY_ENGINE` selects the default Compose engine only when
@@ -872,7 +1094,7 @@ second deployment configuration.
 
 Search debug script (`scripts/debug_search_dataflow.py`): `INQTRIX_PERPLEXITY_INSTRUCTIONS` (*(unset)*), `INQTRIX_PERPLEXITY_MODEL` (*(unset)*), `INQTRIX_PERPLEXITY_PRESET` (`fast-search`). Script-local overrides for ad-hoc Perplexity dataflow debugging; the runtime equivalents are `INQTRIX_SEARCH_INSTRUCTIONS` / `SEARCH_MODEL` / `INQTRIX_SEARCH_PRESET` in the Providers block.
 
-Live prompt-flow debug script (`scripts/live_prompt_flow_debug.py`): `INQTRIX_LOG_DIR` (default `logs`; the `configure_logging(log_dir=...)` target, wired from env only by this script — the server/worker always use `logs`). The script also defaults `OBSERVABILITY_PROFILE` to `forensic` for its own run.
+Live prompt-flow debug script (`scripts/live_prompt_flow_debug.py`): writes a `DEBUG` log file `logs/inqtrix-script.log` into its output directory (target, level and directory are fixed in the script), and runs its agent with the `forensic` observability profile.
 
 ## Related docs
 

@@ -41,7 +41,7 @@ _QUOTE = re.compile(
     r'«([^»]{20,400})»|»([^«]{20,400})«'
 )
 _WORD = re.compile(r"[^\W_]+(?:['’\u2010-\u2015][^\W_]+)*")
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class CitationValidationFailed(RuntimeError):
@@ -289,10 +289,11 @@ def _label_shaped(value: str, ref: dict[str, Any]) -> bool:
     """Whether *value* is the label a reader is supposed to cite."""
     if not _EVIDENCE_LABEL_SHAPE.match(value.strip()):
         return False
+    # A web source has no internal id; its URL is not logged.
     log.warning(
         "Reference %s is filed under the label-shaped id %s; it is read as a "
         "reader label, not as an internal identifier.",
-        ref.get("document_id") or ref.get("url") or "?", value.strip(),
+        ref.get("document_id") or "(web source)", value.strip(),
     )
     return True
 

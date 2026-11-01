@@ -1091,7 +1091,8 @@ def build_knowledge_answer_prompt(
         history: Optional pre-formatted conversation history block.
         grounding: When ``True``, the prompt additionally requires a
             ``QUOTES:`` block of verbatim, labelled quotes BEFORE the
-            ``ANSWER:`` section (quote-then-answer). The caller
+            ``ANSWER:`` section (quote-then-answer), or the single line
+            ``NONE`` when no excerpt answers the question. The caller
             verifies the quotes deterministically and strips the block
             from the user-facing answer.
         report: Deep-profile answer form — replaces the free-form
@@ -1124,6 +1125,12 @@ def build_knowledge_answer_prompt(
             "no omissions, no rephrasing, at most 30 words per quote.\n"
             "THEN write a line 'ANSWER:' followed by the actual answer "
             "according to the rules above.\n"
+            "If the excerpts do not answer the question at all, write the "
+            "line 'QUOTES:', then the single line 'NONE', then the line "
+            "'ANSWER:' and, on the next line, one sentence saying that the "
+            "excerpts do not answer the question, without any report "
+            "structure. Use NONE only when you answer no part of the "
+            "question; every statement you do make needs its quote.\n"
         )
         if grounding
         else ""

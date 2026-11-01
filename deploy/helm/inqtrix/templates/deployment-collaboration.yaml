@@ -54,6 +54,9 @@ spec:
           env:
             - name: INQTRIX_API_INTERNAL_URL
               value: "http://{{ include "inqtrix.fullname" . }}-api:{{ .Values.service.apiPort }}"
+            # The server always writes JSON; empty keeps the threshold INFO.
+            - name: INQTRIX_LOG_LEVEL
+              value: {{ (.Values.observability | default dict).logLevel | default "" | quote }}
             - name: INQTRIX_COLLABORATION_SECRET
               valueFrom:
                 secretKeyRef:

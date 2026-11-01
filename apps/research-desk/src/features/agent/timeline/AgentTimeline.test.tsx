@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { translations } from '@/i18n/translations'
 import { agentRunFromSummary, type AgentRunOutcome } from '../model'
@@ -49,6 +49,49 @@ function addAnswer(record: ReturnType<typeof run>, withSources = true, writing =
     refs: withSources ? [{ label: 'W1', url: 'https://example.org/source', title: 'Beleg' }] : [],
   }
 }
+
+describe('who asked the question of a turn', () => {
+  const turn = (access: { mode: 'owner' } | { mode: 'shared'; permission: 'edit' | 'view' }) => {
+    const record = run()
+    record.access = access
+    return renderToStaticMarkup(<AgentRunTurn actions={actions} historical run={record} />)
+  }
+  afterEach(() => {
+    localeState.locale = 'de'
+  })
+
+  it('calls the reader the author of their own run', () => {
+    expect(turn({ mode: 'owner' })).toContain('<span>Sie</span>')
+    expect(turn({ mode: 'owner' })).not.toContain('<span>Inhaber</span>')
+  })
+
+  it('never calls the reader the author of a run someone shared with them', () => {
+    // A recipient's own question opens their own session, so a shared turn
+    // always carries the owner's words. The server sends no name for it.
+    for (const permission of ['view', 'edit'] as const) {
+      const html = turn({ mode: 'shared', permission })
+      expect(html).toContain('<span>Inhaber</span>')
+      expect(html).not.toContain('<span>Sie</span>')
+    }
+  })
+
+  it('says the same in English', () => {
+    localeState.locale = 'en'
+    const html = turn({ mode: 'shared', permission: 'view' })
+    expect(html).toContain('<span>Owner</span>')
+    expect(html).not.toContain('<span>You</span>')
+  })
+})
+
+describe('the failure line of a turn', () => {
+  it('keeps a $ pattern in the failure text as written', () => {
+    const record = run()
+    record.status = 'failed'
+    record.error = 'Budget $& Plan'
+    const html = renderToStaticMarkup(<AgentRunTurn actions={actions} historical run={record} />)
+    expect(html).toContain('Fehlgeschlagen: Budget $&amp; Plan')
+  })
+})
 
 describe('run settings in the transcript', () => {
   const settingsRun = (status: 'completed' | 'failed') => {

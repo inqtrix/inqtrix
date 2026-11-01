@@ -59,7 +59,7 @@ from inqtrix.state import (
 )
 from inqtrix.strategies import StrategyContext
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _FLATTENED_COUNT_KEYS = frozenset({"source_tier_counts", "claim_status_counts"})
 """Snapshot dicts exported one level flat onto the node span."""

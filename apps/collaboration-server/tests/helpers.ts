@@ -243,6 +243,47 @@ export class FakeCollaborationApi implements CollaborationApi {
   }
 }
 
+export function varUint(value: number): number[] {
+  const bytes: number[] = []
+  let rest = value
+  while (rest > 127) {
+    bytes.push((rest % 128) | 128)
+    rest = Math.floor(rest / 128)
+  }
+  bytes.push(rest)
+  return bytes
+}
+
+export function varString(value: string): number[] {
+  const bytes = [...new TextEncoder().encode(value)]
+  return [...varUint(bytes.length), ...bytes]
+}
+
+/** A frame whose one struct the room already holds, referring to a character. */
+export function frameReferringInto(client: number, ownClock: number, originClock: number): Uint8Array {
+  return new Uint8Array([
+    ...varUint(1), ...varUint(1), ...varUint(client), ...varUint(ownClock),
+    4 | 0x80, // a string with an origin
+    ...varUint(client), ...varUint(originClock),
+    ...varString('x'),
+    ...varUint(0),
+  ])
+}
+
+export function highSurrogateOf(document: Y.Doc): { client: number; clock: number } {
+  for (const [client, structs] of document.store.clients) {
+    for (const struct of structs) {
+      const text = ((struct as Y.Item).content as { str?: string } | undefined)?.str
+      if (typeof text !== 'string') continue
+      for (let index = 0; index < text.length; index += 1) {
+        const unit = text.charCodeAt(index)
+        if (unit >= 0xd800 && unit <= 0xdbff) return { client, clock: struct.id.clock + index }
+      }
+    }
+  }
+  throw new Error('the document holds no surrogate pair')
+}
+
 export const silentLogger: SidecarLogger = {
   debug: () => undefined,
   error: () => undefined,

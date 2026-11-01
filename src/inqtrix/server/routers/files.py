@@ -53,6 +53,7 @@ from inqtrix.services.upload_operation_service import (
 )
 from inqtrix.services.request_parsing import (
     error_response,
+    workspace_id_for_write,
     workspace_id_from_request,
 )
 from inqtrix.storage.object_store import ObjectStoreError
@@ -67,7 +68,7 @@ _BINDING_MAX_CHARS = 1024
 _OBJECT_STORE_WARNING_INTERVAL_SECONDS = 60.0
 _object_store_warning_lock = threading.Lock()
 _object_store_last_warning: dict[str, float] = {}
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _DISPOSITION_SAFE = re.compile(r"[^A-Za-z0-9._ ()\[\]-]")
 
@@ -189,6 +190,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             "when upload bindings are available."
         )
     principal_dep = container.principal_dependency
+    users = getattr(container.auth_provider, "users", None)
     user_context_dep = container.user_context_dependency
     quota_service = container.quota_service
 
@@ -281,7 +283,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "invalid_request_error",
             )
         try:
-            workspace_id = workspace_id_from_request(req)
+            workspace_id = await workspace_id_for_write(req, principal, users)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         bind_requested = asset_id is not None or section_id is not None
@@ -526,7 +528,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
     ):
         try:
-            workspace_id = workspace_id_from_request(req)
+            workspace_id = await workspace_id_for_write(req, principal, users)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         bounded = min(200, max(1, limit))
@@ -566,7 +568,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
     ):
         try:
-            workspace_id = workspace_id_from_request(req)
+            workspace_id = await workspace_id_for_write(req, principal, users)
             return upload_service.operations.retry(
                 operation_id,
                 tenant_id=principal.tenant_id,

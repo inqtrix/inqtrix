@@ -11,8 +11,8 @@ type DialogProps = {
   contentProps?: Omit<React.ComponentPropsWithoutRef<'div'>, 'children' | 'className'>
   children: ReactNode
   className?: string
-  /** Localised label for the close affordance (defaults to "Close"). */
-  closeLabel?: string
+  /** Localised name of the close button. */
+  closeLabel: string
   description?: ReactNode
   /** When false, overlay-click and Esc do NOT close (e.g. mid-submit). */
   dismissable?: boolean
@@ -33,7 +33,7 @@ type DialogProps = {
 export function Dialog({
   children,
   className,
-  closeLabel = 'Close',
+  closeLabel,
   contentClassName,
   contentProps,
   description,

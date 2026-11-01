@@ -259,7 +259,10 @@ apply happens solely through `POST /v1/editor/patches/{id}:apply`.
   and skill revision before and after provider/search calls and at tool,
   knowledge, skill, child-run, segment, and final-publication boundaries. If
   access disappears, the run ends with `authorization_revoked`; it does not
-  continue with a silently smaller evidence set. A remote call already in
+  continue with a silently smaller evidence set. A run with
+  `source_policy.knowledge` set to `disabled` has no tool that reaches a
+  collection, so collection visibility is no dependency of its actor: a shared
+  editor can continue it without access to the owner's collections. A remote call already in
   flight cannot be recalled, but its return value is discarded after the
   post-call check and is not persisted or emitted.
 * **Children wait**: `web_research` tasks are SUBMITTED as child
@@ -934,7 +937,7 @@ persisted payload + checkpoint.
 `discovery_max_tool_calls` (15),
 `max_plan_tasks` (8), `max_replan_rounds` (2), `mission_time_budget_seconds` (720),
 `max_clarification_rounds` (2), `default_autonomy` (`balanced`),
-`allow_web_discovery_preview` (on), `advanced_autonomy` (off),
+`allow_web_discovery_preview` (on), `advanced_autonomy` (off), `allow_autonomous` (on),
 `allow_volatile` (off). All enforced in code, never prompted. Model
 tiers: `agent_intake`/`agent_sufficiency` fast,
 `agent_discovery_analyst`/`agent_contradiction`/`agent_file_analysis`/
@@ -982,7 +985,8 @@ instead of presenting the normal tier's larger allowance before submission.
   Standard/Auto (`/v1/capabilities` `agent.mode_presets`, mapped onto
   the unchanged wire vocabulary `balanced`/`autonomous`;
   `advanced_autonomy` republishes the legacy three-way control incl.
-  `strict`). In Standard the approved plan is the ONLY web-search
+  `strict`; `allow_autonomous=false` takes Auto away from the publication,
+  and `POST /v1/runs` then refuses it for an agent run). In Standard the approved plan is the ONLY web-search
   consent surface — plan tasks carry their verbatim queries (shown
   inline in the approval tray), a replan that adds anything but a
   knowledge query re-gates — only `rag_query` auto-approves
@@ -1116,8 +1120,15 @@ resume under their own algorithm.
 * **Same platform seams.** Registry algorithm behind the normal
   RunService -> queue -> worker path; sync `graph.stream` only; shared
   checkpointer with `thread_id=run_id`; park/resume against control
-  rows. Compiled graph variants are cached per `(autonomy,
-  source_policy.web, source_policy.knowledge, max_tool_calls)` —
+  rows. The stream runs with `durability="sync"`: each superstep's
+  checkpoint is stored before the next superstep starts, so the
+  checkpoint holding a model step's tool calls is stored before any of
+  those tools runs, and LangGraph's background checkpoint chain cannot
+  exhaust its own thread pool (under the library default `"async"`, a run
+  with many fast supersteps can wait on itself forever). Each superstep
+  therefore waits for one checkpoint write; with Postgres that is a round
+  trip through the checkpointer pool. Compiled graph variants are cached
+  per `(autonomy, source_policy.web, source_policy.knowledge, max_tool_calls)` —
   `interrupt_on` and the enforced source tool
   surface are both compile-time; per-segment state travels through a
   ContextVar, so the compiled graphs are stateless and shared across
@@ -1597,7 +1608,8 @@ the single policy gate.
   main-model call. Dynamic `load_skill` uses the same resolver and activates
   the skill/tool restrictions only after its required inputs are answered.
   Own `model_allowed` +
-  autocomplete-eligible skills disclose as one-liners under a
+  autocomplete-eligible skills (ownerless ones in the modes without user
+  accounts) disclose as one-liners under a
   deterministic character budget (`skills_disclosure_budget_chars`,
   visible overflow line). The kernel's `load_skill` tool activates a
   disclosed skill mid-run (gated in balanced/strict, free in
@@ -1605,7 +1617,8 @@ the single policy gate.
   markers re-arm the exact admitted revision on every resumed segment,
   so a tool limit acquired before a park survives park/resume without
   policy drift. Shared-in skills are
-  structurally never model-activatable for the recipient.
+  structurally never model-activatable for the recipient, who can still
+  attach them.
 * **`allowed_tools` enforcement.** The union over activated skills
   narrows the run at the dispatch chokepoints: kernel tool bodies
   refuse blocked tools with a visible tool error, and the phase

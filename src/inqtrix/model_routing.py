@@ -118,7 +118,7 @@ def validate_model_tier(value: str) -> str:
     canonical = (value or "").strip().lower()
     if canonical and canonical not in TIER_NAMES:
         raise ValueError(
-            f"model_tier must be one of {TIER_NAMES} or empty; got {value!r}"
+            f"model_tier must be one of {', '.join(TIER_NAMES)} or empty"
         )
     return canonical
 

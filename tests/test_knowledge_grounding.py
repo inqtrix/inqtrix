@@ -16,9 +16,11 @@ import logging
 import re
 from typing import Any
 
+import pytest
 
 from inqtrix.core.context import RunContext, RuntimeContext
 from inqtrix.core.results import RunRequest
+from inqtrix.i18n import t
 from inqtrix.knowledge.algorithm import (
     KNOWLEDGE_ANSWER_INCOMPLETE,
     KnowledgeAlgorithm,
@@ -35,6 +37,7 @@ from inqtrix.knowledge.grounding import (
     quote_key,
     strip_page_break_artifacts,
 )
+from inqtrix.result import KnowledgeResultState
 from inqtrix.runtime_logging import sanitize_event_payload
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
@@ -216,6 +219,69 @@ def test_one_bounded_markdown_heading_repair_is_audited():
     assert report.marker == GROUNDING_MARKER_FORMAT_REPAIRED
     assert report.format_repaired is True
     assert report.answer == "Antwort [K1]."
+
+
+# The stable receipt value of a declared absence of evidence.
+NO_EVIDENCE_MARKER = "_knowledge_grounding_no_evidence"
+NO_EVIDENCE_ANSWER = (
+    "QUOTES:\n"
+    "NONE\n"
+    "\n"
+    "ANSWER:\n"
+    "Die Auszüge beantworten die Frage nicht."
+)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        NO_EVIDENCE_ANSWER,
+        "QUOTES:\n  NONE  \nANSWER:\nDie Auszüge beantworten die Frage nicht.",
+        "QUOTES:\n**NONE**\nANSWER:\nDie Auszüge beantworten die Frage nicht.",
+        # The answer part of a declared absence is never published, so it
+        # may be empty.
+        "QUOTES:\nNONE\nANSWER:\n",
+    ],
+)
+def test_an_explicit_none_declares_that_no_excerpt_answers(content):
+    report = check_grounding(content, EVIDENCE)
+    assert report.status == "no_evidence"
+    assert report.marker == NO_EVIDENCE_MARKER
+    assert report.failure_code is None
+    assert report.publishable is False
+    assert report.answer == ""
+    assert report.quotes == []
+    assert report.format_repaired is False
+
+
+def test_the_heading_repair_also_reads_a_declared_absence():
+    report = check_grounding(
+        "### QUOTES:\nNONE\n### ANSWER:\nNichts gefunden.", EVIDENCE
+    )
+    assert report.status == "no_evidence"
+    assert report.format_repaired is True
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # NONE next to a quote: an answer rests on quotes or declares none.
+        "QUOTES:\nNONE\n"
+        '[K1] "Die Haftung ist auf den Auftragswert begrenzt."\n'
+        "ANSWER:\nDie Haftung ist begrenzt [K1].",
+        "QUOTES:\nNONE\nNONE\nANSWER:\nNichts gefunden.",
+        "QUOTES: NONE\nANSWER:\nNichts gefunden.",
+        "QUOTES:\n[NONE]\nANSWER:\nNichts gefunden.",
+        "QUOTES:\nNone.\nANSWER:\nNichts gefunden.",
+        "QUOTES:\n- NONE\nANSWER:\nNichts gefunden.",
+        "QUOTES:\nNONE\n",
+    ],
+)
+def test_a_declared_absence_has_exactly_one_form(content):
+    report = check_grounding(content, EVIDENCE)
+    assert report.status is GroundingStatus.REJECTED_FORMAT
+    assert report.failure_code is GroundingFailureCode.FORMAT_INVALID
+    assert report.answer == ""
 
 
 # ------------------------------------------------------------------ #
@@ -967,6 +1033,128 @@ def test_format_invalid_first_attempt_never_retries():
         event == "inqtrix.knowledge.answer.retry"
         for event, _payload in events
     )
+
+
+class AnswerQueueLLM(QueuedGroundedLLM):
+    """Scripts the answer calls only; a deep run's question decomposition
+    gets an empty sub-query list, so the queue belongs to the answer."""
+
+    def complete_with_metadata(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        if "DOCUMENT EXCERPTS:" not in prompt:
+            return LLMResponse(
+                content="[]",
+                prompt_tokens=5,
+                completion_tokens=1,
+                model="stub-decompose",
+                finish_reason="stop",
+            )
+        return super().complete_with_metadata(prompt, **kwargs)
+
+
+# A deep-profile report that declares no evidence and still names an
+# excerpt: the answer part is never published, whatever it says.
+REPORT_WITH_NO_EVIDENCE = (
+    "QUOTES:\n"
+    "NONE\n"
+    "ANSWER:\n"
+    "## Kurzfassung\n"
+    "Die Auszüge beantworten die Frage nicht; [K1] regelt nur die Haftung.\n"
+    "## Belegbasis\n"
+    "[K1] trägt keine Aussage zur Frage."
+)
+
+
+@pytest.mark.parametrize(
+    ("completion", "profile", "prompt_tokens"),
+    [
+        (NO_EVIDENCE_ANSWER, None, 42),
+        # `tief` writes a report and decomposes the question first.
+        (REPORT_WITH_NO_EVIDENCE, "tief", 42 + 5),
+    ],
+)
+def test_a_declared_absence_ends_in_the_honest_refusal(
+    completion, profile, prompt_tokens
+):
+    llm = AnswerQueueLLM([completion, "nie aufgerufen"])
+    algorithm, context, runtime, events = make_algorithm(
+        llm, grounding_enabled=True
+    )
+
+    result = algorithm.run(
+        RunRequest(
+            mode="knowledge",
+            question="Wie ist die Haftung?",
+            knowledge_filters={"profile": profile} if profile else {},
+        ),
+        runtime=runtime,
+        context=context,
+    )
+
+    assert result.successful is True
+    assert result.terminal_failure is None
+    assert result.answer == t({"language": "de"}, "knowledge_no_relevant_content")
+    # One answer call: a declared absence is final, never regenerated.
+    assert len(llm.prompts) == 1
+    # The prompt names the token the grammar reads.
+    assert "then the single line 'NONE'" in llm.prompts[0]
+    assert not any(
+        event == "inqtrix.knowledge.answer.retry" for event, _payload in events
+    )
+    # Like the refusal without excerpts, it reports no quote verdict.
+    assert not any(
+        event == "inqtrix.knowledge.grounding.checked"
+        for event, _payload in events
+    )
+    state = result.raw["result_state"]
+    assert state["report_references"] == []
+    assert state["knowledge_evidence_used"] == 0
+    grounding = state["knowledge_grounding"]
+    assert grounding["marker"] == NO_EVIDENCE_MARKER
+    assert grounding["status"] is None
+    assert grounding["failure_code"] is None
+    assert grounding["quotes_total"] == 0
+    assert grounding["quotes_verified"] == 0
+    # The strict receipt reads it without a new status value.
+    receipt = KnowledgeResultState.from_sources(state)
+    assert receipt is not None and receipt.grounding is not None
+    assert receipt.grounding.status is None
+    assert receipt.grounding.marker == NO_EVIDENCE_MARKER
+    # The answer call is real spend and stays booked.
+    assert result.raw["usage"]["prompt_tokens"] == prompt_tokens
+
+
+def test_a_declared_absence_never_turns_a_quote_failure_into_a_refusal():
+    llm = QueuedGroundedLLM([PARAPHRASED_ATTEMPT, NO_EVIDENCE_ANSWER])
+    algorithm, context, runtime, events = make_algorithm(
+        llm, grounding_enabled=True
+    )
+
+    result = run_question(algorithm, runtime, context)
+
+    assert len(llm.prompts) == 2
+    assert result.successful is False
+    assert (
+        result.terminal_failure.type
+        == GroundingFailureCode.QUOTE_UNVERIFIED.value
+    )
+    assert "keine relevanten" not in result.answer
+    state = result.raw["result_state"]["knowledge_grounding"]
+    assert state["status"] == GroundingStatus.REJECTED_QUOTE.value
+    # The outcome, counts included, is the first attempt's.
+    assert state["quotes_total"] == 1
+    assert state["quotes_verified"] == 0
+    assert [attempt["status"] for attempt in state["attempts"]] == [
+        GroundingStatus.REJECTED_QUOTE.value,
+        "no_evidence",
+    ]
+    checked = [
+        payload
+        for event, payload in events
+        if event == "inqtrix.knowledge.grounding.checked"
+    ]
+    assert len(checked) == 1
+    assert checked[0]["status"] == GroundingStatus.REJECTED_QUOTE.value
+    assert checked[0]["quotes_verified"] == 0
 
 
 def test_answer_retry_is_projected_and_forwarded_on_the_agent_path():

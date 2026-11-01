@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from inqtrix.services.asset_records_service import AssetRecordsService
     from inqtrix.services.quota_service import QuotaService
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class UploadExecutionDeferred(RuntimeError):
@@ -580,6 +580,13 @@ class UploadOperationService:
             )
             if not landed:
                 raise UploadAttemptSuperseded(record.operation_id) from exc
+            log.warning(
+                "Upload operation %s deferred for a retry (attempt %d of %d, failure_code=%s).",
+                record.operation_id,
+                fence_attempt,
+                self._max_attempts,
+                error_type,
+            )
             raise UploadExecutionDeferred(
                 self.operations.get(
                     record.operation_id,
@@ -785,8 +792,10 @@ class UploadReconciler:
                 # process brings a matching reconciler.
                 log.error(
                     "Upload reconciler: schema head changed under this process; the "
-                    "reconciler is stopping so an updated process can take over. %s",
-                    exc,
+                    "reconciler is stopping so an updated process can take over "
+                    "(installed=%s, expected=%s).",
+                    exc.installed,
+                    exc.expected,
                 )
                 return
             except Exception as exc:

@@ -9,6 +9,7 @@ import {
   canSetRole,
   deriveFeatureRows,
   deriveSystemFeatureRows,
+  enableWarning,
   isLastActiveAdmin,
   isSelf,
   patRevealReducer,
@@ -257,5 +258,20 @@ describe('audit date range', () => {
   it('round-trips a picked day', () => {
     const epoch = auditEpochFromDateInput('2026-01-09')
     expect(auditDateInputValue(epoch)).toBe('2026-01-09')
+  })
+})
+
+describe('enableWarning', () => {
+  it('warns before enabling a tombstone of the identity system', () => {
+    expect(enableWarning(user({ id: 'gone', deprovisioned: true, disabled: true, disabled_source: 'provisioning' }))).toBe('tombstone')
+  })
+
+  it('warns that the next sync may lock an account the identity system locked', () => {
+    expect(enableWarning(user({ id: 'locked', disabled: true, disabled_source: 'provisioning' }))).toBe('provisioningLock')
+  })
+
+  it('lets an administrator lift an own lock without a warning', () => {
+    expect(enableWarning(user({ id: 'admin-locked', disabled: true, disabled_source: 'admin' }))).toBeNull()
+    expect(enableWarning(user({ id: 'active' }))).toBeNull()
   })
 })

@@ -269,6 +269,11 @@ export const SCENARIO_INVENTORY: readonly ScenarioDefinition[] = [
     'lock screen stays usable in each authentication mode, language and viewport',
   ),
   uiScenario(
+    'ui.lock-screen-gateway-states',
+    'Gateway sign-in states instead of every form on the lock screen',
+    'gateway states replace every form and stay usable in each language and viewport',
+  ),
+  uiScenario(
     'ui.brand-focus-visible',
     'Visible keyboard focus on brand-filled lock screen controls in every preset',
     'keyboard focus stays visible on brand-filled lock screen controls in every preset',

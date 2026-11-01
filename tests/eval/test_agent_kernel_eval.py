@@ -335,10 +335,13 @@ LIVE = os.environ.get("INQTRIX_EVAL_AGENT_LIVE") == "1"
         "provider env (uv run --env-file .env) — multiple real LLM runs."
     ),
 )
-def test_agent_kernel_live_eval() -> None:
+def test_agent_kernel_live_eval(monkeypatch: pytest.MonkeyPatch) -> None:
     """k=3 real trials per scenario against the configured providers."""
     from inqtrix.providers import create_providers
     from inqtrix.settings import Settings as LiveSettings
+    from tests._hermetic import restore_machine_aws_setup
+
+    restore_machine_aws_setup(monkeypatch)
 
     settings = LiveSettings()
     providers = create_providers(settings)

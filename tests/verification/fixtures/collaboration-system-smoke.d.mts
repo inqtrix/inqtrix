@@ -1,6 +1,7 @@
 export const GENERATED_SYSTEM_SMOKE_CONTRACT:
   'inqtrix-generated-system-smoke-v1'
 export const GENERATED_SYSTEM_SMOKE_TRANSPORT: 'python-gateway'
+export const SYSTEM_SMOKE_LOCALE: 'de'
 
 export type GeneratedSystemSmokeActor = {
   displayName: string

@@ -36,6 +36,10 @@ spec:
       {{- include "inqtrix.selectorLabels" (dict "root" . "component" "web") | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # Roll the web pods when the configuration changes: they take the
+        # auth mode and the identity header names from it.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         {{- include "inqtrix.labels" (dict "root" . "component" "web") | nindent 8 }}
     spec:
@@ -58,6 +62,12 @@ spec:
             # /v1, /health, /readyz, and /collaboration to FastAPI.
             - name: INQTRIX_BACKEND_URL
               value: "http://{{ include "inqtrix.fullname" . }}-api:{{ .Values.service.apiPort }}"
+            # Logging: threshold and format only; empty keeps the gateway
+            # default. The web pod has no envFrom, so nothing else sets them.
+            - name: INQTRIX_LOG_LEVEL
+              value: {{ (.Values.observability | default dict).logLevel | default "" | quote }}
+            - name: INQTRIX_LOG_FORMAT
+              value: {{ (.Values.observability | default dict).logFormat | default "" | quote }}
             # The gateway overwrites client forwarding headers with the protocol
             # owned by the chart's public TLS boundary. web.externalScheme
             # overrides the derivation for TLS terminators the chart does not
@@ -122,6 +132,23 @@ spec:
             # built-in default applies (one source of truth, no duplicate).
             - name: INQTRIX_MAX_UPSTREAM_CONNECTIONS
               value: {{ $maxUpstream | toString | quote }}
+            {{- end }}
+            {{- /* Gateway mode: the web gateway removes these identity headers
+                   from peers outside its own trusted list (the API gateway in
+                   front of the web Service). The names come from config like
+                   the API pod's; the list is this pod's own, because the API
+                   pod trusts the web pods instead. The shared secret never
+                   reaches this pod. */}}
+            {{- range $name := list "INQTRIX_GATEWAY_JWT_HEADER" "INQTRIX_GATEWAY_SUBJECT_HEADER" "INQTRIX_GATEWAY_EMAIL_HEADER" "INQTRIX_GATEWAY_NAME_HEADER" "INQTRIX_GATEWAY_GROUPS_HEADER" "INQTRIX_GATEWAY_PROOF_HEADER" "INQTRIX_GATEWAY_RESOLVER_HEADERS" }}
+            {{- $headerName := coalesce (index $.Values.config $name) (index $.Values.extraConfig $name) "" }}
+            {{- if $headerName }}
+            - name: {{ $name }}
+              value: {{ toString $headerName | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.web.gatewayTrustedProxies }}
+            - name: INQTRIX_GATEWAY_TRUSTED_PROXIES
+              value: {{ .Values.web.gatewayTrustedProxies | quote }}
             {{- end }}
             {{- with .Values.web.extraEnv }}
             {{- toYaml . | nindent 12 }}

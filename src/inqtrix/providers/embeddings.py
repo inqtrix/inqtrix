@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.urls import sanitize_error
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class EmbeddingProviderError(RuntimeError):

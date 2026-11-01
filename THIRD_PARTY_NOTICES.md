@@ -11,8 +11,8 @@ and the canonical npm `package-lock.json`.
 
 | Surface | Packages |
 |---|---:|
-| python | 93 |
-| python-dev | 39 |
+| python | 94 |
+| python-dev | 41 |
 | react-prod | 478 |
 | react-dev | 203 |
 | node-prod | 5 |
@@ -25,7 +25,7 @@ and the canonical npm `package-lock.json`.
 | python | `alembic` | 1.18.4 | MIT | python package metadata: License-Expression |
 | python | `annotated-doc` | 0.0.4 | MIT | python package metadata: License-Expression |
 | python | `annotated-types` | 0.7.0 | MIT License | python package metadata: classifiers |
-| python | `anyio` | 4.13.0 | MIT | python package metadata: License-Expression |
+| python | `anyio` | 4.15.1 | MIT | python package metadata: License-Expression |
 | python | `argon2-cffi` | 23.1.0 | MIT | python package metadata: License-Expression |
 | python | `argon2-cffi-bindings` | 25.1.0 | MIT | python package metadata: License-Expression |
 | python | `asyncpg` | 0.31.0 | Apache-2.0 | python package metadata: License-Expression |
@@ -37,22 +37,23 @@ and the canonical npm `package-lock.json`.
 | python | `boto3` | 1.42.85 | Apache-2.0 | python package metadata: License |
 | python | `botocore` | 1.42.85 | Apache-2.0 | python package metadata: License |
 | python | `cachetools` | 5.5.2 | MIT License | python package metadata: classifiers |
-| python | `certifi` | 2026.2.25 | Mozilla Public License 2.0 (MPL 2.0) | python package metadata: classifiers |
+| python | `certifi` | 2026.10.23 | Mozilla Public License 2.0 (MPL 2.0) | python package metadata: classifiers |
 | python | `cffi` | 2.0.0 | MIT | python package metadata: License-Expression |
 | python | `charset-normalizer` | 3.4.6 | MIT | python package metadata: License |
 | python | `click` | 8.3.1 | BSD-3-Clause | python package metadata: License-Expression |
-| python | `cryptography` | 46.0.7 | Apache-2.0 OR BSD-3-Clause | python package metadata: License-Expression |
+| python | `cryptography` | 50.0.2 | Apache-2.0 OR BSD-3-Clause | python package metadata: License-Expression |
 | python | `defusedxml` | 0.7.1 | Python Software Foundation License | python package metadata: classifiers |
 | python | `distro` | 1.9.0 | Apache Software License | python package metadata: classifiers |
 | python | `fastapi` | 0.135.2 | MIT | python package metadata: License-Expression |
-| python | `filelock` | 3.32.5 | MIT | python package metadata: License-Expression |
+| python | `filelock` | 4.2.4 | MIT | python package metadata: License-Expression |
 | python | `flatbuffers` | 25.12.19 | Apache Software License | python package metadata: classifiers |
+| python | `greenlet` | 3.5.1 | MIT AND PSF-2.0 | python package metadata: License-Expression |
 | python | `h11` | 0.16.0 | MIT License | python package metadata: classifiers |
 | python | `httpcore` | 1.0.9 | BSD-3-Clause | python package metadata: License-Expression |
-| python | `httpcore2` | 2.3.0 | BSD-3-Clause | python package metadata: License-Expression |
+| python | `httpcore2` | 2.16.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `httpx` | 0.28.1 | BSD License | python package metadata: classifiers |
-| python | `httpx2` | 2.3.0 | BSD-3-Clause | python package metadata: License-Expression |
-| python | `idna` | 3.11 | BSD-3-Clause | python package metadata: License-Expression |
+| python | `httpx2` | 2.16.0 | BSD-3-Clause | python package metadata: License-Expression |
+| python | `idna` | 3.20 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `isodate` | 0.7.2 | BSD License | python package metadata: classifiers |
 | python | `jiter` | 0.13.0 | MIT License | python package metadata: classifiers |
 | python | `jmespath` | 1.1.0 | MIT License | python package metadata: classifiers |
@@ -62,9 +63,9 @@ and the canonical npm `package-lock.json`.
 | python | `langchain-core` | 1.6.3 | MIT License | python package metadata: classifiers |
 | python | `langchain-protocol` | 0.0.18 | MIT License | python package metadata: classifiers |
 | python | `langgraph` | 1.2.11 | MIT | python package metadata: License-Expression |
-| python | `langgraph-checkpoint` | 4.1.1 | MIT | python package metadata: License-Expression |
+| python | `langgraph-checkpoint` | 4.3.1 | MIT | python package metadata: License-Expression |
 | python | `langgraph-prebuilt` | 1.1.0 | MIT | python package metadata: License-Expression |
-| python | `langgraph-sdk` | 0.4.2 | MIT | python package metadata: License-Expression |
+| python | `langgraph-sdk` | 0.4.10 | MIT | python package metadata: License-Expression |
 | python | `langsmith` | 0.12.4 | MIT | python package metadata: License |
 | python | `magika` | 0.6.2 | Apache Software License | python package metadata: classifiers |
 | python | `mako` | 1.3.12 | MIT License | python package metadata: classifiers |
@@ -73,7 +74,7 @@ and the canonical npm `package-lock.json`.
 | python | `markitdown` | 0.1.6 | MIT | python package metadata: License-Expression |
 | python | `markupsafe` | 3.0.3 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `mdurl` | 0.1.2 | MIT License | python package metadata: classifiers |
-| python | `msal` | 1.35.1 | MIT License | python package metadata: classifiers |
+| python | `msal` | 1.39.0 | MIT License | python package metadata: classifiers |
 | python | `msal-extensions` | 1.3.1 | MIT License | python package metadata: classifiers |
 | python | `numpy` | 2.4.4 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | python package metadata: License-Expression |
 | python | `onnxruntime` | 1.26.0 | MIT License | python package metadata: classifiers |
@@ -86,9 +87,9 @@ and the canonical npm `package-lock.json`.
 | python | `pycparser` | 3.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `pydantic` | 2.12.5 | MIT | python package metadata: License-Expression |
 | python | `pydantic-core` | 2.41.5 | MIT | python package metadata: License-Expression |
-| python | `pydantic-settings` | 2.13.1 | MIT | python package metadata: License-Expression |
-| python | `pygments` | 2.19.2 | BSD License | python package metadata: classifiers |
-| python | `pyjwt` | 2.12.1 | MIT | python package metadata: License-Expression |
+| python | `pydantic-settings` | 2.16.2 | MIT | python package metadata: License-Expression |
+| python | `pygments` | 2.21.0 | BSD-2-Clause | python package metadata: License-Expression |
+| python | `pyjwt` | 2.15.1 | MIT | python package metadata: License-Expression |
 | python | `python-dateutil` | 2.9.0.post0 | Apache Software License / BSD License | python package metadata: classifiers |
 | python | `python-dotenv` | 1.2.2 | BSD-3-Clause | python package metadata: License |
 | python | `python-multipart` | 0.0.32 | Apache-2.0 | python package metadata: License-Expression |
@@ -100,16 +101,16 @@ and the canonical npm `package-lock.json`.
 | python | `s3transfer` | 0.16.0 | Apache Software License | python package metadata: classifiers |
 | python | `six` | 1.17.0 | MIT License | python package metadata: classifiers |
 | python | `sniffio` | 1.3.1 | Apache Software License / MIT License | python package metadata: classifiers |
-| python | `soupsieve` | 2.8.4 | MIT | python package metadata: License-Expression |
+| python | `soupsieve` | 3.0.4 | MIT | python package metadata: License-Expression |
 | python | `sqlalchemy` | 2.0.50 | MIT | python package metadata: License |
-| python | `starlette` | 1.0.0 | BSD-3-Clause | python package metadata: License-Expression |
+| python | `starlette` | 1.10.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `tenacity` | 9.1.4 | Apache Software License | python package metadata: classifiers |
 | python | `tldextract` | 5.3.2 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `tqdm` | 4.67.3 | MPL-2.0 AND MIT | python package metadata: License |
 | python | `truststore` | 0.10.4 | MIT | python package metadata: License-Expression |
-| python | `typing-extensions` | 4.15.0 | PSF-2.0 | python package metadata: License-Expression |
+| python | `typing-extensions` | 4.16.0 | PSF-2.0 | python package metadata: License-Expression |
 | python | `typing-inspection` | 0.4.2 | MIT | python package metadata: License-Expression |
-| python | `urllib3` | 2.6.3 | MIT | python package metadata: License-Expression |
+| python | `urllib3` | 2.8.0 | MIT | python package metadata: License-Expression |
 | python | `uuid-utils` | 0.14.1 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `uvicorn` | 0.42.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `websockets` | 15.0.1 | BSD License | python package metadata: classifiers |
@@ -129,19 +130,21 @@ and the canonical npm `package-lock.json`.
 | python-dev | `langchain` | 1.4.0 | MIT License | python package metadata: classifiers |
 | python-dev | `langchain-anthropic` | 1.7.2 | MIT License | python package metadata: classifiers |
 | python-dev | `langchain-google-genai` | 4.4.0 | MIT | python package metadata: License |
-| python-dev | `langgraph-checkpoint-postgres` | 3.1.0 | MIT | python package metadata: License-Expression |
-| python-dev | `opentelemetry-api` | 1.44.0 | Apache-2.0 | python package metadata: License-Expression |
-| python-dev | `opentelemetry-exporter-otlp-proto-common` | 1.44.0 | Apache-2.0 | python package metadata: License-Expression |
-| python-dev | `opentelemetry-exporter-otlp-proto-http` | 1.44.0 | Apache-2.0 | python package metadata: License-Expression |
-| python-dev | `opentelemetry-proto` | 1.44.0 | Apache-2.0 | python package metadata: License-Expression |
-| python-dev | `opentelemetry-sdk` | 1.44.0 | Apache-2.0 | python package metadata: License-Expression |
-| python-dev | `opentelemetry-semantic-conventions` | 0.65b0 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `langgraph-checkpoint-postgres` | 3.2.0 | MIT | python package metadata: License-Expression |
+| python-dev | `opentelemetry-api` | 1.45.2 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `opentelemetry-exporter-http-transport` | 0.66b2 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `opentelemetry-exporter-otlp-common` | 0.66b2 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `opentelemetry-exporter-otlp-proto-common` | 1.45.2 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `opentelemetry-exporter-otlp-proto-http` | 1.45.2 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `opentelemetry-proto` | 1.45.2 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `opentelemetry-sdk` | 1.45.2 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `opentelemetry-semantic-conventions` | 0.66b2 | Apache-2.0 | python package metadata: License-Expression |
 | python-dev | `pluggy` | 1.6.0 | MIT License | python package metadata: classifiers |
 | python-dev | `portalocker` | 3.2.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python-dev | `prometheus-client` | 0.25.0 | Apache-2.0 AND BSD-2-Clause | python package metadata: License-Expression |
 | python-dev | `psycopg` | 3.3.4 | LGPL-3.0-only | python package metadata: License-Expression |
 | python-dev | `psycopg-pool` | 3.3.1 | LGPL-3.0-only | python package metadata: License-Expression |
-| python-dev | `pyasn1` | 0.6.3 | BSD-2-Clause | python package metadata: License |
+| python-dev | `pyasn1` | 0.6.5 | BSD-2-Clause | python package metadata: License |
 | python-dev | `pyasn1-modules` | 0.4.2 | BSD License | python package metadata: classifiers |
 | python-dev | `pytest` | 9.0.2 | MIT | python package metadata: License-Expression |
 | python-dev | `pytest-asyncio` | 1.3.0 | Apache-2.0 | python package metadata: License-Expression |
@@ -340,7 +343,7 @@ and the canonical npm `package-lock.json`.
 | react-prod | `@types/mdast` | 4.0.4 | MIT | package-lock.json metadata |
 | react-prod | `@types/ms` | 2.1.0 | MIT | package-lock.json metadata |
 | react-prod | `@types/node` | 24.12.4 | MIT | package-lock.json metadata |
-| react-prod | `@types/node` | 25.9.5 | MIT | package-lock.json metadata |
+| react-prod | `@types/node` | 26.6.6 | MIT | package-lock.json metadata |
 | react-prod | `@types/react` | 19.2.14 | MIT | package-lock.json metadata |
 | react-prod | `@types/react-dom` | 19.2.3 | MIT | package-lock.json metadata |
 | react-prod | `@types/trusted-types` | 2.0.7 | MIT | package-lock.json metadata |
@@ -419,8 +422,8 @@ and the canonical npm `package-lock.json`.
 | react-prod | `devlop` | 1.1.0 | MIT | package-lock.json metadata |
 | react-prod | `diff` | 9.0.0 | BSD-3-Clause | package-lock.json metadata |
 | react-prod | `dingbat-to-unicode` | 1.0.1 | BSD-2-Clause | package-lock.json metadata |
-| react-prod | `docx` | 9.7.1 | MIT | package-lock.json metadata |
-| react-prod | `dompurify` | 3.4.13 | (MPL-2.0 OR Apache-2.0) | package-lock.json metadata |
+| react-prod | `docx` | 9.11.0 | MIT | package-lock.json metadata |
+| react-prod | `dompurify` | 3.4.17 | (MPL-2.0 OR Apache-2.0) | package-lock.json metadata |
 | react-prod | `duck` | 0.1.12 | BSD | package-lock.json metadata |
 | react-prod | `entities` | 6.0.1 | BSD-2-Clause | package-lock.json metadata |
 | react-prod | `es-toolkit` | 1.49.0 | MIT | package-lock.json metadata |
@@ -534,7 +537,7 @@ and the canonical npm `package-lock.json`.
 | react-prod | `motion-utils` | 12.39.0 | MIT | package-lock.json metadata |
 | react-prod | `ms` | 2.1.3 | MIT | package-lock.json metadata |
 | react-prod | `nanoid` | 3.3.18 | MIT | package-lock.json metadata |
-| react-prod | `nanoid` | 5.1.16 | MIT | package-lock.json metadata |
+| react-prod | `nanoid` | 6.0.2 | MIT | package-lock.json metadata |
 | react-prod | `oniguruma-parser` | 0.12.2 | MIT | package-lock.json metadata |
 | react-prod | `oniguruma-to-es` | 4.3.6 | MIT | package-lock.json metadata |
 | react-prod | `option` | 0.2.4 | BSD-2-Clause | package-lock.json metadata |
@@ -610,7 +613,7 @@ and the canonical npm `package-lock.json`.
 | react-prod | `tw-animate-css` | 1.4.0 | MIT | package-lock.json metadata |
 | react-prod | `underscore` | 1.13.8 | MIT | package-lock.json metadata |
 | react-prod | `undici-types` | 7.16.0 | MIT | package-lock.json metadata |
-| react-prod | `undici-types` | 7.24.6 | MIT | package-lock.json metadata |
+| react-prod | `undici-types` | 8.9.0 | MIT | package-lock.json metadata |
 | react-prod | `unified` | 11.0.5 | MIT | package-lock.json metadata |
 | react-prod | `unist-util-find-after` | 5.0.0 | MIT | package-lock.json metadata |
 | react-prod | `unist-util-is` | 6.0.1 | MIT | package-lock.json metadata |

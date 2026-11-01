@@ -436,7 +436,7 @@ describe('document coordinator', () => {
   })
 
   it('fully validates only the candidate after authoritative state is established', async () => {
-    const validation = vi.spyOn(documentStateModule, 'validateDocument')
+    const validation = vi.spyOn(documentStateModule, 'validateDocumentContent')
     const fixture = await coordinatorFixture()
     const document = editorJsonToYDoc(parseEditorMarkdown('A'))
     try {

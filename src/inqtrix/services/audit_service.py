@@ -39,7 +39,7 @@ from inqtrix.observability.otel import current_trace_id_hex
 if TYPE_CHECKING:
     from inqtrix.auth.permissions import AuditSink
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 

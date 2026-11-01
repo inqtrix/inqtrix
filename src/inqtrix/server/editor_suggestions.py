@@ -33,7 +33,7 @@ from inqtrix.server.text_improvements import (
     text_looks_sensitive,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 EditorSuggestLocale = Literal["de", "en"]
 

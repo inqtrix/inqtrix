@@ -569,7 +569,7 @@ export function SkillLibraryPanel({
               <p className="t-meta text-muted-foreground">{s.pointsHint}</p>
               {uncovered.length > 0 && (
                 <p className="rounded-md bg-warning-subtle px-2.5 py-2 t-meta text-warning">
-                  {s.pointsUncovered.replace('{names}', uncovered.join(', '))}
+                  {s.pointsUncovered.replace('{names}', () => uncovered.join(', '))}
                 </p>
               )}
               {points.map((point, index) => (

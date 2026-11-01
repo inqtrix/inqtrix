@@ -8,24 +8,47 @@ import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from inqtrix.auth.invitations import RegistrationDenied
+from inqtrix.auth.invitations import (
+    CONFIRMED_EMAIL_REQUIRED,
+    INVITATION_REQUIRED,
+    RegistrationDenied,
+)
 from inqtrix.auth.lifecycle import (
+    RESTORED_FROM_DEPROVISIONING,
+    AdminActor,
     AdminAuthorizationError,
+    ExternalProfile,
+    LifecycleActor,
     LoginCommand,
+    ProfileChange,
+    ProvisioningActor,
+    ProvisioningOutcome,
     UserDisabledError,
     UserLifecycleStatus,
+    UserNotProvisionedError,
+    audit_actor,
+    changed_scim_fields,
+    checked_source_issuer,
+    disable_source_of,
+    external_profile,
+    login_role_source,
+    merge_login_profile,
+    provisioning_issuer,
+    restores_tombstone,
+    scim_fields,
 )
 from inqtrix.storage.auth_orm import auth_sessions
 from inqtrix.storage.auth_postgres import (
+    PostgresUserDirectory,
     insert_auth_session,
     lock_tenant_security,
 )
 from inqtrix.storage.credentials_orm import local_credentials
 from inqtrix.storage.db import tenant_session
-from inqtrix.storage.identity_orm import active_admin, invitations, users
+from inqtrix.storage.identity_orm import active_admin, audit_log, invitations, users
 from inqtrix.storage.invitations_postgres import accept_open_invitations
 from inqtrix.storage.resource_access import append_audit_row
 from inqtrix.storage.pat_orm import personal_access_tokens
@@ -41,33 +64,16 @@ if TYPE_CHECKING:
     from inqtrix.auth.sessions import AuthSession
 
 
-def _to_user(row) -> "MirroredUser":
-    """Map one canonical user row to the domain record."""
-    from inqtrix.auth.directory import MirroredUser
-
-    return MirroredUser(
-        user_id=row.id,
-        tenant_id=row.tenant_id,
-        issuer=row.issuer,
-        subject=row.subject,
-        email=row.email,
-        email_verified=row.email_verified,
-        display_name=row.display_name,
-        disabled_at=(
-            row.disabled_at.timestamp() if row.disabled_at is not None else None
-        ),
-        instance_role=row.instance_role,
-        last_login_at=(
-            row.last_login_at.timestamp()
-            if row.last_login_at is not None
-            else None
-        ),
-        default_workspace_id=row.default_workspace_id,
-    )
-
-
 class PostgresUserLifecycleTransaction:
-    """Execute each lifecycle command in one tenant-scoped transaction."""
+    """Execute each lifecycle command in one tenant-scoped transaction.
+
+    Args:
+        session_factory: Async session factory on the caller's loop.
+        app_role: Restricted role assumed per transaction.
+        source_issuer: Issuer key of the active identity source. The
+            first-owner rule and the last-admin guards count only active
+            admins bound under it; ``None`` counts every issuer.
+    """
 
     atomic_effects = True
     """Audit and invalidations share the lifecycle database transaction."""
@@ -77,9 +83,16 @@ class PostgresUserLifecycleTransaction:
         *,
         session_factory: "async_sessionmaker[AsyncSession]",
         app_role: str,
+        source_issuer: str | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._app_role = app_role
+        self._source_issuer = checked_source_issuer(source_issuer)
+
+    @property
+    def source_issuer(self) -> str | None:
+        """Issuer whose admins the first-owner rule and the guards count."""
+        return self._source_issuer
 
     def _scope(self, tenant_id: str):
         return tenant_session(
@@ -128,8 +141,44 @@ class PostgresUserLifecycleTransaction:
             )
         return locked
 
+    async def _lock_actor_and_target(
+        self,
+        db: "AsyncSession",
+        *,
+        tenant_id: str,
+        actor: LifecycleActor,
+        target_user_id: uuid.UUID,
+    ) -> dict[uuid.UUID, object]:
+        """Lock the target and revalidate the actor after the tenant lock.
+
+        An administrator is locked and revalidated together with the target.
+        Provisioning locks only the target and reaches it only when it is
+        bound under the identity source's issuer; any other account is
+        absent for it.
+        """
+        if isinstance(actor, AdminActor):
+            return await self._lock_admin_actor_and_target(
+                db,
+                tenant_id=tenant_id,
+                actor_user_id=actor.user_id,
+                target_user_id=target_user_id,
+            )
+        issuer = provisioning_issuer(self._source_issuer)
+        row = (
+            await db.execute(
+                select(users)
+                .where(users.c.tenant_id == tenant_id, users.c.id == target_user_id)
+                .with_for_update()
+            )
+        ).first()
+        if row is None or row.issuer != issuer:
+            return {}
+        return {row.id: row}
+
     async def provision_login(self, command: LoginCommand) -> "MirroredUser":
         """Upsert user, accept invitations, grant admin, and mint session."""
+        from inqtrix.auth.directory import MirroredUser
+
         now = time.time()
         async with self._scope(command.tenant_id) as db:
             await lock_tenant_security(db, command.tenant_id)
@@ -150,7 +199,13 @@ class PostgresUserLifecycleTransaction:
                 # one: its erasure lifted ``disabled_at`` only so the
                 # deletion machine can act as its owner.
                 raise UserDisabledError(command.subject)
+            if command.provisioned_only and existing is None:
+                raise UserNotProvisionedError("no account is provisioned for this identity")
             if command.invitation_required and existing is None:
+                if not command.accepts_invitations:
+                    raise RegistrationDenied(
+                        CONFIRMED_EMAIL_REQUIRED, reason="email_unverified"
+                    )
                 invitation = (
                     await db.execute(
                         select(invitations.c.id)
@@ -168,18 +223,21 @@ class PostgresUserLifecycleTransaction:
                 ).first()
                 if invitation is None:
                     raise RegistrationDenied(
-                        "Registration requires an invitation. Contact the "
-                        "administrator."
+                        INVITATION_REQUIRED, reason="no_invitation"
                     )
 
+            # ``existing`` was read under the tenant lock that every
+            # lifecycle command writing the profile takes, so the merge
+            # cannot race another profile update.
+            profile = merge_login_profile(existing, command)
             statement = pg_insert(users).values(
                 id=command.session.user_id,
                 tenant_id=command.tenant_id,
                 issuer=command.issuer,
                 subject=command.subject,
-                email=command.email,
-                email_verified=command.email_verified,
-                display_name=command.display_name,
+                email=profile.email,
+                email_verified=profile.email_verified,
+                display_name=profile.display_name,
                 last_login_at=func.now(),
             )
             row = (
@@ -198,7 +256,7 @@ class PostgresUserLifecycleTransaction:
             assert row is not None
 
             accepted = ()
-            if command.email:
+            if command.accepts_invitations:
                 accepted = await accept_open_invitations(
                     db,
                     tenant_id=command.tenant_id,
@@ -207,10 +265,7 @@ class PostgresUserLifecycleTransaction:
                     now=now,
                 )
             if command.invitation_required and existing is None and not accepted:
-                raise RegistrationDenied(
-                    "Registration requires an invitation. Contact the "
-                    "administrator."
-                )
+                raise RegistrationDenied(INVITATION_REQUIRED, reason="no_invitation")
             for invitation in accepted:
                 await append_audit_row(
                     db,
@@ -221,33 +276,33 @@ class PostgresUserLifecycleTransaction:
                     resource_id=invitation.id,
                 )
 
-            if command.is_admin:
+            grant_admin = command.is_admin
+            if not grant_admin and command.first_login_owner:
+                grant_admin = (
+                    await db.execute(
+                        select(users.c.id)
+                        .where(
+                            users.c.tenant_id == command.tenant_id,
+                            active_admin(self._source_issuer),
+                        )
+                        .limit(1)
+                    )
+                ).first() is None
+            if grant_admin:
                 await db.execute(
                     update(users)
                     .where(users.c.id == row.id)
                     .values(instance_role="admin")
                 )
-            elif command.first_login_owner:
-                existing_admin = (
-                    await db.execute(
-                        select(users.c.id)
-                        .where(
-                            users.c.tenant_id == command.tenant_id,
-                            active_admin(),
-                        )
-                        .limit(1)
-                    )
-                ).first()
-                if existing_admin is None:
-                    await db.execute(
-                        update(users)
-                        .where(users.c.id == row.id)
-                        .values(instance_role="admin")
-                    )
             await insert_auth_session(
                 db,
                 tenant_id=command.tenant_id,
-                session=replace(command.session, user_id=row.id),
+                session=replace(
+                    command.session,
+                    user_id=row.id,
+                    email=profile.email or None,
+                    display_name=profile.display_name,
+                ),
             )
             refreshed = (
                 await db.execute(select(users).where(users.c.id == row.id))
@@ -261,6 +316,21 @@ class PostgresUserLifecycleTransaction:
                 resource_type="user",
                 resource_id=str(row.id),
             )
+            # ``row`` carries the role from before this login: the upsert
+            # never touches it.
+            if grant_admin and row.instance_role != "admin":
+                await append_audit_row(
+                    db,
+                    tenant_id=command.tenant_id,
+                    actor_user_id=row.id,
+                    action="user.role_updated",
+                    resource_type="user",
+                    resource_id=str(row.id),
+                    detail={
+                        "instance_role": "admin",
+                        "source": login_role_source(command),
+                    },
+                )
             await append_instance_admin_invalidations(
                 db,
                 tenant_id=command.tenant_id,
@@ -269,7 +339,7 @@ class PostgresUserLifecycleTransaction:
                 resource_type="user",
                 resource_id=str(row.id),
             )
-            return _to_user(refreshed)
+            return PostgresUserDirectory._to_user(refreshed, MirroredUser)
 
     async def create_local_account(
         self,
@@ -282,6 +352,8 @@ class PostgresUserLifecycleTransaction:
         actor_user_id: uuid.UUID | None = None,
     ) -> "MirroredUser | None":
         """Create mirror, credential, role, and optional session together."""
+        from inqtrix.auth.directory import MirroredUser
+
         async with self._scope(tenant_id) as db:
             await lock_tenant_security(db, tenant_id)
             if not first_only:
@@ -366,7 +438,7 @@ class PostgresUserLifecycleTransaction:
                 resource_type="user",
                 resource_id=str(credential.user_id),
             )
-            return _to_user(row)
+            return PostgresUserDirectory._to_user(row, MirroredUser)
 
     async def set_role(
         self,
@@ -400,7 +472,7 @@ class PostgresUserLifecycleTransaction:
                         select(users.c.id)
                         .where(
                             users.c.tenant_id == tenant_id,
-                            active_admin(),
+                            active_admin(self._source_issuer),
                             users.c.id != user_id,
                         )
                         .limit(1)
@@ -438,20 +510,20 @@ class PostgresUserLifecycleTransaction:
         tenant_id: str,
         user_id: uuid.UUID,
         disabled_at: float | None,
-        actor_user_id: uuid.UUID,
+        actor: LifecycleActor,
     ) -> UserLifecycleStatus:
-        """Apply disable state and all dependent revocations atomically."""
-        value = (
-            dt.datetime.fromtimestamp(disabled_at, tz=dt.timezone.utc)
-            if disabled_at is not None
-            else None
-        )
+        """Apply disable state and all dependent revocations atomically.
+
+        The actor decides the source of a disable. Provisioning never takes
+        over a disable it did not apply and lifts only its own; asked to
+        lift an administrator's, it leaves the account disabled.
+        """
         async with self._scope(tenant_id) as db:
             await lock_tenant_security(db, tenant_id)
-            locked = await self._lock_admin_actor_and_target(
+            locked = await self._lock_actor_and_target(
                 db,
                 tenant_id=tenant_id,
-                actor_user_id=actor_user_id,
+                actor=actor,
                 target_user_id=user_id,
             )
             target = locked.get(user_id)
@@ -459,62 +531,449 @@ class PostgresUserLifecycleTransaction:
                 return UserLifecycleStatus.NOT_FOUND
             if target.erasure_operation_id is not None:
                 return UserLifecycleStatus.ERASING
-            if (
-                disabled_at is not None
-                and target.instance_role == "admin"
-                and target.disabled_at is None
-            ):
-                other_admin = (
-                    await db.execute(
-                        select(users.c.id)
-                        .where(
-                            users.c.tenant_id == tenant_id,
-                            active_admin(),
-                            users.c.id != user_id,
-                        )
-                        .limit(1)
+            return await self._apply_disable(
+                db,
+                tenant_id=tenant_id,
+                target=target,
+                disabled_at=disabled_at,
+                actor=actor,
+            )
+
+    @staticmethod
+    async def _wake_admins(db: "AsyncSession", *, tenant_id: str, user_id: uuid.UUID) -> None:
+        """Wake every active administrator's views of *user_id*."""
+        await append_instance_admin_invalidations(
+            db,
+            tenant_id=tenant_id,
+            target_user_ids=(user_id,),
+            scope="account",
+            resource_type="user",
+            resource_id=str(user_id),
+        )
+
+    async def _apply_disable(
+        self,
+        db: "AsyncSession",
+        *,
+        tenant_id: str,
+        target,
+        disabled_at: float | None,
+        actor: LifecycleActor,
+    ) -> UserLifecycleStatus:
+        """Disable or enable a locked target inside the caller's transaction."""
+        user_id = target.id
+        actor_user_id, actor_type = audit_actor(actor)
+        if isinstance(actor, ProvisioningActor) and target.disabled_at is not None:
+            if disabled_at is not None:
+                # Already disabled: the disable keeps its source.
+                return UserLifecycleStatus.UPDATED
+            if target.scim_deleted_at is not None:
+                # A tombstone comes back only through an administrator.
+                return UserLifecycleStatus.NOT_FOUND
+            if target.disabled_source != "provisioning":
+                await append_audit_row(
+                    db,
+                    tenant_id=tenant_id,
+                    actor_user_id=actor_user_id,
+                    actor_type=actor_type,
+                    action="user.scim_enable_ignored",
+                    resource_type="user",
+                    resource_id=str(user_id),
+                )
+                return UserLifecycleStatus.KEPT_DISABLED
+        if disabled_at is not None and await self._is_last_admin_of_source(
+            db, tenant_id=tenant_id, target=target
+        ):
+            return UserLifecycleStatus.LAST_ADMIN
+        value = (
+            dt.datetime.fromtimestamp(disabled_at, tz=dt.timezone.utc)
+            if disabled_at is not None
+            else None
+        )
+        restored = restores_tombstone(target, disabled_at=disabled_at)
+        values: dict[str, object] = {
+            "disabled_at": value,
+            "disabled_source": (
+                disable_source_of(actor) if disabled_at is not None else None
+            ),
+        }
+        if restored:
+            values["scim_deleted_at"] = None
+        await db.execute(
+            update(users)
+            .where(users.c.tenant_id == tenant_id, users.c.id == user_id)
+            .values(**values)
+        )
+        if disabled_at is not None:
+            await self._cut_off(
+                db, tenant_id=tenant_id, user_id=user_id, now=disabled_at
+            )
+        else:
+            await db.execute(
+                update(local_credentials)
+                .where(
+                    local_credentials.c.tenant_id == tenant_id,
+                    local_credentials.c.user_id == user_id,
+                )
+                .values(disabled_at=None)
+            )
+        await append_audit_row(
+            db,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            actor_type=actor_type,
+            action=(
+                "user.disabled"
+                if disabled_at is not None
+                else "user.enabled"
+            ),
+            resource_type="user",
+            resource_id=str(user_id),
+            detail=RESTORED_FROM_DEPROVISIONING if restored else None,
+        )
+        await append_instance_admin_invalidations(
+            db,
+            tenant_id=tenant_id,
+            target_user_ids=(user_id,),
+            scope="account",
+            resource_type="user",
+            resource_id=str(user_id),
+        )
+        return UserLifecycleStatus.UPDATED
+
+    async def _is_last_admin_of_source(
+        self, db: "AsyncSession", *, tenant_id: str, target
+    ) -> bool:
+        """Whether disabling *target* would leave the source without an admin."""
+        if target.instance_role != "admin" or target.disabled_at is not None:
+            return False
+        other_admin = (
+            await db.execute(
+                select(users.c.id)
+                .where(
+                    users.c.tenant_id == tenant_id,
+                    active_admin(self._source_issuer),
+                    users.c.id != target.id,
+                )
+                .limit(1)
+            )
+        ).first()
+        return other_admin is None
+
+    async def _user_name_taken(
+        self,
+        db: "AsyncSession",
+        *,
+        tenant_id: str,
+        issuer: str,
+        user_name: str,
+        owner_id: uuid.UUID | None,
+    ) -> bool:
+        """Whether another account of *issuer* carries *user_name*.
+
+        Compared without regard to case, like the unique index. A tombstone
+        carries none: deprovisioning gives it up.
+        """
+        condition = [
+            users.c.tenant_id == tenant_id,
+            users.c.issuer == issuer,
+            func.lower(users.c.scim_user_name) == func.lower(user_name),
+        ]
+        if owner_id is not None:
+            condition.append(users.c.id != owner_id)
+        return (
+            await db.execute(select(users.c.id).where(*condition).limit(1))
+        ).first() is not None
+
+    @staticmethod
+    async def _provisioned_user(
+        db: "AsyncSession", *, tenant_id: str, user_id: uuid.UUID
+    ) -> "MirroredUser":
+        from inqtrix.auth.directory import MirroredUser
+
+        row = (
+            await db.execute(
+                select(users).where(
+                    users.c.tenant_id == tenant_id, users.c.id == user_id
+                )
+            )
+        ).one()
+        return PostgresUserDirectory._to_user(row, MirroredUser)
+
+    async def provision_external_user(
+        self,
+        *,
+        tenant_id: str,
+        subject: str,
+        profile: ExternalProfile,
+    ) -> ProvisioningOutcome:
+        """Create an account for provisioning, or adopt an unbound one.
+
+        A new account has no session and no sign-in yet, and its e-mail
+        stays unconfirmed until a sign-in brings the identity provider's
+        word. An account the source already holds under *subject* is
+        adopted when provisioning never bound it; a bound account, a
+        tombstone or an account being erased is a conflict, and so is a
+        user name another account of the source carries.
+        """
+        issuer = provisioning_issuer(self._source_issuer)
+        actor = ProvisioningActor()
+        actor_user_id, actor_type = audit_actor(actor)
+        async with self._scope(tenant_id) as db:
+            await lock_tenant_security(db, tenant_id)
+            existing = (
+                await db.execute(
+                    select(users)
+                    .where(
+                        users.c.tenant_id == tenant_id,
+                        users.c.issuer == issuer,
+                        users.c.subject == subject,
                     )
-                ).first()
-                if other_admin is None:
-                    return UserLifecycleStatus.LAST_ADMIN
+                    .with_for_update()
+                )
+            ).first()
+            if existing is not None and (
+                existing.scim_user_name is not None
+                or existing.scim_deleted_at is not None
+                or existing.erasure_operation_id is not None
+            ):
+                return ProvisioningOutcome(UserLifecycleStatus.CONFLICT)
+            if await self._user_name_taken(
+                db,
+                tenant_id=tenant_id,
+                issuer=issuer,
+                user_name=profile.user_name,
+                owner_id=existing.id if existing is not None else None,
+            ):
+                return ProvisioningOutcome(UserLifecycleStatus.CONFLICT)
+            scim_name = dict(profile.name) if profile.name else None
+            if existing is None:
+                user_id = uuid.uuid4()
+                now = time.time()
+                await db.execute(
+                    insert(users).values(
+                        id=user_id,
+                        tenant_id=tenant_id,
+                        issuer=issuer,
+                        subject=subject,
+                        email=profile.email,
+                        email_verified=False,
+                        display_name=profile.display_name,
+                        scim_user_name=profile.user_name,
+                        scim_name=scim_name,
+                        disabled_at=(
+                            None
+                            if profile.active
+                            else dt.datetime.fromtimestamp(now, tz=dt.timezone.utc)
+                        ),
+                        disabled_source=None if profile.active else "provisioning",
+                    )
+                )
+                await append_audit_row(
+                    db,
+                    tenant_id=tenant_id,
+                    actor_user_id=actor_user_id,
+                    actor_type=actor_type,
+                    action="user.provisioned",
+                    resource_type="user",
+                    resource_id=str(user_id),
+                    detail={"fields": scim_fields(profile)},
+                )
+                await self._wake_admins(db, tenant_id=tenant_id, user_id=user_id)
+                return ProvisioningOutcome(
+                    UserLifecycleStatus.UPDATED,
+                    await self._provisioned_user(
+                        db, tenant_id=tenant_id, user_id=user_id
+                    ),
+                )
+            disable = not profile.active and existing.disabled_at is None
+            if disable and await self._is_last_admin_of_source(
+                db, tenant_id=tenant_id, target=existing
+            ):
+                return ProvisioningOutcome(UserLifecycleStatus.LAST_ADMIN)
             await db.execute(
                 update(users)
-                .where(users.c.tenant_id == tenant_id, users.c.id == user_id)
-                .values(disabled_at=value)
+                .where(users.c.tenant_id == tenant_id, users.c.id == existing.id)
+                .values(scim_user_name=profile.user_name, scim_name=scim_name)
             )
-            if disabled_at is not None:
-                await self._cut_off(
-                    db, tenant_id=tenant_id, user_id=user_id, now=disabled_at
-                )
-            else:
-                await db.execute(
-                    update(local_credentials)
-                    .where(
-                        local_credentials.c.tenant_id == tenant_id,
-                        local_credentials.c.user_id == user_id,
-                    )
-                    .values(disabled_at=None)
-                )
             await append_audit_row(
                 db,
                 tenant_id=tenant_id,
                 actor_user_id=actor_user_id,
-                action=(
-                    "user.disabled"
-                    if disabled_at is not None
-                    else "user.enabled"
-                ),
+                actor_type=actor_type,
+                action="user.scim_adopted",
                 resource_type="user",
-                resource_id=str(user_id),
+                resource_id=str(existing.id),
             )
-            await append_instance_admin_invalidations(
+            if profile.active == (existing.disabled_at is None):
+                await self._wake_admins(db, tenant_id=tenant_id, user_id=existing.id)
+            if profile.active != (existing.disabled_at is None):
+                await self._apply_disable(
+                    db,
+                    tenant_id=tenant_id,
+                    target=existing,
+                    disabled_at=None if profile.active else time.time(),
+                    actor=actor,
+                )
+            return ProvisioningOutcome(
+                UserLifecycleStatus.UPDATED,
+                await self._provisioned_user(
+                    db, tenant_id=tenant_id, user_id=existing.id
+                ),
+                adopted=True,
+            )
+
+    async def update_external_profile(
+        self,
+        *,
+        tenant_id: str,
+        user_id: uuid.UUID,
+        change: ProfileChange,
+    ) -> ProvisioningOutcome:
+        """Apply a provisioning change to an account of the source.
+
+        *change* maps the account's current profile to the new one under
+        the tenant lock, so a change and a concurrent sign-in never overwrite
+        each other. A new e-mail is unconfirmed; ``active`` follows the
+        disable rules of :meth:`set_disabled`; roles never change here.
+        """
+        actor = ProvisioningActor()
+        actor_user_id, actor_type = audit_actor(actor)
+        async with self._scope(tenant_id) as db:
+            await lock_tenant_security(db, tenant_id)
+            locked = await self._lock_actor_and_target(
+                db, tenant_id=tenant_id, actor=actor, target_user_id=user_id
+            )
+            target = locked.get(user_id)
+            if (
+                target is None
+                or target.scim_deleted_at is not None
+                or target.erasure_operation_id is not None
+            ):
+                return ProvisioningOutcome(UserLifecycleStatus.NOT_FOUND)
+            before = external_profile(
+                await self._provisioned_user(db, tenant_id=tenant_id, user_id=user_id)
+            )
+            after = change(before)
+            if after.user_name != before.user_name and await self._user_name_taken(
                 db,
                 tenant_id=tenant_id,
-                target_user_ids=(user_id,),
-                scope="account",
+                issuer=target.issuer,
+                user_name=after.user_name,
+                owner_id=user_id,
+            ):
+                return ProvisioningOutcome(UserLifecycleStatus.CONFLICT)
+            if (
+                before.active
+                and not after.active
+                and await self._is_last_admin_of_source(
+                    db, tenant_id=tenant_id, target=target
+                )
+            ):
+                return ProvisioningOutcome(UserLifecycleStatus.LAST_ADMIN)
+            fields = changed_scim_fields(before, after)
+            if fields:
+                values: dict[str, Any] = {
+                    # An empty user name leaves the account unbound.
+                    "scim_user_name": after.user_name or None,
+                    "display_name": after.display_name,
+                    "scim_name": dict(after.name) if after.name else None,
+                    "email": after.email,
+                }
+                if after.email != before.email:
+                    values["email_verified"] = False
+                await db.execute(
+                    update(users)
+                    .where(users.c.tenant_id == tenant_id, users.c.id == user_id)
+                    .values(**values)
+                )
+                await append_audit_row(
+                    db,
+                    tenant_id=tenant_id,
+                    actor_user_id=actor_user_id,
+                    actor_type=actor_type,
+                    action="user.scim_updated",
+                    resource_type="user",
+                    resource_id=str(user_id),
+                    detail={"fields": ",".join(fields)},
+                )
+                if after.active == before.active:
+                    await self._wake_admins(db, tenant_id=tenant_id, user_id=user_id)
+            if after.active != before.active:
+                await self._apply_disable(
+                    db,
+                    tenant_id=tenant_id,
+                    target=target,
+                    disabled_at=None if after.active else time.time(),
+                    actor=actor,
+                )
+            return ProvisioningOutcome(
+                UserLifecycleStatus.UPDATED,
+                await self._provisioned_user(db, tenant_id=tenant_id, user_id=user_id),
+            )
+
+    async def deprovision(
+        self,
+        *,
+        tenant_id: str,
+        user_id: uuid.UUID,
+    ) -> UserLifecycleStatus:
+        """Disable an account for provisioning and leave a tombstone.
+
+        One transaction: the disable from provisioning with the complete
+        cut-off (an administrator's disable keeps its source), then the
+        tombstone that neither a sign-in nor provisioning brings back. The
+        tombstone gives up its user name, so a new person of the source can
+        take it; an administrator who lifts the tombstone gets the account
+        back unbound, until provisioning binds it again.
+        """
+        actor = ProvisioningActor()
+        actor_user_id, actor_type = audit_actor(actor)
+        async with self._scope(tenant_id) as db:
+            await lock_tenant_security(db, tenant_id)
+            locked = await self._lock_actor_and_target(
+                db, tenant_id=tenant_id, actor=actor, target_user_id=user_id
+            )
+            target = locked.get(user_id)
+            if (
+                target is None
+                or target.scim_deleted_at is not None
+                or target.erasure_operation_id is not None
+            ):
+                return UserLifecycleStatus.NOT_FOUND
+            now = time.time()
+            if target.disabled_at is None:
+                status = await self._apply_disable(
+                    db,
+                    tenant_id=tenant_id,
+                    target=target,
+                    disabled_at=now,
+                    actor=actor,
+                )
+                if status is UserLifecycleStatus.LAST_ADMIN:
+                    return status
+            await db.execute(
+                update(users)
+                .where(users.c.tenant_id == tenant_id, users.c.id == user_id)
+                .values(
+                    scim_deleted_at=dt.datetime.fromtimestamp(
+                        now, tz=dt.timezone.utc
+                    ),
+                    scim_user_name=None,
+                )
+            )
+            await append_audit_row(
+                db,
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                actor_type=actor_type,
+                action="user.deprovisioned",
                 resource_type="user",
                 resource_id=str(user_id),
             )
+            if target.disabled_at is not None:
+                # The disable above woke the administrators otherwise.
+                await self._wake_admins(db, tenant_id=tenant_id, user_id=user_id)
             return UserLifecycleStatus.UPDATED
 
     async def inventory(
@@ -541,8 +1000,9 @@ class PostgresUserLifecycleTransaction:
         *,
         tenant_id: str,
         user_id: uuid.UUID,
-        actor_user_id: uuid.UUID,
+        actor: LifecycleActor,
         operation_id: str,
+        hourly_limit: int | None = None,
     ) -> tuple[UserLifecycleStatus, dict[str, Any]]:
         """Cut an account off and mark it as erased by one operation.
 
@@ -557,53 +1017,79 @@ class PostgresUserLifecycleTransaction:
         Idempotent: an account already being erased answers with the
         operation that erases it. ``REFUSED`` carries the reasons the
         erasure preview shows as blockers -- they come from the same
-        function.
+        function; when provisioning was refused, the audit keeps them, since
+        nobody sees its answer. With *hourly_limit*, provisioning starts at
+        most that many erasures an hour (counted under the tenant lock, so
+        exactly, also across processes); beyond it, ``LIMITED`` changes
+        nothing.
         """
         from inqtrix.services.user_erasure_inventory import erasure_blockers
 
         async with self._scope(tenant_id) as db:
             await lock_tenant_security(db, tenant_id)
-            locked = await self._lock_admin_actor_and_target(
+            locked = await self._lock_actor_and_target(
                 db,
                 tenant_id=tenant_id,
-                actor_user_id=actor_user_id,
+                actor=actor,
                 target_user_id=user_id,
             )
             target = locked.get(user_id)
             if target is None:
                 return UserLifecycleStatus.NOT_FOUND, {}
+            if isinstance(actor, ProvisioningActor) and target.scim_deleted_at is None:
+                # Provisioning erases only what it deprovisioned: an account an
+                # administrator restored in between is no longer its to erase.
+                return UserLifecycleStatus.NOT_FOUND, {}
+            actor_user_id, actor_type = audit_actor(actor)
             if target.erasure_operation_id is not None:
                 return UserLifecycleStatus.UPDATED, {
                     "operation_id": target.erasure_operation_id
                 }
-            if target.instance_role == "admin" and target.disabled_at is None:
-                other_admin = (
-                    await db.execute(
-                        select(users.c.id)
-                        .where(
-                            users.c.tenant_id == tenant_id,
-                            active_admin(),
-                            users.c.id != user_id,
-                        )
-                        .limit(1)
-                    )
-                ).first()
-                if other_admin is None:
-                    return UserLifecycleStatus.LAST_ADMIN, {}
+            if await self._is_last_admin_of_source(
+                db, tenant_id=tenant_id, target=target
+            ):
+                return UserLifecycleStatus.LAST_ADMIN, {}
+            if hourly_limit is not None and (
+                await self._erasures_started_last_hour(
+                    db, tenant_id=tenant_id, actor_type=actor_type
+                )
+                >= hourly_limit
+            ):
+                return UserLifecycleStatus.LIMITED, {}
             blockers = await erasure_blockers(db, user_id=user_id)
             if blockers:
+                if isinstance(actor, ProvisioningActor):
+                    await append_audit_row(
+                        db,
+                        tenant_id=tenant_id,
+                        actor_user_id=actor_user_id,
+                        actor_type=actor_type,
+                        action="user.erasure_refused",
+                        resource_type="user",
+                        resource_id=str(user_id),
+                        detail={"reasons": list(blockers)},
+                    )
+                    await self._wake_admins(db, tenant_id=tenant_id, user_id=user_id)
                 return UserLifecycleStatus.REFUSED, {"refused": list(blockers)}
             now = time.time()
             await self._cut_off(db, tenant_id=tenant_id, user_id=user_id, now=now)
             await db.execute(
                 update(users)
                 .where(users.c.tenant_id == tenant_id, users.c.id == user_id)
-                .values(disabled_at=None, erasure_operation_id=operation_id)
+                .values(
+                    disabled_at=None,
+                    disabled_source=None,
+                    erasure_operation_id=operation_id,
+                    # The identity system may give the name to someone new
+                    # while the erasure runs.
+                    scim_user_name=None,
+                )
             )
             await append_audit_row(
                 db,
                 tenant_id=tenant_id,
                 actor_user_id=actor_user_id,
+                actor_type=actor_type,
                 action="user.erasure_started",
                 resource_type="user",
                 resource_id=str(user_id),
@@ -618,6 +1104,25 @@ class PostgresUserLifecycleTransaction:
                 resource_id=str(user_id),
             )
             return UserLifecycleStatus.UPDATED, {"operation_id": operation_id}
+
+    @staticmethod
+    async def _erasures_started_last_hour(
+        db: "AsyncSession", *, tenant_id: str, actor_type: str
+    ) -> int:
+        """Erasure starts of *actor_type* in the tenant within the last hour."""
+        return (
+            await db.execute(
+                select(func.count())
+                .select_from(audit_log)
+                .where(
+                    audit_log.c.tenant_id == tenant_id,
+                    audit_log.c.action == "user.erasure_started",
+                    audit_log.c.actor_type == actor_type,
+                    audit_log.c.occurred_at
+                    > func.now() - dt.timedelta(hours=1),
+                )
+            )
+        ).scalar_one()
 
     async def erasure_operation_id(
         self,
@@ -645,15 +1150,16 @@ class PostgresUserLifecycleTransaction:
         tenant_id: str,
         user_id: uuid.UUID,
         operation_id: str,
-        actor_user_id: uuid.UUID | None,
+        actor: LifecycleActor,
     ) -> UserLifecycleStatus:
         """Remove the ``users`` row once nothing else names the account.
 
         The last step of an erasure, under the tenant's security lock like
         every other identity change and as short as one row. The audit row
-        is written BEFORE the user row goes: its actor is the
-        administrator, and the erased id is the resource it names.
-        ``NOT_FOUND`` means an earlier attempt already finished.
+        is written BEFORE the user row goes: its actor is the one who
+        started the erasure (an administrator, or provisioning), and the
+        erased id is the resource it names. ``NOT_FOUND`` means an earlier
+        attempt already finished.
         """
         async with self._scope(tenant_id) as db:
             await lock_tenant_security(db, tenant_id)
@@ -670,10 +1176,12 @@ class PostgresUserLifecycleTransaction:
                 raise RuntimeError(
                     "the account is not being erased by this operation"
                 )
+            actor_user_id, actor_type = audit_actor(actor)
             await append_audit_row(
                 db,
                 tenant_id=tenant_id,
                 actor_user_id=actor_user_id,
+                actor_type=actor_type,
                 action="user.erased",
                 resource_type="user",
                 resource_id=str(user_id),

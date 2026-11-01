@@ -127,7 +127,7 @@ from inqtrix.urls import (
     today,
 )
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 _ALLOWED_FINISH_REASONS = {"", "stop", "end_turn"}
@@ -1168,9 +1168,9 @@ def _pin_source_roles(
             if current != model_reason:
                 conflicts += 1
                 log.warning(
-                    "Conflicting source role for %s: keeping %s, discarding %s (first "
-                    "judgment takes precedence)",
-                    pinned.get("domain", ""),
+                    "Conflicting source role for source %s: keeping %s, discarding %s "
+                    "(first judgment takes precedence)",
+                    record.get("source_id") or "?",
                     current,
                     model_reason,
                 )
@@ -5098,9 +5098,9 @@ def _apply_evaluated_coverage(
     if indices and not usable:
         s["coverage_source"] = "unparsable"
         log.warning(
-            "Evaluate: COVERED_ASPECTS has no usable indices %r (round=%d, model=%s); "
-            "open subquestions remain open",
-            indices[:6],
+            "Evaluate: COVERED_ASPECTS has %d entries and no usable index (round=%d, "
+            "model=%s); open subquestions remain open",
+            len(indices),
             int(s.get("round", 0) or 0),
             evaluate_model,
         )

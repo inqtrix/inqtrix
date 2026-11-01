@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  getAgentRunArtifact,
   getAgentRunPlan,
   listAgentRunApprovals,
   listAgentRunArtifacts,
   listAgentRunClarifications,
   listAgentSessionArtifacts,
+  renameAgentRunArtifact,
 } from '@/api/inqtrixClient'
 import type { ResearchRunSummary } from '@/features/researchRuns/types'
 import { agentRunFromSummary, type AgentRunRecord, type AgentSessionArtifactIndex } from './model'
@@ -21,11 +23,13 @@ vi.mock('react', async (original) => ({
 }))
 vi.mock('@/api/inqtrixClient', async (original) => ({
   ...await original<typeof import('@/api/inqtrixClient')>(),
+  getAgentRunArtifact: vi.fn(),
   getAgentRunPlan: vi.fn(),
   listAgentRunApprovals: vi.fn(),
   listAgentRunArtifacts: vi.fn(),
   listAgentRunClarifications: vi.fn(),
   listAgentSessionArtifacts: vi.fn(),
+  renameAgentRunArtifact: vi.fn(),
 }))
 
 const summary = (overrides: Partial<ResearchRunSummary>): ResearchRunSummary => ({
@@ -47,11 +51,13 @@ const staleRun = (overrides: Partial<ResearchRunSummary>): AgentRunRecord => {
 const staleIndex = { stale: true } as unknown as AgentSessionArtifactIndex
 
 beforeEach(() => {
+  vi.mocked(getAgentRunArtifact).mockReset().mockResolvedValue({ artifact_id: 'artifact-1' } as never)
   vi.mocked(getAgentRunPlan).mockReset().mockResolvedValue(null as never)
   vi.mocked(listAgentRunApprovals).mockReset().mockResolvedValue([] as never)
   vi.mocked(listAgentRunArtifacts).mockReset().mockResolvedValue([] as never)
   vi.mocked(listAgentRunClarifications).mockReset().mockResolvedValue([] as never)
   vi.mocked(listAgentSessionArtifacts).mockReset().mockResolvedValue({ data: [] } as never)
+  vi.mocked(renameAgentRunArtifact).mockReset().mockResolvedValue({} as never)
 })
 
 describe('control rows of the open session only', () => {
@@ -102,5 +108,75 @@ describe('control rows of the open session only', () => {
     })
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1))
     expect(vi.mocked(listAgentSessionArtifacts).mock.calls.map((call) => call[0])).toEqual(['session-a'])
+  })
+})
+
+describe('a session the server does not hold', () => {
+  const viewId = 'shared-agent-view:run-shared'
+  const sharedRun = () => staleRun({
+    access: { mode: 'shared', permission: 'edit' },
+    run_id: 'run-shared',
+  })
+  const control = (
+    sessions: Record<string, { persistable?: boolean }>,
+    dispatch = vi.fn(),
+    sessionId = viewId,
+    sessionArtifacts: Record<string, AgentSessionArtifactIndex> = { [sessionId]: staleIndex },
+  ) => useAgentControlApi({
+    apiKey: undefined,
+    dispatch,
+    enabled: true,
+    onEditorDocumentsChanged: vi.fn(),
+    runs: { 'run-shared': sharedRun() },
+    selectedSessionId: sessionId,
+    sessionArtifacts,
+    sessions,
+    workspaceId: 'workspace-owner',
+  })
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  it('asks for no artifact list of a shared-run view', async () => {
+    // The view is a local shell: `GET .../shared-agent-view:<id>/artifacts`
+    // answered 404 on every run event and put an error on the session index.
+    const dispatch = vi.fn()
+    control({ [viewId]: { persistable: false } }, dispatch)
+    await settled()
+    expect(listAgentSessionArtifacts).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'markAgentSessionArtifactsError' }),
+    )
+  })
+
+  it('still asks for the list of a real session', async () => {
+    control({ 'session-a': {} }, vi.fn(), 'session-a')
+    await settled()
+    expect(vi.mocked(listAgentSessionArtifacts).mock.calls.map((call) => call[0]))
+      .toEqual(['session-a'])
+  })
+
+  it('reports a rename as done without asking for the list of the view', async () => {
+    // The rename succeeded on the server; a 404 from the list behind it turned
+    // that into "rename failed" for a recipient with edit rights.
+    vi.mocked(listAgentSessionArtifacts).mockRejectedValue(
+      Object.assign(new Error('not found'), { status: 404 }),
+    )
+    const result = await control({ [viewId]: { persistable: false } })
+      .renameArtifact('run-shared', 'artifact-1', 'Neuer Titel', viewId)
+    expect(result).toEqual({ kind: 'renamed' })
+    expect(renameAgentRunArtifact).toHaveBeenCalledTimes(1)
+    expect(listAgentSessionArtifacts).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the list after renaming in a real session', async () => {
+    // No stale index here, so the request can only come from the rename.
+    const dispatch = vi.fn()
+    const result = await control({ 'session-a': {} }, dispatch, 'session-a', {})
+      .renameArtifact('run-shared', 'artifact-1', 'Neuer Titel', 'session-a')
+    expect(result).toEqual({ kind: 'renamed' })
+    expect(vi.mocked(listAgentSessionArtifacts).mock.calls.map((call) => call[0]))
+      .toEqual(['session-a'])
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'session-a', type: 'setAgentSessionArtifacts' }),
+    )
   })
 })

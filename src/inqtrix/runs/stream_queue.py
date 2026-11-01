@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Generic, TypeVar
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 TJob = TypeVar("TJob")
 

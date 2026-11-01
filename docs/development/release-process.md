@@ -6,7 +6,7 @@ The release process is maintainer-owned. This page exists so contributors know w
 
 ## Today's state
 
-The repository is marked experimental and is on release line `0.2.0` (dev designation `0.2.0.10`), a placeholder. The version is defined once as `__version__` in `src/inqtrix/__init__.py`; `pyproject.toml` derives the package version from it (Hatchling dynamic version). No version has been tagged or published yet. A formal release process — signing, PyPI publication, GitHub Releases, change categorisation — is a dedicated follow-up task.
+The repository is marked experimental and is on release line `0.2.0` (dev designation `0.2.0.11`), a placeholder. The version is defined once as `__version__` in `src/inqtrix/__init__.py`; `pyproject.toml` derives the package version from it (Hatchling dynamic version). No version has been tagged or published yet. A formal release process — signing, PyPI publication, GitHub Releases, change categorisation — is a dedicated follow-up task.
 
 ## Automation status
 

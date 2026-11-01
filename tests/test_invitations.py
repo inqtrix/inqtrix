@@ -17,6 +17,7 @@ import pytest
 from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
 from inqtrix.auth.invitations import (
+    CONFIRMED_EMAIL_REQUIRED,
     DuplicateOpenInvitation,
     MemoryInvitationStore,
     RegistrationDenied,
@@ -54,9 +55,13 @@ async def invite(invitations, email="alice@example.com", workspace="ws-1",
     )
 
 
-async def admit(gate, users, *, sub="user-1", email="alice@example.com"):
+async def admit(gate, users, *, sub="user-1", email="alice@example.com", email_verified=True):
     await gate.admit(
-        tenant_id="default", issuer=ISSUER, sub=sub, email=email
+        tenant_id="default",
+        issuer=ISSUER,
+        sub=sub,
+        email=email,
+        email_verified=email_verified,
     )
     user = await users.record_login(
         tenant_id="default",
@@ -204,6 +209,37 @@ async def test_missing_email_with_unknown_user_is_denied_in_invite_mode():
     _identity, _invitations, _users, gate = make_world()
     with pytest.raises(RegistrationDenied):
         await admit(gate, _users, email="")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("email", "invited"),
+    [("alice@example.com", True), ("alice@example.com", False), ("", False)],
+    ids=["invited", "not-invited", "no-email"],
+)
+async def test_an_unconfirmed_first_login_is_refused_before_any_invitation_lookup(email, invited):
+    _identity, invitations, _users, gate = make_world()
+    if invited:
+        await invite(invitations)
+    lookups = []
+    original = invitations.has_open_for_email
+
+    async def counted(**kwargs):
+        lookups.append(kwargs)
+        return await original(**kwargs)
+
+    invitations.has_open_for_email = counted
+
+    with pytest.raises(RegistrationDenied) as excinfo:
+        await gate.admit(
+            tenant_id="default", issuer=ISSUER, sub="user-1", email=email, email_verified=False
+        )
+
+    assert (excinfo.value.reason, str(excinfo.value)) == (
+        "email_unverified",
+        CONFIRMED_EMAIL_REQUIRED,
+    )
+    assert lookups == []
 
 
 @pytest.mark.asyncio

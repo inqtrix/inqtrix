@@ -41,7 +41,7 @@ from inqtrix.providers.base import (
 )
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 
 class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):

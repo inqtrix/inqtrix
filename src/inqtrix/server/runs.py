@@ -64,7 +64,7 @@ from inqtrix.settings import ServerSettings
 from inqtrix.text import iter_bounded_chunks
 from inqtrix.urls import sanitize_error
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 RunWork = Callable[["RunHandle"], None]
 

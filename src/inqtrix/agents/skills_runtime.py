@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from inqtrix.content.skills import SkillRecord
     from inqtrix.providers.base import LLMProvider
 
-log = logging.getLogger("inqtrix")
+log = logging.getLogger(__name__)
 
 _REQUIRES_PLAN_STRICTNESS = {"never": 0, "auto": 1, "always": 2}
 
@@ -380,9 +380,9 @@ def check_skill_points(
     )
     if outcome.value is None:
         log.warning(
-            "SkillPointCheck for '%s' returned no valid result; all points are treated "
-            "as unanswered.",
-            skill.label,
+            "SkillPointCheck for skill %s returned no valid result; all points are "
+            "treated as unanswered.",
+            skill.id,
         )
         return {}, outcome.usage
     known_ids = {
@@ -393,10 +393,10 @@ def check_skill_points(
     for verdict in outcome.value.points:
         name = known_ids.get(verdict.id)
         if name is None:
+            # The point id is model text; the skill id is the server's.
             log.warning(
-                "SkillPointCheck '%s' named unknown point %r; discarded.",
-                skill.label,
-                verdict.id,
+                "SkillPointCheck for skill %s named an unknown point; discarded.",
+                skill.id,
             )
             continue
         if verdict.answered and verdict.answer_from_context.strip():

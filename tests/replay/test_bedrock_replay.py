@@ -8,18 +8,12 @@ official AWS-recommended mechanism for unit-testing boto3 clients.
 
 Each test:
 
-1. Sets fake AWS env vars so :class:`BedrockLLM`'s constructor can
-   instantiate a real boto3 client without hitting the credential
-   chain.
+1. Builds :class:`BedrockLLM` with a real boto3 client; the fixed test
+   credentials of the test session keep it off the AWS credential chain.
 2. Wraps the constructed client in a ``Stubber``.
 3. Queues canned responses (success / throttling sequences / errors)
    via ``add_response`` / ``add_client_error``.
 4. Activates the stubber and exercises the provider end-to-end.
-
-The fake-credentials approach is deliberately scoped to the
-``stubbed_provider`` fixture so the global ``isolate_provider_env``
-auto-fixture from ``tests/replay/conftest.py`` keeps its protective
-effect on every other test in this module.
 """
 
 from __future__ import annotations
@@ -44,14 +38,9 @@ pytestmark = pytest.mark.replay
 def stubbed_provider(monkeypatch: pytest.MonkeyPatch):
     """Yield ``(provider, stubber)`` with a real boto3 client + Stubber.
 
-    Sets fake AWS env vars before construction so the provider's
-    boto3 client can be created without hitting the AWS credential
-    chain. The ``isolate_provider_env`` auto-fixture in
-    ``tests/replay/conftest.py`` deletes ``AWS_*`` vars first;
-    re-adding them here is intentional and scoped to this fixture.
+    The test session's fixed test credentials let the client be built
+    without the AWS credential chain; only the region is set here.
     """
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "fake-access-key")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake-secret-key")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-central-1")
 
     provider = BedrockLLM(default_model="eu.anthropic.claude-sonnet-4-6")
