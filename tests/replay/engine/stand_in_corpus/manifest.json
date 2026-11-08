@@ -1,0 +1,41 @@
+{
+ "routing_version": 3,
+ "routing_signatures": {
+  "research.classify.llm": [
+   "[\"\", \"analyse this question in two parts: === part 1: classification === 1. does it ne\"]"
+  ],
+  "research.plan.llm": [
+   "[\"\", \"generate exactly 6 diverse search queries that broadly cover different aspects, \"]",
+   "[\"\", \"generate exactly 6 precise, specific search queries for a web search. every quer\"]"
+  ],
+  "research.claim_extract.inqtrix_claim_extraction_v2.llm": [
+   "[\"inqtrix_claim_extraction_v2\", \"\"]"
+  ],
+  "research.evaluate.llm": [
+   "[\"\", \"judge whether the researched information is sufficient to answer the question co\"]"
+  ],
+  "research.answer.llm": [
+   "[\"\", \"you are a helpful research assistant. answer style (like a senior research analy\"]"
+  ],
+  "knowledge.knowledge_decompose.llm": [
+   "[\"\", \"you split a question for a document search into self-contained sub-questions. qu\"]"
+  ],
+  "knowledge.knowledge_gate.llm": [
+   "[\"\", \"you are a retrieval checker. judge whether the following evidence excerpts are s\"]"
+  ],
+  "knowledge.knowledge_answer.llm": [
+   "[\"\", \"you answer a question exclusively on the basis of the following excerpts from in\"]"
+  ]
+ },
+ "responses_per_operation": {
+  "research.classify.llm": 1,
+  "research.plan.llm": 1,
+  "research.claim_extract.inqtrix_claim_extraction_v2.llm": 1,
+  "research.evaluate.llm": 1,
+  "research.answer.llm": 1,
+  "knowledge.knowledge_decompose.llm": 1,
+  "knowledge.knowledge_gate.llm": 1,
+  "knowledge.knowledge_answer.llm": 1
+ },
+ "conversations_per_operation": {}
+}

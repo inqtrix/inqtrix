@@ -1,23 +1,11 @@
 """Azure OpenAI adapter for the LLMProvider interface.
 
-This module calls the Azure OpenAI v1 Chat Completions API via the
-official ``openai`` SDK's generic ``OpenAI`` client.  SDK retries are
-disabled and the provider owns a small visible retry loop so transient
-attempts can be logged and streamed to the UI.
-
-Three authentication modes are supported:
-
-* **API key** — simplest path; pass ``api_key`` to the constructor.
-* **Entra ID (Service Principal)** — pass ``tenant_id``, ``client_id``
-  and ``client_secret`` directly to the constructor; the provider
-  builds a ``ClientSecretCredential`` and a token provider internally.
-  Alternatively pass a pre-built ``credential`` object.
-* **Custom token provider** — pass an ``azure_ad_token_provider``
-  callable obtained from ``azure.identity.get_bearer_token_provider``.
-  Use this for Managed Identity, AzureCliCredential, or any other
-  credential type. Requires the ``azure-identity`` package::
-
-      uv sync
+This module calls the Azure OpenAI v1 API via the official ``openai``
+SDK's async client: Chat Completions, or the Responses API for a model
+whose card says so.  SDK retries are disabled and
+the provider owns a small visible retry loop so transient attempts can
+be logged and streamed to the UI. It authenticates with the resource's
+API key (``api_key``).
 
 Enterprise environments that route traffic through an HTTP proxy can
 set ``proxy_url`` — the provider will create an ``httpx`` client with
@@ -26,7 +14,7 @@ that proxy and inject it into the client constructor.
 Key differences from the ``LiteLLM`` provider:
 
 * Uses the Azure OpenAI **v1** endpoint format with
-    ``OpenAI(base_url="https://.../openai/v1/")``.  This avoids the old
+    ``AsyncOpenAI(base_url="https://.../openai/v1/")``.  This avoids the old
     date-based ``api_version`` churn and follows Microsoft's current
     guidance for new integrations.
 
@@ -37,10 +25,18 @@ Key differences from the ``LiteLLM`` provider:
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any, Callable, Mapping, Literal
+import weakref
+from typing import Any, Mapping, Literal
 
-from openai import DefaultHttpxClient, OpenAI, OpenAIError, RateLimitError, APIStatusError
+from openai import (
+    APIStatusError,
+    AsyncOpenAI,
+    DefaultAsyncHttpxClient,
+    OpenAIError,
+    RateLimitError,
+)
 
 from inqtrix.constants import (
     DEFAULT_LLM_MAX_OUTPUT_TOKENS,
@@ -52,25 +48,38 @@ from inqtrix.exceptions import (
     AzureOpenAIAPIError,
 )
 from inqtrix.providers._azure_common import (
-    AZURE_OPENAI_DEFAULT_SCOPE,
-    build_azure_openai_token_provider,
     extract_azure_api_error_details,
     normalize_openai_v1_base_url,
 )
+from inqtrix.model_cards import resolve_model_card
 from inqtrix.providers._schema import strictify_json_schema
+from inqtrix.providers.attempts import (
+    AsyncNativeLLMProvider,
+    call_with_retries,
+    estimate_request_tokens,
+)
+from inqtrix.providers import _openai_resources  # noqa: F401  (resources at import)
+from inqtrix.providers._openai_responses import (
+    api_name as openai_api_name,
+    chat_turn as openai_chat_turn,
+    send as send_openai_request,
+    sent_form as sent_openai_request,
+    uses_responses,
+)
+from inqtrix.providers._openai_rules import (
+    reasoning_levels as openai_reasoning_levels,
+    effort_to_send,
+    warn_once,
+)
 from inqtrix.providers.base import (
+    without_provider_state,
     ChatTurn,
-    LLMProvider,
     LLMResponse,
     REASONING_EFFORT_LEVELS,
     StructuredLLMResponse,
-    _NonFatalNoticeMixin,
-    _RetryNoticeMixin,
     _bounded_timeout,
-    _call_openai_chat_completion_with_retries,
     _check_deadline,
     _operation_deadline,
-    chat_turn_from_openai_response,
     model_capacity_reason,
     _normalize_completion_response,
     normalize_reasoning_effort,
@@ -158,8 +167,8 @@ def _deployment_may_support_structured_output(model: str) -> bool:
     )
 
 
-class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
-    """Call the Azure OpenAI v1 Chat Completions API via the official SDK.
+class AzureOpenAILLM(AsyncNativeLLMProvider):
+    """Call the Azure OpenAI v1 API (Chat Completions, Responses where the card says so) via the official SDK.
 
     Use this provider when your reasoning models are deployed on Azure
     OpenAI and you want the current v1 endpoint shape instead of the
@@ -179,7 +188,8 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             into reasoning calls.
         _models (ModelSettings): Effective role-to-model mapping exposed
             to the runtime.
-        _client (OpenAI): Shared SDK client for Azure OpenAI requests.
+        _clients (WeakKeyDictionary): One ``AsyncOpenAI`` client per event
+            loop, built on first use from ``_client_kwargs``.
     """
 
     complete_uses_metadata: bool = True
@@ -190,12 +200,6 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         azure_endpoint: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
-        azure_ad_token_provider: Callable[[], str] | None = None,
-        credential: Any | None = None,
-        tenant_id: str | None = None,
-        client_id: str | None = None,
-        client_secret: str | None = None,
-        token_scope: str = AZURE_OPENAI_DEFAULT_SCOPE,
         default_model: str = "gpt-4o",
         classify_model: str = "",
         claim_extract_model: str = "",
@@ -225,9 +229,9 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
 
         Use the constructor when the reasoning path should run against an
         Azure OpenAI deployment name rather than a raw model name. Exactly
-        one endpoint input and exactly one authentication path must be
-        supplied. Role-specific deployments and extra request parameters
-        let you optimize cost or compatibility without changing graph code.
+        one endpoint input and the resource's API key must be supplied.
+        Role-specific deployments and extra request parameters let you
+        optimize cost or compatibility without changing graph code.
 
         Args:
             azure_endpoint: Azure OpenAI resource endpoint such as
@@ -236,34 +240,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             base_url: Full Azure OpenAI v1 base URL such as
                 ``"https://my-resource.openai.azure.com/openai/v1/"``.
                 When this is provided, ``azure_endpoint`` must be omitted.
-            api_key: Azure OpenAI API key. Do not use this together with
-                ``azure_ad_token_provider`` or any of the credential
-                arguments.
-            azure_ad_token_provider: Bearer-token provider from
-                ``azure.identity.get_bearer_token_provider(...)``. Use
-                this for Managed Identity, AzureCliCredential, or any
-                custom credential type. Mutually exclusive with
-                ``api_key``, ``credential`` and the Service Principal
-                fields.
-            credential: Optional pre-built ``azure.identity`` credential
-                object (any ``TokenCredential``-like instance). When
-                supplied the provider builds an internal bearer-token
-                provider from it. Mutually exclusive with ``api_key``,
-                ``azure_ad_token_provider`` and the Service Principal
-                fields.
-            tenant_id: Entra tenant ID for automatic Service Principal
-                auth. Must be supplied together with ``client_id`` and
-                ``client_secret``. Mutually exclusive with ``api_key``,
-                ``azure_ad_token_provider`` and ``credential``.
-            client_id: Entra client ID for automatic Service Principal
-                auth. See ``tenant_id``.
-            client_secret: Entra client secret for automatic Service
-                Principal auth. See ``tenant_id``.
-            token_scope: OAuth scope used when building an internal
-                token provider from ``credential`` or the Service
-                Principal fields. Defaults to the Azure OpenAI scope
-                (``https://cognitiveservices.azure.com/.default``).
-                Override only when targeting a non-OpenAI Azure surface.
+            api_key: Azure OpenAI API key of the resource. Required.
             default_model: Primary deployment name for classify, plan,
                 evaluate fallback, and answer calls. This must be the Azure
                 deployment name, not the base model name.
@@ -314,9 +291,9 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             request_params: Optional extra parameters merged into reasoning
                 calls after reserved SDK keys are filtered out.
             default_reasoning_effort: Optional reasoning effort applied to
-                classify, plan, evaluate, and answer calls. Forwarded to
-                the Chat Completions API as the top-level
-                ``reasoning_effort`` field. Accepted values are
+                classify, plan, evaluate, and answer calls. Forwarded as
+                the top-level ``reasoning_effort`` field of Chat Completions,
+                or as ``reasoning.effort`` on the Responses API. Accepted values are
                 ``"none"``, ``"minimal"``, ``"low"``, ``"medium"``,
                 ``"high"``, and ``"xhigh"``. The provider validates the
                 set; per-value-per-model compatibility is enforced by
@@ -342,14 +319,11 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
 
         Raises:
             ValueError: If neither or both of ``azure_endpoint`` and
-                ``base_url`` are provided, if more than one of the auth
-                modes (``api_key``, ``azure_ad_token_provider``,
-                ``credential``, Service Principal fields) is supplied,
-                if none is supplied, if the Service Principal fields
-                are partially supplied, if ``token_budget_parameter``
-                is invalid, if ``default_reasoning_effort`` is not in
-                the accepted value set, or if ``temperature`` is set
-                together with ``default_reasoning_effort``.
+                ``base_url`` are provided, if ``api_key`` is empty, if
+                ``token_budget_parameter`` is invalid, if
+                ``default_reasoning_effort`` is not in the accepted value
+                set, or if ``temperature`` is set together with
+                ``default_reasoning_effort``.
 
         Example:
             >>> from inqtrix import AzureOpenAILLM
@@ -366,45 +340,8 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 "Provide exactly one of azure_endpoint or base_url."
             )
 
-        sp_fields = (tenant_id, client_id, client_secret)
-        sp_any = any(sp_fields)
-        sp_all = all(sp_fields)
-        if sp_any and not sp_all:
-            raise ValueError(
-                "tenant_id, client_id and client_secret must all be "
-                "provided together for Service Principal auth."
-            )
-
-        auth_modes_chosen = sum(
-            1
-            for present in (
-                bool(api_key),
-                bool(azure_ad_token_provider),
-                bool(credential),
-                sp_all,
-            )
-            if present
-        )
-        if auth_modes_chosen > 1:
-            raise ValueError(
-                "api_key, azure_ad_token_provider, credential and the "
-                "Service Principal fields (tenant_id/client_id/client_secret) "
-                "are mutually exclusive — pass exactly one auth mode."
-            )
-        if auth_modes_chosen == 0:
-            raise ValueError(
-                "An auth mode must be provided: api_key, azure_ad_token_provider, "
-                "credential, or tenant_id+client_id+client_secret."
-            )
-
-        if azure_ad_token_provider is None and (credential is not None or sp_all):
-            azure_ad_token_provider = build_azure_openai_token_provider(
-                credential=credential,
-                tenant_id=tenant_id,
-                client_id=client_id,
-                client_secret=client_secret,
-                scope=token_scope,
-            )
+        if not (api_key or "").strip():
+            raise ValueError("AzureOpenAILLM requires a non-empty api_key.")
 
         if token_budget_parameter not in {"max_completion_tokens", "max_tokens"}:
             raise ValueError(
@@ -472,30 +409,39 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             tier_fast_effort=tier_fast_effort,
         )
 
-        # Build optional httpx client for proxy support.
-        http_client = None
-        if proxy_url:
-            import httpx
-
-            http_client = DefaultHttpxClient(
-                proxy=proxy_url,
-                timeout=httpx.Timeout(timeout, connect=10.0),
-            )
-
-        auth_value: str | Callable[[], str] = azure_ad_token_provider or api_key or ""
-
-        client_kwargs: dict[str, Any] = {
+        self._client_kwargs: dict[str, Any] = {
             "base_url": self._normalize_base_url(base_url or azure_endpoint or ""),
-            "api_key": auth_value,
+            "api_key": api_key,
             "timeout": timeout,
             "max_retries": 0,
         }
         if default_headers:
-            client_kwargs["default_headers"] = dict(default_headers)
-        if http_client is not None:
-            client_kwargs["http_client"] = http_client
+            self._client_kwargs["default_headers"] = dict(default_headers)
+        self._proxy_url = proxy_url
+        self._clients: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, AsyncOpenAI
+        ] = weakref.WeakKeyDictionary()
 
-        self._client = OpenAI(**client_kwargs)
+    def _async_client(self) -> AsyncOpenAI:
+        """The SDK client of the running loop: one per adapter and loop, built on first use.
+
+        Its connection pool belongs to that loop, so a second loop (a test's
+        own, say) gets a client of its own instead of a pool it cannot use.
+        """
+        loop = asyncio.get_running_loop()
+        client = self._clients.get(loop)
+        if client is None:
+            kwargs = dict(self._client_kwargs)
+            if self._proxy_url:
+                import httpx
+
+                kwargs["http_client"] = DefaultAsyncHttpxClient(
+                    proxy=self._proxy_url,
+                    timeout=httpx.Timeout(kwargs["timeout"], connect=10.0),
+                )
+            client = AsyncOpenAI(**kwargs)
+            self._clients[loop] = client
+        return client
 
     _normalize_base_url = staticmethod(normalize_openai_v1_base_url)
     _extract_api_error_details = staticmethod(extract_azure_api_error_details)
@@ -531,14 +477,19 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
 
         ``None``/``""`` leaves the kwargs untouched, so the constructor
         ``default_reasoning_effort`` (already merged via ``self._request_params``)
-        still applies. ``"none"`` (or an unsupported level, which is downgraded
-        to ``"none"`` with a visible warning) forces reasoning off by *omitting*
-        ``reasoning_effort`` entirely -- this is 400-safe for non-reasoning
-        deployments (e.g. gpt-4o) and matches the gpt-5.x default of no implicit
-        reasoning. A graded level is sent as ``reasoning_effort`` and, because
-        Azure rejects it together with ``temperature``, drops ``temperature``
-        for this call. A graded level on an incompatible deployment surfaces
-        loudly as an Azure HTTP 400.
+        still applies. For a model with OpenAI rules on its card the value
+        comes from :func:`~inqtrix.providers._openai_rules.effort_to_send`:
+        ``"none"`` goes out explicitly where the card knows it (GPT-6 and
+        GPT-5.6 think at ``medium`` when the field is missing), a model that
+        reasons but cannot be switched off runs at its weakest level, a level
+        the model's API cannot send becomes the strongest allowed level below it
+        (``max`` on Chat Completions runs at ``xhigh``), each with one visible
+        warning per model. Every other deployment gets no field for ``"none"``
+        (400-safe for non-reasoning deployments such as gpt-4o) and the
+        validated level otherwise. A graded level is sent as
+        ``reasoning_effort`` and, because Azure rejects it together with
+        ``temperature``, drops ``temperature`` for this call. A graded level on
+        an incompatible deployment surfaces loudly as an Azure HTTP 400.
 
         Args:
             create_kwargs: The request kwargs built so far (post-merge).
@@ -552,21 +503,25 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         if token == "":
             return create_kwargs
         out = dict(create_kwargs)
-        if token == "none":
+        if openai_reasoning_levels(use_model) is not None:
+            sent = effort_to_send(use_model, token, label="AzureOpenAILLM")
+        elif token == "none":
+            sent = None
+        else:
+            sent, warnings = validate_reasoning_effort(
+                token,
+                supported_levels=REASONING_EFFORT_LEVELS,
+                label=f"AzureOpenAILLM({use_model})",
+            )
+            for warning in warnings:
+                warn_once("AzureOpenAILLM", use_model, warning)
+            sent = None if sent == "none" else sent
+        if sent is None:
             out.pop("reasoning_effort", None)
             return out
-        effort, warnings = validate_reasoning_effort(
-            token,
-            supported_levels=REASONING_EFFORT_LEVELS,
-            label=f"AzureOpenAILLM({use_model})",
-        )
-        for warning in warnings:
-            log.warning("CONFIG: %s", warning)
-        if effort == "none":
-            out.pop("reasoning_effort", None)
-            return out
-        out["reasoning_effort"] = effort
-        out.pop("temperature", None)
+        out["reasoning_effort"] = sent
+        if sent != "none":
+            out.pop("temperature", None)
         return out
 
     @staticmethod
@@ -657,7 +612,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         """Return the configured context window for capacity checks."""
         return self._context_window_tokens
 
-    def _create_chat_completion_with_retry(
+    async def _acreate_chat_completion(
         self,
         *,
         create_kwargs: dict[str, Any],
@@ -666,8 +621,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         timeout: float,
         deadline: float | None,
     ) -> Any:
-        """Call Chat Completions with visible transient-error retries."""
-        self._clear_retry_notices()
+        """Call the model's API (Chat Completions, or Responses where the card says so) with visible retries."""
 
         def _error_code(exc: BaseException) -> str:
             if isinstance(exc, APIStatusError):
@@ -682,7 +636,16 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             return ""
 
         operation_deadline = _operation_deadline(timeout, deadline)
-        return _call_openai_chat_completion_with_retries(
+        client = self._async_client()
+        return await call_with_retries(
+            lambda: send_openai_request(
+                client,
+                {
+                    **create_kwargs,
+                    "timeout": _bounded_timeout(timeout, operation_deadline),
+                },
+                provider="azure",
+            ),
             provider_label="AzureOpenAI",
             model=model,
             operation=operation,
@@ -690,20 +653,16 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             outer_deadline=deadline,
             timeout_label=f'Azure OpenAI call ({operation})',
             configured_timeout_seconds=timeout,
-            create=lambda: self._client.chat.completions.create(
-                **{
-                    **create_kwargs,
-                    "timeout": _bounded_timeout(timeout, operation_deadline),
-                }
-            ),
-            append_retry_notice=self._append_retry_notice,
             error_code_for=_error_code,
             request_id_for=_request_id,
+            estimated_input_tokens=estimate_request_tokens(sent_openai_request(create_kwargs, provider="azure")),
+            max_output_tokens=int(create_kwargs.get(self._token_budget_parameter) or 0) or None,
+            reasoning_effort=str(create_kwargs.get("reasoning_effort") or "") or None,
         )
 
     # -- LLMProvider interface ---------------------------------------------
 
-    def complete(
+    async def acomplete(
         self,
         prompt: str,
         *,
@@ -741,18 +700,20 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             AzureOpenAIAPIError: If the SDK reports a non-rate-limit
                 backend failure.
         """
-        return self.complete_with_metadata(
-            prompt,
-            system=system,
-            model=model,
-            max_output_tokens=max_output_tokens,
-            timeout=timeout,
-            state=state,
-            deadline=deadline,
-            reasoning_effort=reasoning_effort,
+        return (
+            await self.acomplete_with_metadata(
+                prompt,
+                system=system,
+                model=model,
+                max_output_tokens=max_output_tokens,
+                timeout=timeout,
+                state=state,
+                deadline=deadline,
+                reasoning_effort=reasoning_effort,
+            )
         ).content
 
-    def complete_with_metadata(
+    async def acomplete_with_metadata(
         self,
         prompt: str,
         *,
@@ -826,7 +787,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         )
 
         try:
-            r = self._create_chat_completion_with_retry(
+            r = await self._acreate_chat_completion(
                 create_kwargs=create_kwargs,
                 model=use_model,
                 operation="complete",
@@ -884,9 +845,10 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 ) from e
             details = self._extract_api_error_details(e)
             log.error(
-                "Azure-OpenAI call failed (model=%s, status=%s, code=%s, request-id=%s,"
+                "Azure-OpenAI call failed (model=%s, api=%s, status=%s, code=%s, request-id=%s,"
                 " error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 details.get("status_code"),
                 details.get("error_code") or "-",
                 details.get("request_id") or "-",
@@ -916,8 +878,9 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=e,
                 ) from e
             log.error(
-                "Azure-OpenAI call failed (model=%s, error_type=%s)",
+                "Azure-OpenAI call failed (model=%s, api=%s, error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 type(e).__name__,
             )
             raise AzureOpenAIAPIError(
@@ -934,7 +897,22 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         silently degraded)."""
         return True
 
-    def chat(
+    def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
+        """The efforts this adapter can send for *model*: the card's, without what its API refuses.
+
+        A card without OpenAI rules keeps its levels up to ``xhigh``: the
+        adapter sends no ``max`` for such a model. Without a card: ``None``.
+        """
+        use_model = model or self._default_model
+        levels = openai_reasoning_levels(use_model)
+        if levels is not None:
+            return levels
+        card = resolve_model_card(use_model) if use_model else None
+        if card is None:
+            return None
+        return [level for level in card.reasoning_levels if level == "none" or level in REASONING_EFFORT_LEVELS]
+
+    async def achat(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -962,7 +940,11 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         use_model = model or self._default_model
         create_kwargs: dict[str, Any] = {
             "model": use_model,
-            "messages": list(messages),
+            "messages": (
+                messages
+                if uses_responses(use_model)
+                else without_provider_state(messages, provider="azure")
+            ),
             "timeout": _bounded_timeout(timeout, deadline),
             "stream": False,
         }
@@ -982,14 +964,14 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
         try:
-            r = self._create_chat_completion_with_retry(
+            r = await self._acreate_chat_completion(
                 create_kwargs=create_kwargs,
                 model=use_model,
                 operation="chat",
                 timeout=timeout,
                 deadline=deadline,
             )
-            return chat_turn_from_openai_response(r, model=use_model)
+            return openai_chat_turn(r, provider="azure", model=use_model)
         except RateLimitError as e:
             log.error(
                 "FATAL Rate-Limit (model=%s, error_type=%s)",
@@ -1024,9 +1006,10 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 ) from e
             details = self._extract_api_error_details(e)
             log.error(
-                "Azure-OpenAI chat failed (model=%s, status=%s, code=%s, request-id=%s,"
+                "Azure-OpenAI chat failed (model=%s, api=%s, status=%s, code=%s, request-id=%s,"
                 " error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 details.get("status_code"),
                 details.get("error_code") or "-",
                 details.get("request_id") or "-",
@@ -1056,8 +1039,9 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=e,
                 ) from e
             log.error(
-                "Azure-OpenAI chat failed (model=%s, error_type=%s)",
+                "Azure-OpenAI chat failed (model=%s, api=%s, error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 type(e).__name__,
             )
             raise AzureOpenAIAPIError(
@@ -1083,7 +1067,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         """
         return _deployment_may_support_structured_output(model or self._default_model)
 
-    def complete_structured(
+    async def acomplete_structured(
         self,
         prompt: str,
         *,
@@ -1164,7 +1148,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         }
 
         try:
-            r = self._create_chat_completion_with_retry(
+            r = await self._acreate_chat_completion(
                 create_kwargs=create_kwargs,
                 model=use_model,
                 operation="structured_response",
@@ -1229,9 +1213,10 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 ) from e
             details = self._extract_api_error_details(e)
             log.error(
-                "Azure-OpenAI call failed (model=%s, status=%s, code=%s, request-id=%s,"
+                "Azure-OpenAI call failed (model=%s, api=%s, status=%s, code=%s, request-id=%s,"
                 " error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 details.get("status_code"),
                 details.get("error_code") or "-",
                 details.get("request_id") or "-",
@@ -1261,8 +1246,9 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=e,
                 ) from e
             log.error(
-                "Azure-OpenAI call failed (model=%s, error_type=%s)",
+                "Azure-OpenAI call failed (model=%s, api=%s, error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 type(e).__name__,
             )
             raise AzureOpenAIAPIError(
@@ -1274,18 +1260,19 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
     def is_available(self) -> bool:
         """Report whether the provider is configured to attempt requests.
 
-        Configuration here means: an OpenAI SDK client was successfully
-        constructed (endpoint resolved, exactly one auth mode supplied,
-        token budget parameter validated). This does not guarantee that
+        Configuration here means: the OpenAI SDK client configuration was
+        resolved (endpoint resolved, project key supplied, token budget
+        parameter validated); the client itself is built per loop on
+        first use. This does not guarantee that
         the Azure deployment is reachable or that credentials are valid
         — those failures only surface on the first ``complete()`` call.
 
         Returns:
-            ``True`` when the internal SDK client was constructed,
+            ``True`` when the client configuration was resolved,
             otherwise ``False``. In practice ``False`` is unreachable
             today because constructor argument validation raises
             ``ValueError`` on bad input rather than returning a half-
             initialised provider; the method is kept for forward
             compatibility and ABC contract compliance.
         """
-        return self._client is not None
+        return self._client_kwargs is not None

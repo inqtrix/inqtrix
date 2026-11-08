@@ -154,6 +154,80 @@ See [Database migrations](database-migrations.md). A direct command is allowed
 only inside the documented maintenance window after a verified backup and full
 database-client drain.
 
+### Workflow contracts in an update
+
+Every run is bound to the workflow contract its mode carried when it was
+accepted. A release that raises a contract ends, at the first worker of the
+new version, the open runs that already ran under the old one: they become
+`cancelled` with the reason `workflow_contract_changed`, children included, and
+a person sees why instead of approving a run that can no longer continue. Read
+what that will hit before the update. The list answers only a browser session
+of an instance admin (an access token gets `404`), so open it signed in, or
+send that session's cookie:
+
+```text
+https://<host>/v1/admin/system/run-bindings?mode=agent_kernel&below=2
+```
+
+`contracts` names what the running version carries, `counts` the open runs per
+mode, status and contract, and `runs` those bound below the version you name
+(at most 1,000; `runs_total` and `truncated` say when more exist). A running run
+that was already asked to stop counts under the status `cancel_requested`.
+
+Rolling such a release back is the other direction: a worker of the old version
+cannot run a run bound to the newer contract, and the first such run it claims
+stops its run claims (`claims no further runs` in its log); its indexing,
+deletions and uploads go on. Before starting the old workers, list the runs
+above the old version:
+
+```text
+https://<host>/v1/admin/system/run-bindings?above=1
+```
+
+Then cancel them with the API of the old version running. In the web app,
+Settings, Admin, System counts the open runs per mode, status and contract and
+offers, for each mode, to cancel the runs this version cannot run. The same from
+the signed-in session, with its CSRF token in `X-CSRF-Token`:
+
+```text
+POST https://<host>/v1/admin/system/run-bindings/cancel
+{"mode": "agent_kernel"}
+```
+
+It cancels the open runs of that mode bound above the contract the API carries,
+or every open run of a mode the API does not register; a run bound below ends on
+its own. A queued or parked run ends at once, a running one at its next step or
+when a worker takes it over, and active children go with their parent (reason
+`parent_cancelled`). The answer counts both (`cancelled`, `cancel_requested`).
+A run already asked to stop, by an earlier cancel or with its parent, is neither
+asked nor recorded again; the System page counts it apart and does not offer it.
+Each cancelled run is recorded in the audit log as `run.cancelled_by_admin`, with
+the admin as actor, the run id, the mode and both contract versions; children
+cancelled with it have no row of their own. The owner is not part of the row:
+once the run is deleted, the audit log no longer says whose run it was. A
+cancelled run, running or not, ends with the reason `cancelled_by_admin`. The
+owner of an agent run sees it in the Agent Desk and can start the question
+again; a research or knowledge run shows only as cancelled in the desk. Neither
+the view nor the answer shows a question, a title or an owner.
+
+A run that has not started yet and is bound to an older contract is not ended:
+it starts under the contract the worker carries. A run bound to a newer contract
+stops the run claims of the worker that claims it, whether it ran before or not.
+
+No worker can run such a run, and the same holds for a run whose mode the workers
+do not register (a service the mode needs is not configured on them). Every
+worker that claims it logs `claims no further runs until that run is cancelled,
+ends or parks` and takes no new run while the run still waits for a worker; its
+other jobs go on, and the runs it took with it in the same batch start. The run
+is not failed on its last delivery either, because only a worker that may run it
+decides about it. The worker checks the run every few seconds and claims again,
+with the line `claims runs again`, once the run no longer waits: it is cancelled
+(the admin cancel above covers a newer binding and a mode the API does not
+register; the next claim ends a running one), it ended under a worker that
+carries the mode and the contract, or it parks there. No restart is needed. A
+run that is still queued fails after two hours in the queue (`queued_timeout`).
+Restore the configuration or the version, or cancel the runs.
+
 ### Upgrading the bundled Qdrant
 
 A Qdrant **minor** version bump is not a plain image swap. Two upstream rules

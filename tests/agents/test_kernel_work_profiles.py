@@ -15,8 +15,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from inqtrix.harness.contracts.events import ANSWER_DRAFT_EVENT, OUTCOME_EVENT
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from inqtrix.agents.kernel import work_profiles
 from inqtrix.agents.kernel.deps import KernelDeps
@@ -30,7 +31,6 @@ from inqtrix.agents.kernel.work_profiles import (
 from inqtrix.core.results import WorkHandover
 from inqtrix.exceptions import AgentPolicyDenied
 from inqtrix.providers.base import ChatTurn, ToolCallRequest
-from inqtrix.runs.shared import ANSWER_DRAFT_EVENT, OUTCOME_EVENT
 
 from tests.agents.test_kernel_deep_mode import (
     REVIEW_RESULT_CALL,

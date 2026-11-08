@@ -562,7 +562,7 @@ def test_list_jobs_filters_by_collection() -> None:
 
         filtered = client.get(
             "/v1/knowledge/indexing-jobs",
-            params={"collection_id": collection_id},
+            params={"collection_id": collection_id, "operation_kind": "collection_generation"},
         )
         assert {job["job_id"] for job in filtered.json()["data"]} == {job_id}
 
@@ -571,6 +571,43 @@ def test_list_jobs_filters_by_collection() -> None:
             params={"collection_id": "kc_other"},
         )
         assert other.json()["data"] == []
+
+
+def test_the_job_list_names_both_kinds_of_job() -> None:
+    """A reload finds a document's job here, and with it the progress or the failure."""
+    client = make_indexing_client()
+    with client:
+        collection_id = _collection_with_two_documents(client)
+        job_store = client.app.state.container.indexing_service.job_store
+        document_job = job_store.submit(
+            collection_id=collection_id,
+            collection_name="Vertraege",
+            embedding_model="stub-embed-8",
+            operation_kind="document_revision",
+            document_id="kd_one",
+            revision_id="rev_one",
+            work=lambda handle: handle.complete(),
+        )
+        generation = client.post(
+            f"/v1/knowledge/collections/{collection_id}/reindex", json={}
+        ).json()
+
+        def listed(**params: str) -> set[str]:
+            answer = client.get("/v1/knowledge/indexing-jobs", params=params)
+            assert answer.status_code == 200
+            return {job["job_id"] for job in answer.json()["data"]}
+
+        assert {document_job["job_id"], generation["job_id"]} <= listed()
+        documents = listed(operation_kind="document_revision")
+        assert document_job["job_id"] in documents
+        assert generation["job_id"] not in documents
+        assert listed(operation_kind="collection_generation") == {generation["job_id"]}
+        assert (
+            client.get(
+                "/v1/knowledge/indexing-jobs", params={"operation_kind": "other"}
+            ).status_code
+            == 400
+        )
 
 
 def test_reindex_unknown_collection_returns_404() -> None:

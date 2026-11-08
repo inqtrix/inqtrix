@@ -1,0 +1,315 @@
+{
+  "notes": [
+    "Every stage size, duration, rate, share and think time in this file is an assumption of the capacity model, not a measured value. Change it here; the engine reads it from nowhere else.",
+    "Rates are runs per active user and hour. In the closed loop they only set the relative weight of each scenario; the number of active root runs comes from the stage. Direct chats are the one open stream that really runs at its rate.",
+    "A stage is 'tabs' signed-in users with an open page, of whom at most 'roots' have a root run active at the same time."
+  ],
+  "seed": 73021,
+  "stages": {
+    "smoke": {
+      "source": "assumption",
+      "tabs": 6,
+      "roots": 3,
+      "collection_users": 3,
+      "rest_seconds": 30,
+      "idle_seconds": 30,
+      "ramp_seconds": 30,
+      "plateau_seconds": 60,
+      "decay_max_seconds": 900,
+      "min_active_root_share": 0.5
+    },
+    "l05": {
+      "source": "assumption",
+      "tabs": 150,
+      "roots": 25,
+      "collection_users": 6,
+      "rest_seconds": 60,
+      "idle_seconds": 120,
+      "ramp_seconds": 150,
+      "plateau_seconds": 600,
+      "decay_max_seconds": 600
+    },
+    "l1": {
+      "source": "assumption",
+      "tabs": 300,
+      "roots": 50,
+      "collection_users": 12,
+      "rest_seconds": 60,
+      "idle_seconds": 120,
+      "ramp_seconds": 300,
+      "plateau_seconds": 900,
+      "decay_max_seconds": 600
+    },
+    "l2": {
+      "source": "assumption",
+      "tabs": 600,
+      "roots": 100,
+      "collection_users": 24,
+      "rest_seconds": 60,
+      "idle_seconds": 120,
+      "ramp_seconds": 300,
+      "plateau_seconds": 900,
+      "decay_max_seconds": 600
+    }
+  },
+  "load_matrix": {
+    "note": "The axes a stage describes its load by. 'recorded' comes from real runs through the stand-in, 'assumption' is a number of the capacity model. The report carries this next to the measured values.",
+    "children_and_depth": { "source": "recorded", "measured_in": "runs.database, slots" },
+    "parked_share_and_resume_rate": { "source": "assumption", "measured_in": "think, client counters gates_*" },
+    "stream_rate": { "source": "not_built", "measured_in": "nothing yet: the stand-in answers in one piece" },
+    "run_viewers_and_tabs": { "source": "assumption", "measured_in": "stages: one tab per account, one run stream per active root" },
+    "document_and_checkpoint_sizes": { "source": "recorded", "measured_in": "the provisioned corpus, phases checkpoint_bytes_max" },
+    "provider_latency": { "source": "recorded", "measured_in": "stack.stand_in.latency_scale, the stand-in's calibrated profile" }
+  },
+  "families": {
+    "schnell": { "source": "assumption", "rate_per_user_hour": 1 },
+    "standard": { "source": "assumption", "rate_per_user_hour": 0.5 },
+    "gruendlich": { "source": "assumption", "rate_per_user_hour": 0.2 },
+    "tief": { "source": "assumption", "rate_per_user_hour": 0.05 }
+  },
+  "scenarios": {
+    "agent_schnell_no_web": {
+      "family": "schnell",
+      "share": 0.4,
+      "mode": "agent_kernel",
+      "tier": "schnell",
+      "web": false,
+      "questions": ["plain"]
+    },
+    "agent_schnell_web": {
+      "family": "schnell",
+      "share": 0.4,
+      "mode": "agent_kernel",
+      "tier": "schnell",
+      "web": true,
+      "questions": ["web"]
+    },
+    "knowledge_schnell": {
+      "family": "schnell",
+      "share": 0.2,
+      "mode": "knowledge",
+      "profile": "schnell",
+      "needs_collection": true,
+      "questions": ["knowledge"]
+    },
+    "research_compact": {
+      "family": "standard",
+      "share": 0.7,
+      "mode": "research",
+      "report_profile": "compact",
+      "questions": ["research_battery", "research_power_prices"]
+    },
+    "knowledge_standard": {
+      "family": "standard",
+      "share": 0.3,
+      "mode": "knowledge",
+      "profile": "standard",
+      "needs_collection": true,
+      "questions": ["knowledge"]
+    },
+    "agent_gruendlich_web": {
+      "family": "gruendlich",
+      "share": 0.7,
+      "mode": "agent_kernel",
+      "tier": "gruendlich",
+      "web": true,
+      "questions": ["web"]
+    },
+    "agent_gruendlich_canvas": {
+      "family": "gruendlich",
+      "share": 0.3,
+      "mode": "agent_kernel",
+      "tier": "gruendlich",
+      "web": false,
+      "needs_collection": true,
+      "questions": ["canvas_memo", "canvas_table"]
+    },
+    "agent_tief_web": {
+      "family": "tief",
+      "share": 0.5,
+      "mode": "agent_kernel",
+      "tier": "tief",
+      "web": true,
+      "questions": ["web"]
+    },
+    "research_deep": {
+      "family": "tief",
+      "share": 0.5,
+      "mode": "research",
+      "report_profile": "deep",
+      "questions": ["research_battery", "research_power_prices"]
+    }
+  },
+  "direct": {
+    "source": "assumption",
+    "rate_per_user_hour": 4,
+    "questions": ["plain"]
+  },
+  "questions": {
+    "plain": "Erkläre verständlich, wie eine Luftfederung vom Typ Airmatic im Auto funktioniert, welche Teile typischerweise verschleißen und woran ich einen Defekt früh erkenne.",
+    "web": "Erstelle einen kurzen Bericht mit Quellen: Wie viele öffentliche Ladepunkte für E-Autos gab es Mitte 2026 in Deutschland, wie hat sich die Zahl seit Anfang 2024 entwickelt, und welche Lücken beim Ausbau nennen Fachquellen?",
+    "canvas_memo": "Lies den vollständigen Einführungsleitfaden in der ausgewählten Sammlung und erstelle im Canvas ein kurzes Memo: Welche verbindlichen Sonderregeln gelten für den Pilotbetrieb zu Kosten, Freigabe, Betriebszeiten und späteren Erweiterungen? Nenne die maßgebliche Fundstelle. Keine Websuche.",
+    "canvas_table": "Erstelle im Canvas eine Tabelle über alle zehn Dokumente der ausgewählten Sammlung mit genau diesen Spalten: Dokument, wichtigste Frist oder Zeitgrenze, genannter Betrag oder Grenzwert, zuständige Stelle oder Meldeweg, Fundstelle. Steht ein Feld nicht im Dokument, schreibe „nicht genannt“. Lies dafür jedes Dokument vollständig und erfinde nichts. Keine Websuche.",
+    "knowledge": "Welche Fristen gelten rund um eine Kundenkündigung und die anschließende Datenlöschung?",
+    "research_battery": "Welche Pflichten bringt die EU-Batterieverordnung ab 2027 für austauschbare Akkus in Smartphones, und welche Ausnahmen gibt es?",
+    "research_power_prices": "Wie haben sich die durchschnittlichen Strompreise für Haushaltskunden in Deutschland von Oktober 2025 bis Oktober 2026 entwickelt, und welche Gründe nennen Fachquellen?"
+  },
+  "clarification_answer": "Keine weiteren Vorgaben.",
+  "think": {
+    "source": "assumption",
+    "min_seconds": 3,
+    "max_seconds": 20,
+    "late_share": 0.1,
+    "late_seconds": 120
+  },
+  "between_runs_seconds": {
+    "source": "assumption",
+    "min": 2,
+    "max": 8
+  },
+  "provisioning": {
+    "concurrency": 8,
+    "collection_corpus": "tests/eval/golden/corpus",
+    "indexing_timeout_seconds": 300
+  },
+  "tab": {
+    "source": "assumption",
+    "page_load_parallel": 6,
+    "quota_poll_seconds": 25,
+    "desk_switch_seconds": 180,
+    "desk_switch_jitter_share": 0.25,
+    "desk_switch": [
+      "/v1/runs",
+      "/v1/knowledge/collections",
+      "/v1/skills"
+    ]
+  },
+  "page_load": [
+    "GET /api/auth/config",
+    "GET /v1/capabilities",
+    "GET /api/auth/session",
+    "GET /v1/quota/usage",
+    "GET /v1/skills",
+    "GET /v1/runs",
+    "GET /v1/knowledge/collections",
+    "GET /v1/shares/inbox",
+    "GET /v1/shares/mine",
+    "GET /v1/prompt-templates",
+    "GET /v1/account/preferences",
+    "GET /v1/chat/thread-groups",
+    "GET /v1/editor/folders",
+    "PUT /v1/assets/default-sections",
+    "GET /v1/vector-indexes",
+    "GET /v1/knowledge-session-groups",
+    "GET /v1/chat/threads",
+    "GET /v1/editor/documents",
+    "GET /v1/knowledge-sessions",
+    "GET /v1/assets/sections",
+    "GET /v1/assets/groups",
+    "GET /v1/assets",
+    "GET /v1/uploads",
+    "GET /v1/agent-session-groups",
+    "GET /v1/agent-sessions"
+  ],
+  "user_events": {
+    "enabled": true,
+    "identity_probe": "/api/auth/session",
+    "wake_debounce_ms": 75,
+    "reconnect_max_seconds": 30,
+    "consumed_scopes": [
+      "collaboration_comment_changed",
+      "collaboration_comment_mention"
+    ],
+    "scopes": {
+      "runs": ["/v1/runs"],
+      "sharing": [
+        "/v1/runs",
+        "/v1/knowledge/collections",
+        "/v1/shares/inbox",
+        "/v1/shares/mine"
+      ],
+      "skills": ["/v1/skills"],
+      "knowledge_collections": ["/v1/knowledge/collections"],
+      "indexing": ["/v1/knowledge/collections"],
+      "prompt_templates": ["/v1/prompt-templates"],
+      "editor_documents": [],
+      "deletion_operations": [],
+      "collaboration_guest_policy": []
+    },
+    "all": [
+      "/v1/skills",
+      "/v1/runs",
+      "/v1/knowledge/collections",
+      "/v1/shares/inbox",
+      "/v1/shares/mine",
+      "/v1/prompt-templates"
+    ]
+  },
+  "transport": {
+    "first_activity_seconds": 15,
+    "inactivity_seconds": 30,
+    "parked_poll_seconds": 15,
+    "outage_poll_seconds": 3,
+    "outage_polls_per_retry": 10,
+    "request_timeout_seconds": 120
+  },
+  "decay_cancel_settle_seconds": 60,
+  "load_applied": {
+    "source": "assumption",
+    "min_active_root_share": 0.9,
+    "max_rejected_share": 0.02,
+    "max_http_failure_share": 0.001,
+    "max_direct_failure_share": 0.05,
+    "max_stream_drop_share": 0.05
+  },
+  "limits": {
+    "source": "The starting limits of the capacity model, shown next to the measured value until the operator confirms them. postgres_cpu_cores is 60 % of the ten cores of the measuring machine.",
+    "sse_lag_p95_ms": 1000,
+    "submit_p95_ms": 300,
+    "postgres_cpu_cores": 6,
+    "loop_lag_p99_ms": 50
+  },
+  "setup_settings": {
+    "api": ["RUN_MAX_CONCURRENT", "RUN_MAX_CONCURRENT_PER_USER", "RUN_QUEUE_MAX_SIZE", "INQTRIX_DATABASE_POOL_SIZE", "INQTRIX_DATABASE_POOL_MAX_OVERFLOW"],
+    "worker": ["INQTRIX_WORKER_CONCURRENCY", "INQTRIX_DATABASE_POOL_SIZE", "INQTRIX_DATABASE_POOL_MAX_OVERFLOW"]
+  },
+  "cancel_probe": {
+    "scenario": "research_compact",
+    "operation": "research.web_search.web_search",
+    "runs": 8,
+    "min_searches_per_run": 3,
+    "provider_call_wait_seconds": 120,
+    "quiet_wait_seconds": 120,
+    "drain_wait_seconds": 180,
+    "poll_ms": 500
+  },
+  "sampling": {
+    "postgres_seconds": 5,
+    "postgres_table_seconds": 15,
+    "containers_seconds": 15,
+    "stand_in_seconds": 10,
+    "exec_concurrency": 4
+  },
+  "stand_in": {
+    "service": "mock-providers",
+    "wired_services": ["api", "worker"],
+    "required_wired_services": ["api"],
+    "endpoint_variables": [
+      "AZURE_OPENAI_ENDPOINT",
+      "PERPLEXITY_BASE_URL",
+      "INQTRIX_EMBEDDING_AZURE_ENDPOINT"
+    ],
+    "endpoint_prefix": "http://mock-providers:",
+    "provider_variables": {
+      "INQTRIX_LLM_PROVIDER": "azure",
+      "INQTRIX_SEARCH_PROVIDER": "perplexity",
+      "INQTRIX_EMBEDDING_PROVIDER": "azure",
+      "INQTRIX_RERANKER_PROVIDER": "none",
+      "INQTRIX_AGENT_MEMORY_PROVIDER": "none"
+    },
+    "known_degraded": [
+      "^\\d+ ambiguous routing signatures"
+    ],
+    "silent_after_seconds": 300
+  }
+}

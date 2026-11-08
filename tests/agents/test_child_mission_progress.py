@@ -9,11 +9,8 @@ could not say what was running.
 
 import json
 
-from inqtrix.runs.shared import (
-    OUTCOME_EVENT,
-    build_child_progress_payload,
-    should_project_child_event,
-)
+from inqtrix.runs.shared import build_child_progress_payload, should_project_child_event
+from inqtrix.harness.contracts.events import OUTCOME_EVENT
 
 
 def _project(event_type: str, payload: dict) -> dict:

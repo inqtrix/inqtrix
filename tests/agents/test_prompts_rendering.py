@@ -96,7 +96,7 @@ def test_rendering_block_states_usage_rules():
     # visible parser error in the middle of the answer.
     assert "must be in double quotes" in block
     assert 'A["v(t)"]' in block
-    assert 'write "USD 5", never "$5"' in block
+    assert '"120 Euro" stays "120 Euro", "$5" becomes "USD 5"' in block
     assert "override these defaults" in block
 
 

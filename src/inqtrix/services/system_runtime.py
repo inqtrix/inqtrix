@@ -7,13 +7,23 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 
 if TYPE_CHECKING:
-    from inqtrix.server.container import AppContainer
+    from inqtrix.settings import Settings
 
 log = logging.getLogger(__name__)
+
+
+class RuntimeContainer(Protocol):
+    """The wired collaborators the runtime manifest and its probes read."""
+
+    settings: "Settings"
+    file_service: Any
+    knowledge_service: Any
+    session_factory: Any
+    object_store_backend: Any
 
 _RUNTIME_PROBE_TIMEOUT_SECONDS = 2.0
 
@@ -44,7 +54,7 @@ def _checkpointer_pool_size(container: Any) -> int | None:
 
 
 async def system_runtime_payload_checked(
-    container: "AppContainer",
+    container: RuntimeContainer,
 ) -> dict[str, Any]:
     """Return the runtime payload with current backend availability probes."""
     probes = await runtime_probe_results(container)
@@ -52,7 +62,7 @@ async def system_runtime_payload_checked(
 
 
 def system_runtime_payload(
-    container: "AppContainer",
+    container: RuntimeContainer,
     *,
     probes: RuntimeProbeResults | None = None,
 ) -> dict[str, Any]:
@@ -248,7 +258,7 @@ KNOWLEDGE_REASON_STORE_UNREACHABLE = "store_unreachable"
 
 
 async def knowledge_availability(
-    container: "AppContainer",
+    container: RuntimeContainer,
     *,
     vector_store_available: bool | None = None,
 ) -> tuple[bool, str | None]:
@@ -274,7 +284,7 @@ async def knowledge_availability(
     return False, KNOWLEDGE_REASON_STORE_UNREACHABLE
 
 
-async def runtime_probe_results(container: "AppContainer") -> RuntimeProbeResults:
+async def runtime_probe_results(container: RuntimeContainer) -> RuntimeProbeResults:
     """Probe optional backing services without exposing connection details."""
     object_store, queue_result, vector_store = await asyncio.gather(
         _probe_object_store(container),
@@ -325,7 +335,7 @@ def runtime_feature_overrides(
 
 
 def _knowledge_payload(
-    container: "AppContainer",
+    container: RuntimeContainer,
     *,
     probes: RuntimeProbeResults | None = None,
 ) -> dict[str, Any]:
@@ -398,7 +408,7 @@ def _blob_storage_label(object_store: str) -> str:
     return object_store
 
 
-async def _probe_object_store(container: "AppContainer") -> bool:
+async def _probe_object_store(container: RuntimeContainer) -> bool:
     service = getattr(container, "file_service", None)
     if service is None:
         return False
@@ -413,7 +423,7 @@ async def _probe_object_store(container: "AppContainer") -> bool:
 
 
 async def _probe_queue(
-    container: "AppContainer",
+    container: RuntimeContainer,
     *,
     include_info: bool = True,
 ) -> tuple[bool, dict[str, int] | None]:
@@ -422,9 +432,9 @@ async def _probe_queue(
         return True, None
     info: dict[str, int] | None = None
 
-    def _probe() -> bool:
+    async def _probe() -> bool:
         nonlocal info
-        if not _ping_valkey(settings.queue.valkey_url):
+        if not await asyncio.to_thread(_ping_valkey, settings.queue.valkey_url):
             return False
         if not include_info:
             # Readiness needs only the availability bit — skip the
@@ -434,26 +444,23 @@ async def _probe_queue(
 
         queue = ValkeyRunQueue(url=settings.queue.valkey_url)
         try:
-            info = queue.group_info()
+            info = await queue.group_info()
         except Exception:  # noqa: BLE001 — liveness detail degrades to None
             info = None
         finally:
             # Probe clients are throwaway: close like _ping_valkey does,
             # or every runtime read leaks one broker connection.
             try:
-                queue._client.close()
+                await queue.aclose()
             except Exception:  # noqa: BLE001 — best-effort teardown
                 pass
         return True
 
-    available = await _bounded_probe(
-        "valkey_queue",
-        lambda: asyncio.to_thread(_probe),
-    )
+    available = await _bounded_probe("valkey_queue", _probe)
     return available, info
 
 
-async def _probe_vector_store(container: "AppContainer") -> bool:
+async def _probe_vector_store(container: RuntimeContainer) -> bool:
     service = container.knowledge_service
     if service is None:
         return False
@@ -472,7 +479,7 @@ async def _probe_vector_store(container: "AppContainer") -> bool:
 
 
 async def readiness_payload(
-    container: "AppContainer",
+    container: RuntimeContainer,
 ) -> tuple[int, dict[str, Any]]:
     """Build the ``/readyz`` payload and its HTTP status code.
 
@@ -539,7 +546,7 @@ def _check_label(ok: bool, *, skipped: bool) -> str:
     return "ok" if ok else "unavailable"
 
 
-async def _probe_database_state(container: "AppContainer") -> str:
+async def _probe_database_state(container: RuntimeContainer) -> str:
     """Three-way database verdict: ``ok`` | ``unavailable`` | ``violation``.
 
     The distinction is load-bearing for the product gate: a probe that
@@ -622,16 +629,16 @@ async def _probe_database_state(container: "AppContainer") -> str:
     return "ok"
 
 
-async def _probe_database(container: "AppContainer") -> bool:
+async def _probe_database(container: RuntimeContainer) -> bool:
     return await _probe_database_state(container) in {"ok", "skipped"}
 
 
-async def database_runtime_contract_ready(container: "AppContainer") -> bool:
+async def database_runtime_contract_ready(container: RuntimeContainer) -> bool:
     """Return the hard database-contract state used by HTTP startup gates."""
     return await _probe_database(container)
 
 
-async def _probe_vector_store_ready(container: "AppContainer") -> bool:
+async def _probe_vector_store_ready(container: RuntimeContainer) -> bool:
     # Readiness variant: NO knowledge service means the feature is off —
     # trivially ready (the admin runtime view reports False there
     # because it describes feature availability, not pod readiness).
@@ -640,7 +647,7 @@ async def _probe_vector_store_ready(container: "AppContainer") -> bool:
     return await _probe_vector_store(container)
 
 
-async def _probe_object_store_ready(container: "AppContainer") -> bool:
+async def _probe_object_store_ready(container: RuntimeContainer) -> bool:
     """Treat a disabled file service as an intentionally skipped dependency."""
     if getattr(container, "file_service", None) is None:
         return True

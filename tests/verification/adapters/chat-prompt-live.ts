@@ -16,7 +16,7 @@ export const chatPromptLiveAdapter: VerificationAdapter = {
   profiles: ['chat-prompt'],
   async preflight(context) {
     const baseURL = context.environment.INQTRIX_E2E_BASE_URL
-      ?? 'http://127.0.0.1:8080'
+      ?? 'http://localhost:8080'
     let baseURLCheck
     let origin: string | null = null
     try {

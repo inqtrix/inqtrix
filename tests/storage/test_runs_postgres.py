@@ -10,6 +10,7 @@ carrier, terminal-state absorption, and claim fencing.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import time
@@ -17,11 +18,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
 
+import anyio
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from inqtrix import aio
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.exceptions import AgentProviderTimeout, AgentRateLimited
@@ -38,12 +41,8 @@ from inqtrix.runs.deletion_operations import (
 )
 from inqtrix.runs.deletion_postgres import PostgresDeletionOperationStore
 from inqtrix.runs.postgres_store import PostgresRunStore
-from inqtrix.server.runs import (
-    RunActive,
-    RunNotFound,
-    RunParentInactive,
-    RunSessionActive,
-)
+from inqtrix.exceptions import RunNotFound
+from inqtrix.runs.records import RunActive, RunParentInactive, RunSessionActive
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.agent_sessions_orm import agent_sessions
 from inqtrix.storage.deletions_orm import deletion_operations
@@ -60,6 +59,15 @@ TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
+
+# The contracts a worker carries; every run these tests claim is bound to 1.
+WORKER_CONTRACTS = {
+    "research": 1,
+    "direct_llm": 1,
+    "knowledge": 1,
+    "workspace_agent": 1,
+    "agent_kernel": 1,
+}
 USER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 USER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
 OWNER_1 = uuid.UUID("33333333-3333-4333-8333-333333333333")
@@ -164,8 +172,8 @@ async def engine():
     await engine.dispose()
 
 
-@pytest_asyncio.fixture()
-async def store(engine):
+@pytest.fixture()
+def store(engine):
     store = PostgresRunStore(
         engine=build_engine(TEST_DATABASE_URL),
         app_role=APP_ROLE,
@@ -223,6 +231,8 @@ def submit_noop(store, *, work=None, **kwargs):
         question=kwargs.pop("question", "Wie ist die Haftung geregelt?"),
         stack_name="default",
         work=work or _default_work,
+        mode=kwargs.pop("mode", "research"),
+        workflow_contract=kwargs.pop("workflow_contract", 1),
         request_payload={"question": "x", "body": {"mode": "research"}},
         **kwargs,
     )
@@ -294,7 +304,7 @@ class _RecordingDispatchQueue:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str]] = []
 
-    def enqueue(self, *, run_id: str, tenant_id: str) -> None:
+    async def enqueue(self, *, run_id: str, tenant_id: str) -> None:
         self.enqueued.append((run_id, tenant_id))
 
 
@@ -302,7 +312,7 @@ class _RecordingDeletionQueue:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str]] = []
 
-    def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
+    async def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
         self.enqueued.append((operation_id, tenant_id))
 
 
@@ -330,6 +340,8 @@ def test_worker_claim_store_dispatches_children_and_parent_wakes(
             workspace_id="ws-agent",
         )
         parent = dispatching.submit(
+            mode="research",
+            workflow_contract=1,
             question="parent",
             stack_name="default",
             work=lambda _handle: None,
@@ -344,12 +356,14 @@ def test_worker_claim_store_dispatches_children_and_parent_wakes(
         assert dispatching.dispatch_status(parent["run_id"], "default") == "queued"
         assert dispatching.dispatch_status(parent["run_id"], "other") is None
         parent_claim = dispatching.claim_for_execution(
-            parent["run_id"], "default", allow_takeover=False
+            parent["run_id"], "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
         )
         assert parent_claim is not None
         assert parent_claim.workspace_id == "ws-agent"
         assert dispatching.dispatch_status(parent["run_id"], "default") == "running"
         child = dispatching.submit(
+            mode="research",
+            workflow_contract=1,
             question="child",
             stack_name="default",
             work=lambda _handle: None,
@@ -389,7 +403,7 @@ def test_worker_claim_store_dispatches_children_and_parent_wakes(
         assert len(child_progress()) == queued_count
 
         child_claim = dispatching.claim_for_execution(
-            child["run_id"], "default", allow_takeover=False
+            child["run_id"], "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
         )
         assert child_claim is not None
         assert child_claim.workspace_id == "ws-agent"
@@ -458,6 +472,8 @@ def test_child_park_projects_its_gate_to_the_parent_stream(store) -> None:
             workspace_id="ws-agent",
         )
         parent = dispatching.submit(
+            mode="research",
+            workflow_contract=1,
             question="parent",
             stack_name="default",
             work=lambda _handle: None,
@@ -470,10 +486,12 @@ def test_child_park_projects_its_gate_to_the_parent_stream(store) -> None:
             },
         )
         parent_claim = dispatching.claim_for_execution(
-            parent["run_id"], "default", allow_takeover=False
+            parent["run_id"], "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
         )
         assert parent_claim is not None
         child = dispatching.submit(
+            mode="research",
+            workflow_contract=1,
             question="child",
             stack_name="default",
             work=lambda _handle: None,
@@ -497,7 +515,7 @@ def test_child_park_projects_its_gate_to_the_parent_stream(store) -> None:
             fence_attempt=parent_claim.attempt,
         )
         child_claim = dispatching.claim_for_execution(
-            child["run_id"], "default", allow_takeover=False
+            child["run_id"], "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
         )
         assert child_claim is not None
         dispatching.mark_waiting(
@@ -524,11 +542,9 @@ def test_child_park_projects_its_gate_to_the_parent_stream(store) -> None:
 
 
 @pytest.mark.asyncio
-async def test_migration_scrubs_active_legacy_child_token_budget(
-    store,
-) -> None:
+async def test_migration_scrubs_active_legacy_child_token_budget(engine) -> None:
     """0043 removes planner caps before a worker can replay the child."""
-    del store
+    del engine  # fixture performs isolated database cleanup before the test
     queue = _RecordingDispatchQueue()
     durable = PostgresRunStore(
         engine=build_engine(TEST_DATABASE_URL),
@@ -541,14 +557,18 @@ async def test_migration_scrubs_active_legacy_child_token_budget(
         completed_ttl_seconds=300,
         worker_id="pytest-legacy-budget",
     )
-    root = durable.submit(
+    root = await durable.asubmit(
+        mode="research",
+        workflow_contract=1,
         question="root",
         stack_name="default",
         work=lambda _handle: None,
         kind="agent",
         request_payload={"body": {"mode": "workspace_agent"}},
     )
-    child = durable.submit(
+    child = await durable.asubmit(
+        mode="research",
+        workflow_contract=1,
         question="legacy child",
         stack_name="default",
         work=lambda _handle: None,
@@ -592,7 +612,7 @@ async def test_migration_scrubs_active_legacy_child_token_budget(
                     )
                 ).scalar_one()
     finally:
-        durable.close()
+        await durable.aclose()
         await engine.dispose()
 
     assert before == "1800"
@@ -613,6 +633,8 @@ def test_nested_children_use_canonical_root_and_cancel_recursively(
             handle.complete({"answer": "done"})
 
     root = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="root",
         stack_name="default",
         work=blocking_work,
@@ -620,6 +642,8 @@ def test_nested_children_use_canonical_root_and_cancel_recursively(
         request_payload={"body": {"mode": "workspace_agent"}},
     )
     finished_child = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="finished child",
         stack_name="default",
         work=lambda handle: handle.complete({"answer": "finished"}),
@@ -630,6 +654,8 @@ def test_nested_children_use_canonical_root_and_cancel_recursively(
     )
     wait_for_status(store, finished_child["run_id"], {"completed"})
     child = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="child",
         stack_name="default",
         work=blocking_work,
@@ -639,6 +665,8 @@ def test_nested_children_use_canonical_root_and_cancel_recursively(
         request_payload={"body": {"mode": "research"}},
     )
     grandchild = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="grandchild",
         stack_name="default",
         work=blocking_work,
@@ -675,6 +703,8 @@ def test_origin_key_submit_or_find_is_atomic_postgres(store) -> None:
             handle.complete({"answer": "done"})
 
     root = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="root",
         stack_name="default",
         work=root_work,
@@ -686,6 +716,8 @@ def test_origin_key_submit_or_find_is_atomic_postgres(store) -> None:
     def submit_same_origin() -> dict:
         barrier.wait()
         return store.submit(
+            mode="research",
+            workflow_contract=1,
             question="same child",
             stack_name="default",
             work=lambda handle: handle.complete({"answer": "child"}),
@@ -720,6 +752,8 @@ def test_child_submit_racing_root_cancel_is_serialized_postgres(store) -> None:
             handle.complete({"answer": "done"})
 
     root = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="root",
         stack_name="default",
         work=blocking_work,
@@ -731,6 +765,8 @@ def test_child_submit_racing_root_cancel_is_serialized_postgres(store) -> None:
     def submit_child() -> dict:
         barrier.wait()
         return store.submit(
+            mode="research",
+            workflow_contract=1,
             question="racing child",
             stack_name="default",
             work=blocking_work,
@@ -784,6 +820,8 @@ def test_cancelled_child_park_miss_projects_and_wakes_parent(store) -> None:
     try:
         seed_agent_session(dispatching, "session-cancelled-park")
         parent = dispatching.submit(
+            mode="research",
+            workflow_contract=1,
             question="parent",
             stack_name="default",
             work=lambda _handle: None,
@@ -792,10 +830,12 @@ def test_cancelled_child_park_miss_projects_and_wakes_parent(store) -> None:
             request_payload={"body": {"mode": "workspace_agent"}},
         )
         parent_claim = dispatching.claim_for_execution(
-            parent["run_id"], "default", allow_takeover=False
+            parent["run_id"], "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
         )
         assert parent_claim is not None
         child = dispatching.submit(
+            mode="research",
+            workflow_contract=1,
             question="child",
             stack_name="default",
             work=lambda _handle: None,
@@ -810,7 +850,7 @@ def test_cancelled_child_park_miss_projects_and_wakes_parent(store) -> None:
             },
         )
         child_claim = dispatching.claim_for_execution(
-            child["run_id"], "default", allow_takeover=False
+            child["run_id"], "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
         )
         assert child_claim is not None
         dispatching.mark_waiting(
@@ -954,6 +994,8 @@ def test_parallel_root_agent_session_claim_accepts_exactly_one(store):
     def submit() -> str:
         barrier.wait(timeout=5.0)
         return store.submit(
+            mode="research",
+            workflow_contract=1,
             question="Agent",
             stack_name="default",
             work=work,
@@ -1000,6 +1042,8 @@ def test_agent_session_tombstone_blocks_children_until_runs_are_terminal(
     try:
         seed_agent_session(durable, session_id)
         root = durable.submit(
+            mode="research",
+            workflow_contract=1,
             question="parent",
             stack_name="default",
             work=lambda _handle: None,
@@ -1008,7 +1052,7 @@ def test_agent_session_tombstone_blocks_children_until_runs_are_terminal(
             request_payload={"body": {"mode": "workspace_agent"}},
         )
         claim = durable.claim_for_execution(
-            root["run_id"], "default", allow_takeover=False
+            root["run_id"], "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
         )
         assert claim is not None
 
@@ -1028,6 +1072,8 @@ def test_agent_session_tombstone_blocks_children_until_runs_are_terminal(
 
         with pytest.raises(RunSessionActive):
             durable.submit(
+                mode="research",
+                workflow_contract=1,
                 question="child",
                 stack_name="default",
                 work=lambda _handle: None,
@@ -1275,6 +1321,7 @@ def test_knowledge_session_deletion_removes_only_its_owned_run_aggregate(
                                 **row,
                                 "status": "completed",
                                 "mode": "knowledge",
+                                "workflow_contract": 1,
                                 "kind": "standard",
                                 "session_id": f"foreign-{index}",
                                 "question": "Foreign content",
@@ -1542,37 +1589,33 @@ async def test_retained_deletion_receipts_block_session_recreation(engine) -> No
     knowledge_store = PostgresKnowledgeSessionStore(
         engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE
     )
-    try:
-        with pytest.raises(AgentSessionNotFound):
-            await agent_store.claim_session(
-                id="session-deleted-agent",
-                title="stale",
-                created_at=now,
-                created_by_user_id=None,
-                workspace_id=None,
-            )
-        with pytest.raises(KnowledgeSessionNotFound):
-            await knowledge_store.claim_session(
-                id="session-deleted-knowledge",
-                title="stale",
-                created_at=now,
-                created_by_user_id=None,
-                workspace_id=None,
-            )
-        with pytest.raises(KnowledgeSessionNotFound):
-            await knowledge_store.upsert_session(
-                id="session-deleted-knowledge",
-                title="stale",
-                items_json="[]",
-                group_id=None,
-                created_at=now,
-                updated_at=now,
-                created_by_user_id=None,
-                workspace_id=None,
-            )
-    finally:
-        await agent_store.aclose()
-        await knowledge_store.aclose()
+    with pytest.raises(AgentSessionNotFound):
+        await agent_store.claim_session(
+            id="session-deleted-agent",
+            title="stale",
+            created_at=now,
+            created_by_user_id=None,
+            workspace_id=None,
+        )
+    with pytest.raises(KnowledgeSessionNotFound):
+        await knowledge_store.claim_session(
+            id="session-deleted-knowledge",
+            title="stale",
+            created_at=now,
+            created_by_user_id=None,
+            workspace_id=None,
+        )
+    with pytest.raises(KnowledgeSessionNotFound):
+        await knowledge_store.upsert_session(
+            id="session-deleted-knowledge",
+            title="stale",
+            items_json="[]",
+            group_id=None,
+            created_at=now,
+            updated_at=now,
+            created_by_user_id=None,
+            workspace_id=None,
+        )
 
 
 def test_metrics_snapshot_counts_running_rows(store):
@@ -1641,8 +1684,35 @@ def test_owned_run_handle_reads_elapsed_time_without_public_visibility(store):
         store.get(summary["run_id"])
 
 
+def test_a_run_row_keeps_the_binding_it_was_submitted_with(store):
+    """An imported report never runs, so it takes the first contract."""
+    submitted = submit_noop(store, mode="knowledge", workflow_contract=3)
+    imported = store.import_completed_run(
+        source_run_id="local_bound_pg",
+        question="imported report",
+        stack_name="default",
+        result={"answer": "body"},
+        mode="agent_kernel",
+    )
+
+    async def binding(run_id):
+        async with store._session("default") as session:
+            row = (
+                await session.execute(
+                    select(runs.c.mode, runs.c.workflow_contract).where(
+                        runs.c.run_id == run_id
+                    )
+                )
+            ).one()
+        return tuple(row)
+
+    assert store._call(binding(submitted["run_id"])) == ("knowledge", 3)
+    assert store._call(binding(imported["run_id"])) == ("agent_kernel", 1)
+
+
 def test_import_completed_run_is_idempotent_and_owner_scoped(store):
     summary = store.import_completed_run(
+        mode="research",
         source_run_id="local_imported_pg",
         question="imported report",
         stack_name="default",
@@ -1661,6 +1731,7 @@ def test_import_completed_run_is_idempotent_and_owner_scoped(store):
 
     # Idempotent re-import for the same owner: same row, body untouched.
     again = store.import_completed_run(
+        mode="research",
         source_run_id="local_imported_pg",
         question="imported report",
         stack_name="default",
@@ -1673,6 +1744,7 @@ def test_import_completed_run_is_idempotent_and_owner_scoped(store):
 
     # A foreign principal importing the SAME id gets a fresh id; A stays intact.
     foreign = store.import_completed_run(
+        mode="research",
         source_run_id="local_imported_pg",
         question="B",
         stack_name="default",
@@ -1693,6 +1765,7 @@ def test_share_facts_match_the_single_owner_and_title_reads(store):
     from inqtrix.auth.shares import ShareFacts
 
     owned = store.import_completed_run(
+        mode="research",
         source_run_id="local_share_facts_owned",
         question="Owned report?",
         stack_name="default",
@@ -1701,6 +1774,7 @@ def test_share_facts_match_the_single_owner_and_title_reads(store):
         created_by_tenant_id="default",
     )["run_id"]
     legacy = store.import_completed_run(
+        mode="research",
         source_run_id="local_share_facts_legacy",
         question="Legacy report?",
         stack_name="default",
@@ -1725,6 +1799,7 @@ def test_share_facts_match_the_single_owner_and_title_reads(store):
 
 def test_delete_removes_terminal_run_owner_scoped(store):
     imported = store.import_completed_run(
+        mode="research",
         source_run_id="local_delete_pg",
         question="report",
         stack_name="default",
@@ -1935,14 +2010,14 @@ def test_claim_fencing_discards_zombie_terminal_writes(store):
         run_id = third["run_id"]
         assert store.get(run_id)["status"] == "queued"
 
-        first = store.claim_for_execution(run_id, "default", allow_takeover=False)
+        first = store.claim_for_execution(run_id, "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS)
         assert first is not None and first.attempt == 1
         # A fresh duplicate message must NOT steal a healthy run...
         assert (
-            store.claim_for_execution(run_id, "default", allow_takeover=False) is None
+            store.claim_for_execution(run_id, "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS) is None
         )
         # ...but a reclaim (owner stopped heartbeating) takes over.
-        second = store.claim_for_execution(run_id, "default", allow_takeover=True)
+        second = store.claim_for_execution(run_id, "default", allow_takeover=True, workflow_contracts=WORKER_CONTRACTS)
         assert second is not None and second.attempt == 2
 
         # The zombie's write (old fence) is a discarded no-op...
@@ -2041,7 +2116,6 @@ def test_worker_shape_store_never_sweeps_foreign_rows(store):
 def test_stuck_row_cap_spares_terminal_rows(store):
     """The retention failsafe targets NON-terminal rows only —
     terminal rows are governed by the regular TTL."""
-    import asyncio as aio
 
     from sqlalchemy import update as sa_update
 
@@ -2058,10 +2132,90 @@ def test_stuck_row_cap_spares_terminal_rows(store):
                 .values(created_at=time.time() - 30 * 86_400)
             )
 
-    aio.run_coroutine_threadsafe(backdate(), store._loop).result()
+    store._call(backdate())
     # Any read runs the lazy cleanup; the terminal row must survive
     # the stuck-row cap (its finished_at is fresh, the TTL governs).
     assert store.get(summary["run_id"])["status"] == "completed"
+
+
+def test_closing_the_store_closes_its_queue_client_on_the_process_loop(engine):
+    """The client's connections belong to the loop the store runs on."""
+    class ClosableQueue(_RecordingDispatchQueue):
+        closed_on: asyncio.AbstractEventLoop | None = None
+
+        async def aclose(self) -> None:
+            self.closed_on = asyncio.get_running_loop()
+
+    queue = ClosableQueue()
+    closing = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=None,
+        dispatch_queue=queue,
+        recover_orphans=False,
+        max_concurrent=2,
+        max_queue_size=10,
+        completed_ttl_seconds=300,
+        worker_id="pytest-client-close",
+    )
+
+    closing.close()
+
+    assert queue.closed_on is aio.default_loop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", ["in_a_statement", "between_statements"])
+async def test_a_read_cancelled_midway_leaves_the_pool_working(engine, cancelled: str) -> None:
+    """A client that disconnects during a read must not hand the next request a dead connection.
+
+    As in a request, the cancelling scope also cancels every further await inside it, and
+    the only connection of the pool has to come back.
+    """
+    del engine  # fixture performs isolated database cleanup before the test
+    durable = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL, pool_size=1, max_overflow=0, pool_timeout=5),
+        app_role=APP_ROLE,
+        queue=None,
+        dispatch_queue=_RecordingDispatchQueue(),
+        recover_orphans=False,
+        max_concurrent=1,
+        max_queue_size=2,
+        completed_ttl_seconds=300,
+        worker_id="pytest-cancelled-read",
+    )
+    try:
+        summary = await durable.asubmit(
+            mode="research",
+            workflow_contract=1,
+            question="Cancelled read",
+            stack_name="default",
+            work=lambda _handle: None,
+            request_payload={"question": "Cancelled read"},
+        )
+        reading_entered = asyncio.Event()
+
+        async def read_until_cancelled() -> None:
+            async with durable._session("default") as session:
+                await session.execute(text("SELECT 1"))
+                reading_entered.set()
+                if cancelled == "in_a_statement":
+                    await session.execute(text("SELECT pg_sleep(30)"))
+                else:
+                    await asyncio.sleep(30)
+
+        started = time.monotonic()
+        async with anyio.create_task_group() as requests:
+            requests.start_soon(read_until_cancelled)
+            await asyncio.wait_for(reading_entered.wait(), timeout=5)
+            await asyncio.sleep(0.1)
+            requests.cancel_scope.cancel()
+
+        for _ in range(3):
+            assert (await durable.aget(summary["run_id"]))["run_id"] == summary["run_id"]
+        assert time.monotonic() - started < 15
+    finally:
+        await durable.aclose()
 
 
 def test_enqueue_failure_keeps_the_accepted_run(engine):
@@ -2069,7 +2223,7 @@ def test_enqueue_failure_keeps_the_accepted_run(engine):
     run into a 500 — the reconciler re-dispatches it later."""
 
     class BrokenQueue:
-        def enqueue(self, *, run_id, tenant_id):
+        async def enqueue(self, *, run_id, tenant_id):
             raise ConnectionError("broker weg")
 
     broken = PostgresRunStore(
@@ -2083,6 +2237,8 @@ def test_enqueue_failure_keeps_the_accepted_run(engine):
     )
     try:
         summary = broken.submit(
+            mode="research",
+            workflow_contract=1,
             question="Broker-Test",
             stack_name="default",
             work=lambda handle: None,
@@ -2144,6 +2300,7 @@ def test_an_incognito_run_ages_out_after_its_own_window(store):
 
     def ask(body: dict) -> dict:
         return store.submit(
+            workflow_contract=1,
             question="Wie ist die Haftung geregelt?",
             stack_name="default",
             work=done,
@@ -2193,6 +2350,7 @@ def test_a_sweep_removes_an_expired_incognito_run_without_any_access(store):
 
     def ask(body: dict) -> str:
         return store.submit(
+            workflow_contract=1,
             question="Wie ist die Haftung geregelt?",
             stack_name="default",
             work=done,
@@ -2571,6 +2729,313 @@ def test_parent_failure_cascades_over_children_with_reason(store):
         events.close()
 
 
+def _reasons(store, run_id: str, event_type: str) -> list[str]:
+    """The ``reason`` of every *event_type* event of one run, in order."""
+    events = store.subscribe(run_id)
+    try:
+        return [
+            str(event["data"].get("reason"))
+            for event in events.replay
+            if event["type"] == event_type
+        ]
+    finally:
+        events.close()
+
+
+def _set_run_columns(run_id: str, **values) -> None:
+    """Write columns of one run directly, as another process would see them."""
+
+    async def write() -> None:
+        writer = build_engine(TEST_DATABASE_URL)
+        factory = build_session_factory(writer)
+        try:
+            async with factory() as session:
+                async with session.begin():
+                    await session.execute(
+                        runs.update().where(runs.c.run_id == run_id).values(**values)
+                    )
+        finally:
+            await writer.dispose()
+
+    asyncio.run(write())
+
+
+def _cancel_watching_child(started: threading.Event, *, park: bool = False):
+    """Child work that runs until its cancel arrives, then reports the cancel.
+
+    Its engine knows only that the cancel event was set, so it reports the
+    generic ``client_requested_cancel``, or parks when *park* is set; the
+    store decides which reason the run ends with.
+    """
+
+    def work(handle) -> None:
+        started.set()
+        handle.cancel_event.wait(10)
+        if park:
+            handle.wait("waiting_for_input")
+        else:
+            handle.cancel("client_requested_cancel")
+
+    return work
+
+
+def test_a_running_child_ends_with_the_reason_of_its_cancel_request(store):
+    """The parent's failure asks the running child to stop with ``parent_failed``.
+
+    The child's engine only sees the cancel event and reports the generic
+    reason; the run still ends with the reason of the request it received.
+    """
+    parent = submit_noop(
+        store, work=lambda handle: handle.wait("waiting_for_input"), kind="agent"
+    )["run_id"]
+    wait_for_status(store, parent, {"waiting_for_input"})
+    started = threading.Event()
+    child = submit_noop(
+        store,
+        question="Teilaufgabe",
+        work=_cancel_watching_child(started),
+        kind="agent_child",
+        parent_run_id=parent,
+        root_run_id=parent,
+    )["run_id"]
+    assert started.wait(5)
+
+    assert store.fail(parent, "Simulierter Elternfehler") is True
+
+    wait_for_status(store, child, {"cancelled"})
+    assert _reasons(store, child, "inqtrix.run.cancel_requested") == ["parent_failed"]
+    assert _reasons(store, child, "inqtrix.run.cancelled") == ["parent_failed"]
+
+
+def test_a_child_that_parks_with_a_pending_request_ends_with_its_reason(store):
+    parent = submit_noop(
+        store, work=lambda handle: handle.wait("waiting_for_input"), kind="agent"
+    )["run_id"]
+    wait_for_status(store, parent, {"waiting_for_input"})
+    started = threading.Event()
+    child = submit_noop(
+        store,
+        question="Teilaufgabe",
+        work=_cancel_watching_child(started, park=True),
+        kind="agent_child",
+        parent_run_id=parent,
+        root_run_id=parent,
+    )["run_id"]
+    assert started.wait(5)
+
+    assert store.fail(parent, "Simulierter Elternfehler") is True
+
+    wait_for_status(store, child, {"cancelled"})
+    assert _reasons(store, child, "inqtrix.run.cancelled") == ["parent_failed"]
+
+
+def test_a_cascade_leaves_the_pending_request_of_a_child_alone(store):
+    """A child already asked to stop keeps that request and its reason."""
+    parent = submit_noop(
+        store, work=lambda handle: handle.wait("waiting_for_input"), kind="agent"
+    )["run_id"]
+    wait_for_status(store, parent, {"waiting_for_input"})
+    started = threading.Event()
+    proceed = threading.Event()
+
+    def child_work(handle) -> None:
+        started.set()
+        proceed.wait(10)
+        assert handle.cancel_event.is_set()
+        handle.cancel("client_requested_cancel")
+
+    child = submit_noop(
+        store,
+        question="Teilaufgabe",
+        work=child_work,
+        kind="agent_child",
+        parent_run_id=parent,
+        root_run_id=parent,
+    )["run_id"]
+    assert started.wait(5)
+    store.cancel(child)
+
+    assert store.fail(parent, "Simulierter Elternfehler") is True
+    proceed.set()
+
+    wait_for_status(store, child, {"cancelled"})
+    assert _reasons(store, child, "inqtrix.run.cancel_requested") == [
+        "client_requested_cancel"
+    ]
+    assert _reasons(store, child, "inqtrix.run.cancelled") == ["client_requested_cancel"]
+
+
+def test_a_run_that_ends_itself_cancelled_takes_its_children_along(store):
+    """A run that stops on its own, without a request, still ends its children."""
+    proceed = threading.Event()
+
+    def parent_work(handle) -> None:
+        proceed.wait(10)
+        handle.cancel("limit_cancelled_by_user")
+
+    parent = submit_noop(store, work=parent_work, kind="agent")["run_id"]
+    wait_for_status(store, parent, {"running"})
+    child = submit_noop(
+        store,
+        question="Teilaufgabe",
+        work=lambda handle: handle.wait("waiting_for_input"),
+        kind="agent_child",
+        parent_run_id=parent,
+        root_run_id=parent,
+    )["run_id"]
+    wait_for_status(store, child, {"waiting_for_input"})
+
+    proceed.set()
+
+    wait_for_status(store, parent, {"cancelled"})
+    assert _reasons(store, parent, "inqtrix.run.cancelled") == ["limit_cancelled_by_user"]
+    wait_for_status(store, child, {"cancelled"})
+    assert _reasons(store, child, "inqtrix.run.cancelled") == ["parent_cancelled"]
+
+
+def test_a_timed_out_wait_cancels_the_running_children_of_the_run(engine):
+    """The waiting TTL takes the run's live children along (``parent_cancelled``).
+
+    The child still works when its parent's wait runs out: the sweep asks it to
+    stop in the same transaction, its in-process handle learns of it after the
+    commit, and it ends with the request's reason.
+    """
+    impatient = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=None,
+        max_concurrent=2,
+        max_queue_size=10,
+        completed_ttl_seconds=300,
+        worker_id="pytest-worker-ttl-cascade",
+        waiting_ttl_seconds=60,
+    )
+    try:
+        parent = submit_noop(
+            impatient,
+            work=lambda handle: handle.wait("waiting_for_approval"),
+            kind="agent",
+        )["run_id"]
+        wait_for_status(impatient, parent, {"waiting_for_approval"})
+        started = threading.Event()
+        child = submit_noop(
+            impatient,
+            question="Teilaufgabe",
+            work=_cancel_watching_child(started),
+            kind="agent_child",
+            parent_run_id=parent,
+            root_run_id=parent,
+        )["run_id"]
+        assert started.wait(5)
+
+        _set_run_columns(parent, waiting_since=time.time() - 120)
+
+        wait_for_status(impatient, parent, {"cancelled"})
+        assert _reasons(impatient, parent, "inqtrix.run.cancelled") == ["approval_timeout"]
+        wait_for_status(impatient, child, {"cancelled"})
+        assert _reasons(impatient, child, "inqtrix.run.cancel_requested") == [
+            "parent_cancelled"
+        ]
+        assert _reasons(impatient, child, "inqtrix.run.cancelled") == ["parent_cancelled"]
+    finally:
+        impatient.close()
+
+
+def test_a_restart_fails_the_running_run_and_cancels_its_waiting_children(engine):
+    """The restart sweep fails what no process runs and ends the children with it."""
+    release = threading.Event()
+    before = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=None,
+        max_concurrent=2,
+        max_queue_size=10,
+        completed_ttl_seconds=300,
+        worker_id="pytest-before-restart",
+    )
+    try:
+        parent = submit_noop(
+            before, work=lambda handle: release.wait(10), kind="agent"
+        )["run_id"]
+        wait_for_status(before, parent, {"running"})
+        child = submit_noop(
+            before,
+            question="Teilaufgabe",
+            work=lambda handle: handle.wait("waiting_for_input"),
+            kind="agent_child",
+            parent_run_id=parent,
+            root_run_id=parent,
+        )["run_id"]
+        wait_for_status(before, child, {"waiting_for_input"})
+
+        after = PostgresRunStore(
+            engine=build_engine(TEST_DATABASE_URL),
+            app_role=APP_ROLE,
+            queue=None,
+            max_concurrent=2,
+            max_queue_size=10,
+            completed_ttl_seconds=300,
+            worker_id="pytest-after-restart",
+        )
+        try:
+            after.start()
+            assert after.get(parent)["status"] == "failed"
+            assert after.get(child)["status"] == "cancelled"
+            assert _reasons(after, child, "inqtrix.run.cancelled") == ["parent_failed"]
+        finally:
+            after.close()
+    finally:
+        release.set()
+        before.close()
+
+
+def test_a_claim_without_execution_authority_cancels_the_children_of_the_run(store):
+    """A run whose execution authority is gone fails at its claim, children included."""
+    del store  # fixture provides isolated migrated rows for this test
+    dispatching = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=None,
+        dispatch_queue=_RecordingDispatchQueue(),
+        recover_orphans=False,
+        max_concurrent=2,
+        max_queue_size=10,
+        completed_ttl_seconds=300,
+        worker_id="pytest-claim-revoked",
+    )
+    try:
+        parent = submit_noop(dispatching, kind="agent")["run_id"]
+        child = submit_noop(
+            dispatching,
+            question="Teilaufgabe",
+            kind="agent_child",
+            parent_run_id=parent,
+            root_run_id=parent,
+        )["run_id"]
+        child_claim = dispatching.claim_for_execution(
+            child, "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
+        )
+        assert child_claim is not None
+        dispatching.mark_waiting(
+            child, status="waiting_for_input", fence_attempt=child_claim.attempt
+        )
+        # An ownerless run executed by a user: no execution authority.
+        _set_run_columns(parent, execution_actor_user_id=USER_A)
+
+        assert (
+            dispatching.claim_for_execution(
+                parent, "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
+            )
+            is None
+        )
+
+        assert dispatching.dispatch_status(parent, "default") == "failed"
+        assert dispatching.dispatch_status(child, "default") == "cancelled"
+        assert _reasons(dispatching, child, "inqtrix.run.cancelled") == ["parent_failed"]
+    finally:
+        dispatching.close()
+
+
 def test_waiting_ttl_auto_cancels_with_approval_timeout(engine):
     impatient = PostgresRunStore(
         engine=build_engine(TEST_DATABASE_URL),
@@ -2657,6 +3122,8 @@ def test_waiting_child_ttl_projects_terminal_and_wakes_parent(store):
         calls["count"] += 1
         if calls["count"] == 1:
             child = impatient.submit(
+                mode="research",
+                workflow_contract=1,
                 question="Kind-Recherche",
                 stack_name="default",
                 work=child_work,
@@ -2677,6 +3144,8 @@ def test_waiting_child_ttl_projects_terminal_and_wakes_parent(store):
 
     try:
         parent = impatient.submit(
+            mode="research",
+            workflow_contract=1,
             question="Agent-Auftrag",
             stack_name="default",
             work=parent_work,
@@ -2792,8 +3261,6 @@ def test_stuck_row_failsafe_spares_waiting_rows(store, engine):
 
     # Age the row past the stuck threshold; keep the wait fresh. A
     # dedicated engine: the fixture engine is bound to another loop.
-    import asyncio
-
     async def _age():
         aging_engine = build_engine(TEST_DATABASE_URL)
         try:
@@ -2844,7 +3311,7 @@ def test_waiting_ttl_sweep_does_not_deadlock_concurrent_dispatch(engine):
         time.sleep(0.5)
 
         # Concurrent submitters (dispatch holds the store lock while
-        # blocking on the store loop) and readers (their cleanup sweep
+        # blocking on the process loop) and readers (their cleanup sweep
         # runs ON that loop and records the timed-out parked run).
         # With the regression this interleaving wedges the whole store.
         import threading
@@ -2913,7 +3380,7 @@ def test_fenced_park_with_pending_cancel_resolves_as_cancel(store):
         own = submit_noop(store, work=slow)["run_id"]
         zombie = submit_noop(store, work=slow)["run_id"]
 
-        claim = store.claim_for_execution(own, "default", allow_takeover=False)
+        claim = store.claim_for_execution(own, "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS)
         assert claim is not None and claim.attempt == 1
         # Two-phase request against the running claim...
         store.cancel(own)
@@ -2924,15 +3391,16 @@ def test_fenced_park_with_pending_cancel_resolves_as_cancel(store):
         events = store.subscribe(own)
         try:
             assert events.replay[-1]["type"] == "inqtrix.run.cancelled"
-            assert events.replay[-1]["data"]["reason"] == "cancelled_while_waiting"
+            # The run ends with the reason of the request it parked under.
+            assert events.replay[-1]["data"]["reason"] == "client_requested_cancel"
         finally:
             events.close()
 
         # The zombie guard stays: a superseded attempt's park neither
         # parks nor cancels the live attempt's run.
-        first = store.claim_for_execution(zombie, "default", allow_takeover=False)
+        first = store.claim_for_execution(zombie, "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS)
         assert first is not None and first.attempt == 1
-        second = store.claim_for_execution(zombie, "default", allow_takeover=True)
+        second = store.claim_for_execution(zombie, "default", allow_takeover=True, workflow_contracts=WORKER_CONTRACTS)
         assert second is not None and second.attempt == 2
         with pytest.raises(RunActive, match="another worker attempt"):
             store.mark_waiting(zombie, status="waiting_for_approval", fence_attempt=1)
@@ -2969,7 +3437,6 @@ def test_emit_after_terminal_is_dropped_loudly(store):
 def test_child_projection_cannot_follow_parent_terminal_event(store):
     """Parent lock orders a racing child projection before terminalization."""
     del store
-    import asyncio
     from types import MethodType
 
     queue = _RecordingDispatchQueue()
@@ -3001,6 +3468,8 @@ def test_child_projection_cannot_follow_parent_terminal_event(store):
     try:
         seed_agent_session(projector, "session-projection-order")
         parent = projector.submit(
+            mode="research",
+            workflow_contract=1,
             question="parent",
             stack_name="default",
             work=lambda _handle: None,
@@ -3009,6 +3478,8 @@ def test_child_projection_cannot_follow_parent_terminal_event(store):
             request_payload={"body": {"mode": "workspace_agent"}},
         )
         child = projector.submit(
+            mode="research",
+            workflow_contract=1,
             question="child",
             stack_name="default",
             work=lambda _handle: None,
@@ -3107,6 +3578,8 @@ class _SegmentedParent:
         if self.segments == 1:
             for work in self.child_works:
                 summary = self.store.submit(
+                    mode="research",
+                    workflow_contract=1,
                     question="Kind-Recherche",
                     stack_name="default",
                     work=work,
@@ -3137,6 +3610,8 @@ def test_children_wake_resumes_parent_after_last_child(store):
 
     parent = _SegmentedParent(store, [child_one, child_two])
     run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent-Auftrag",
         stack_name="default",
         work=parent,
@@ -3172,6 +3647,8 @@ def test_cancelling_waiting_child_wakes_parent(store):
 
     parent = _SegmentedParent(store, [child_work])
     run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent-Auftrag",
         stack_name="default",
         work=parent,
@@ -3198,6 +3675,8 @@ def test_children_park_self_heals_when_child_already_terminal(store):
 
     parent = _SegmentedParent(store, [child_work], park_gate=park_gate)
     run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent-Auftrag",
         stack_name="default",
         work=parent,
@@ -3232,6 +3711,8 @@ def test_cancel_of_children_parked_parent_cascades(store):
 
     parent = _SegmentedParent(store, [child_work])
     run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent-Auftrag",
         stack_name="default",
         work=parent,
@@ -3257,7 +3738,7 @@ def test_per_user_cap_admission_counts_queued_and_running(engine):
     """1.3: durable per-user fairness bound; parked runs excluded."""
     import threading
 
-    from inqtrix.server.runs import RunPerUserLimit
+    from inqtrix.runs.records import RunPerUserLimit
 
     del engine  # fixture cleanup engine belongs to pytest's event loop
     store = PostgresRunStore(
@@ -3278,6 +3759,8 @@ def test_per_user_cap_admission_counts_queued_and_running(engine):
 
     def submit(user_id: uuid.UUID):
         return store.submit(
+            mode="research",
+            workflow_contract=1,
             question="F",
             stack_name="default",
             work=slow,
@@ -3293,6 +3776,8 @@ def test_per_user_cap_admission_counts_queued_and_running(engine):
         # A distinct canonical user is unaffected; anonymous is never capped.
         submit(USER_B)
         store.submit(
+            mode="research",
+            workflow_contract=1,
             question="F",
             stack_name="default",
             work=slow,
@@ -3303,7 +3788,7 @@ def test_per_user_cap_admission_counts_queued_and_running(engine):
         store.close()
 
 
-def test_close_drains_active_local_worker_before_stopping_database_loop(engine):
+def test_close_drains_active_local_worker_before_disposing_the_engine(engine):
     """A terminal write in flight must finish before its event loop closes."""
     del engine  # fixture performs isolated database cleanup before the test
     store = PostgresRunStore(
@@ -3327,6 +3812,8 @@ def test_close_drains_active_local_worker_before_stopping_database_loop(engine):
         terminal_write_finished.set()
 
     store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Close drain",
         stack_name="default",
         work=work,
@@ -3344,7 +3831,7 @@ def test_close_drains_active_local_worker_before_stopping_database_loop(engine):
 
     assert not closer.is_alive()
     assert terminal_write_finished.is_set()
-    assert store._loop.is_closed()
+    assert store._closed
 
 
 def test_close_drains_unclosed_event_subscription_before_disposing_engine(engine):
@@ -3362,6 +3849,8 @@ def test_close_drains_unclosed_event_subscription_before_disposing_engine(engine
         worker_id="pytest-close-subscription",
     )
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Open stream",
         stack_name="default",
         work=lambda handle: None,
@@ -3376,7 +3865,7 @@ def test_close_drains_unclosed_event_subscription_before_disposing_engine(engine
 
     assert not poller.is_alive()
     assert store._subscriptions == set()
-    assert store._loop.is_closed()
+    assert store._closed
 
 
 def test_subscription_start_is_atomic_with_store_close(engine, monkeypatch):
@@ -3394,6 +3883,8 @@ def test_subscription_start_is_atomic_with_store_close(engine, monkeypatch):
         worker_id="pytest-subscription-start-race",
     )
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Race stream startup",
         stack_name="default",
         work=lambda handle: None,
@@ -3447,7 +3938,7 @@ def test_subscription_start_is_atomic_with_store_close(engine, monkeypatch):
     poller = subscriptions[0]._thread
     assert poller is not None and not poller.is_alive()
     assert store._subscriptions == set()
-    assert store._loop.is_closed()
+    assert store._closed
 
 
 def test_consumer_close_does_not_block_on_inflight_subscription_read(
@@ -3467,6 +3958,8 @@ def test_consumer_close_does_not_block_on_inflight_subscription_read(
         worker_id="pytest-subscription-consumer-close",
     )
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Disconnect stream",
         stack_name="default",
         work=lambda handle: None,
@@ -3500,7 +3993,7 @@ def test_consumer_close_does_not_block_on_inflight_subscription_read(
     assert not poller.is_alive()
     assert subscription not in store._subscriptions
     store.close()
-    assert store._loop.is_closed()
+    assert store._closed
 
 
 def test_run_lists_read_no_result_and_match_the_single_read(store):
@@ -3527,6 +4020,8 @@ def test_run_lists_read_no_result_and_match_the_single_read(store):
     long_question = "Wie ist die Haftung geregelt? " * (QUESTION_COLUMN_LIMIT // 10)
     session_id = f"ses-{uuid.uuid4().hex[:12]}"
     root = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="root",
         stack_name="default",
         work=root_work,
@@ -3535,6 +4030,8 @@ def test_run_lists_read_no_result_and_match_the_single_read(store):
     )
     try:
         child = store.submit(
+            mode="research",
+            workflow_contract=1,
             question=long_question,
             stack_name="default",
             work=lambda handle: handle.complete({"answer": "x" * 50_000}),
@@ -3558,7 +4055,7 @@ def test_run_lists_read_no_result_and_match_the_single_read(store):
     def capture(conn, cursor, statement, parameters, context, executemany):
         statements.append(statement)
 
-    engine = store._engine.sync_engine
+    engine = store._session_factory.kw["bind"].sync_engine
     event.listen(engine, "before_cursor_execute", capture)
     try:
         page, _cursor = store.list_page(limit=50)
@@ -3632,6 +4129,8 @@ def test_list_page_reports_true_global_queue_position_across_pages(store):
     for i in range(5):
         ids.append(
             store.submit(
+                mode="research",
+                workflow_contract=1,
                 question=f"q{i}",
                 stack_name="default",
                 work=blocking,
@@ -3749,9 +4248,13 @@ def test_initial_retention_sweep_already_owns_checkpoint_cleanup(store):
     reopened = PostgresRunStore(engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE,
         queue=None, max_concurrent=2, max_queue_size=10, completed_ttl_seconds=300,
         worker_id="retention-reopen", recover_orphans=True,
-        checkpoint_cleanup=lambda rid, mode: calls.append((rid, mode)))
+        checkpoint_cleanup=lambda rid, mode: calls.append(
+            (rid, mode, threading.current_thread().name)
+        ))
     try:
-        assert calls == [(run_id, "agent_kernel")]
+        reopened.start()
+        assert [call[:2] for call in calls] == [(run_id, "agent_kernel")]
+        assert calls[0][2].startswith("inqtrix-blocking"), "the cleanup holds no loop"
         with pytest.raises(RunNotFound):
             reopened.get(run_id)
     finally:
@@ -3783,3 +4286,69 @@ def test_cascading_run_delete_purges_descendant_checkpoints_under_terminal_fence
     assert calls == [(run_id, "agent_kernel"), (child_id, "workspace_agent")]
     with pytest.raises(RunNotFound):
         store.get(child_id)
+
+
+@pytest.fixture()
+def audited_store(engine):
+    """A store whose denials reach an audit sink on the same pool."""
+    store_engine = build_engine(TEST_DATABASE_URL)
+    store = PostgresRunStore(
+        engine=store_engine,
+        app_role=APP_ROLE,
+        queue=None,
+        max_concurrent=2,
+        max_queue_size=10,
+        completed_ttl_seconds=300,
+        worker_id="pytest-worker",
+        audit=PostgresIdentityBackend(
+            session_factory=build_session_factory(store_engine), app_role=APP_ROLE
+        ),
+    )
+    yield store
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda store, run_id, reader: store.get(run_id, visible_to=reader),
+        lambda store, run_id, reader: store.result(run_id, visible_to=reader),
+        lambda store, run_id, reader: store.subscribe(run_id, visible_to=reader, stream=False),
+        lambda store, run_id, reader: store.source_request_body(run_id, visible_to=reader),
+    ],
+    ids=["summary", "result", "replay", "request_body"],
+)
+def test_a_denied_read_is_audited_after_its_session_closed(audited_store, read):
+    """A denial holds one pool connection at a time and still reaches the audit.
+
+    The read's session holds its connection while it checks visibility, and
+    the audit sink opens a session of its own: written inside the read, every
+    denial held two connections, and a full pool of them waited on itself.
+    The guard of this suite fails a test whose task holds two connections.
+    """
+    run_id = submit_noop(
+        audited_store, created_by_user_id=OWNER_1, created_by_tenant_id="default"
+    )["run_id"]
+    wait_for_status(audited_store, run_id, {"completed"}, visible_to=_scoped(OWNER_1))
+
+    with pytest.raises(RunNotFound):
+        read(audited_store, run_id, _scoped(INTRUDER))
+
+    async def denials() -> list[uuid.UUID]:
+        admin_engine = build_engine(TEST_DATABASE_URL)
+        try:
+            async with build_session_factory(admin_engine)() as session:
+                return list(
+                    (
+                        await session.execute(
+                            select(audit_log.c.actor_user_id).where(
+                                audit_log.c.action == "authz.denied",
+                                audit_log.c.resource_id == run_id,
+                            )
+                        )
+                    ).scalars()
+                )
+        finally:
+            await admin_engine.dispose()
+
+    assert audited_store._call(denials()) == [INTRUDER]

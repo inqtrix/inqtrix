@@ -23,7 +23,7 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from fastapi import Request
 
@@ -126,6 +126,10 @@ class AuthProvider(ABC):
     (:func:`inqtrix.auth.api_key.build_auth_provider`) translates env
     configuration into constructor arguments.
     """
+
+    database_engine: Any = None
+    """The engine of the process, when this provider's stores already sit on it.
+    The composing process takes it over instead of building a second one."""
 
     @property
     @abstractmethod

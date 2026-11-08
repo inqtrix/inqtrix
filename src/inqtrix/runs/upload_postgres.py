@@ -14,13 +14,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from inqtrix.storage.migration_contract import (
     assert_schema_head,
 )
-from inqtrix.project.asset_lifecycle import lock_asset_lifecycle
+from inqtrix.storage.asset_lifecycle import lock_asset_lifecycle
 from inqtrix.project.asset_records_ports import (
     AssetDeletionInProgress,
     AssetNotFound,
     AssetRecord,
 )
 from inqtrix.runs.durable_store import DurableJobStoreBase
+from inqtrix.runs.shared import bridge_to_loop
 from inqtrix.runs.upload_operations import (
     UploadAttempt,
     UploadBinding,
@@ -36,7 +37,7 @@ from inqtrix.runs.upload_operations import (
     file_record_to_payload,
     new_upload_operation_id,
 )
-from inqtrix.source_authority import (
+from inqtrix.storage.source_authority import (
     PostgresSourceLifecycleAuthority,
     SourceLifecycleConflict,
     SourceScope,
@@ -90,7 +91,6 @@ def _record_from_mapping(row: Any) -> UploadOperationRecord:
 class PostgresUploadOperationStore(DurableJobStoreBase):
     """Fenced operation ledger with an atomic asset lifecycle projection."""
 
-    _loop_thread_name = "inqtrix-upload-db"
     _dispatch_thread_prefix = "inqtrix-upload"
     _job_kind = "Durable upload operation"
 
@@ -113,27 +113,27 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
         )
         self._reconcile_delay_seconds = max(1.0, reconcile_delay_seconds)
 
-    def start_or_resume(
+    async def astart_or_resume(
         self,
         *,
         asset: AssetRecord,
         proposed_file,
         binding: UploadBinding,
     ) -> UploadAttempt:
-        return self._call(
-            self._start_or_resume_db(
-                asset=asset, proposed_file=proposed_file, binding=binding
-            )
+        return await self._start_or_resume_db(
+            asset=asset, proposed_file=proposed_file, binding=binding
         )
 
-    def get_record(
+    start_or_resume = bridge_to_loop(astart_or_resume)
+
+    async def aget_record(
         self, operation_id: str, *, tenant_id: str = "default"
     ) -> UploadOperationRecord:
-        return self._call(
-            self._get_record_by_tenant_db(operation_id, tenant_id=tenant_id)
-        )
+        return await self._get_record_by_tenant_db(operation_id, tenant_id=tenant_id)
 
-    def get(
+    get_record = bridge_to_loop(aget_record)
+
+    async def aget(
         self,
         operation_id: str,
         *,
@@ -142,17 +142,17 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
         workspace_id: str | None,
     ) -> dict[str, Any]:
         return build_upload_summary(
-            self._call(
-                self._get_record_db(
-                    operation_id,
-                    tenant_id=tenant_id,
-                    created_by_user_id=created_by_user_id,
-                    workspace_id=workspace_id,
-                )
+            await self._get_record_db(
+                operation_id,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                workspace_id=workspace_id,
             )
         )
 
-    def list_operations(
+    get = bridge_to_loop(aget)
+
+    async def alist_operations(
         self,
         *,
         tenant_id: str,
@@ -160,17 +160,17 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
         workspace_id: str | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        rows = self._call(
-            self._list_db(
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-                limit=limit,
-            )
+        rows = await self._list_db(
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            workspace_id=workspace_id,
+            limit=limit,
         )
         return [build_upload_summary(row) for row in rows]
 
-    def checkpoint(
+    list_operations = bridge_to_loop(alist_operations)
+
+    async def acheckpoint(
         self,
         operation_id: str,
         *,
@@ -178,31 +178,31 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
         stage: UploadStage,
         fence_attempt: int,
     ) -> bool:
-        return self._call(
-            self._checkpoint_db(
-                operation_id,
-                tenant_id=tenant_id,
-                stage=stage,
-                fence_attempt=fence_attempt,
-            )
+        return await self._checkpoint_db(
+            operation_id,
+            tenant_id=tenant_id,
+            stage=stage,
+            fence_attempt=fence_attempt,
         )
 
-    def complete(
+    checkpoint = bridge_to_loop(acheckpoint)
+
+    async def acomplete(
         self,
         operation_id: str,
         *,
         tenant_id: str = "default",
         fence_attempt: int,
     ) -> bool:
-        return self._call(
-            self._complete_db(
-                operation_id,
-                tenant_id=tenant_id,
-                fence_attempt=fence_attempt,
-            )
+        return await self._complete_db(
+            operation_id,
+            tenant_id=tenant_id,
+            fence_attempt=fence_attempt,
         )
 
-    def fail(
+    complete = bridge_to_loop(acomplete)
+
+    async def afail(
         self,
         operation_id: str,
         message: str,
@@ -212,18 +212,18 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
         error_type: str = "server_error",
         awaiting_bytes: bool = False,
     ) -> bool:
-        return self._call(
-            self._fail_db(
-                operation_id,
-                tenant_id=tenant_id,
-                message=sanitize_error(message),
-                error_type=error_type,
-                fence_attempt=fence_attempt,
-                awaiting_bytes=awaiting_bytes,
-            )
+        return await self._fail_db(
+            operation_id,
+            tenant_id=tenant_id,
+            message=sanitize_error(message),
+            error_type=error_type,
+            fence_attempt=fence_attempt,
+            awaiting_bytes=awaiting_bytes,
         )
 
-    def queue_retry(
+    fail = bridge_to_loop(afail)
+
+    async def aqueue_retry(
         self,
         operation_id: str,
         message: str,
@@ -232,19 +232,17 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
         fence_attempt: int,
         error_type: str = "dependency_error",
     ) -> bool:
-        landed = self._call(
-            self._queue_retry_db(
-                operation_id,
-                tenant_id=tenant_id,
-                message=sanitize_error(message),
-                error_type=error_type,
-                fence_attempt=fence_attempt,
-            )
+        landed = await self._queue_retry_db(
+            operation_id,
+            tenant_id=tenant_id,
+            message=sanitize_error(message),
+            error_type=error_type,
+            fence_attempt=fence_attempt,
         )
         if landed and self._queue is not None:
             try:
-                record = self.get_record(operation_id, tenant_id=tenant_id)
-                self._queue.enqueue(
+                record = await self.aget_record(operation_id, tenant_id=tenant_id)
+                await self._queue.enqueue(
                     operation_id=operation_id, tenant_id=record.tenant_id
                 )
             except Exception as exc:
@@ -256,7 +254,9 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
                 )
         return landed
 
-    def queue_continuation(
+    queue_retry = bridge_to_loop(aqueue_retry)
+
+    async def aqueue_continuation(
         self,
         operation_id: str,
         *,
@@ -265,16 +265,14 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
     ) -> bool:
         """Persist the HTTP-to-worker handoff for canonical parsing."""
 
-        landed = self._call(
-            self._queue_continuation_db(
-                operation_id,
-                tenant_id=tenant_id,
-                fence_attempt=fence_attempt,
-            )
+        landed = await self._queue_continuation_db(
+            operation_id,
+            tenant_id=tenant_id,
+            fence_attempt=fence_attempt,
         )
         if landed and self._queue is not None:
             try:
-                self._queue.enqueue(operation_id=operation_id, tenant_id=tenant_id)
+                await self._queue.enqueue(operation_id=operation_id, tenant_id=tenant_id)
             except Exception as exc:
                 log.warning(
                     "Upload continuation %s could not be dispatched; the outbox "
@@ -284,7 +282,9 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
                 )
         return landed
 
-    def queue_missing_preparations(self, *, limit: int) -> list[tuple[str, str]]:
+    queue_continuation = bridge_to_loop(aqueue_continuation)
+
+    async def aqueue_missing_preparations(self, *, limit: int) -> list[tuple[str, str]]:
         """Return ready operations whose asset never got a preparation to parsing.
 
         The caller dispatches every returned operation; each outbox row
@@ -293,9 +293,11 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
         "prepared again".
         """
 
-        return self._call(self._queue_missing_preparations_db(limit))
+        return await self._queue_missing_preparations_db(limit)
 
-    def retry(
+    queue_missing_preparations = bridge_to_loop(aqueue_missing_preparations)
+
+    async def aretry(
         self,
         operation_id: str,
         *,
@@ -303,17 +305,15 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> dict[str, Any]:
-        record = self._call(
-            self._retry_db(
-                operation_id,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-            )
+        record = await self._retry_db(
+            operation_id,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            workspace_id=workspace_id,
         )
         if self._queue is not None:
             try:
-                self._queue.enqueue(operation_id=operation_id, tenant_id=tenant_id)
+                await self._queue.enqueue(operation_id=operation_id, tenant_id=tenant_id)
             except Exception as exc:
                 log.warning(
                     "Upload retry %s could not be dispatched; the outbox remains due "
@@ -323,49 +323,55 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
                 )
         return build_upload_summary(record)
 
-    def is_attempt_current(
+    retry = bridge_to_loop(aretry)
+
+    async def ais_attempt_current(
         self,
         operation_id: str,
         *,
         tenant_id: str = "default",
         fence_attempt: int,
     ) -> bool:
-        return self._call(
-            self._is_current_db(
-                operation_id,
-                tenant_id=tenant_id,
-                fence_attempt=fence_attempt,
-            )
+        return await self._is_current_db(
+            operation_id,
+            tenant_id=tenant_id,
+            fence_attempt=fence_attempt,
         )
 
-    def heartbeat(
+    is_attempt_current = bridge_to_loop(ais_attempt_current)
+
+    async def aheartbeat(
         self,
         operation_id: str,
         *,
         tenant_id: str = "default",
         fence_attempt: int,
     ) -> bool:
-        return self._call(
-            self._heartbeat_db(
-                operation_id,
-                tenant_id=tenant_id,
-                fence_attempt=fence_attempt,
-            )
+        return await self._heartbeat_db(
+            operation_id,
+            tenant_id=tenant_id,
+            fence_attempt=fence_attempt,
         )
 
-    def claim_for_execution(
+    heartbeat = bridge_to_loop(aheartbeat)
+
+    async def aclaim_for_execution(
         self, operation_id: str, tenant_id: str, *, allow_takeover: bool
     ) -> ClaimedUploadOperation | None:
-        return self._call(
-            self._claim_db(operation_id, tenant_id, allow_takeover=allow_takeover)
-        )
+        return await self._claim_db(operation_id, tenant_id, allow_takeover=allow_takeover)
 
-    def stale_dispatches(self, *, older_than_seconds: float) -> list[tuple[str, str]]:
-        return self._call(self._stale_dispatches_db(older_than_seconds))
+    claim_for_execution = bridge_to_loop(aclaim_for_execution)
 
-    def cancel_requested_operations(self, watched: dict[str, str]) -> set[str]:
+    async def astale_dispatches(self, *, older_than_seconds: float) -> list[tuple[str, str]]:
+        return await self._stale_dispatches_db(older_than_seconds)
+
+    stale_dispatches = bridge_to_loop(astale_dispatches)
+
+    async def acancel_requested_operations(self, watched: dict[str, str]) -> set[str]:
         del watched
         return set()
+
+    cancel_requested_operations = bridge_to_loop(acancel_requested_operations)
 
     def _make_handle(self, entity_id: str, cancel_event):  # pragma: no cover
         del entity_id, cancel_event

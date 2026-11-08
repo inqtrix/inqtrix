@@ -20,7 +20,7 @@ from inqtrix.project.agent_sessions_ports import (
     AgentSessionNotFound,
     AgentSessionStore,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.project.session_titles import TitleSource
 from inqtrix.services.workspace_guard import deny_cross_workspace
 
@@ -75,7 +75,7 @@ class AgentSessionsService:
         win through a check/insert race.
         """
         owners = (
-            self._run_store.session_owners(session_id)
+            await self._run_store.asession_owners(session_id)
             if self._run_store is not None
             else set()
         )
@@ -290,9 +290,9 @@ class AgentSessionsService:
         # operation and row removal commit atomically.  Only dependent data is
         # expected to be absent at this point.
         del scope
-        counter = getattr(self._run_store, "agent_session_residuals", None)
+        counter = getattr(self._run_store, "aagent_session_residuals", None)
         run_residuals = (
-            counter(
+            await counter(
                 session_id,
                 tenant_id=tenant_id,
                 requester_user_id=owner_user_id,

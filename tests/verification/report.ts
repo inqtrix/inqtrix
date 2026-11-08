@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type {
   CleanupRecord,
   EngineResult,
+  LogInspection,
   PreflightCheck,
   RunStatus,
   ScenarioReportRecord,
@@ -22,7 +23,7 @@ import {
 const MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const VERSION_SOURCE = resolve(
   MODULE_DIRECTORY,
-  '../../src/inqtrix/__init__.py',
+  '../../src/inqtrix/version.py',
 )
 
 export class ReportWriter {
@@ -39,6 +40,7 @@ export class ReportWriter {
       engines: [...PROFILE_ENGINE_ORDER[context.profile]],
       finishedAt: null,
       inqtrixVersion: readInqtrixVersion(),
+      logInspection: { reason: 'The run ended before the log inspection.', status: 'not_run' },
       preflight: [],
       profile: context.profile,
       runId: context.runId,
@@ -54,7 +56,7 @@ export class ReportWriter {
           ? 'not_run'
           : 'not_applicable',
       })),
-      schemaVersion: 4,
+      schemaVersion: 6,
       sourceDirty: sourceDirty(context.repositoryRoot),
       sourceRevision: sourceRevision(context.repositoryRoot),
       startedAt: context.startedAt,
@@ -101,6 +103,11 @@ export class ReportWriter {
     await this.flush()
   }
 
+  async setLogInspection(inspection: LogInspection): Promise<void> {
+    this.report.logInspection = this.redactor.redact(inspection)
+    await this.flush()
+  }
+
   async finish(status: RunStatus): Promise<VerificationReport> {
     this.report.finishedAt = new Date().toISOString()
     this.report.status = status
@@ -121,20 +128,16 @@ export class ReportWriter {
       scenario.engine === result.engine && scenario.status === 'not_run'
     ))
     const explicit = new Map(
-      (result.scenarios ?? []).map((scenario) => [scenario.id, scenario.status]),
+      (result.scenarios ?? []).map((scenario) => [scenario.id, scenario]),
     )
+    // Only what the engine reported is written. An engine that ended early
+    // leaves the rest not_run; its own status keeps the run red, and no
+    // scenario is blamed in place of the one that was never measured.
     for (const scenario of selected) {
-      const status = explicit.get(scenario.id)
-      if (status) scenario.status = status
-    }
-    const unresolved = selected.filter((scenario) => scenario.status === 'not_run')
-    if (
-      result.status !== 'passed' &&
-      !selected.some((scenario) => scenario.status === 'failed')
-      && unresolved.length > 0
-    ) {
-      const firstUnresolved = unresolved[0]
-      if (firstUnresolved) firstUnresolved.status = 'failed'
+      const reported = explicit.get(scenario.id)
+      if (!reported) continue
+      scenario.status = reported.status
+      if (reported.reason !== undefined) scenario.reason = reported.reason
     }
   }
 }

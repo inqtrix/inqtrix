@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from openai import OpenAI
 
 if TYPE_CHECKING:
     from inqtrix.providers.base import LLMProvider, ProviderContext, SearchProvider
@@ -68,7 +67,8 @@ def create_providers(settings: "Settings") -> "ProviderContext":
 
     Raises:
         RuntimeError: If a selected provider is missing a required
-            credential (anthropic/azure/bedrock/azure_foundry).
+            credential (anthropic, azure, azure_foundry), an extra-headers
+            setting is invalid, or extra LLM headers are set for bedrock.
 
     Example:
         >>> from inqtrix.providers import create_providers
@@ -157,7 +157,7 @@ def instrument_providers(
         build_content_policy,
         set_active_content_policy,
     )
-    from inqtrix.observability.provider_tracing import (
+    from inqtrix.providers.tracing import (
         instrument_llm,
         instrument_search,
     )
@@ -240,6 +240,27 @@ def _warn_ignored(value: Any, env_name: str, provider: str) -> None:
         )
 
 
+_EXTRA_HEADER_SETTINGS = {
+    "llm": ("llm_extra_headers", "INQTRIX_LLM_EXTRA_HEADERS"),
+    "search": ("search_extra_headers", "INQTRIX_SEARCH_EXTRA_HEADERS"),
+}
+
+
+def _extra_headers(
+    providers_cfg: "ProviderSettings | None", axis: str, provider: str
+) -> dict[str, Any]:
+    """The ``default_headers`` argument for the selected provider of *axis*.
+
+    Raises:
+        RuntimeError: If the setting is not a valid object of headers.
+    """
+    from inqtrix.providers.headers import configured_headers
+
+    attr, env_name = _EXTRA_HEADER_SETTINGS[axis]
+    headers = configured_headers(_sel(providers_cfg, attr, ""), setting=env_name, provider=provider)
+    return {"default_headers": headers} if headers else {}
+
+
 def _common_llm_model_kwargs(
     settings: "Settings", providers_cfg: "ProviderSettings | None"
 ) -> dict[str, Any]:
@@ -283,7 +304,34 @@ def _common_llm_model_kwargs(
     selectable = _sel(providers_cfg, "selectable_chat_models", [])
     if selectable:
         kwargs["selectable_models"] = list(selectable)
+    _warn_models_without_card(
+        [value for key, value in kwargs.items() if key.endswith("_model")] + list(selectable or [])
+    )
     return kwargs
+
+
+_warned_without_card: set[str] = set()
+
+
+def _warn_models_without_card(models: list[Any]) -> None:
+    """Say once per model and process which configured model no card describes.
+
+    Without a card a model has no known context window, prices or request
+    rules: the OpenAI-compatible adapters send it over Chat Completions, and a
+    GPT-6 or GPT-5.6 deployment then fails on every tool call that reasons.
+    """
+    from inqtrix.model_cards import resolve_model_card
+
+    for model in sorted({str(name) for name in models if name}):
+        if model in _warned_without_card or resolve_model_card(model) is not None:
+            continue
+        _warned_without_card.add(model)
+        log.warning(
+            "CONFIG: model %r has no model card: context window, prices and request rules are unknown, "
+            "and OpenAI-compatible adapters send it over Chat Completions. Name the deployment or gateway "
+            "alias after the model id (for example gpt-6.1-terra) so its card applies.",
+            model,
+        )
 
 
 def _build_llm_provider(
@@ -340,18 +388,13 @@ def _make_litellm(
         api_key=settings.server.litellm_api_key,
         base_url=settings.server.litellm_base_url,
     )
+    kwargs.update(_extra_headers(providers_cfg, "llm", "litellm"))
     token_budget = _sel(providers_cfg, "token_budget_parameter", "")
     if token_budget:
         kwargs["token_budget_parameter"] = token_budget
     _warn_ignored(_sel(providers_cfg, "temperature", None), "INQTRIX_TEMPERATURE", "litellm")
 
-    llm = LiteLLM(**kwargs)
-    llm._client = OpenAI(
-        base_url=settings.server.litellm_base_url,
-        api_key=settings.server.litellm_api_key,
-        max_retries=0,
-    )
-    return llm
+    return LiteLLM(**kwargs)
 
 
 def _make_anthropic(
@@ -367,6 +410,7 @@ def _make_anthropic(
     base_url = _sel(providers_cfg, "anthropic_base_url", "")
     if base_url:
         kwargs["base_url"] = base_url
+    kwargs.update(_extra_headers(providers_cfg, "llm", "anthropic"))
     temperature = _sel(providers_cfg, "temperature", None)
     if temperature is not None:
         kwargs["temperature"] = temperature
@@ -381,7 +425,7 @@ def _make_anthropic(
 def _make_azure_openai(
     settings: "Settings", providers_cfg: "ProviderSettings | None"
 ) -> "LLMProvider":
-    """Build the Azure OpenAI provider (key-auth or Service-Principal)."""
+    """Build the Azure OpenAI provider; requires ``AZURE_OPENAI_API_KEY``."""
     from inqtrix.providers.azure import AzureOpenAILLM
 
     kwargs = _common_llm_model_kwargs(settings, providers_cfg)
@@ -390,26 +434,10 @@ def _make_azure_openai(
         "AZURE_OPENAI_ENDPOINT",
         "azure",
     )
-    api_key = _sel(providers_cfg, "azure_openai_api_key", "")
-    tenant_id = _sel(providers_cfg, "azure_tenant_id", "")
-    client_id = _sel(providers_cfg, "azure_client_id", "")
-    client_secret = _sel(providers_cfg, "azure_client_secret", "")
-    if api_key:
-        kwargs["api_key"] = api_key
-    elif tenant_id and client_id and client_secret:
-        kwargs.update(
-            tenant_id=tenant_id, client_id=client_id, client_secret=client_secret
-        )
-    else:
-        log.warning(
-            "CONFIG: INQTRIX_LLM_PROVIDER=azure needs AZURE_OPENAI_API_KEY or the "
-            "complete Service-Principal trio (AZURE_TENANT_ID/AZURE_CLIENT_ID/"
-            "AZURE_CLIENT_SECRET); failing loudly."
-        )
-        raise RuntimeError(
-            "Selected provider 'azure' requires AZURE_OPENAI_API_KEY or the "
-            "complete AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET trio."
-        )
+    kwargs["api_key"] = _require(
+        _sel(providers_cfg, "azure_openai_api_key", ""), "AZURE_OPENAI_API_KEY", "azure"
+    )
+    kwargs.update(_extra_headers(providers_cfg, "llm", "azure"))
     temperature = _sel(providers_cfg, "temperature", None)
     if temperature is not None:
         kwargs["temperature"] = temperature
@@ -422,12 +450,30 @@ def _make_azure_openai(
 def _make_bedrock(
     settings: "Settings", providers_cfg: "ProviderSettings | None"
 ) -> "LLMProvider":
-    """Build the AWS Bedrock provider (boto3 credential chain)."""
+    """Build the AWS Bedrock provider (Bedrock API key or boto3 credential chain)."""
     from inqtrix.providers.bedrock import BedrockLLM
 
+    if _sel(providers_cfg, "llm_extra_headers", "").strip():
+        log.warning(
+            "CONFIG: INQTRIX_LLM_EXTRA_HEADERS is set but provider 'bedrock' signs "
+            "its calls through boto3 and sends no extra headers; failing loudly."
+        )
+        raise RuntimeError(
+            "INQTRIX_LLM_EXTRA_HEADERS is not supported with INQTRIX_LLM_PROVIDER=bedrock."
+        )
     kwargs = _common_llm_model_kwargs(settings, providers_cfg)
+    api_key = _sel(providers_cfg, "aws_bearer_token_bedrock", "").strip() or None
+    profile = _sel(providers_cfg, "aws_profile", "") or None
+    if api_key and profile:
+        log.warning(
+            "CONFIG: AWS_PROFILE=%s is not used: AWS_BEARER_TOKEN_BEDROCK is set, "
+            "so Bedrock calls authenticate with that API key.",
+            profile,
+        )
+        profile = None
     kwargs.update(
-        profile_name=_sel(providers_cfg, "aws_profile", "") or None,
+        api_key=api_key,
+        profile_name=profile,
         region_name=_sel(providers_cfg, "aws_region", "eu-central-1"),
         timeout=settings.agent.reasoning_timeout,
     )
@@ -467,13 +513,14 @@ def _make_perplexity(
     instructions = _sel(providers_cfg, "search_instructions", "")
     if instructions:
         kwargs["instructions"] = instructions
+    kwargs.update(_extra_headers(providers_cfg, "search", "perplexity"))
     return PerplexitySearch(**kwargs)
 
 
 def _make_azure_foundry(
     settings: "Settings", providers_cfg: "ProviderSettings | None"
 ) -> "SearchProvider":
-    """Build the Azure AI Foundry web-search provider (key or SP auth)."""
+    """Build the Azure AI Foundry web-search provider; requires ``AZURE_AI_PROJECT_API_KEY``."""
     from inqtrix.providers.azure_web_search import AzureFoundryWebSearch
 
     kwargs: dict[str, Any] = {
@@ -497,26 +544,12 @@ def _make_azure_foundry(
     agent_version = _sel(providers_cfg, "web_search_agent_version", "")
     if agent_version:
         kwargs["agent_version"] = agent_version
-    api_key = _sel(providers_cfg, "azure_ai_project_api_key", "")
-    tenant_id = _sel(providers_cfg, "azure_tenant_id", "")
-    client_id = _sel(providers_cfg, "azure_client_id", "")
-    client_secret = _sel(providers_cfg, "azure_client_secret", "")
-    if api_key:
-        kwargs["api_key"] = api_key
-    elif tenant_id and client_id and client_secret:
-        kwargs.update(
-            tenant_id=tenant_id, client_id=client_id, client_secret=client_secret
-        )
-    else:
-        log.warning(
-            "CONFIG: INQTRIX_SEARCH_PROVIDER=azure_foundry needs "
-            "AZURE_AI_PROJECT_API_KEY or the complete Service-Principal trio; "
-            "failing loudly."
-        )
-        raise RuntimeError(
-            "Selected provider 'azure_foundry' requires AZURE_AI_PROJECT_API_KEY "
-            "or the complete AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET trio."
-        )
+    kwargs["api_key"] = _require(
+        _sel(providers_cfg, "azure_ai_project_api_key", ""),
+        "AZURE_AI_PROJECT_API_KEY",
+        "azure_foundry",
+    )
+    kwargs.update(_extra_headers(providers_cfg, "search", "azure_foundry"))
     _warn_ignored(_sel(providers_cfg, "search_preset", ""), "INQTRIX_SEARCH_PRESET", "azure_foundry")
     _warn_ignored(
         _sel(providers_cfg, "search_instructions", ""),

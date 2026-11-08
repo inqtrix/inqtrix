@@ -104,7 +104,6 @@ BASELINE: set[tuple[str, str]] = {
     ('knowledge/grounding.py', 'Die Antwort wurde nicht veröffentlicht, weil der erforderliche Belegbl'),
     ('knowledge/grounding.py', 'Die Antwort wurde nicht veröffentlicht, weil mindestens ein als wörtli'),
     # nodes.py
-    ('nodes.py', ': nicht zugeordnet]'),
     ('nodes.py', 'Belege ausserhalb des Evidenz-Budgets ('),
     ('nodes.py', 'Evidenzlage noch zu duenn ('),
     ('nodes.py', 'Mehrere zentrale Aussagen sind zwischen Quellen umstritten.'),

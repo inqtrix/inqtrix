@@ -897,7 +897,6 @@ function researchRunStatusOrDefault(value: unknown): JobStatus {
   if (
     value === 'cancelled'
     || value === 'completed'
-    || value === 'expired'
     || value === 'failed'
     || value === 'queued'
     || value === 'running'

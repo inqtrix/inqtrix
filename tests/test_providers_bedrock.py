@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from inqtrix.providers.attempts import observe_retries
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout, BedrockAPIError
+from inqtrix.providers import base as provider_base
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +226,7 @@ def test_thinking_auto_raises_max_tokens(mock_boto3):
     BedrockLLM, mock_client = mock_boto3
     mock_client.converse.return_value = _converse_response("ok")
 
-    from inqtrix.providers.bedrock import _THINKING_MIN_MAX_TOKENS
+    from inqtrix.providers.base import _THINKING_MIN_MAX_TOKENS
 
     llm = BedrockLLM(
         default_max_tokens=1024,
@@ -402,36 +405,30 @@ def test_complete_allows_per_call_output_budget_override(mock_boto3):
 # ---------------------------------------------------------------------------
 
 
-def test_retries_transient_error_then_succeeds(mock_boto3):
+def test_retries_transient_error_then_succeeds(mock_boto3, monkeypatch):
     BedrockLLM, mock_client = mock_boto3
-
 
     transient = _make_client_error("ServiceUnavailableException", "service busy", 503)
     mock_client.converse.side_effect = [transient, transient, _converse_response("ok")]
+    monkeypatch.setattr(provider_base, "_retry_delay_seconds", lambda *_args: 0.0)
 
     llm = BedrockLLM()
-    # Patch sleep to avoid real delays
-    with patch("inqtrix.providers.bedrock.time") as mock_time:
-        mock_time.monotonic.return_value = time.monotonic() + 1000
-        mock_time.sleep = MagicMock()
-        result = llm.complete("test")
+    result = llm.complete("test")
 
     assert result == "ok"
     assert mock_client.converse.call_count == 3
 
 
-def test_throttling_retries_then_raises_rate_limited(mock_boto3):
+def test_throttling_retries_then_raises_rate_limited(mock_boto3, monkeypatch):
     BedrockLLM, mock_client = mock_boto3
 
     throttle = _make_client_error("ThrottlingException", "rate exceeded", 429)
     mock_client.converse.side_effect = [throttle] * 5
+    monkeypatch.setattr(provider_base, "_retry_delay_seconds", lambda *_args: 0.0)
 
     llm = BedrockLLM()
-    with patch("inqtrix.providers.bedrock.time") as mock_time:
-        mock_time.monotonic.return_value = time.monotonic() + 1000
-        mock_time.sleep = MagicMock()
-        with pytest.raises(AgentRateLimited):
-            llm.complete("test")
+    with pytest.raises(AgentRateLimited):
+        llm.complete("test")
 
     assert mock_client.converse.call_count == 3
 
@@ -454,24 +451,27 @@ def test_non_retryable_error_raises_bedrock_api_error(mock_boto3):
     assert "invalid input" in str(error)
 
 
-def test_connection_closed_retries_once_then_succeeds(mock_boto3):
+def test_connection_closed_retries_once_then_succeeds(mock_boto3, monkeypatch):
     from botocore.exceptions import ConnectionClosedError
 
     BedrockLLM, mock_client = mock_boto3
 
     transport_error = ConnectionClosedError(endpoint_url="https://example.test")
     mock_client.converse.side_effect = [transport_error, _converse_response("ok")]
+    delays: list[int] = []
+    monkeypatch.setattr(
+        provider_base, "_retry_delay_seconds", lambda attempt, *_args: delays.append(attempt) or 0.0
+    )
 
     llm = BedrockLLM()
     observed = []
-    with patch("inqtrix.providers.bedrock._sleep_before_retry") as sleep:
-        with llm.observe_retries(lambda notice: observed.append(notice)):
-            result = llm.complete("test")
+    with observe_retries("model", lambda notice: observed.append(notice)) as retry_log:
+        result = llm.complete("test")
 
-    notices = llm.consume_retry_notices()
+    notices = retry_log.notices()
     assert result == "ok"
     assert mock_client.converse.call_count == 2
-    assert sleep.call_count == 1
+    assert len(delays) == 1
     assert len(observed) == 1
     assert observed[0]["provider"] == "Bedrock"
     assert observed[0]["progress_emitted"] is True
@@ -480,18 +480,18 @@ def test_connection_closed_retries_once_then_succeeds(mock_boto3):
     assert notices[0]["max_attempts"] == 3
 
 
-def test_connection_closed_exhausts_limited_transport_attempts(mock_boto3):
+def test_connection_closed_exhausts_limited_transport_attempts(mock_boto3, monkeypatch):
     from botocore.exceptions import ConnectionClosedError
 
     BedrockLLM, mock_client = mock_boto3
 
     transport_error = ConnectionClosedError(endpoint_url="https://example.test")
     mock_client.converse.side_effect = [transport_error] * 5
+    monkeypatch.setattr(provider_base, "_retry_delay_seconds", lambda *_args: 0.0)
 
     llm = BedrockLLM()
-    with patch("inqtrix.providers.bedrock._sleep_before_retry"):
-        with pytest.raises(BedrockAPIError) as exc_info:
-            llm.complete("test")
+    with pytest.raises(BedrockAPIError) as exc_info:
+        llm.complete("test")
 
     assert mock_client.converse.call_count == 3
     assert exc_info.value.error_code == "ConnectionClosedError"
@@ -638,3 +638,19 @@ def test_bedrock_api_error_message_format():
     assert "HTTP 400" in str(err)
     assert "request-id=req-abc" in str(err)
     assert "invalid model id" in str(err)
+
+
+def test_an_async_call_from_a_loop_of_its_own_runs_on_the_process_loop(
+    mock_boto3, loops_borrow_nothing
+):
+    """A library caller awaits Bedrock on its own loop, which nobody configured.
+
+    The boto3 request needs the provider lane of the process loop; awaited on
+    the caller's loop it found no lanes and failed with ``LoopNotConfigured``.
+    """
+    BedrockLLM, mock_client = mock_boto3
+    mock_client.converse.return_value = _converse_response("Hallo Welt")
+    llm = BedrockLLM(default_model="eu.anthropic.claude-sonnet-4-6")
+
+    assert asyncio.run(llm.acomplete("Frage")) == "Hallo Welt"
+

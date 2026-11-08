@@ -95,8 +95,9 @@ class UserEventStore(Protocol):
         target_user_id: uuid.UUID,
         cursor: int,
         timeout: float,
-    ) -> None:
-        """Wait for likely new work; callers still re-read authoritatively."""
+    ) -> bool:
+        """Wait for likely new work and say whether it came; callers still
+        re-read authoritatively."""
         ...
 
 
@@ -272,7 +273,8 @@ class MemoryUserEventStore:
             current = self._next_id - 1
             if cursor > current and cursor != 0:
                 return UserEventPage((), current, reset_required=True)
-            if cursor and cursor <= self._evicted_through:
+            # At the head nothing can be missing, even with every event expired.
+            if cursor and cursor < current and cursor <= self._evicted_through:
                 return UserEventPage((), current, reset_required=True)
             matches = [
                 event
@@ -298,10 +300,10 @@ class MemoryUserEventStore:
         target_user_id: uuid.UUID,
         cursor: int,
         timeout: float,
-    ) -> None:
-        def _wait() -> None:
+    ) -> bool:
+        def _wait() -> bool:
             with self._condition:
-                self._condition.wait_for(
+                return self._condition.wait_for(
                     lambda: any(
                         event.id > cursor
                         and event.tenant_id == tenant_id
@@ -311,7 +313,7 @@ class MemoryUserEventStore:
                     timeout=max(0.0, timeout),
                 )
 
-        await asyncio.to_thread(_wait)
+        return await asyncio.to_thread(_wait)
 
     def _cleanup_locked(self, now: float) -> None:
         cutoff = now - self._retention_seconds

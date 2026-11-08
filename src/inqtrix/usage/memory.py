@@ -89,9 +89,6 @@ class MemoryUsageStore:
             for key, values in sorted(totals.items())
         ]
 
-    async def aclose(self) -> None:
-        return None
-
     # Test helper — deliberately sync and read-only.
     def rows_snapshot(self) -> list[UsageRow]:
         with self._lock:

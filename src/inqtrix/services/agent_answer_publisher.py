@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from inqtrix import aio
 from inqtrix.agents.control_ports import (
     ArtifactNotFound,
     ArtifactPublicationFenced,
@@ -31,15 +32,15 @@ from inqtrix.execution_failures import RunExecutionFailure
 from inqtrix.i18n import t
 from inqtrix.prompt_language import resolve_answer_language
 from inqtrix.runs.shared import answer_artifact_id, answer_publication_id
-from inqtrix.sync_bridge import run_coro_sync
+from inqtrix.harness.contracts.events import (
+    ANSWER_INTERRUPTED_EVENT,
+    ARTIFACT_CREATED_EVENT,
+    ARTIFACT_UPDATED_EVENT,
+)
 
 if TYPE_CHECKING:
     from inqtrix.agents.control_ports import AgentControlStore, ArtifactRecord
-    from inqtrix.server.runs import RunHandle
-
-
-ARTIFACT_CREATED_EVENT = "inqtrix.agent.artifact.created"
-ARTIFACT_UPDATED_EVENT = "inqtrix.agent.artifact.updated"
+    from inqtrix.runs.records import RunHandle
 
 
 class AgentAnswerPublisher:
@@ -106,7 +107,7 @@ class AgentAnswerPublisher:
             # publication attempt visible explicitly instead of silently
             # completing with a result but no answer artifact.
             handle.emit(
-                "inqtrix.answer.interrupted",
+                ANSWER_INTERRUPTED_EVENT,
                 {
                     "artifact_id": artifact_id,
                     "publication_id": publication_id,
@@ -120,7 +121,7 @@ class AgentAnswerPublisher:
         self._emit_artifact_signal(handle, staged)
 
         def _finalize() -> None:
-            finalized = run_coro_sync(
+            finalized = aio.call_from_thread(
                 self._store.upsert_artifact(
                     run_id=handle.run_id,
                     kind="answer",
@@ -162,13 +163,13 @@ class AgentAnswerPublisher:
         title: str,
     ) -> "ArtifactRecord":
         try:
-            current, _revisions = run_coro_sync(
+            current, _revisions = aio.call_from_thread(
                 self._store.get_artifact(handle.run_id, artifact_id)
             )
             expected_revision = current.revision
         except ArtifactNotFound:
             expected_revision = 0
-        return run_coro_sync(
+        return aio.call_from_thread(
             self._store.upsert_artifact(
                 run_id=handle.run_id,
                 kind="answer",

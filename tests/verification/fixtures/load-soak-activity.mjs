@@ -20,7 +20,6 @@ const WEB_SEARCH_REQUESTS_AFTER_PHASE = Object.freeze({
 const TERMINAL_RUN_STATUSES = new Set([
   'cancelled',
   'completed',
-  'expired',
   'failed',
 ])
 

@@ -27,11 +27,13 @@ def test_pool_kwargs_reach_the_engine() -> None:
         engine.sync_engine.dispose()
 
 
-def test_defaults_stay_byte_identical_to_sqlalchemy() -> None:
+def test_the_default_keeps_what_it_opens() -> None:
+    """The pool closes an overflow connection on return, so a process above its
+    size would keep reconnecting. The same limit as a pool, without that."""
     engine = build_engine(_URL)
     try:
-        assert engine.pool.size() == 5
-        assert engine.pool._max_overflow == 10
+        assert engine.pool.size() == 15
+        assert engine.pool._max_overflow == 0
     finally:
         engine.sync_engine.dispose()
 

@@ -149,10 +149,7 @@ def create_app_from_env() -> FastAPI:
         public_base_url=os.getenv("INQTRIX_PUBLIC_BASE_URL", "").strip() or None,
         external_scheme=os.getenv("INQTRIX_EXTERNAL_SCHEME", "").strip() or None,
         max_request_bytes=settings._resolve_proxy_max_body_bytes(),
-        max_upstream_connections=settings._parse_optional_int(
-            os.getenv("INQTRIX_MAX_UPSTREAM_CONNECTIONS"),
-            env_var="INQTRIX_MAX_UPSTREAM_CONNECTIONS",
-        ),
+        max_upstream_connections=settings._resolve_max_upstream_connections(),
         identity_policy=settings.IdentityEdgePolicy.from_env(),
         forwarded_allow_ips_set="FORWARDED_ALLOW_IPS" in os.environ,
     )

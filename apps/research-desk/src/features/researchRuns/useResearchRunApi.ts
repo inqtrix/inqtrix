@@ -178,7 +178,7 @@ export function useResearchRunApi({
     () => loadResultOnce(runId, finishedAt),
   ), [loadResultOnce])
 
-  const replayTerminalAgentEvents = useCallback(async (
+  const replayTerminalEvents = useCallback(async (
     summary: ResearchRunSummary,
   ) => {
     if (replayedTerminalRunIdsRef.current.has(summary.run_id)) return
@@ -221,9 +221,14 @@ export function useResearchRunApi({
 
   const replayRunHistory = useCallback((runIds: readonly string[]) => {
     for (const summary of demandQueued(replayQueueRef.current, runIds)) {
-      void replayTerminalAgentEvents(summary)
+      void replayTerminalEvents(summary)
     }
-  }, [replayTerminalAgentEvents])
+  }, [replayTerminalEvents])
+
+  const loadRunSteps = useCallback(async (runId: string): Promise<void> => {
+    const [summary] = demandQueued(replayQueueRef.current, [runId])
+    if (summary) await replayTerminalEvents(summary)
+  }, [replayTerminalEvents])
 
   const startStream = useCallback((summary: ResearchRunSummary) => {
     // Child runs are projected through their parent stream. A child channel is
@@ -238,7 +243,7 @@ export function useResearchRunApi({
       )
       if (action === 'replay_events') {
         if (queueUntilDemanded(replayQueueRef.current, summary)) {
-          void replayTerminalAgentEvents(summary)
+          void replayTerminalEvents(summary)
         }
       } else if (action === 'load_result') {
         void loadResult(summary.run_id, isoFromSeconds(summary.finished_at))
@@ -248,6 +253,11 @@ export function useResearchRunApi({
         }
       } else {
         perRunCallbacksRef.current.delete(summary.run_id)
+      }
+      // The steps of a finished run that is no agent run load when its step
+      // log is opened: a reload brings the result, not the log.
+      if (action !== 'replay_events' && queueUntilDemanded(replayQueueRef.current, summary)) {
+        void replayTerminalEvents(summary)
       }
       return
     }
@@ -346,7 +356,7 @@ export function useResearchRunApi({
           ? current.filter((id) => id !== summary.run_id)
           : current)
     })
-  }, [apiKey, loadResult, replayTerminalAgentEvents, workspaceId])
+  }, [apiKey, loadResult, replayTerminalEvents, workspaceId])
 
   const submitRun = useCallback(async (
     request: CreateResearchRunRequest,
@@ -602,6 +612,9 @@ export function useResearchRunApi({
     /** Load the results of these finished runs (the knowledge questions in
      * view); runs listed later load as soon as they arrive. */
     requestRunResults,
+    /** Load the stored steps of one finished run whose log is opened;
+     * resolves once they are delivered (none for a run not listed). */
+    loadRunSteps,
     /** Load a finished run's result again after a failed attempt. */
     retryResult: loadResult,
     runsHydrated,
@@ -613,7 +626,6 @@ function terminalStatus(status: ResearchRunSummary['status']) {
   return status === 'completed'
     || status === 'failed'
     || status === 'cancelled'
-    || status === 'expired'
 }
 
 /** Terminal root-agent summaries need their durable event story replayed after

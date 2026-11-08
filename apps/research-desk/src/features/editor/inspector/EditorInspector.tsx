@@ -41,6 +41,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useLocale } from '@/i18n/LocaleProvider'
 import { countLabel } from '@/i18n/plural'
 import { cn } from '@/lib/utils'
+import { intlLocale } from '@/lib/time'
 import type { CollaborationReviewDisplay } from '../tiptap'
 import {
   adjacentChangeId,
@@ -1500,7 +1501,7 @@ function activityHeadline(
 }
 
 function formatInspectorTime(timestamp: number, locale: 'de' | 'en'): string {
-  return new Intl.DateTimeFormat(locale === 'de' ? 'de-DE' : 'en-US', {
+  return new Intl.DateTimeFormat(intlLocale(locale), {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',

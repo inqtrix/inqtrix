@@ -269,8 +269,8 @@ Every Postgres table that holds tenant data is protected by two layers:
    database-level tenant boundary.
 
 The shared lifecycle for the project tier lives in
-`src/inqtrix/project/base_session_store.py` (the dedicated NullPool engine +
-`tenant_session`); the policy/GRANT boilerplate is applied uniformly in each
+`src/inqtrix/project/base_session_store.py` (a session factory on the engine of the
+process + `tenant_session`); the policy/GRANT boilerplate is applied uniformly in each
 Alembic migration.
 
 `tenant_session` also owns transaction finalization. Request cancellation is
@@ -283,73 +283,58 @@ Cancelled asyncpg work invalidates rather than recycles its driver connection.
 The engine adapter lets that invalidation finish updating the pool record after
 the driver has force-closed the socket; the original request cancellation still
 propagates. A closed handle must never remain eligible for a later checkout or
-trigger pool-wide invalidation through the next pre-ping.
+trigger pool-wide invalidation through the next connection check.
 
-## Engines and event-loop domains
+## One engine per process
 
-An asyncpg connection belongs to the event loop that created it. A **pooled**
-engine therefore belongs to exactly one loop: the pool caches connections, and a
-cached connection handed to a second loop fails on checkout
-(`Future attached to a different loop`), corrupts asyncpg's protocol state, and
-poisons the pool for every later borrower — including unrelated callers who
-share it.
+An asyncpg connection belongs to the event loop that created it, so a pooled
+engine belongs to exactly one loop. Each process has one event loop: the HTTP
+request path runs on it, and job bodies on the transition lane reach it through
+`aio.call_from_thread`. Every statement of a process runs on that loop, on one
+engine:
 
-Inqtrix has two kinds of consumer, and they need different engines:
-
-* **The HTTP request path** runs on uvicorn's one persistent loop. Pooling is
-  correct and valuable here.
-* **Run threads** (`inqtrix-run-*`, `inqtrix-reindex-*`) execute algorithms
-  synchronously and reach async stores through `run_coro_sync` or a bare
-  `asyncio.run` — a fresh, immediately closed loop *per call*. Only a
-  `NullPool` engine, which caches nothing, is safe there.
-
-That is why a single API process holds more than one engine, and why merging
-them would be a regression rather than a cleanup:
-
-| Engine | Pool | Loop domain |
+| Connections | Pool | Used by |
 |---|---|---|
-| Platform bundle (identity, files, skills, quota reads of the request path) | pooled | HTTP loop |
-| Auth bundle (sessions, users, PATs) | pooled | HTTP loop |
-| Run store, indexing store, deletion and upload operation stores | pooled | each pinned to its OWN dedicated loop (`DurableJobStoreBase`) |
-| **Run-thread lane** (`build_run_thread_persistence`) | **NullPool** | any per-call loop |
-| Knowledge, control, editor stores; quota recording; usage ledger; account erasure | NullPool | any per-call loop |
-| Worker claim-contract probe | NullPool, one engine per probe | throwaway loop (`run_coro_sync`) |
-| Agent checkpointer (`PostgresSaver`) | psycopg pool, `min_size=0` | worker threads, never the HTTP loop |
+| The engine of the process (`build_process_engine`) | `INQTRIX_DATABASE_POOL_SIZE`, opened on demand and kept | every store, the request path and job bodies alike |
+| Agent checkpointer (`PostgresSaver`) | its own psycopg pool, `min_size=0` | worker threads, never the event loop |
+| Worker claim-contract probe | one short-lived connection per probe | the worker's start and its periodic check |
 
-Two ways to make a pooled engine safe are in use: pin it to one long-lived loop
-and marshal every call onto it (the job stores), or give the off-loop consumer
-its own NullPool engine (everything else). The run-thread lane is the second:
-the API keeps its pooled bundle for requests and hands run threads a NullPool
-twin. On the worker the whole bundle is already NullPool, so the lane *is* that
-bundle — no third engine.
+The composition root builds the engine once and hands it on: `create_app` and the
+worker's entry point. An auth provider built beforehand, the documented library
+path, already sits on the engine; `create_app` takes it over instead of building a
+second one. Whoever composed the process disposes the engine, last, after everything
+that uses it has stopped.
 
-The quota store uses both lanes. Admission, the composer meter (every 30
-seconds per visible tab) and the admin overview run only on the request loop,
-so they read through the platform bundle's pooled engine, usage and limits in
-one session; run threads record spend through the store's own NullPool engine.
-The worker re-proves its claim contract once a minute while the database is
-healthy and every 5 seconds after an outage, each time on a fresh NullPool
-engine, so an idle worker no longer opens a connection every few seconds.
+The worker re-proves its claim contract once a minute while the database is healthy
+and every 5 seconds after an outage, on a connection of its own. So a full pool
+cannot read as a broken schema, and an idle worker opens one connection a minute.
 
-Enforcement is deliberate, because this rule was documented in four places and
-broken anyway (v0.2.0.4 wired the pooled auth directory into the run thread's
-actor probe, and nothing caught it):
+A shared limit changes what a held connection costs. Two rules follow:
 
-* `tenant_session` warns once per engine when a pooled engine is reached from a
-  second loop. It is the one chokepoint every tenant-scoped statement passes,
-  so it sees callers that never touch `sync_bridge`.
-* `tests/test_enterprise_seams.py` asserts the pool class on the engines reached
-  through the real container — offline, with a dummy URL, since
-  `create_async_engine` is lazy.
+* **A task holds one connection at a time.** Several tasks that each hold one and
+  wait for a second would wait for each other until the pool's timeout fails them.
+  `tests/_connection_guard.py` watches every pool and fails a test that does this.
+* **A connection is held across other work only where the design needs it, and
+  bounded by job slots.** Knowledge jobs keep a collection's row lock while they
+  write to the vector index, so a concurrent submit cannot snapshot a half-finished
+  change. That holds one connection for the length of the write per indexing or
+  deletion job. A process warns at startup when those slots could fill its pool.
+  Run deletion holds its transaction across the checkpoint cleanup, and orphan
+  reconciliation across the vector index, in an admin request.
 
-NullPool costs a connect per operation. That is affordable only because the
-actor's authority is checked at safepoints (see `agent-platform.md`), not per
-emitted event; a per-event check on a NullPool engine would be a connection
-storm. The run store does re-check its execution path inside every event's
-write transaction, but on its own pooled engine and loop, so an event costs
-round trips, not a connection. A finished answer is published in
-byte-bounded deltas of at most 2 KB, not word by word, so even a long answer
-is a few dozen events rather than thousands.
+Enforcement: `tests/architecture/test_async_discipline.py` refuses an engine built
+anywhere but in `storage/db.py` and the one-off probes of the `storage` package, and
+`tests/test_one_engine_per_process.py` counts what the real API and worker
+compositions build, offline, since `create_async_engine` is lazy.
+
+A pooled connection that sat unused for a second is checked at its next checkout,
+and every connection is recycled after 30 minutes. A connection in steady use is
+not checked: the check is three round trips on asyncpg, and a transaction otherwise
+needs about five, so with a database a few milliseconds away checking every checkout
+would take more than a third of what the pool can serve. For the same reason a
+transaction sets its role and tenant in one statement. A finished answer is published in
+byte-bounded deltas of at most 2 KB, not word by word, so even a long answer is a
+few dozen events rather than thousands.
 
 ## Durable jobs and concurrency
 
@@ -571,7 +556,10 @@ the canonical `user_id` and cursor; `invalidate` names only what server view to
 refetch; `reset` means the cursor fell outside retention. `Last-Event-ID`
 replays retained rows, but every connect/reconnect still performs a broad
 authoritative refetch. The stream checks the live credential immediately before
-each data frame. The browser re-reads only the lists an `invalidate` scope can
+each data frame. A quiet stream costs no query of its own: it writes a keepalive
+comment every 5 seconds and, once within a minute, checks the credential and
+re-reads its page, which also finds a cursor that no longer fits. The browser
+re-reads only the lists an `invalidate` scope can
 change: a run starting or finishing (`runs`) re-reads the run list, not the
 skills, templates, collections, editor or share lists. A reconnect, a `reset`,
 a scope the client does not know, window focus and coming online re-read every
@@ -583,8 +571,9 @@ the poll reads the newest event of each waiting user with one index probe per
 user and wakes the streams whose user has an event past their cursor. A wake
 carries no data: the woken stream reads its own page. The poll stops as soon as
 the last stream of the tenant stops waiting. A failed poll is logged once as a
-warning (and its recovery as information) and retried on the next interval;
-waiting streams keep their five-second check meanwhile. The poll does not use
+warning (and its recovery as information) and retried on the next interval, and
+a wake that was missed reaches the stream at its next check, within a minute. The
+poll does not use
 `LISTEN`/`NOTIFY`, which a transaction-mode connection pooler does not carry.
 
 Durable deletion operations notify their owner through this same stream when
@@ -613,8 +602,8 @@ request carries the rendered user's opaque id as an expected-principal
 generation. The server compares it with the freshly authenticated principal in
 the same dependency resolution and returns `409 principal_changed` before a
 stale tab can read or mutate the new account; the SPA then reloads. Quiet user
-SSE streams also re-check the principal before keepalives, so an identity switch
-cannot remain hidden indefinitely. Session refreshes use generation
+SSE streams also re-check the principal within a minute, so an identity switch
+cannot remain hidden. Session refreshes use generation
 and abort guards so a late response for user A cannot modify user B's state.
 Authoritative list responses replace the current user's slice, including when
 the response is empty; they are never merged into a later login generation.

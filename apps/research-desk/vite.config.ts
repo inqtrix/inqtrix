@@ -13,7 +13,7 @@ const apiProxyTarget = process.env.VITE_INQTRIX_API_BASE_URL || 'http://localhos
 // release line plus its dev designation, which is what the app shows);
 // deploy/docker/Dockerfile.web copies the file into the SPA build.
 function readAppVersion(): string {
-  const source = path.resolve(__dirname, '../../src/inqtrix/__init__.py')
+  const source = path.resolve(__dirname, '../../src/inqtrix/version.py')
   let content: string
   try {
     content = readFileSync(source, 'utf8')

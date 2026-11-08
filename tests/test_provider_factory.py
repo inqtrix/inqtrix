@@ -143,15 +143,24 @@ def test_missing_anthropic_key_fails_loud(caplog: pytest.LogCaptureFixture) -> N
     assert any("ANTHROPIC_API_KEY" in r.message for r in caplog.records)
 
 
-def test_missing_azure_auth_fails_loud() -> None:
-    # Endpoint present but neither api key nor a complete SP trio.
+def test_missing_azure_key_fails_loud() -> None:
     providers = ProviderSettings(
         llm_provider="azure",
         azure_openai_endpoint="https://t.openai.azure.com/",
         azure_openai_api_key="",
-        azure_tenant_id="t",  # partial trio -> still must fail loudly
     )
     with pytest.raises(RuntimeError, match="AZURE_OPENAI_API_KEY"):
+        create_providers(_settings(providers))
+
+
+def test_missing_foundry_key_fails_loud() -> None:
+    providers = ProviderSettings(
+        search_provider="azure_foundry",
+        azure_ai_project_endpoint="https://p.services.ai.azure.com/api/projects/p",
+        web_search_agent_name="web-search",
+        azure_ai_project_api_key="",
+    )
+    with pytest.raises(RuntimeError, match="AZURE_AI_PROJECT_API_KEY"):
         create_providers(_settings(providers))
 
 

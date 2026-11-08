@@ -79,7 +79,7 @@ import { DocumentReader } from '@/features/knowledge/KnowledgeSourcePanel'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { countLabel } from '@/i18n/plural'
 import { scheduleIdle } from '@/lib/idle'
-import { formatDuration } from '@/lib/time'
+import { formatDuration, formatTimeOfDay } from '@/lib/time'
 import { withAiDisclosure } from '@/lib/aiDisclosure'
 import { cn } from '@/lib/utils'
 import { suggestionDiffSegments } from '@/features/editor/suggestionDiff'
@@ -124,7 +124,7 @@ import {
 } from '../evidenceProvenance'
 import { WebEvidenceSourceRow } from '../WebEvidenceSourceRow'
 import { activityText, RunOutcomeLine } from '../timeline/AgentTimeline'
-import { agentRunFailureText } from '../runFailure'
+import { runFailureText } from '@/lib/runFailure'
 import { artifactClaimMarks, documentOutcome } from '../runPresentation'
 import { ClaimNote, useClaimNote } from '../claimNote'
 import {
@@ -1902,7 +1902,7 @@ function RunOverview({
     (task) => effectiveAgentTaskStatus(task, run.taskStates[task.taskId]) === 'completed',
   ).length
   const transportDegraded = context.pollingRunIds.includes(run.runId)
-  const failureText = agentRunFailureText(run.error ?? '', t, run.errorCode)
+  const failureText = runFailureText(run.error ?? '', t, run.errorCode)
   const groups = agentTaskGroups(tasks, run.taskStates)
   // Idle prefetch: settled task results of the OPEN run view warm before
   // the click (hover covers pointer users; this covers touch/keyboard
@@ -2041,7 +2041,7 @@ export function TaskWorkUnit({
   restoreFocus: boolean
   task: AgentPlanTaskRecord
 }) {
-  const { t } = useLocale()
+  const { locale, t } = useLocale()
   const buttonRef = useRef<HTMLButtonElement>(null)
   const status = effectiveAgentTaskStatus(task, live)
   const activeOperation = status === 'running' || status === 'cancel_requested'
@@ -2196,11 +2196,7 @@ export function TaskWorkUnit({
               ? ''
               : t.agent.canvas.child.lastUpdate.replace(
                 '{time}',
-                () => new Date(updatedAt * 1000).toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  second: '2-digit',
-                }),
+                () => formatTimeOfDay(updatedAt * 1000, locale, { seconds: true }),
               )}
           </span>
           {elapsedLabel && (

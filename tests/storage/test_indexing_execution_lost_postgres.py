@@ -10,6 +10,7 @@ collection, the eager restart sweep, and the paused-rows guard.
 from __future__ import annotations
 
 import os
+import asyncio
 import time
 import uuid
 
@@ -94,11 +95,12 @@ def _build_store() -> PostgresIndexingJobStore:
     )
 
 
-@pytest.fixture()
-def store():
+@pytest_asyncio.fixture()
+async def store():
     store = _build_store()
+    await store.astart()
     yield store
-    store.close()
+    await store.aclose()
 
 
 async def _seed_job(
@@ -172,14 +174,14 @@ async def _failed_event_count(job_id: str) -> int:
         await engine.dispose()
 
 
-def wait_for_status(store, job_id, statuses, timeout=10.0):
+async def wait_for_status(store, job_id, statuses, timeout=10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        summary = store.get(job_id)
+        summary = await store.aget(job_id)
         if summary["status"] in statuses:
             return summary
         store._last_execution_lost_check = None
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
     pytest.fail(f"job {job_id} never reached {statuses}")
 
 
@@ -190,7 +192,7 @@ async def test_lost_cancelling_job_frees_the_collection(store, zero_grace):
         job_id, status="cancelling", age_seconds=300, cancel_requested=True
     )
     store._last_execution_lost_check = None
-    assert store.has_active_job(COLLECTION_ID) is False
+    assert await store.ahas_active_job(COLLECTION_ID) is False
     row = await _job_row(job_id)
     assert row["status"] == "failed"
     assert row["error"]["type"] == "execution_lost"
@@ -204,28 +206,29 @@ async def test_lost_cancelling_job_frees_the_collection(store, zero_grace):
         handle.progress(completed_documents=1, current_document_title="doc")
         handle.complete()
 
-    summary = store.submit(
+    summary = await store.asubmit(
         collection_id=COLLECTION_ID,
         collection_name="Lost fixture",
         embedding_model="text-embedding-3-large",
         work=_work,
     )
-    wait_for_status(store, summary["job_id"], {"completed"})
+    await wait_for_status(store, summary["job_id"], {"completed"})
 
 
 @pytest.mark.asyncio
-async def test_restart_sweep_runs_eagerly_at_construction():
+async def test_the_restart_sweep_runs_when_the_process_starts_serving():
     job_id = f"job_boot_{uuid.uuid4().hex}"
     await _seed_job(job_id, status="running", age_seconds=10)
     store = _build_store()
     try:
+        await store.astart()
         assert store._sweep_orphans is False
         row = await _job_row(job_id)
         assert row["status"] == "failed"
         assert row["error"]["type"] == "server_restarted"
-        assert store.has_active_job(COLLECTION_ID) is False
+        assert await store.ahas_active_job(COLLECTION_ID) is False
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -233,6 +236,6 @@ async def test_paused_rows_are_never_fence_candidates(store, zero_grace):
     job_id = f"job_paused_{uuid.uuid4().hex}"
     await _seed_job(job_id, status="paused_dependency", age_seconds=3600)
     store._last_execution_lost_check = None
-    store.get(job_id)
+    await store.aget(job_id)
     row = await _job_row(job_id)
     assert row["status"] == "paused_dependency"

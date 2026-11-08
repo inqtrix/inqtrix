@@ -736,7 +736,7 @@ def _kernel_algo_and_deps(
     service: AgentMemoryService, *, opt_in: bool
 ) -> tuple[Any, Any, list[tuple[str, dict[str, Any]]]]:
     """Minimal kernel algorithm + deps pair for the memory seams."""
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
     from inqtrix.agents.kernel.deps import KernelDeps
 
@@ -835,7 +835,7 @@ def test_kernel_stages_candidates_after_success(
         MemoryReflection,
     )
 
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.algorithm import _stage_kernel_memory
 
     provider = FakeMemoryProvider()

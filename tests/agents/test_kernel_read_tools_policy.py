@@ -9,6 +9,8 @@ skips and the model continues visibly.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import time
 import asyncio
 import json
@@ -17,7 +19,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -782,7 +784,7 @@ def test_every_provider_source_is_visible_and_addressable_in_ledger():
             if message.get("role") == "tool"
         ]
         content = tool_replies[0]["content"]
-        assert "10 sources delivered by Azure fully registered" in content
+        assert "10 sources delivered by the search provider fully registered" in content
         assert "Quelle 10" in content
         assert "more sources" not in content
 
@@ -851,24 +853,33 @@ def test_uncited_answer_keeps_full_basis_references():
 # -- context management: compaction + offload, visible --------------------- #
 
 
+class _LongAnswerSearch(RecordingSearch):
+    def search(self, query: str, **kwargs: Any) -> GroundedSearchResult:
+        result = super().search(query, **kwargs)
+        return replace(result, answer=result.answer + ". " + "Ausführlicher Befund. " * 200)
+
+
 def test_compaction_fires_visibly_and_archives_history():
     """A tiny trigger compacts mid-run: event + narration + run archive.
 
-    The scripted turns are: (1) a web_instant call, (2) the SUMMARY call the
-    compaction middleware makes through the same bridge model, (3) the final
-    answer. keep=2 leaves the oldest message eligible for eviction on the
-    second model call.
+    The scripted turns are: (1) a web_instant call; (2) a second web_instant
+    call, before which a compaction would only evict the assignment, which
+    travels verbatim anyway, so it cannot shrink the view and requests no
+    summary; (3) the summary of the compaction that evicts the assignment,
+    the first call and its long result; (4) the final answer. Summaries go
+    through the same bridge model.
     """
     llm = ScriptedToolLLM(
         [
             _tool_turn("call_ctx1", "web_instant", {"query": "Kontext"}),
+            _tool_turn("call_ctx2", "web_instant", {"query": "Mehr Kontext"}),
             _text_turn("Zusammenfassung: fruehe Schritte."),
             _text_turn("Finale Antwort nach Kompaktierung."),
         ]
     )
     client = make_client(
         llm,
-        RecordingSearch(),
+        _LongAnswerSearch(),
         platform_overrides={
             "INQTRIX_AGENT_KERNEL_CONTEXT_TRIGGER_TOKENS": 10,
             "INQTRIX_AGENT_KERNEL_CONTEXT_KEEP_MESSAGES": 2,
@@ -889,12 +900,12 @@ def test_compaction_fires_visibly_and_archives_history():
             for e in events
             if e["type"] == "inqtrix.agent.context.compacted"
         ]
-        assert compacted, "compaction event missing"
+        assert len(compacted) == 1, "compaction event missing"
         short = run_id.removeprefix("run_")[-12:]
         # One logical source reference spans immutable storage parts.
         section_id = compacted[0]["archive_artifact_id"]
         assert section_id.startswith(f"art_{short}_ctx")
-        assert compacted[0]["messages_summarized"] >= 1
+        assert compacted[0]["messages_summarized"] == 3
         assert compacted[0]["trigger_tokens"] == 10
         narrations = [
             e["data"]

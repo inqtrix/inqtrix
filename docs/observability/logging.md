@@ -149,6 +149,8 @@ In a container, stdout is the durable sink; a file under `/app/logs` is lost wit
 Unhandled exception; the process stops: RuntimeError: Retired setting INQTRIX_LOG_ENABLED is set; use INQTRIX_LOG_TARGET (console, file, both or none) instead. The service does not start until it is removed.
 ```
 
+The Azure sign-in variables `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` are retired too: Azure OpenAI and the Foundry search run on keys only (`AZURE_OPENAI_API_KEY`, `AZURE_AI_PROJECT_API_KEY`). Set, each logs a `WARNING` at startup and has no effect.
+
 uvicorn's `FORWARDED_ALLOW_IPS` is retired as well, because the API server and the web gateway start uvicorn with `proxy_headers=False` and read `X-Forwarded-For` themselves. In the API server, the worker and the migration job a set value, even an empty one, only writes a `WARNING` and appears in the status line as `retired_settings=FORWARDED_ALLOW_IPS`:
 
 ```text
@@ -267,9 +269,11 @@ uvicorn's own access log is off. Instead the gateway writes one access line per 
 GET /s/[REDACTED] 200 2.7ms
 ```
 
-A request whose backend cannot be reached writes a `WARNING` such as `Configured backend is unreachable for GET /v1/things (ConnectError).` A client that disconnects while the gateway still waits for the backend writes an `INFO` line, `Client disconnected while awaiting the upstream response for <method> <path> — upstream request aborted.`, because the interface aborts outdated requests on its own. An unhandled exception that ends the gateway process writes the `CRITICAL` line described in [Why a process stopped](#why-a-process-stopped); a message appears in it only for an exception that gateway code raised itself.
+A request whose backend cannot be reached writes a `WARNING` such as `Configured backend is unreachable for GET /v1/things (ConnectError).` A client that disconnects while the gateway still waits for the backend writes an `INFO` line, `Client disconnected while awaiting the upstream response for <method> <path> — upstream request aborted.`, because the interface aborts outdated requests on its own. A client that leaves while its request body is still being relayed (a closed tab, an aborted upload) writes the `INFO` line `Client disconnected while sending the request body for <method> <path> — upstream request aborted.`; both answer HTTP 499. An unhandled exception that ends the gateway process writes the `CRITICAL` line described in [Why a process stopped](#why-a-process-stopped); a message appears in it only for an exception that gateway code raised itself.
 
-A request whose header block is still incomplete after 16 KiB never reaches the gateway's code: uvicorn answers it with 400 and writes the `WARNING` `Invalid HTTP request received.`, without path or client. In `gateway` mode this line is the place to look when a large assertion token together with the cookies breaks every request of one person.
+At start, before it serves, the gateway raises its soft open-file limit to the hard limit (without a hard limit, to what `INQTRIX_MAX_UPSTREAM_CONNECTIONS` alone needs, two descriptors per stream) and writes `Raised the open-file limit from <old> to <new>.` (`INFO`). When the limit stays below what the streams alone need it writes `The open-file limit is <limit>, below the <need> that <n> upstream connections alone need; under load the gateway runs out of file descriptors. Raise the hard limit of the container or lower INQTRIX_MAX_UPSTREAM_CONNECTIONS.` (`WARNING`); a refused raise writes `The open-file limit stays at <limit>: raising it to <target> was refused. <n> upstream connections alone need <need>. ...` (`WARNING`). A soft limit already at the hard limit, and enough for the streams, writes nothing.
+
+A request whose header block is still incomplete after 32 KiB never reaches the gateway's code: uvicorn answers it with 400 and writes the `WARNING` `Invalid HTTP request received.`, without path or client ([Request limits at the web edge](../deployment/react-ui.md#request-limits-at-the-web-edge)). In `gateway` mode this line is the place to look when a large assertion token together with the cookies breaks every request of one person.
 
 **Identity edge.** At start the gateway writes one `INFO` line with its policy for the identity headers of `gateway` mode, the configured header names (`-` for none) and the number of trusted peers: `Identity edge: identity_header_policy=strip_untrusted headers=x-inqtrix-proof,x-inqtrix-subject trusted_proxies=1.` The policy is `strip_untrusted` with header names and a peer list, `keep_all` with names but no list, and `none` without names. When it removes identity headers from a peer outside its `INQTRIX_GATEWAY_TRUSTED_PROXIES`, it writes a `WARNING` with the header names, never their values, at most once a minute; the number counts the reports it held back since its previous line:
 
@@ -563,6 +567,45 @@ The no-silent-fallbacks rule requires every fallback path to emit all three of: 
 
 See [Iteration log](iteration-log.md) for the structured marker view and the [Forensic cookbook](forensic-cookbook.md#debugging-runs) for the typical recovery flows.
 
+## Kernel context compaction lines
+
+The agent kernel condenses older history with its own middleware (logger
+`inqtrix.agents.kernel.compaction`). The thread keeps every message; the model
+call sees a summary of the older part and the newest messages. Before a summary
+is considered, tool results the model has answered and that can be read again
+give way to placeholders in the model call's input, from 100,000 tokens or the
+trigger, whichever is lower; the newest three results stay. This writes no line
+of its own: the placeholders stand in the model input of the trace.
+
+- `Kernel context compacted: <n> messages summarized (generation <g>, archive
+  <section>, trigger <t> tokens).` (INFO): one compaction landed after the model
+  call it served; the event `inqtrix.agent.context.compacted` and a narration
+  follow.
+- `Kernel compaction skipped: only the newest messages are left above the
+  trigger ...` (WARNING, once per segment): nothing older is left to condense;
+  the model call goes out uncompacted.
+- `Kernel compaction would not shrink the view even without a summary (<before>
+  tokens before, <after> after); ...` (WARNING): the summary message alone, which
+  carries the assignment and the user's answers verbatim, would not make the
+  input smaller; no summary is requested and nothing is archived, the
+  uncompacted view goes out, and the segment tries again only after the view has
+  grown.
+- `Kernel compaction did not shrink the view (<before> tokens before, <after>
+  after); ...` (WARNING): the summary would not have made the input smaller; the
+  uncompacted view goes out, and the segment tries again only after the view
+  has grown or a compaction has landed.
+- `The run's assignment (~<n> tokens) takes more than half of the compaction
+  trigger ...` and `Kernel compaction without the run's assignment in reach;
+  ...` (WARNING): the assignment travels verbatim next to the summary, or only
+  the question could be restated.
+- `Kernel compaction trigger <t> lies above the input budget of model <m>; it is
+  capped at <b> tokens.` (WARNING, logger `inqtrix.agents.kernel.algorithm`, once
+  per segment): with a model card the trigger never exceeds the input budget.
+
+A summary call that fails, comes back cut off or filtered, or would not fit the
+model's input budget, and an archive that is unavailable, end the model call with
+their error; no compaction event is written for them.
+
 ## Worker claim safety markers
 
 The worker's durable-claim path emits two operator-relevant line families:
@@ -591,6 +634,68 @@ The worker's durable-claim path emits two operator-relevant line families:
   claims on its own. This fence detects a COMPLETED cutover; a migration
   still in flight carries the old revision and is governed by the
   canonical migration workflow, which stops clients first.
+- `Worker <worker id>: run <run id> is bound to <mode> contract <n>, newer
+  than the <m> this process carries; this worker claims no further runs, its
+  other jobs go on.` (ERROR) and `Worker <worker id>: run <run id> belongs to
+  mode <mode>, which this process has not registered (registered: <modes>);
+  this worker claims no further runs, its other jobs go on, and the run and its
+  checkpoint stay.` (WARNING): every run is bound to its mode and to the
+  workflow contract that mode carried when the run was accepted, and a run
+  claim compares that binding with what the worker registered. In both cases
+  the claim rolled back, the run and its checkpoint are unchanged, the queue
+  entry stays unacked for another worker, and the worker's run loop claims
+  no further runs while its active runs finish. The shared claim guard stays
+  open: indexing, deletions and uploads go on, and the runs claimed in the
+  same batch start, each checked against its own binding. A newer contract
+  means the worker image is older than the run; an unregistered mode means
+  the worker lacks a service the mode needs (or the mode is switched off
+  there). The worker reads the run every few seconds and claims again once it
+  no longer waits for a worker: cancelled (a running one is then ended by the
+  next claim), ended, or parked under a worker that carries the contract or
+  the mode; it then logs `Run <run id> no longer holds this worker's claims
+  (<state>)` and `Worker <id> claims runs again` at INFO. Both lines add `; the follow-up dispatch for job <run id> remains
+  unacknowledged` when the claim was the successor of a parked segment.
+- `Run <run id> never ran under <mode> contract <n>; it runs under contract
+  <m>.` (INFO): a run accepted under an older contract that had not started
+  yet takes the worker's contract and runs. A run that had already run under
+  an older contract, or whose mode is retired, ends instead as `cancelled`
+  with the reason `workflow_contract_changed` or `workflow_retired`; its
+  checkpoint is deleted after that commit without being read. When that
+  deletion fails, `Run <run id> ended for its workflow binding; its checkpoint
+  could not be deleted and stays until the run is removed.` (WARNING) follows;
+  removing the run deletes it.
+- `Worker <worker id> ended <n> parked runs that their workflow binding no
+  longer lets resume.` (INFO): at start and then on the reconcile cadence the
+  run worker ends runs waiting for an approval, an answer or their children
+  whose binding it would end at their next claim, with the same reasons.
+  `Run <run id> ended for its workflow binding; <n> active child runs
+  cancelled (parent_cancelled).` (WARNING) names the children such an end
+  cancelled, at a claim or in this sweep.
+- `Run <run id> <how it ended>; <n> active child runs cancelled (<reason>).`
+  (WARNING): a run that ended other than by completing took live children
+  along. `<how it ended>` is `failed`, `failed (<error type>)` after a restart,
+  a lost execution or two hours in the queue (`queued_timeout`), `lost its execution authority`, `timed out waiting`,
+  `was cancelled` (a run that stopped on its own) or `ended for its workflow
+  binding`; `<reason>` is `parent_failed` or `parent_cancelled`. Queued and
+  waiting children ended at once, running ones were asked to stop and end with
+  that reason. A user's or an admin's cancel takes the children along without
+  this line.
+- `Instance admin <usr_ref> cancelled the open runs of mode <mode> this server
+  cannot run (its contract: <n or not registered>): <n> ended, <n> asked to
+  stop.` (WARNING, API): an instance admin cancelled the runs bound above the
+  contract the API carries for the mode, or all open runs of a mode it does not
+  register. Each run is in the audit log as `run.cancelled_by_admin`, with the
+  admin as actor, the run id, the mode and both contract versions (its children
+  have no row, the owner is not recorded); a running one ends at its next step
+  or when a worker takes it over.
+- `A checkpoint holds the type '<module>'.'<class>' outside the allowed list; it
+  loads as raw data.` (WARNING, logger `inqtrix.agents.checkpointing`): the
+  agent checkpointer loads only LangGraph's safe types plus its own list, which
+  is empty, whatever `LANGGRAPH_STRICT_MSGPACK` says. Each such value is also
+  counted in `inqtrix_checkpoint_types_blocked_total`. A kernel run whose
+  checkpoint held one stops at the start of its segment, before any node runs,
+  and fails with "The run's stored state holds data the server does not load;
+  the run stops instead of resuming on altered data."
 
 ## API product-gate markers (`/readyz`)
 

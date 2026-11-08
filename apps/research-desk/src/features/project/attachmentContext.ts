@@ -78,17 +78,31 @@ function memberBlock(member: ChatMessageAttachmentRecord): string {
  * line up with the `[N]` markers the composer wrote into the instruction. The
  * aggregate size guardrail is the visible >50%-context warning above the
  * composer; here each member only carries its own per-document cap.
+ *
+ * Material that earlier messages of the conversation attached follows in a
+ * section of its own, headed by its `@` label and without a number: the
+ * numbers belong to the pills of the current message, and an earlier block
+ * that took one would shift them away from the `[N]` the user wrote.
  */
 export function contentWithAttachmentContext(
   contentMarkdown: string,
   attachments: ChatMessageAttachmentRecord[],
+  earlier: readonly ChatMessageAttachmentRecord[] = [],
 ): string {
-  const blocks = renderAttachmentContextBlocks(attachments)
+  const sections: string[] = []
+  if (attachments.length > 0) sections.push(renderAttachmentContextBlocks(attachments))
+  if (earlier.length > 0) {
+    sections.push([
+      'Attached to earlier messages of this conversation:',
+      '',
+      groupAttachmentUnits([...earlier]).map((unit) => unitBlock(unit, null)).join('\n\n'),
+    ].join('\n'))
+  }
 
   return [
     'Use the attached Inqtrix chat context blocks for this answer.',
     '',
-    blocks,
+    sections.join('\n\n'),
     '',
     'User message:',
     contentMarkdown,
@@ -98,16 +112,18 @@ export function contentWithAttachmentContext(
 export function renderAttachmentContextBlocks(
   attachments: ChatMessageAttachmentRecord[],
 ): string {
-  return groupAttachmentUnits(attachments).map((unit, index) => {
-    const number = index + 1
-    const label = attachmentMentionLabel(unit.members[0])
-    const header = unit.members.length > 1
-      ? `--- [${number}] ${label} (${unit.members.length} documents) ---`
-      : `--- [${number}] ${label} ---`
-    return [
-      header,
-      unit.members.map(memberBlock).join('\n\n'),
-      `--- End context ${number} ---`,
-    ].join('\n')
-  }).join('\n\n')
+  return groupAttachmentUnits(attachments)
+    .map((unit, index) => unitBlock(unit, index + 1))
+    .join('\n\n')
+}
+
+/** One unit's block: numbered for a pill of the current message, else by its label alone. */
+function unitBlock(unit: AttachmentUnit, number: number | null): string {
+  const label = attachmentMentionLabel(unit.members[0])
+  const name = number === null ? label : `[${number}] ${label}`
+  const header = unit.members.length > 1
+    ? `--- ${name} (${unit.members.length} documents) ---`
+    : `--- ${name} ---`
+  const footer = number === null ? `--- End ${label} ---` : `--- End context ${number} ---`
+  return [header, unit.members.map(memberBlock).join('\n\n'), footer].join('\n')
 }

@@ -15,7 +15,7 @@ from inqtrix.project.vector_index_ports import (
     VectorIndexMemberUnavailable,
     VectorIndexNotFound,
 )
-from inqtrix.source_authority import (
+from inqtrix.storage.source_authority import (
     MemorySourceLifecycleAuthority,
     SourceScope,
 )

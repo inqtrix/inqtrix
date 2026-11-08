@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 import asyncio
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from inqtrix.agents.kernel.deps import KernelDeps
 from inqtrix.agents.context_archive import CONTEXT_ARCHIVE_SECTION_CHARS

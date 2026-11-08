@@ -22,7 +22,7 @@ from inqtrix.project.chat_ports import (
     ThreadGroupNotFound,
     ThreadNotFound,
 )
-from inqtrix.project.scoped_upsert import ResourceScope, require_memory_scope
+from inqtrix.storage.scoped_upsert import ResourceScope, require_memory_scope
 from inqtrix.project.session_titles import TitleSource, title_after_save
 
 
@@ -279,6 +279,3 @@ class MemoryChatStore:
         for tid, thread in list(self._threads.items()):
             if thread.group_id == group_id:
                 self._threads[tid] = replace(thread, group_id=None)
-
-    async def aclose(self) -> None:
-        return None

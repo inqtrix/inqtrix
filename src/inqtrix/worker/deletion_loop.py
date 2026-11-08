@@ -6,7 +6,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from inqtrix.observability.context import bind_log_context, reset_log_context
+from inqtrix import aio
+from inqtrix.observability.context import bind_log_context
 from inqtrix.runs.deletion_execution import execute_claimed_deletion
 from inqtrix.worker.loop import BaseWorkerLoop, _RECONCILE_MIN_AGE_SECONDS
 
@@ -47,38 +48,37 @@ class DeletionWorkerLoop(
             heartbeat_seconds=heartbeat_seconds,
             claim_idle_seconds=claim_idle_seconds,
             claim_guard=claim_guard,
-            thread_prefix="inqtrix-delete",
         )
         self._service = service
 
     def _entity_id(self, job: "QueuedDeletionOperation") -> str:
         return job.operation_id
 
-    def _stale_dispatch(self) -> list[tuple[str, str]]:
-        return self._store.stale_queued_operations(
-            older_than_seconds=_RECONCILE_MIN_AGE_SECONDS
+    async def _stale_dispatch(self) -> list[tuple[str, str]]:
+        return await self._store.astale_queued_operations(
+            older_than_seconds=_RECONCILE_MIN_AGE_SECONDS,
         )
 
-    def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
-        return self._store.cancel_requested_operations(watched)
+    async def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
+        return await self._store.acancel_requested_operations(watched)
 
-    def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
-        self._queue.enqueue(operation_id=entity_id, tenant_id=tenant_id)
+    async def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
+        await self._queue.enqueue(operation_id=entity_id, tenant_id=tenant_id)
 
     def _execute(
         self,
         job: "QueuedDeletionOperation",
         claimed: "ClaimedDeletionOperation",
         cancel_event: threading.Event,
-    ) -> None:
+    ) -> bool:
         del cancel_event  # deletion is intentionally not reversible mid-saga
         old_message_acked = False
         # Like the run and indexing workers: every line of this job names it.
-        log_tokens = bind_log_context(run_id=job.operation_id, tenant=job.tenant_id)
+        bind_log_context(run_id=job.operation_id, tenant=job.tenant_id)
         try:
             handle = execute_claimed_deletion(self._store, self._service, claimed)
             if handle.terminal_landed:
-                self._queue.ack(job.message_id)
+                aio.call_from_thread(self._queue.ack(job.message_id))
                 old_message_acked = True
             else:
                 log.warning(
@@ -95,6 +95,4 @@ class DeletionWorkerLoop(
                 job.operation_id,
                 type(exc).__name__,
             )
-        finally:
-            self._finish_active(job, allow_successor=old_message_acked)
-            reset_log_context(log_tokens)
+        return old_message_acked

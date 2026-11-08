@@ -931,6 +931,44 @@ worker's handle parks with the claim fence and ACKs the dispatch message;
 the resume re-enqueues a fresh message that any worker continues from the
 persisted payload + checkpoint.
 
+## Workflow contracts
+
+A checkpoint resumes only into the graph shape that wrote it. Every
+algorithm therefore names a `contract_version`, and every run is bound to its
+mode and to the version that mode carried when the run was accepted (the
+`runs.workflow_contract` column). A run claimed from the queue executes only
+under its own contract: a run that never ran takes the worker's version; a
+run with stored state from an older version, or of a retired mode, ends as
+`cancelled` (`workflow_contract_changed` / `workflow_retired`) and loses its
+checkpoint, and its active children are cancelled (`parent_cancelled`); a newer
+version or a mode the worker has not registered stops that worker's claims
+until the run is cancelled, ends or parks; the worker then claims again by
+itself. Parked runs of the first kind end
+at once when a worker starts and then once a minute, so nobody approves a run
+that could no longer continue. Runs of the second kind an instance admin
+cancels per mode after a rollback (`cancelled_by_admin`); a claim resolves the
+pending cancel before it judges the binding, so such a run no longer stops the
+worker that takes it over.
+
+`tests/architecture/workflow_contracts.json` pins the checkpoint-relevant
+shape of each workflow with a checkpointer (`agent_kernel` per autonomy
+variant and work profile, `workspace_agent`): graph nodes and edges, state
+channels with their kind and snapshot frequency, every tool the graph can run
+with a hash of its argument schema, and the interrupt kinds with the payload
+keys they need. `tests/architecture/test_workflow_contract_pins.py` compares
+the compiled graphs with that pin:
+
+* **Break** — a changed node (a renamed middleware is one), edge, channel or
+  interrupt kind, or a tool removed or given other arguments. Raise the
+  workflow's `contract_version`, then re-pin.
+* **Addition** — a new tool. A run parked with an open call resumes with it
+  (`tests/harness/test_resume_with_added_tool.py`), so no increment; only
+  re-pin.
+
+Re-pin with `uv run python -m tests.architecture.workflow_pins`; it refuses a
+break that keeps the pinned version. Prose in a tool's argument schema
+(descriptions, titles, examples) is no part of the pin.
+
 ## Settings (`INQTRIX_AGENT_*`)
 
 `enabled`, `max_parallel_children` (8), `max_parallel_queries_per_task` (3),
@@ -959,11 +997,11 @@ other unknown fields. An already stored task cannot override its child's model
 routing through that parameter.
 
 The normal/deep kernel bases are `kernel_max_tool_calls` (30/60 through
-the deep variant) and `kernel_max_iterations` (121/121: fourteen tool turns
+the deep variant) and `kernel_max_iterations` (120/120: fourteen tool turns
 plus the answer in both — deep buys more tool calls and the verification
 pass, not more turns). Explicit extensions are bounded independently by
 `kernel_max_tool_calls_extension_ceiling` (60/120) and
-`kernel_max_iterations_extension_ceiling` (241/241), again with deep
+`kernel_max_iterations_extension_ceiling` (240/240), again with deep
 variants. A configured ceiling below its base cannot shrink the base; the
 effective ceiling is their maximum. `/v1/capabilities.agent.limits` publishes
 these pairs together with mission discovery/plan/replan/clarification/child
@@ -972,11 +1010,12 @@ Every live Agent execution snapshot publishes measured usage and the
 effective boundary in `execution.limits`; older servers omit the capability
 block and the UI hides it rather than guessing.
 
-The manifest also publishes the effective `schnell` kernel boundary (57
+The manifest also publishes the effective `schnell` kernel boundary (96
 steps and no in-run extension at the defaults: the published search, one
-knowledge/todo turn, one slack turn, plus three read-only turns on evidence
-the session already retains, canvas documents and attached reports — a
-follow-up in a session with earlier searches reads before it answers)
+knowledge/todo turn, one slack turn, plus eight read-only turns on evidence
+the session already retains, canvas documents, attached reports and the
+windows of a named document, so a follow-up reads before it answers and a
+document can be read to its end)
 instead of presenting the normal tier's larger allowance before submission.
 
 ## Interaction layer
@@ -1095,10 +1134,13 @@ auto-retain memories yet.
 ## Cognitive kernel (`mode=agent_kernel`)
 
 A second **orchestrator** registered next to the phase machine: an LLM
-tool-calling loop on deepagents, assembled through the one harness seam
-(`agents/harness.py::build_kernel_agent`, pin `deepagents>=0.7.13,<0.8`
-with contract tests in `tests/agents/test_harness_kernel_contract.py`
-as the upgrade gate). The phase machine stays registered — it is the
+tool-calling loop on LangChain's `create_agent`, assembled through the one
+harness seam (`agents/harness.py::build_kernel_agent`) with the kernel's own
+state (`agents/kernel/state.py`: `messages` as a delta channel that stores
+writes and folds them with the public `add_messages`, a full snapshot every
+50 steps), and with contract tests in
+`tests/agents/test_harness_kernel_contract.py` and
+`tests/harness/runtime/test_public_seams.py` as the upgrade gate. The phase machine stays registered — it is the
 kernel's `run_deep_mission` child capability, and parked missions must
 resume under their own algorithm.
 
@@ -1233,10 +1275,19 @@ resume under their own algorithm.
   applies to ordinary runs. Aggregate session deletion removes these originals.
   Eager archival never shortens a tool result. Model-input planning considers
   complete messages, system input and tool schemas against a conservative model
-  card budget with output reserve. If reduction is needed, it archives the full
-  input message first and requests a task-specific projection. This shares the
-  existing provider attempt/deadline budget. A projection that cannot itself fit
+  card budget with output reserve. If reduction is needed, tool results give way
+  to placeholders that name how to read them again, in the order the rule for
+  answered results below protects them: answered results outside the newest three
+  first, then answered ones among them, last results the model has not seen yet,
+  whose placeholder names no evidence; the largest first in each, and a result
+  without a reader in that call is passed over. A result that cannot be read
+  again is archived in full first. This makes no model call and stores nothing
+  in the checkpoint. An input that does not fit even then
   stops visibly with originals retained; it never falls back to prefix slicing.
+  The same placeholders clear answered tool results from the model input before
+  any context compaction summary, from 100,000 tokens or the compaction trigger,
+  whichever is lower; the newest three results, the user's answers and loaded
+  skills stay verbatim.
   Unknown model cards retain provider-driven context recovery.
   Public captured archives reject edits and renames with `archive_immutable` (HTTP 409).
   Ordinary Canvas documents keep their complete Markdown, revision and editing
@@ -1445,8 +1496,9 @@ resume under their own algorithm.
   contradiction judges and the revision. It sits outside the tracing wrapper,
   so a generation's recorded system instructions show it. Text that directs
   the work is never fenced: after a context compaction the run's assignment
-  (its first message and skill block) and the user's answers to clarifying
-  questions stand verbatim before the fenced summary, a plan's section
+  (its first message and skill block), the user's answers to clarifying
+  questions and the instructions of skills the model loaded stand verbatim
+  before the fenced summary, a plan's section
   focus stays the section writer's work order, and a writer or the revision
   reads the user's own free-text answers outside the clarification record's
   fence. Fences and the rule stop a forged boundary and lower the chance
@@ -1464,8 +1516,8 @@ resume under their own algorithm.
   execution at the next safepoint. Reconnect after revoke cannot replay older
   frames to the former recipient.
 * **Rollout.** `INQTRIX_AGENT_KERNEL_ENABLED` (default on) gates
-  registration together with the checkpointer rule, deepagents
-  availability, and `supports_tool_calls()` on the default provider
+  registration together with the checkpointer rule, the agent runtime
+  (LangChain) being installed, and `supports_tool_calls()` on the default provider
   (failed gates WARN). Capabilities publish `features.agent_kernel`, the
   missed gate's reason under `feature_status.agent_kernel`, and the
   effective `agent.default_mode` (`INQTRIX_AGENT_DEFAULT_MODE` falls back
@@ -1613,7 +1665,7 @@ the single policy gate.
   deterministic character budget (`skills_disclosure_budget_chars`,
   visible overflow line). The kernel's `load_skill` tool activates a
   disclosed skill mid-run (gated in balanced/strict, free in
-  autonomous); trusted `[skill_geladen:<id>@<revision>]` transcript
+  autonomous); trusted `[skill_loaded:<id>@<revision>]` transcript
   markers re-arm the exact admitted revision on every resumed segment,
   so a tool limit acquired before a park survives park/resume without
   policy drift. Shared-in skills are
@@ -1801,14 +1853,14 @@ never an unbounded loop:
   effort > skill pin > deep > tier map). The tier stays with the tier
   map (`agent_kernel` is high-tier already).
 * **Budgets.** The kernel `recursion_limit` rises to
-  `INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_DEEP` (121 = 14 sequential tool
-  turns plus the answer; one tool turn costs 8 measured super-steps, the
-  answer turn 9) — a raised, still operator-bounded decision point.
+  `INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_DEEP` (120 = 14 sequential tool
+  turns plus the answer; one tool turn and the answer turn each cost 8
+  measured super-steps) — a raised, still operator-bounded decision point.
   Independently,
   all model-emitted tool calls count against a checkpoint-derived
   cumulative limit (30 normal, 60 deep); an overflowing multi-call batch
   is rejected before any tool executes. Explicit extension may raise the
-  effective deep limits only to 241 steps and 120 tool calls by default.
+  effective deep limits only to 240 steps and 120 tool calls by default.
 * **Child profiles.** Normal kernel `run_web_research` children are forced
   to COMPACT; Deep children and every deep phase-machine child research run
   are forced onto the DEEP report profile
@@ -1885,11 +1937,14 @@ never an unbounded loop:
 
 ## Dependencies
 
-Optional extra `agent`: `deepagents` (isolated behind
-`agents/harness.py`; pulls `langchain-anthropic` and
-`langchain-google-genai` unconditionally — see THIRD_PARTY_NOTICES),
-`langchain`, `langgraph-checkpoint-postgres`, `psycopg`. Deployments
-should set `LANGGRAPH_STRICT_MSGPACK=true`. Install with
+Optional extra `agent`: `langchain` and `langchain-core` (the kernel's
+agent loop, assembled in `agents/harness.py`), `langgraph-checkpoint-postgres`,
+`psycopg`. The agent checkpointer loads only LangGraph's safe types plus the
+list `CHECKPOINT_TYPES` in `agents/checkpointing.py` (empty: both workflows keep
+plain data and LangChain messages), passed to the serializer directly, so it
+holds whether or not `LANGGRAPH_STRICT_MSGPACK` is set; a value of another type
+loads as raw data, is logged and counted, and stops a kernel run before its next
+segment. The list is part of the workflow fingerprint. Install with
 `uv sync --extra agent --extra knowledge-qdrant --extra queue-valkey`, or use
 standard Python/pip with
 `python -m pip install -e ".[agent,knowledge-qdrant,queue-valkey]"`.

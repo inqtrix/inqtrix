@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from inqtrix import aio
 from inqtrix.agents.intake import assignment_needs_web
 from inqtrix.agents.patterns._structured import StructuredOutcome, structured_call
 from inqtrix.agents.phase_models import AssignmentProfile, DiscoveryResult
@@ -216,10 +217,8 @@ def execute_probes(
     earlier search already found is a back-reference, never a second
     copy; a cut excerpt says so.
     """
-    import asyncio
-
     call = invoke or (
-        lambda capability_id, payload: asyncio.run(
+        lambda capability_id, payload: aio.call_from_thread(
             registry.invoke(capability_id, payload, capability_context)
         )
     )

@@ -25,7 +25,7 @@ from inqtrix.project.agent_sessions_ports import (
     AgentSessionNotFound,
 )
 from inqtrix.project.session_titles import TitleSource, check_legacy_title_conflict, generated_title_update, legacy_title_condition, title_update_columns
-from inqtrix.project.scoped_upsert import (
+from inqtrix.storage.scoped_upsert import (
     ResourceScope,
     delete_scoped_postgres,
     require_scoped_parent,

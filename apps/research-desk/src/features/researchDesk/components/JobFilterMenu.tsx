@@ -9,6 +9,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { jobFilterOptions } from '../jobFilters'
 import type { JobFilter, ResearchJob } from '../types'
 
 type JobFilterMenuProps = {
@@ -27,7 +28,7 @@ export function JobFilterMenu({
   trailing,
 }: JobFilterMenuProps) {
   const { t } = useLocale()
-  const filters = buildFilterOptions(jobs, t.home.tabs)
+  const filters = jobFilterOptions(jobs, t.home.tabs)
   const active = filters.find((filter) => filter.key === activeFilter) ?? filters[0]
 
   return (
@@ -73,39 +74,4 @@ export function JobFilterMenu({
       {trailing ? <div className="ml-auto flex shrink-0 items-center pl-2">{trailing}</div> : null}
     </div>
   )
-}
-
-function buildFilterOptions(
-  jobs: ResearchJob[],
-  labels: Record<JobFilter, string>,
-) {
-  return [
-    { count: jobs.length, key: 'all', label: labels.all },
-    {
-      // Unavailable runs retract their status (calm lock): they count
-      // only under "all", mirroring visibleResearchJobs.
-      count: jobs.filter((job) => job.status === 'running' && !job.unavailable).length,
-      key: 'running',
-      label: labels.running,
-    },
-    {
-      count: jobs.filter((job) => job.status === 'queued' && !job.unavailable).length,
-      key: 'queued',
-      label: labels.queued,
-    },
-    {
-      count: jobs.filter((job) => job.status === 'cancelled').length,
-      key: 'cancelled',
-      label: labels.cancelled,
-    },
-    {
-      count: jobs.filter((job) => job.status === 'completed').length,
-      key: 'completed',
-      label: labels.completed,
-    },
-  ] satisfies Array<{
-    count: number
-    key: JobFilter
-    label: string
-  }>
 }

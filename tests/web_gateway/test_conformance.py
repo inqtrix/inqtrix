@@ -1,5 +1,6 @@
 """Regression tests for gateway conformance responsibility."""
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +94,26 @@ def test_main_propagates_non_default_collaboration_transport_limits(
         == configured_frame_bytes
     )
     assert captured["uvicorn_options"]["ws_max_queue"] == configured_queue
+    assert captured["uvicorn_options"]["http"] == "h11"
+    assert captured["uvicorn_options"]["h11_max_incomplete_event_size"] == 32 * 1024
     assert captured["uvicorn_options"]["workers"] == 1
+
+def test_both_web_edges_accept_the_same_request_head() -> None:
+    """nginx gets one buffer of the gateway's head size per header line.
+
+    A head of that size then fits nginx's buffers however its lines are cut,
+    and h11 at the Python edge holds an incomplete head of the same size, so a
+    head that one edge accepts reliably the other accepts too.
+    """
+    template = (
+        Path(__file__).resolve().parents[2] / "deploy" / "nginx" / "inqtrix.conf.template"
+    ).read_text(encoding="utf-8")
+    buffers = re.findall(
+        r"^\s*large_client_header_buffers\s+(\d+)\s+(\d+)k;", template, flags=re.M
+    )
+    assert buffers == [("2", "32")]
+    assert int(buffers[0][1]) * 1024 == gateway_settings._REQUEST_HEAD_MAX_BYTES
+
 
 def test_gateway_transport_defaults_match_canonical_settings() -> None:
     """The dependency-light gateway cannot silently drift from API bounds."""
@@ -281,7 +301,10 @@ def test_main_multi_worker_uses_import_string_factory(
     clean_gateway_env.setenv("RESEARCH_DESK_WORKERS", "3")
     captured = _run_stubbed_main(clean_gateway_env, fake_dist)
 
-    assert captured["order"] == ["build_app", "uvicorn.run"]
+    assert [step for step in captured["order"] if step != "open_file_limit"] == [
+        "build_app",
+        "uvicorn.run",
+    ]
     assert (
         captured["uvicorn_app"]
         == "inqtrix_web_gateway.app:create_app_from_env"

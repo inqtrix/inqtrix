@@ -262,7 +262,7 @@ def test_metadata_only_and_source_less_search_do_not_invent_passages(deps):
 
 
 def test_explicit_evidence_read_reaches_context_without_bulk_offload(deps):
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.tools import build_kernel_tools
 
     set_kernel_deps(deps)
@@ -361,7 +361,7 @@ def test_index_and_source_less_answers_are_readable_without_fabricated_reference
 
 
 def test_tool_continuation_reauthorizes_origins_and_does_not_create_archives(deps):
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.tools import build_kernel_tools
 
     principal = object()
@@ -405,7 +405,7 @@ def test_window_refuses_positions_beyond_the_document_and_reports_metadata_only(
 
 
 def test_attached_report_imports_its_retained_search_lineage(deps):
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.tools import build_kernel_tools
 
     principal = object()
@@ -533,7 +533,7 @@ def test_a_task_whose_only_limit_is_a_search_notice_still_reaches_the_review(dep
 
 @pytest.mark.parametrize("count", [12, 41])
 def test_attached_report_offload_keeps_the_entire_reference_catalog(deps, count):
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.tools import build_kernel_tools
 
     principal = object()
@@ -567,7 +567,7 @@ def test_attached_report_offload_keeps_the_entire_reference_catalog(deps, count)
 
 
 def test_canvas_keeps_internal_reference_ids_in_metadata_instead_of_prose(deps):
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.tools import build_kernel_tools
 
     ref, = deps.register_references([{"url": "https://example.org/source", "title": "Evidence"}])
@@ -869,7 +869,7 @@ def test_kernel_canvas_update_may_keep_an_existing_document_id(deps):
     asked it to touch. What the guard owes the reader is that this CALL
     introduces none.
     """
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.tools import build_kernel_tools
 
     kept, fresh = deps.register_references([
@@ -918,7 +918,7 @@ def test_a_canvas_title_is_read_like_the_body(deps):
     as reader-facing as one in a sentence, and a guard that reads only the
     body leaves the shortest, most visible line unchecked.
     """
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.tools import build_kernel_tools
 
     kept, _fresh = deps.register_references([

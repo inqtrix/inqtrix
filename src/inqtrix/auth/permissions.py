@@ -718,8 +718,8 @@ class AuthorizationService:
             resource_type=resource_type,
             resource_id=resource_id,
         )
-        # Local import: audit_service imports AuditEntry from this module.
-        from inqtrix.services.audit_service import build_audit_entry
+        # Local import: audit_entries imports AuditEntry from this module.
+        from inqtrix.auth.audit_entries import build_audit_entry
 
         await self._audit.record(
             build_audit_entry(

@@ -23,7 +23,7 @@ from sqlalchemy import text
 from inqtrix.pagination import decode_cursor
 from inqtrix.project.chat_postgres import PostgresChatStore
 from inqtrix.project.chat_ports import ChatMessage, ThreadNotFound
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.storage.chat_orm import (
     chat_messages,
     chat_thread_groups,
@@ -92,7 +92,6 @@ async def store():
             )
     chat_store = PostgresChatStore(engine=engine, app_role=APP_ROLE)
     yield chat_store
-    await chat_store.aclose()
 
 
 async def _save(

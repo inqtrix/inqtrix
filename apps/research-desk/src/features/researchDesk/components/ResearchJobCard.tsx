@@ -26,6 +26,7 @@ import { PhaseSegments as SharedPhaseSegments } from '@/components/ui/phase-segm
 import { cn } from '@/lib/utils'
 import { useRunningDuration } from '@/features/researchRuns/useRunningDuration'
 import { appMotion } from '@/motion/transitions'
+import { runFailureText } from '@/lib/runFailure'
 import { localizedText, phaseOrder, type JobPhase, type ResearchJob } from '../types'
 import {
   phaseLabel,
@@ -33,6 +34,8 @@ import {
   shortRunId,
   statusBadgeClassName,
   statusIcon,
+  unavailableBadgeClassName,
+  unavailableIcon,
 } from './runDisplay'
 
 type ResearchJobCardProps = {
@@ -65,13 +68,13 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
   }, ref) {
     const { locale, t } = useLocale()
     const StatusIcon = job.unavailable
-      ? statusIcon.expired
+      ? unavailableIcon
       : statusIcon[job.status]
     const reduceMotion = useReducedMotion()
     // A locked card must not keep a 1 Hz interval alive: feed the hook a
     // non-running status so it neither ticks nor re-renders.
     const runningDuration = useRunningDuration(
-      job.unavailable ? 'expired' : job.status,
+      job.unavailable ? 'unavailable' : job.status,
       job.startedAtIso,
     )
     const isSharedIn = job.access?.mode === 'shared'
@@ -86,7 +89,7 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
     const metadata: { text: string; title?: string }[] = [
       { text: `${t.runCard.jobId}: ${shortRunId(job.id)}`, title: `${t.runCard.jobId}: ${job.id}` },
       {
-        text: job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'expired'
+        text: job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
           ? `${t.runCard.submitted}: ${job.submittedAt}`
           : `${t.runCard.started}: ${job.startedAt ?? job.submittedAt}`,
       },
@@ -108,8 +111,15 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
     } else if (cancelError) {
       metadata.push({ text: `${t.runCard.cancelFailed}: ${cancelError}` })
     }
-    if (job.error) {
-      metadata.push({ text: job.error })
+    if (job.error || job.errorCode) {
+      // The failure in the reader's language; the provider's raw text (a 429
+      // body with request id, region and links) stays reachable on hover and
+      // in the error details of the expanded card.
+      const failure = runFailureText(job.error ?? '', t, job.errorCode)
+      metadata.push({
+        text: failure,
+        ...(job.error && job.error !== failure ? { title: job.error } : {}),
+      })
     }
     if (job.unavailable) {
       metadata.push({ text: t.runCard.unavailableHint })
@@ -141,7 +151,6 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
               job.status === 'running' && 'text-brand',
               job.status === 'failed' && 'text-destructive',
               job.status === 'cancelled' && 'text-destructive/80',
-              job.status === 'expired' && 'text-muted-foreground',
               job.unavailable && 'text-muted-foreground',
               job.status === 'running' && !job.unavailable && !reduceMotion
                 && 'animate-spin [animation-duration:1.6s]',
@@ -170,7 +179,7 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
             />
             {job.unavailable ? (
               <Badge
-                className={statusBadgeClassName.expired}
+                className={unavailableBadgeClassName}
                 variant="outline"
               >
                 {t.runCard.unavailableBadge}
@@ -534,16 +543,27 @@ function CompactJobDetails({ job }: { job: ResearchJob }) {
     )
   }
 
+  const rawError = job.error?.trim() ?? ''
+  const showRawError = rawError !== '' && rawError !== runFailureText(rawError, t, job.errorCode)
+
   return (
-    <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-      <span>
-        {t.runCard.sources} <strong className="text-foreground">{job.metrics.sources}</strong>
-      </span>
-      {job.score && (
+    <div className="mt-3 flex flex-col gap-2 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-3">
         <span>
-          {t.runCard.score}{' '}
-          <strong className="font-semibold text-success">{job.score}</strong>
+          {t.runCard.sources} <strong className="text-foreground">{job.metrics.sources}</strong>
         </span>
+        {job.score && (
+          <span>
+            {t.runCard.score}{' '}
+            <strong className="font-semibold text-success">{job.score}</strong>
+          </span>
+        )}
+      </div>
+      {showRawError && (
+        <details className="min-w-0">
+          <summary className="cursor-pointer select-none">{t.runCard.errorDetails}</summary>
+          <p className="mt-1 whitespace-pre-wrap break-words font-mono">{rawError}</p>
+        </details>
       )}
     </div>
   )

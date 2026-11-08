@@ -113,6 +113,22 @@ def search(self, query, **hints):
 
 See the [Forensic cookbook](../observability/forensic-cookbook.md) for the full event catalog and `jq`/Python recipes that consume normalized source records.
 
+### Say why a search came back empty: `notices`
+
+A search that cannot deliver (the backend failed or stopped before its answer was finished) returns an empty `GroundedSearchResult` with a `ProviderNotice` that says why, instead of raising. The research run keeps the query with the notice, the kernel's web tool reports the restriction to the model when the notice has a `code`, and the trace shows the search as a WARNING generation with the notice as its status message. Put only your own fixed text in the message, never the backend's error text or the query.
+
+```python
+from inqtrix.search_result import ProviderNotice
+
+return GroundedSearchResult(notices=(ProviderNotice(
+    "CustomWebSearch failed; the empty result remains a visible evidence gap.",
+    code="upstream_5xx",
+    http_status=502,
+),))
+```
+
+A rate limit raises `AgentRateLimited`, and the run's deadline (`AgentTimeout`) and a cancellation (`AgentCancelled`) always pass through: a run that hit its deadline or was cancelled ends, it does not degrade into an empty result.
+
 ## `LLMProvider`
 
 ```python
@@ -140,6 +156,12 @@ class MyLLM(LLMProvider):
 
 agent = ResearchAgent(AgentConfig(llm=MyLLM()))
 ```
+
+### Async methods
+
+Every call method has an async twin with the same arguments, result and errors: `acomplete`, `acomplete_with_metadata`, `acomplete_structured` and `achat` on `LLMProvider`, `asearch` on `SearchProvider`. Async callers use them.
+
+A provider that implements only the sync methods, like `MyLLM` above, keeps working. Its async twins run the sync method on the provider lane of the process loop, a thread held for the whole call, and the first such call names the class once in a `WARNING` (`CONFIG: MyLLM has no async complete; ...`). Keyword arguments left at `None` are not passed to the sync method, so a `complete` that predates a parameter such as `reasoning_effort` still serves its twin. To run on the event loop without a thread, implement the async methods yourself; the sync methods stay what sync callers use.
 
 ### Exposing a `.models` property
 

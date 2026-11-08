@@ -216,9 +216,9 @@ READER_TEXT_AUTHOR: dict[str, str] = {
     # message-table text, so no model text reaches the reader through
     # them; they are listed here so that stays a checked property rather
     # than luck.
-    "agents.kernel.middleware:emit_narration.text=narration_text": (
-        RUNTIME_TEXT
-    ),
+    "agents.kernel.compaction:emit_narration.text="
+    "t({'language': resolve_answer_language(deps.question).code}, "
+    "'kernel_context_compacted')": RUNTIME_TEXT,
     "agents.kernel.middleware:emit_narration.text="
     "t({'language': resolve_answer_language(deps.question).code}, "
     "'kernel_batchguard_ask_first' if ask_turn else "

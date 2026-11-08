@@ -58,10 +58,6 @@ ONE-TIME AZURE SETUP (only needed before the FIRST run of this script)
    - + Deploy model -> ``gpt-4.1`` -> Deployment name e.g. ``gpt-4.1``
      -> Deployment type ``Standard`` or ``Global Standard``
      -> Tokens-per-minute e.g. 30K -> Deploy.
-   - (Optional, recommended) deploy a second cheaper model
-     (e.g. ``gpt-4.1-mini`` or ``gpt-4o-mini``) as a claim-extraction
-     deployment and set ``AZURE_OPENAI_CLAIM_EXTRACT_DEPLOYMENT_NAME`` in
-     ``.env`` accordingly.
 
 5. ``.env`` in the repo root
    - AZURE_OPENAI_ENDPOINT=https://oai-inqtrix-test.openai.azure.com/
@@ -102,7 +98,7 @@ if _logging.file_path:
 
 PROMPT = os.getenv(
     "AZURE_OPENAI_TEST_PROMPT",
-    "Antworte auf Deutsch in genau einem Satz: Dieser Test prueft, ob Azure OpenAI korrekt aufgerufen wird.",
+    "Antworte auf Deutsch in genau einem Satz: Dieser Test prüft, ob Azure OpenAI korrekt aufgerufen wird.",
 )
 
 

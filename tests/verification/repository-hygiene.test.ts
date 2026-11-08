@@ -527,9 +527,9 @@ describe('a scenario reports a measurement, not a default', () => {
   // A live engine that starts every scenario as "failed" reports twelve red
   // verdicts when it reached none of them: the column looks permanently
   // broken, carries no information and hides whichever failure is real.
-  // The report layer already distinguishes an unresolved scenario from a
-  // measured one and attributes exactly one failure when an engine dies, so
-  // the engines must hand it "not_run" rather than a pre-cooked verdict.
+  // The report layer keeps an unmeasured scenario not_run and leaves the
+  // verdict to the engine's own status, so the engines must hand it
+  // "not_run" rather than a pre-cooked verdict.
   const ENGINES = readdirSync(resolve(REPOSITORY_ROOT, 'e2e/engines'))
     .filter((name) => name.endsWith('.mjs'))
 
@@ -554,6 +554,29 @@ describe('a scenario reports a measurement, not a default', () => {
   }
 })
 
+describe('one writer for the scenario results', () => {
+  // Five copies of the result writer drifted apart from the reader: engines
+  // wrote not_run, the reader threw the whole file away, and the report
+  // blamed a scenario that had passed. The contract lives in one module, and
+  // only it and the orchestrator touch the results path.
+  const ALLOWED = new Set([
+    'tests/verification/command-runner.ts',
+    'tests/verification/fixtures/scenario-sidecar.mjs',
+    // Keeps its load child from writing a second result file.
+    'tests/verification/engines/collaboration-load-smoke.mjs',
+  ])
+
+  test('no engine writes the result file on its own', () => {
+    const writers = trackedTextPaths()
+      .filter((relativePath) => /\.(?:c|m)?(?:js|ts)$/.test(relativePath))
+      .filter((relativePath) => !/\.test\.(?:c|m)?(?:js|ts)$/.test(relativePath))
+      .filter((relativePath) => !ALLOWED.has(relativePath))
+      .filter((relativePath) => readFileSync(resolve(REPOSITORY_ROOT, relativePath), 'utf8')
+        .includes('INQTRIX_VERIFICATION_SCENARIO_RESULTS_PATH'))
+    assert.deepEqual(writers, [])
+  })
+})
+
 function isPrivateAgentPath(relativePath: string): boolean {
   const normalized = relativePath.replaceAll('\\', '/').toLowerCase()
   return (
@@ -576,3 +599,18 @@ function git(args: readonly string[]): string {
   )
   return result.stdout
 }
+
+test('no live runner swallows a cleanup call silently', () => {
+  const call = String.raw`\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)`
+  const swallowed = new RegExp(
+    String.raw`(?:logoutActor|logoutContext|eraseTemporaryUser|deleteCollaborationDocument|revokeGuestLink|lifecycle\.complete)`
+    + call
+    + String.raw`\s*(?:\.then` + call + String.raw`\s*)?\.catch\(\(\) =>`,
+  )
+  const offenders = trackedTextPaths()
+    .filter((path) => /^(?:e2e|tests\/verification)\/.*\.(?:mjs|ts)$/.test(path))
+    .filter((path) => !/\.test\./.test(path))
+    .filter((path) => swallowed.test(readFileSync(resolve(REPOSITORY_ROOT, path), 'utf8')))
+
+  assert.deepEqual(offenders, [])
+})

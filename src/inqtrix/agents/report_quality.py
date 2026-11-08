@@ -313,8 +313,9 @@ def writer_identifiers(references: list[dict[str, Any]]) -> list[str]:
 USER_TURN_MARKERS = ("User: ", "Nutzer: ")
 """How a transcript marks a line the USER wrote."""
 
-MODEL_TURN_MARKERS = ("Agent: ", "Assistent: ", "System: ", "Note: ")
-"""How a transcript marks a line the user did NOT write."""
+MODEL_TURN_MARKERS = ("Agent: ", "Assistent: ", "System: ", "Tool: ", "Note: ", "[... ")
+"""How a transcript marks a line the user did NOT write: a model, system or
+tool turn, a note, or the line that stands for left-out turns."""
 
 CLARIFICATION_MARKER = "Clarification: "
 CLARIFICATION_ANSWER_MARKER = " — Answer: "
@@ -325,7 +326,8 @@ answered. Only the answer half is the user's.
 These markers are written by :mod:`inqtrix.agents.session_context`
 (``User:``/``Agent:``/``Clarification: … — Answer: …``/``Note:``),
 :mod:`inqtrix.services.request_parsing` (``Nutzer:``/``Assistent:``/
-``System:``) and the kernel's ``ask_user`` transcript
+``System:``/``Tool:`` and ``[... n earlier messages omitted]``) and the
+kernel's ``ask_user`` transcript
 (``Question: …\nUser's answer: …``). They are repeated here because the
 writer guard, not the producers, is where reading a model line as a user
 line becomes a hole - and a test pins the two sides together so the

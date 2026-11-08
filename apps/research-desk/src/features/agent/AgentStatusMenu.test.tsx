@@ -28,6 +28,7 @@ vi.mock('@/components/ui/dropdown-menu', () => {
 const overview: AgentOverview = {
   brain: 'workspace_agent',
   kernel: 'selectable',
+  kernelReason: null,
   durable: true,
   approvals: null,
   tools: [],
@@ -69,4 +70,39 @@ describe('agent status menu clarification rounds', () => {
   it('keeps the operator ceiling without a selected tier', () => {
     expect(clarificationRounds({ tier: null, tiers: DEMO_AGENT_TIERS })).toBe(hard(2))
   })
+})
+
+
+describe('agent status menu kernel availability', () => {
+  function markup(over: Partial<AgentOverview>) {
+    return renderToStaticMarkup(
+      <TooltipProvider>
+        <AgentStatusMenu
+          autonomyHint=""
+          autonomyLabel="Standard"
+          disabled={false}
+          memoryEnabled={false}
+          overview={{ ...overview, ...over }}
+          responseForm="auto"
+          responseFormValue="Automatisch"
+          sourcePolicy={{ web: 'available', knowledge: 'available' }}
+        />
+      </TooltipProvider>,
+    )
+  }
+
+  it('says why the kernel is unavailable when the server names the reason', () => {
+    const reason = translations.de.agent.overview.kernelReasons.tool_calls_required
+    expect(markup({ kernel: 'unavailable', kernelReason: 'tool_calls_required' })).toContain(reason)
+  })
+
+  it.each(['operator_disabled', 'unknown'] as const)(
+    'says why the kernel is unavailable when the server reports %s',
+    (code) => {
+      const reasons = translations.de.agent.overview.kernelReasons as Record<string, string>
+      expect(reasons[code]).toBeTruthy()
+      expect(markup({ kernel: 'unavailable', kernelReason: code })).toContain(reasons[code])
+    },
+  )
+
 })

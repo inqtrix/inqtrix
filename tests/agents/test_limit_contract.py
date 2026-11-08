@@ -84,7 +84,7 @@ def test_the_limit_card_is_written_in_the_runs_answer_language() -> None:
         store, run_id="run_de0000000000", gate=gate, run_async=run_coro,
         language="de",
     )
-    assert "Ausführungsschritte" in german.question
+    assert "Grenze von 3 Arbeitsschritten" in german.question
     assert "Wie soll der Lauf fortgesetzt werden?" in german.question
     assert [option["label"] for option in german.options] == [
         "Auf 6 erweitern", "Teilstand übernehmen", "Lauf abbrechen",
@@ -94,8 +94,8 @@ def test_the_limit_card_is_written_in_the_runs_answer_language() -> None:
         store, run_id="run_en0000000000", gate=gate, run_async=run_coro,
         language="en",
     )
-    assert "execution steps" in english.question
-    assert "Ausführungsschritte" not in english.question
+    assert "limit of 3 work steps" in english.question
+    assert "Arbeitsschritten" not in english.question
     assert [option["label"] for option in english.options] == [
         "Extend to 6", "Take the partial result", "Cancel the run",
     ]
@@ -104,7 +104,29 @@ def test_the_limit_card_is_written_in_the_runs_answer_language() -> None:
         store, run_id="run_xx0000000000", gate=gate, run_async=run_coro,
         language="",
     )
-    assert "execution steps" in neutral.question
+    assert "work steps" in neutral.question
+
+
+def test_a_fixed_ceiling_asks_without_counters_a_reader_cannot_place() -> None:
+    gate = AgentLimitGate(kind="steps", used=98, current=97, proposed=97, ceiling=97)
+    store = MemoryAgentControlStore()
+
+    german, _ = create_or_get_limit_gate(
+        store, run_id="run_de1111111111", gate=gate, run_async=run_coro, language="de",
+    )
+    english, _ = create_or_get_limit_gate(
+        store, run_id="run_en1111111111", gate=gate, run_async=run_coro, language="en",
+    )
+
+    assert german.question == (
+        "Der Agent hat seine Grenze von 97 Arbeitsschritten erreicht."
+        " Eine Erweiterung ist hier nicht möglich."
+        " Wie soll der Lauf fortgesetzt werden?"
+    )
+    assert "98" not in english.question and "operator" not in english.question
+    assert [option["label"] for option in german.options] == [
+        "Teilstand übernehmen", "Lauf abbrechen",
+    ]
 
 
 def test_a_free_text_answer_is_matched_in_both_languages() -> None:
@@ -139,7 +161,7 @@ def test_operator_ceiling_never_offers_a_fake_extension() -> None:
         language="de",
     )
     assert [option["id"] for option in record.options] == ["partial", "cancel"]
-    assert "lässt keine Erweiterung zu" in record.question
+    assert "Eine Erweiterung ist hier nicht möglich." in record.question
 
 
 def test_answered_extension_folds_idempotently_without_resetting_usage() -> None:

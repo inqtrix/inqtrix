@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 
 class VectorIndexNotFound(KeyError):
@@ -185,5 +185,3 @@ class VectorIndexStore(Protocol):
     ) -> int:
         """Return residual memberships for zero-residual verification."""
         ...
-
-    async def aclose(self) -> None: ...

@@ -30,12 +30,20 @@ from inqtrix.model_cards import build_models_catalog
 from inqtrix.model_routing import describe_chat_model_options, describe_node_resolutions
 from inqtrix.providers import instrument_providers
 from inqtrix.providers.base import ProviderContext
-from inqtrix.server.app import warn_placeholder_secrets
+from inqtrix.server.app import (
+    close_job_store,
+    close_periodic_sweeps,
+    job_stores,
+    process_loop_lifespan,
+    start_job_stores,
+    start_periodic_sweeps,
+    warn_placeholder_secrets,
+)
 from inqtrix.server.routes import create_router, register_routes
 from inqtrix.auth.api_key import build_auth_provider
 from inqtrix.auth.principal import AuthProvider
 from inqtrix.server.security import make_cors_middleware_kwargs
-from inqtrix.server.runs import RunStore
+from inqtrix.runs.memory_store import RunStore
 from inqtrix.services.health_service import provider_label, provider_ready
 from inqtrix.settings import AgentSettings, Settings
 from inqtrix.strategies import StrategyContext, create_default_strategies, resolve_claim_extract_model
@@ -202,7 +210,8 @@ def _stack_models_payload(
         "node_models": node_models,
         "chat_model_options": describe_chat_model_options(llm_models),
         "models_catalog": build_models_catalog(
-            getattr(bundle.providers.llm, "selectable_models", []) or []
+            getattr(bundle.providers.llm, "selectable_models", []) or [],
+            getattr(bundle.providers.llm, "reasoning_levels", None),
         ),
         "context_window_tokens": getattr(
             bundle.providers.llm, "context_window_tokens", None
@@ -308,6 +317,11 @@ def create_multi_stack_app(
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        async with process_loop_lifespan(settings), _application_lifespan(_app):
+            yield
+
+    @asynccontextmanager
+    async def _application_lifespan(_app: FastAPI) -> AsyncIterator[None]:
         log.info(
             "Inqtrix multi-stack server starting | stacks=%d | default=%s "
             "| max_concurrent=%d | run_max_concurrent=%d | run_queue_max_size=%d "
@@ -339,6 +353,8 @@ def create_multi_stack_app(
             _app.state.container
         )
         _app.state.database_contract_ready = database_ready
+        if database_ready:
+            await start_job_stores(_app.state.container)
         if not database_ready:
             log.warning(
                 "Database runtime contract is not ready; multi-stack "
@@ -364,13 +380,7 @@ def create_multi_stack_app(
                 log.info(
                     "Workspace-Share-Reconciliation completed without changes."
                 )
-        # Deliberately NOT gated on database_ready: a database blip during
-        # boot would otherwise disable upload recovery for the whole
-        # process lifetime. Each pass degrades to a WARNING on storage
-        # errors and succeeds on its own once the database returns.
-        upload_reconciler = getattr(container, "upload_reconciler", None)
-        if upload_reconciler is not None:
-            upload_reconciler.start()
+        start_periodic_sweeps(_app.state.container)
         try:
             yield
         finally:
@@ -378,9 +388,9 @@ def create_multi_stack_app(
                 "Inqtrix multi-stack server stopping | stacks=%d",
                 len(resolved_stacks),
             )
-            upload_reconciler = getattr(container, "upload_reconciler", None)
-            if upload_reconciler is not None:
-                upload_reconciler.close()
+            await close_periodic_sweeps(_app.state.container)
+            for store in job_stores(_app.state.container):
+                await close_job_store(store)
             collaboration_service = getattr(
                 container, "editor_collaboration_service", None
             )

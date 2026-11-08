@@ -47,6 +47,9 @@ from __future__ import annotations
 INQTRIX_MODEL_FAILURE_REASON = "inqtrix.model.failure_reason"
 """Stable execution failure reason on a rejected model generation."""
 
+INQTRIX_PROVIDER_ATTEMPTS = "inqtrix.provider.attempts"
+"""Physical requests one logical provider call made, its retries included."""
+
 # --- OTel GenAI semantic conventions (Development; v1.37+ shapes) ------
 GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
 GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
@@ -243,6 +246,9 @@ which then disagrees with the ledger; this marker keeps the gap visible
 instead of exporting a fabricated zero."""
 INQTRIX_ROUND = "inqtrix.round"
 INQTRIX_REASONING_EFFORT = "inqtrix.request.reasoning_effort"
+INQTRIX_REASONING_EFFORT_SENT = "inqtrix.request.reasoning_effort.sent"
+"""The reasoning effort the request carried after the adapter's rules (``xhigh`` where
+``max`` was asked over Chat Completions); absent when the adapter does not say."""
 INQTRIX_TOOL_CHOICE = "inqtrix.request.tool_choice"
 """The obligation a chat turn was sent with (``required`` for a role's
 turns, which must end with their typed result call); absent when the

@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 _off_while_enabled_warned = False
 
 
-def start_worker_metrics(settings: Any) -> bool:
+def start_worker_metrics(settings: Any, database_engine: Any = None) -> bool:
     """Start the worker /metrics endpoint; returns True when serving."""
     global _off_while_enabled_warned
     port = int(settings.queue.worker_metrics_port or 0)
@@ -66,6 +66,10 @@ def start_worker_metrics(settings: Any) -> bool:
     )
 
     registry = CollectorRegistry()
+    if database_engine is not None:
+        from inqtrix.storage.db import DatabasePoolCollector
+
+        registry.register(DatabasePoolCollector(database_engine))
     try:
         start_http_server(port, registry=registry)
     except OSError as exc:

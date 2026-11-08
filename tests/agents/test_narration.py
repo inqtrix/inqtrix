@@ -9,7 +9,6 @@ allowlist must pass every schema field through untouched.
 from __future__ import annotations
 
 from inqtrix.agents.narration import (
-    NARRATION_EVENT,
     discovery_narration,
     first_sentences,
     plan_narration,
@@ -21,6 +20,7 @@ import pytest
 
 from inqtrix.agents.phase_models import DiscoveryResult
 from inqtrix.runtime_logging import sanitize_event_payload
+from inqtrix.harness.contracts.events import NARRATION_EVENT
 
 
 def _discovery(facts: int, gaps: int) -> DiscoveryResult:

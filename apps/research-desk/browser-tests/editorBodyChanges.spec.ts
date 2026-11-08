@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import type { Editor } from '@tiptap/core'
 
 import { CANVAS_SAVE_DEBOUNCE_MS } from '../src/features/agent/canvas/saveGate'
+import { inFreshTab } from './freshTab'
 
 const fixturePath = '/browser-tests/fixtures/editor-body-changes.html'
 
@@ -72,21 +73,23 @@ async function placeCaretAfterFirstParagraph(page: Page) {
     .toBe(true)
 }
 
-test('opening, focusing and clicking the live editor never hands its host a body', async ({ page }) => {
+test('opening, focusing and clicking the live editor never hands its host a body', async ({ context }) => {
   test.setTimeout(BODY_KINDS.length * 2 * OPEN_BUDGET_MS)
   for (const kind of BODY_KINDS) {
     for (const form of ['stored', 'fixpoint'] as const) {
       const label = `${kind} (${form})`
-      await openSurface(page, `body=${kind}&form=${form}`)
-      // The editor did normalize the document: a trailing paragraph after
-      // every other kind of last block. The absence of a body is therefore
-      // not the absence of a document change.
-      expect(await lastBlock(page), label).toBe('paragraph')
-      expect(await bodyChanges(page), `${label} after mount`).toEqual([])
+      await inFreshTab(context, async (page) => {
+        await openSurface(page, `body=${kind}&form=${form}`)
+        // The editor did normalize the document: a trailing paragraph after
+        // every other kind of last block. The absence of a body is therefore
+        // not the absence of a document change.
+        expect(await lastBlock(page), label).toBe('paragraph')
+        expect(await bodyChanges(page), `${label} after mount`).toEqual([])
 
-      await placeCaretAfterFirstParagraph(page)
-      await page.waitForTimeout(SETTLE_MS)
-      expect(await bodyChanges(page), `${label} after the first click`).toEqual([])
+        await placeCaretAfterFirstParagraph(page)
+        await page.waitForTimeout(SETTLE_MS)
+        expect(await bodyChanges(page), `${label} after the first click`).toEqual([])
+      })
     }
   }
 })

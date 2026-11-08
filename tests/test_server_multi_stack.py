@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 import inqtrix.research.web_research as web_research_module
+from inqtrix import aio
 from inqtrix.providers.base import ProviderContext
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.server.stacks import (
@@ -122,6 +124,47 @@ def test_discovery_endpoint_lists_all_stacks_with_ready_flag():
         assert s["ready"] is True
         assert s["llm"] == "_StubLLM"
         assert s["search"] == "_StubSearch"
+
+
+def test_the_periodic_sweeps_run_here_too_and_stop_before_the_stores():
+    """A retention window holds while nobody reads the store, in this server as well."""
+    from dataclasses import replace
+
+    settings = _make_settings()
+    app = create_multi_stack_app(
+        settings=settings,
+        stacks={"stack_a": _bundle("a")},
+        default_stack="stack_a",
+    )
+    events: list[str] = []
+
+    class Sweep:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def start(self) -> None:
+            events.append(f"{self.name}.start")
+
+        async def aclose(self) -> None:
+            events.append(f"{self.name}.close")
+
+    class RunStore:
+        async def aclose(self) -> None:
+            events.append("store.close")
+
+    app.state.container = replace(
+        app.state.container,
+        indexing_auto_resumer=Sweep("resume"),
+        run_retention_sweep=Sweep("retention"),
+        run_store=RunStore(),
+        upload_reconciler=Sweep("uploads"),
+    )
+
+    with TestClient(app):
+        assert sorted(events) == ["resume.start", "retention.start", "uploads.start"]
+    closed = events[3:]
+    assert sorted(closed[:3]) == ["resume.close", "retention.close", "uploads.close"]
+    assert closed[3:] == ["store.close"]
 
 
 def test_restricted_sharing_reconciles_in_multi_stack_lifespan():
@@ -455,10 +498,10 @@ def test_multi_stack_lifespan_owns_the_upload_reconciler():
     reconciler = app.state.container.upload_reconciler
     assert reconciler is not None
     assert reconciler.running is False
-    with TestClient(app):
+    with TestClient(app) as client:
         assert reconciler.running is True
+        assert aio.default_loop() is client.portal.call(asyncio.get_running_loop)
     assert reconciler.running is False
-    reconciler.close()
 
 
 def test_the_lifespan_closes_the_auth_provider():

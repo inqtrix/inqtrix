@@ -7,7 +7,7 @@ import pytest
 
 from inqtrix.project.agent_sessions_memory import MemoryAgentSessionStore
 from inqtrix.project.chat_memory import MemoryChatStore
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.project.session_titles import (
     SessionTitleConflict,
     TitleState,

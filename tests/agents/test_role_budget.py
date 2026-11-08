@@ -381,7 +381,7 @@ def test_the_operator_step_ceiling_binds_a_role_too():
     walked past that cap would be deriving capacity.
 
     This also pulls roles back UNDER that cap. Priced from the old constant
-    a role took 9 + 8x30 = 249 super-steps - already above the 241 an
+    a role took 8 + 8x30 = 248 super-steps - already above the 240 an
     operator allows any conversation to reach. The eight steps are one tool
     turn, and calls are spent in parallel batches.
     """

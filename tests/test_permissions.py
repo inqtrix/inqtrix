@@ -496,12 +496,15 @@ async def test_shares_are_tenant_scoped():
 
 
 def test_postgres_backend_without_url_fails_loudly():
-    from inqtrix.server.container import build_permission_service
+    from inqtrix.server.container import build_platform_persistence_bundle
     from inqtrix.settings import Settings, StorageSettings
+    from inqtrix.storage.db import build_process_engine
+
+    settings = Settings(storage=StorageSettings(backend="postgres"))
 
     with pytest.raises(RuntimeError, match="INQTRIX_DATABASE_URL"):
-        build_permission_service(
-            Settings(storage=StorageSettings(backend="postgres"))
+        build_platform_persistence_bundle(
+            settings, build_process_engine(settings.storage)
         )
 
 

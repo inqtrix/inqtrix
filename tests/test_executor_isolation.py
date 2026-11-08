@@ -13,7 +13,9 @@ saturate one lane and require the others to stay responsive.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -254,6 +256,27 @@ def test_container_carries_lanes_sized_from_settings() -> None:
         assert container.execution_lanes.streams._max_workers == 17
     finally:
         container.execution_lanes.close()
+
+
+def test_the_web_gateway_pool_holds_the_tabs_of_every_load_stage() -> None:
+    """A full pool fails everybody's next page load, not only the tab too many."""
+    from inqtrix_web_gateway import settings as gateway
+
+    stages = json.loads(Path("tests/load/run-load/scenarios.json").read_text())["stages"]
+
+    assert gateway._DEFAULT_MAX_UPSTREAM_CONNECTIONS >= 2 * max(
+        stage["tabs"] for stage in stages.values()
+    )
+
+
+def test_the_stack_file_leaves_the_gateway_pool_to_the_gateway() -> None:
+    """A default restated in the Compose file would outlive a change of the real one."""
+    from inqtrix_web_gateway.settings import _parse_optional_int
+
+    compose = Path("deploy/compose/compose.stack.yaml").read_text()
+
+    assert "INQTRIX_MAX_UPSTREAM_CONNECTIONS: ${INQTRIX_MAX_UPSTREAM_CONNECTIONS:-}\n" in compose
+    assert _parse_optional_int("", env_var="INQTRIX_MAX_UPSTREAM_CONNECTIONS") is None
 
 
 def test_the_web_gateway_pool_covers_both_shipped_admission_caps() -> None:

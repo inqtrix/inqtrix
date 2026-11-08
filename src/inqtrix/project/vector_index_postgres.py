@@ -33,9 +33,9 @@ from inqtrix.project.vector_index_ports import (
     VectorIndexNotFound,
     VectorIndexRecord,
 )
-from inqtrix.project.asset_lifecycle import lock_asset_lifecycle
-from inqtrix.project.scoped_upsert import ResourceScope, delete_scoped_postgres
-from inqtrix.project.scoped_upsert import scoped_postgres_upsert
+from inqtrix.storage.asset_lifecycle import lock_asset_lifecycle
+from inqtrix.storage.scoped_upsert import ResourceScope, delete_scoped_postgres
+from inqtrix.storage.scoped_upsert import scoped_postgres_upsert
 from inqtrix.storage.vector_index_orm import (
     vector_index_history,
     vector_index_members,

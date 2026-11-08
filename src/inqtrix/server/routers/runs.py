@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Mapping
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from inqtrix import aio
 from inqtrix.auth.principal import (
     Principal,
     UserContext,
@@ -70,14 +71,14 @@ from inqtrix.runs.shared import replay_after
 from inqtrix.server.stream_authorization import (
     GenerationGatedFrameAuthorization,
 )
-from inqtrix.server.runs import (
+from inqtrix.exceptions import RunNotFound
+from inqtrix.runs.records import (
     RunActive,
-    RunNotFound,
     RunPerUserLimit,
     RunQueueFull,
     RunSessionActive,
-    format_sse_event,
 )
+from inqtrix.runs.shared import format_sse_event
 from inqtrix.pagination import (
     InvalidCursor,
     clamp_limit,
@@ -95,6 +96,12 @@ from inqtrix.services.request_parsing import (
     workspace_id_for_write,
     workspace_id_from_request,
 )
+from inqtrix.harness.contracts.events import (
+    RUN_CANCELLED_EVENT,
+    RUN_COMPLETED_EVENT,
+    RUN_FAILED_EVENT,
+    STREAM_LIVE_EVENT,
+)
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -102,9 +109,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 TERMINAL_EVENTS = {
-    "inqtrix.run.completed",
-    "inqtrix.run.failed",
-    "inqtrix.run.cancelled",
+    RUN_COMPLETED_EVENT,
+    RUN_FAILED_EVENT,
+    RUN_CANCELLED_EVENT,
 }
 
 
@@ -504,7 +511,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                     "invalid_request_error",
                 )
             try:
-                attached_reports = resolve_attached_reports(
+                attached_reports = await resolve_attached_reports(
                     raw_report_ids,
                     run_store=run_store,
                     visible_to=visible_to,
@@ -637,10 +644,9 @@ def build_router(container: "AppContainer") -> APIRouter:
                 return denied
 
         try:
-            # to_thread: the durable store's submit blocks on database
-            # round-trips; running it inline would stall the event loop
-            # for every concurrent request.
-            summary = await asyncio.to_thread(
+            # A sync service on its way to the store: not on the loop, which
+            # the store needs, and not on the short-work lane.
+            summary = await aio.run_legacy_segment(partial(
                 run_service.submit,
                 question=question,
                 history=history,
@@ -669,7 +675,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 attached_reports=attached_reports,
                 incognito=incognito,
                 ui_language=ui_language,
-            )
+            ))
         except RunPerUserLimit:
             # THEIR cap, not the shared queue: the caller can free
             # capacity by finishing/cancelling their own runs.
@@ -750,13 +756,14 @@ def build_router(container: "AppContainer") -> APIRouter:
                 else {},
                 imported_snapshot,
             )
-            summary = await asyncio.to_thread(
-                run_store.import_completed_run,
+            summary = await run_store.aimport_completed_run(
                 source_run_id=source_run_id,
                 question=str(body.get("question") or ""),
                 stack_name=str(body.get("stack") or "default"),
                 result=imported_result,
                 status=str(body.get("status") or "completed"),
+                # Part of the route's contract: a report from a project file
+                # may leave out its mode and is then a research report.
                 mode=str(body.get("mode") or "research"),
                 agent_overrides=body.get("agent_overrides")
                 if isinstance(body.get("agent_overrides"), dict)
@@ -775,7 +782,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         return JSONResponse(status_code=200, content=summary)
 
     @router.get("/v1/runs")
-    def list_runs(
+    async def list_runs(
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
@@ -797,7 +804,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         except InvalidCursor:
             return error_response(400, "Invalid cursor", "invalid_cursor")
         limit = clamp_limit(req.query_params.get("limit"))
-        summaries, next_cursor = run_store.list_page(
+        summaries, next_cursor = await run_store.alist_page(
             limit=limit,
             after=after,
             workspace_id=workspace_id,
@@ -806,7 +813,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         return list_envelope(summaries, next_cursor)
 
     @router.get("/v1/runs/{run_id}")
-    def get_run(
+    async def get_run(
         run_id: str,
         req: Request,
         principal: Principal = Depends(principal_dep),
@@ -815,7 +822,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         """Return the current public summary for one native run."""
         try:
             workspace_id = workspace_id_from_request(req)
-            return run_store.get(
+            return await run_store.aget(
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
@@ -826,7 +833,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(404, "Run not found", "not_found")
 
     @router.get("/v1/runs/{run_id}/result")
-    def get_run_result(
+    async def get_run_result(
         run_id: str,
         req: Request,
         principal: Principal = Depends(principal_dep),
@@ -835,7 +842,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         """Return the final report payload for a completed native run."""
         try:
             workspace_id = workspace_id_from_request(req)
-            summary = run_store.get(
+            summary = await run_store.aget(
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
@@ -852,18 +859,20 @@ def build_router(container: "AppContainer") -> APIRouter:
                 status=summary["status"],
             )
         try:
-            stored_result = run_store.result(
+            stored_result = await run_store.aresult(
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
             )
             from inqtrix.evidence import project_web_search_payload
 
-            return merge_knowledge_result_payload(
-                project_web_search_payload(stored_result),
-                summary.get("snapshot")
-                if isinstance(summary.get("snapshot"), dict)
-                else None,
+            return await aio.run_blocking(
+                lambda: merge_knowledge_result_payload(
+                    project_web_search_payload(stored_result),
+                    summary.get("snapshot")
+                    if isinstance(summary.get("snapshot"), dict)
+                    else None,
+                )
             )
         except RunNotFound:
             return error_response(404, "Run result not found", "not_found")
@@ -878,8 +887,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         """Request cancellation for a queued or running native run."""
         try:
             workspace_id = workspace_id_from_request(req)
-            summary, affected_run_ids = await asyncio.to_thread(
-                run_store.cancel_tree,
+            summary, affected_run_ids = await run_store.acancel_tree(
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
@@ -919,8 +927,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         try:
-            await asyncio.to_thread(
-                run_store.delete,
+            await run_store.adelete(
                 run_id,
                 workspace_id=workspace_id,
                 requester_user_id=principal.user_id,
@@ -966,10 +973,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         """
         try:
             workspace_id = workspace_id_from_request(req)
-            # to_thread like every durable-store touch in async routes:
-            # the store call blocks on database round-trips.
-            await asyncio.to_thread(
-                run_store.get,
+            await run_store.aget(
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
@@ -978,7 +982,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         except RunNotFound:
             return error_response(404, "Run not found", "not_found")
-        children = await asyncio.to_thread(run_store.children, run_id)
+        children = await run_store.achildren(run_id)
         return {"object": "list", "data": children}
 
     @router.get("/v1/runs/{run_id}/events")
@@ -1012,8 +1016,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         wants_json = req.query_params.get("format") == "json"
         try:
             workspace_id = workspace_id_from_request(req)
-            subscription = await asyncio.to_thread(
-                run_store.subscribe,
+            subscription = await run_store.asubscribe(
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
@@ -1041,8 +1044,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                         current
                     )
                 )
-                await asyncio.to_thread(
-                    run_store.get,
+                await run_store.aget(
                     run_id,
                     workspace_id=workspace_id,
                     visible_to=live_visible_to,
@@ -1119,7 +1121,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 # one frame at a time and the UI animated every line as if it
                 # were new.
                 yield format_sse_event(
-                    {"type": "inqtrix.stream.live", "run_id": run_id}
+                    {"type": STREAM_LIVE_EVENT, "run_id": run_id}
                 )
                 loop = asyncio.get_running_loop()
                 next_heartbeat = loop.time() + 5.0

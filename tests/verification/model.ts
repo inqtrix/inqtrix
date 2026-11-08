@@ -1,3 +1,5 @@
+import type { ScenarioResultEntry } from './fixtures/scenario-sidecar.mjs'
+
 export const VERIFICATION_PROFILES = [
   'ui-fixture',
   'owner-setup',
@@ -10,6 +12,7 @@ export const VERIFICATION_PROFILES = [
   'load-soak',
   'load-ramp',
   'load-capacity',
+  'run-load',
   'edge-conformance',
 ] as const
 
@@ -21,6 +24,7 @@ export const VERIFICATION_ENGINES = [
   'agent-desk-live',
   'chat-prompt-live',
   'collaboration-load',
+  'run-load',
   'web-edge-containers',
 ] as const
 
@@ -44,6 +48,7 @@ export const ENGINE_STATUSES = [
 export const SCENARIO_STATUSES = [
   'passed',
   'failed',
+  'skipped',
   'blocked',
   'not_applicable',
   'not_run',
@@ -74,18 +79,24 @@ export type EngineResult = {
   finishedAt: string
   signal: NodeJS.Signals | null
   scenarios?: ScenarioExecutionResult[]
+  /** Why the engine's result file was discarded, when it was: its scenarios
+   * then stay not_run, and this names the cause at the engine. */
+  scenarioResultsProblem?: string
+  /** Why an engine that exited 0 counts as failed: the scenarios of its
+   * inventory it did not pass, each with its status and reason. */
+  scenarioGap?: string
   startedAt: string
   status: EngineStatus
 }
 
-export type ScenarioExecutionResult = {
-  id: string
-  status: 'passed' | 'failed'
-}
+// What an engine reports per scenario: measured (passed, failed), not
+// measured (not_run), or left out for a stated reason (skipped).
+export type ScenarioExecutionResult = ScenarioResultEntry
 
 export type ScenarioReportRecord = {
   engine: VerificationEngine
   id: string
+  reason?: string
   status: ScenarioStatus
 }
 
@@ -96,6 +107,25 @@ export type CleanupRecord = {
   label: string
   registeredAt: string
   status: CleanupStatus
+}
+
+export type ServiceLogCounters = {
+  errors: number
+  firstLineAt: string | null
+  levels: Record<string, number>
+  lines: number
+  missingFields: Record<string, number>
+  notable: { count: number; level: string; logger: string; message: string }[]
+  notableDropped: number
+  notJson: number
+}
+
+export type LogInspection = {
+  reason?: string
+  runId?: string
+  services?: Record<string, ServiceLogCounters>
+  since?: string
+  status: 'passed' | 'failed' | 'not_run'
 }
 
 export type VerificationReport = {
@@ -109,6 +139,7 @@ export type VerificationReport = {
   engines: VerificationEngine[]
   finishedAt: string | null
   inqtrixVersion: string
+  logInspection: LogInspection
   preflight: PreflightCheck[]
   profile: VerificationProfile
   runId: string
@@ -118,7 +149,7 @@ export type VerificationReport = {
     platform: NodeJS.Platform
   }
   scenarios: ScenarioReportRecord[]
-  schemaVersion: 4
+  schemaVersion: 6
   sourceDirty: boolean | null
   sourceRevision: string | null
   startedAt: string

@@ -2,11 +2,12 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import {
+  PodmanResourceMonitor,
   assertResourceHeadroom,
   buildResourceSnapshot,
   evaluateResourceRecovery,
   parseComposeContainers,
-  parseMachineCapacity,
+  parseHostCapacity,
 } from './container-resource-monitor.mjs'
 
 const canonicalCompose = '/repo/deploy/compose/compose.stack.yaml'
@@ -18,7 +19,7 @@ const containers = services.map((service, index) => ({
 }))
 
 describe('resource-aware local load guard', () => {
-  test('selects one running canonical Compose project and machine capacity', () => {
+  test('selects one running canonical Compose project and its host capacity', () => {
     const inventory = services.map((service, index) => ({
       Id: containers[index].id,
       Labels: {
@@ -31,13 +32,97 @@ describe('resource-aware local load guard', () => {
       parseComposeContainers(JSON.stringify(inventory), project, canonicalCompose),
       containers,
     )
-    assert.deepEqual(parseMachineCapacity(JSON.stringify([{
-      Resources: { CPUs: 7, Memory: 11444 },
-      State: 'running',
-    }])), {
+    assert.deepEqual(parseHostCapacity(JSON.stringify({
+      host: { cpus: 7, memTotal: 11444 * 1024 * 1024 },
+    })), {
       cpus: 7,
       memoryBytes: 11444 * 1024 * 1024,
     })
+  })
+
+  test('refuses a host whose capacity it cannot read', () => {
+    for (const host of [{}, { cpus: 0, memTotal: 1024 }, { cpus: 4, memTotal: 0 }]) {
+      assert.throws(() => parseHostCapacity(JSON.stringify({ host })), /host capacity is invalid/)
+    }
+    assert.throws(() => parseHostCapacity('{}'), /host capacity is invalid/)
+  })
+
+  function scaled(service, number) {
+    return {
+      Id: String(number).repeat(64),
+      Labels: {
+        'com.docker.compose.container-number': String(number),
+        'com.docker.compose.project': project,
+        'com.docker.compose.project.config_files': canonicalCompose,
+        'com.docker.compose.service': service,
+      },
+    }
+  }
+
+  test('watches each process of a scaled API and worker on its own', () => {
+    const inventory = [
+      ...services.map((name, index) => ({ ...scaled(name, 1), Id: containers[index].id })),
+      scaled('api', 2),
+      scaled('worker', 3),
+    ]
+    assert.deepEqual(
+      parseComposeContainers(JSON.stringify(inventory), project, canonicalCompose)
+        .map((container) => container.service),
+      ['api', 'api-2', 'collaboration', 'postgres', 'web', 'worker-3'],
+    )
+  })
+
+  test('refuses a second container of what it reads as one', () => {
+    for (const service of ['collaboration', 'postgres', 'web']) {
+      const inventory = [
+        ...services.map((name, index) => ({ ...scaled(name, 1), Id: containers[index].id })),
+        scaled(service, 2),
+      ]
+      assert.throws(
+        () => parseComposeContainers(JSON.stringify(inventory), project, canonicalCompose),
+        new RegExp(`requires one ${service} container`),
+      )
+    }
+  })
+
+  test('starts where Podman runs without a machine', async () => {
+    const inventory = services.map((name, index) => ({
+      ...scaled(name, 1),
+      Id: containers[index].id,
+      Restarts: 0,
+    }))
+    const answers = {
+      exec: { stdout: '3' },
+      info: { stdout: JSON.stringify({ host: { cpus: 12, memTotal: 16 * 1024 ** 3 } }) },
+      inspect: {
+        stdout: containers.map(() => JSON.stringify({ Running: true })).join('\n'),
+      },
+      ps: { stdout: JSON.stringify(inventory) },
+      stats: {
+        stdout: JSON.stringify(containers.map((container) => ({
+          cpu_percent: '1%',
+          id: container.id,
+          mem_usage: '100MB / 12GB',
+          pids: 5,
+        }))),
+      },
+    }
+    const monitor = new PodmanResourceMonitor({
+      execute: async (_tool, args) => {
+        if (args.includes('psql') || args.at(-1)?.includes('pg_stat_activity')) {
+          return { stdout: '20/100' }
+        }
+        const answer = answers[args[0]]
+        if (!answer) throw new Error(`Inspecting ${args[0]} failed.`)
+        return answer
+      },
+      project,
+      repositoryRoot: '/repo',
+    })
+
+    const baseline = await monitor.initialize()
+
+    assert.deepEqual(baseline.machine, { cpus: 12, memoryBytes: 16 * 1024 ** 3 })
   })
 
   test('rejects foreign Compose files and missing critical services', () => {

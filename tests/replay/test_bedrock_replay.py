@@ -22,7 +22,8 @@ import pytest
 from botocore.stub import Stubber
 
 from inqtrix.exceptions import AgentRateLimited, BedrockAPIError
-from inqtrix.providers.bedrock import _MAX_BEDROCK_ATTEMPTS, BedrockLLM
+from inqtrix.providers.base import MAX_PROVIDER_ATTEMPTS
+from inqtrix.providers.bedrock import BedrockLLM
 
 from tests.fixtures.bedrock_responses import (
     load_bedrock_response,
@@ -113,8 +114,8 @@ def test_throttling_then_success_stub(stubbed_provider) -> None:
     """A throttling burst recovers on the final retry attempt."""
     provider, stubber = stubbed_provider
 
-    # Burst pattern: (_MAX_BEDROCK_ATTEMPTS - 1) throttling + 1 success.
-    for _ in range(_MAX_BEDROCK_ATTEMPTS - 1):
+    # Burst pattern: (MAX_PROVIDER_ATTEMPTS - 1) throttling + 1 success.
+    for _ in range(MAX_PROVIDER_ATTEMPTS - 1):
         stubber.add_client_error(
             "converse",
             service_error_code="ThrottlingException",
@@ -134,7 +135,7 @@ def test_throttling_terminal_stub(stubbed_provider) -> None:
     """All retry attempts throttle → ``AgentRateLimited`` (graph-fatal)."""
     provider, stubber = stubbed_provider
 
-    for _ in range(_MAX_BEDROCK_ATTEMPTS):
+    for _ in range(MAX_PROVIDER_ATTEMPTS):
         stubber.add_client_error(
             "converse",
             service_error_code="ThrottlingException",

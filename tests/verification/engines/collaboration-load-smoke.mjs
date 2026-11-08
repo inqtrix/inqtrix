@@ -8,8 +8,8 @@ import { setTimeout as delay } from 'node:timers/promises'
 import {
   main as runCollaborationLoad,
   writeScenarioResults,
-  writeScenarioSidecar,
 } from '../../load/collaboration-load.mjs'
+import { writeScenarioSidecar } from '../fixtures/scenario-sidecar.mjs'
 import {
   RAMP_MAX_IDENTITIES,
   RAMP_SESSIONS_PER_IDENTITY,
@@ -23,6 +23,7 @@ import {
   temporaryUserDescriptors,
 } from '../fixtures/accounts.mjs'
 import { assertFixture, fetchActorJson } from '../fixtures/api.mjs'
+import { attemptCleanup } from '../fixtures/cleanup-step.mjs'
 import { createApiSessionFixtures } from '../fixtures/api-sessions.mjs'
 import { PodmanResourceMonitor } from '../fixtures/container-resource-monitor.mjs'
 import {
@@ -50,6 +51,7 @@ import { VerificationLifecycleClient } from '../fixtures/lifecycle-client.mjs'
 import { PodmanNetworkShapingDriver } from '../fixtures/network-shaping.mjs'
 import { assertVerificationRunId } from '../fixtures/run-scope.mjs'
 import { grantAndAccept } from '../fixtures/shares.mjs'
+import { httpsErrorsIgnored } from '../fixtures/https-errors.mjs'
 
 const PROFILE = process.env.INQTRIX_LOAD_PROFILE?.trim() || 'load-smoke'
 const MEMORY_RECOVERY_BASELINE_PHASE = 'latency-100ms'
@@ -66,14 +68,14 @@ const adminEmail = requiredEnvironment('INQTRIX_E2E_ADMIN_EMAIL')
 const adminPassword = requiredEnvironment('INQTRIX_E2E_ADMIN_PASSWORD')
 const userPassword = requiredEnvironment('INQTRIX_E2E_USER_PASSWORD')
 const baseURL = normalizeLoadSmokeBaseURL(
-  process.env.INQTRIX_E2E_BASE_URL ?? 'http://127.0.0.1:8080',
+  process.env.INQTRIX_E2E_BASE_URL ?? 'http://localhost:8080',
 )
 const documentSeed = buildLoadDocumentSeed({
   loadProfile: PROFILE,
   requestedProfile: process.env.INQTRIX_LOAD_SMOKE_DOCUMENT_PROFILE,
   runId,
 })
-const ignoreHTTPSErrors = process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1'
+const ignoreHTTPSErrors = httpsErrorsIgnored()
 const repositoryRoot = fileURLToPath(new URL('../../..', import.meta.url))
 
 assertVerificationRunId(runId)
@@ -163,7 +165,6 @@ try {
       summary,
     )
     await writeScenarioSidecar(
-      process.env.INQTRIX_VERIFICATION_SCENARIO_RESULTS_PATH,
       [
         {
           // A budget stop is an honest local ceiling, not a red gate;
@@ -176,6 +177,7 @@ try {
           status: summary.stopKind === 'integrity' ? 'failed' : 'passed',
         },
       ],
+      process.env,
     )
   } else if (PROFILE === 'load-smoke') {
     const result = await runSmoke({ capabilities })
@@ -195,47 +197,38 @@ try {
     await runSoak({ capabilities })
   }
 } finally {
-  await activity?.settle().catch(() => undefined)
+  await attemptCleanup('activity', () => activity?.settle())
   let networkClosed = false
+  // On failure the parent lifecycle retains the registered qdisc cleanup handle.
   if (control) {
-    try {
-      await control.close()
-      networkClosed = true
-    } catch {
-      // The parent lifecycle retains the registered qdisc cleanup handle.
-    }
+    networkClosed = await attemptCleanup('network shaping', () => control.close())
     control = null
     networkDriver = null
   } else if (networkDriver) {
-    try {
-      await networkDriver.close()
-      networkClosed = true
-    } catch {
-      // The parent lifecycle retains the registered qdisc cleanup handle.
-    }
+    networkClosed = await attemptCleanup('network shaping', () => networkDriver.close())
     networkDriver = null
   }
   if (networkClosed && networkCleanupHandle) {
-    await lifecycle.complete(networkCleanupHandle).catch(() => undefined)
+    await attemptCleanup('network shaping', () => lifecycle.complete(networkCleanupHandle))
     networkCleanupHandle = null
   }
   if (document && admin) {
-    await deleteCollaborationDocument({
+    await attemptCleanup('document', () => deleteCollaborationDocument({
       document,
       lifecycle,
       owner: admin,
-    }).catch(() => undefined)
+    }))
   }
   for (const actor of [...temporaryActors].reverse()) {
-    await sessions.logoutActor(actor).catch(() => undefined)
+    await attemptCleanup('logout', () => sessions.logoutActor(actor))
   }
   if (admin) {
     if (PROFILE === 'load-smoke') {
       for (const user of [...temporaryUsers].reverse()) {
-        await eraseTemporaryUser(admin, user, lifecycle).catch(() => undefined)
+        await attemptCleanup('temporary account', () => eraseTemporaryUser(admin, user, lifecycle))
       }
     }
-    await sessions.logoutActor(admin).catch(() => undefined)
+    await attemptCleanup('admin logout', () => sessions.logoutActor(admin))
   }
   await sessions.closeAll()
   lifecycle.close()

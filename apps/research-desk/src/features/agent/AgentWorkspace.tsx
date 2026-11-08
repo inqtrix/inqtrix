@@ -11,7 +11,7 @@ import { createReadyGate } from '@/features/composer/readyGate'
 import type { Dispatch, SetStateAction } from 'react'
 import { useReducedMotion } from 'motion/react'
 
-import type { ClientOptions } from '@/api/inqtrixClient'
+import { fetchResearchRun, type ClientOptions } from '@/api/inqtrixClient'
 import { createProjectEntityId } from '@/features/project/entityId'
 import { shouldRequestAgentTitle } from '@/features/sessionTitle/model'
 import {
@@ -95,6 +95,7 @@ import {
   type AgentDocumentOption,
 } from './AgentComposer'
 import { AgentSessionRail } from './AgentSessionRail'
+import { questionToAskAgain, restartChoice, type AgentRestartNotice } from './bindingEnd'
 import { useDraftField, type AgentComposerDraft } from './composerDraft'
 import { ComposerGateTray, pendingGate } from './ComposerGateTray'
 import { AGENT_CANVAS_REGISTRY } from './canvas/views'
@@ -280,6 +281,11 @@ export function AgentWorkspace({
   const reduceMotion = Boolean(useReducedMotion())
   const isDesktop = useMediaQuery('(min-width: 1024px)')
   const [isMobileSessionsOpen, setIsMobileSessionsOpen] = useState(false)
+  // What the last "start again" left to say next to its button, and a count
+  // the composer focuses on: a restart that filled the input moves the focus
+  // there, so the filled question is read out and can be sent.
+  const [restartNotice, setRestartNotice] = useState<AgentRestartNotice | null>(null)
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0)
   // The draft's document, attachments and run setup are held by the desk
   // (`composerDraft`): a view switch unmounts this workspace, and state
   // kept here came back empty while the draft text survived.
@@ -486,10 +492,11 @@ export function AgentWorkspace({
     () => buildAgentOverview({
       agent: overviewSource,
       autonomy: selectedAutonomy,
+      kernelReason: capabilities?.feature_status?.agent_kernel?.reason_code ?? null,
       kernelSelectable,
       mode: effectiveEngineMode,
     }),
-    [effectiveEngineMode, kernelSelectable, overviewSource, selectedAutonomy],
+    [capabilities, effectiveEngineMode, kernelSelectable, overviewSource, selectedAutonomy],
   )
 
   const clientOptions = useMemo<ClientOptions | null>(
@@ -989,6 +996,34 @@ export function AgentWorkspace({
         : (runId) => {
           if (canEditAgentRun(state.agentRuns[runId])) void cancelRun(runId)
         },
+      // The ordinary send starts the new run, with every check a run meets. A
+      // question that cannot be read in full is not put back cut, and a draft
+      // in the input is only replaced on the user's word.
+      onRestartRun: (run) => {
+        void questionToAskAgain(
+          run,
+          (runId) => fetchResearchRun(runId, clientOptions ?? {}),
+        ).then(
+          (question) => {
+            if (restartChoice(draftQuestion, question) === 'ask') {
+              setRestartNotice({ kind: 'replace', question, runId: run.runId })
+              return
+            }
+            setRestartNotice(null)
+            onDraftQuestionChange(question)
+            setComposerFocusRequest((count) => count + 1)
+          },
+          () => setRestartNotice({ kind: 'read_failed', runId: run.runId }),
+        )
+      },
+      restartNotice,
+      onConfirmRestart: () => {
+        if (restartNotice?.kind !== 'replace') return
+        setRestartNotice(null)
+        onDraftQuestionChange(restartNotice.question)
+        setComposerFocusRequest((count) => count + 1)
+      },
+      onDismissRestart: () => setRestartNotice(null),
       onOpenCanvas: openCanvasView,
       // Inline chip diff: resolve the CURRENT anchor before the
       // revision fetch — the timeline's runId can be stale.
@@ -1008,9 +1043,13 @@ export function AgentWorkspace({
     }),
     [
       cancelRun,
+      clientOptions,
       control,
       demo,
+      draftQuestion,
+      onDraftQuestionChange,
       openCanvasView,
+      restartNotice,
       planSource,
       setPlanDraft,
       state.agentPlanDrafts,
@@ -1467,6 +1506,7 @@ export function AgentWorkspace({
         documents={documents}
         draftDoc={draftDoc}
         draftQuestion={draftQuestion}
+        focusRequest={composerFocusRequest}
         onDraftDocChange={setDraftDoc}
         depthMode={selectedDepth}
         depthSelectable={depthSelectable}

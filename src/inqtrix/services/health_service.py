@@ -10,10 +10,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from inqtrix import __display_version__
 from inqtrix.core.constants import MODEL_NAME
 from inqtrix.legal import ai_disclosure_metadata, legal_metadata
 from inqtrix.model_cards import build_models_catalog
+from inqtrix.version import __display_version__
 from inqtrix.model_routing import (
     describe_chat_model_options,
     describe_node_resolutions,
@@ -148,7 +148,8 @@ class HealthService:
             "node_models": node_models,
             "chat_model_options": describe_chat_model_options(provider_models),
             "models_catalog": build_models_catalog(
-                getattr(llm_provider, "selectable_models", []) or []
+                getattr(llm_provider, "selectable_models", []) or [],
+                getattr(llm_provider, "reasoning_levels", None),
             ),
             "context_window_tokens": getattr(
                 llm_provider, "context_window_tokens", None

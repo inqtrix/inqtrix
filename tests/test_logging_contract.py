@@ -1239,6 +1239,7 @@ def test_api_main_configures_logging_before_settings(
 
     monkeypatch.setattr(server_main, "Settings", _settings)
     monkeypatch.setattr(server_main, "create_app", lambda settings: calls.append("create_app") or "app")
+    monkeypatch.setattr(server_main, "freeze_startup_heap", lambda: None)
     monkeypatch.setattr(
         server_main.uvicorn,
         "run",

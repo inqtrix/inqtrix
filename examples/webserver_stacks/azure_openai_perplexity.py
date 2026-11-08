@@ -2,20 +2,21 @@
 
 Mounts the OpenAI-compatible Inqtrix server on top of an
 ``AzureOpenAILLM`` + ``PerplexitySearch`` stack. Provider construction
-is **1:1 identical** to the library example, including all four Azure
-auth modes available as Options A–E (only A is active; B–E are ready
-to uncomment for Service Principal / Managed Identity setups).
+is **1:1 identical** to the library example, including the API-key
+authentication for Azure OpenAI.
 
 Required environment variables
 ------------------------------
 - ``PERPLEXITY_API_KEY``
-- ``AZURE_OPENAI_API_KEY``           (Option A — default)
+- ``AZURE_OPENAI_API_KEY``
 - ``AZURE_OPENAI_ENDPOINT``
-- ``AZURE_OPENAI_DEPLOYMENT_NAME``
 
-Optional (parity with provider_stacks):
-- ``AZURE_OPENAI_CLAIM_EXTRACT_DEPLOYMENT_NAME``
-- ``AZURE_TENANT_ID`` / ``AZURE_CLIENT_ID`` / ``AZURE_CLIENT_SECRET`` (Option B/C)
+Deployments
+-----------
+The Azure deployment names are set in the provider builder below as three
+model tiers (high for the answer, mid for plan / evaluate / direct chat, fast
+for classify and claim extraction), as in the library example; replace them
+with your deployment names.
 
 Optional logging / server / security: see ``examples/webserver_stacks/README.md``
 (``INQTRIX_LOG_*``, ``OBSERVABILITY_PROFILE``).
@@ -69,7 +70,7 @@ def _build_providers() -> ProviderContext:
 
     # -- LLM Provider ---------------------------------------------------------
     #
-    # Option A: API Key (default)
+    # Authentication: the API key of the Azure OpenAI resource.
     azure_api_key = _require_env("AZURE_OPENAI_API_KEY")
 
     llm = AzureOpenAILLM(
@@ -94,53 +95,6 @@ def _build_providers() -> ProviderContext:
         tier_mid_model="gpt-5.4",        tier_mid_effort="none",
         tier_fast_model="gpt-5.4-mini",  tier_fast_effort="none",
     )
-
-    # -- Option B: Service Principal — direct constructor args ----------------
-    #
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     tenant_id=os.environ["AZURE_TENANT_ID"],
-    #     client_id=os.environ["AZURE_CLIENT_ID"],
-    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # -- Option C: Service Principal — manual token provider ------------------
-    #
-    # from azure.identity import ClientSecretCredential, get_bearer_token_provider
-    #
-    # credential = ClientSecretCredential(
-    #     tenant_id=os.environ["AZURE_TENANT_ID"],
-    #     client_id=os.environ["AZURE_CLIENT_ID"],
-    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
-    # )
-    # token_provider = get_bearer_token_provider(
-    #     credential,
-    #     "https://cognitiveservices.azure.com/.default",
-    # )
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     azure_ad_token_provider=token_provider,
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # -- Option D: Existing token provider ------------------------------------
-    #
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     azure_ad_token_provider=existing_token_provider,
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # -- Option E: DefaultAzureCredential (local dev / Managed Identity) ------
-    #
-    # from azure.identity import DefaultAzureCredential
-    #
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     credential=DefaultAzureCredential(),
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
 
     search = PerplexitySearch(
         api_key=perplexity_key,

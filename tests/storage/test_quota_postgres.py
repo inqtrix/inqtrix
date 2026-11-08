@@ -63,11 +63,11 @@ async def store():
                 (USER_ID, USAGE_USER_ID, LIMIT_USER_ID, OWNER_ID),
             )
     await engine.dispose()
-    store = PostgresQuotaStore(database_url=TEST_DATABASE_URL, app_role=APP_ROLE)
-    yield store
-    # The store owns its NullPool engine; dispose it so the gated suite
-    # leaves no engine lingering (parity with the other repo fixtures).
-    await store.aclose()
+    engine = build_engine(TEST_DATABASE_URL)
+    yield PostgresQuotaStore(
+        session_factory=build_session_factory(engine), app_role=APP_ROLE
+    )
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

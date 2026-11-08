@@ -32,7 +32,7 @@ from inqtrix.observability.propagation import (
 )
 from inqtrix.observability.spool import build_spool_exporter
 from inqtrix.runtime_logging import emit_runtime_event, sanitize_event_payload
-from inqtrix.server.runs import RunStore
+from inqtrix.runs.memory_store import RunStore
 from inqtrix.settings import ObservabilitySettings
 from tests._tracing_helpers import everything_a_span_exports
 
@@ -287,6 +287,8 @@ def test_memory_store_submit_persists_traceparent():
         tracer = provider.get_tracer("test")
         with tracer.start_as_current_span("api-request"):
             summary = store.submit(
+                mode="research",
+                workflow_contract=1,
                 question="traced",
                 stack_name="default",
                 work=lambda handle: None,
@@ -315,12 +317,14 @@ def test_memory_store_trace_id_survives_event_ring_eviction():
         handle.emit_answer("done")
 
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="ring", stack_name="default", work=work
     )
     run_id = summary["run_id"]
     import time as _time
 
-    from inqtrix.server.runs import RunStatus
+    from inqtrix.runs.records import RunStatus
 
     deadline = _time.time() + 10
     while (

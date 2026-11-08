@@ -441,6 +441,46 @@ streaming, uploads, the instance probe, the collaboration WebSocket, SPA
 fallback, MIME handling, cache policy, forwarded-header trust, and sanitized
 guest-link logs.
 
+#### Request limits at the web edge
+
+Both edges, the Python gateway and the optional nginx target, apply the same
+two limits:
+
+| Limit | Value | Above it |
+|---|---|---|
+| Request head: the request line and every header, cookies included | 32 KiB, fixed | Either edge may answer 400 (nginx 414 when the request line alone is too long). Up to 32 KiB a head always passes, however its bytes arrive and however its lines are cut; above it the exact point depends on how the bytes arrive (Python) or fill nginx's header buffers. |
+| Request body | `INQTRIX_PROXY_MAX_BODY_BYTES`, see the table below | 413, also for a chunked body without a declared length |
+
+The head limit matters for [mode `gateway`](auth-modes.md#what-the-jwt-sub-mode-checks):
+the token of the API gateway and all cookies travel in the head together. A proxy
+in front of the edge has limits of its own: an ingress controller such as
+ingress-nginx allows 8 KiB per header line unless its `large-client-header-buffers`
+is raised, so a large token can fail there before it reaches Inqtrix. The Python
+gateway always runs uvicorn's h11 parser, which enforces the limit; it does not
+switch to httptools when that is installed.
+
+#### Several API replicas
+
+When `INQTRIX_BACKEND_URL` names a host with two or more IPv4 addresses, such as a
+Compose service started with `--scale api=2` or a headless Kubernetes Service, the
+gateway sends each HTTP request to the next address in turn, as the optional nginx
+edge does. A stream stays on the address it started on. The name is looked up in the
+background at most every 10 seconds, so a replica joins or leaves within that time.
+An address that refuses the connection is skipped for 10 seconds and the same request
+goes on to the next one. Nothing is sent twice: once a connection stands, a failure
+answers 502.
+
+Nothing changes with a single address, which is the normal case: one Compose replica,
+or a Kubernetes Service, which distributes connections itself. The same goes for an
+IP address in `INQTRIX_BACKEND_URL`, a name with only IPv6 addresses, and a proxy
+set through `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` for the backend's scheme,
+because such a proxy decides by the name. The collaboration WebSocket always uses the
+name.
+
+Several API replicas need the worker profile, because without a worker a run executes
+inside the API process that accepted it. Login throttling counts per process; see
+[Login rate limiting](production-checklist.md#login-rate-limiting).
+
 #### Container quickstart
 
 Build and run the same image used by Compose and Helm:
@@ -529,7 +569,7 @@ and the TLS certificate/key pair before accepting traffic.
 | `INQTRIX_PUBLIC_BASE_URL` | unset | Explicit browser origin when a trusted reverse proxy terminates TLS before the gateway; pins the forwarded scheme AND host. |
 | `INQTRIX_EXTERNAL_SCHEME` | unset | Optional scheme-only override: pins `X-Forwarded-Proto` while the forwarded host follows the request. If `INQTRIX_PUBLIC_BASE_URL` is also set, both schemes must match or startup fails. |
 | `INQTRIX_GATEWAY_*_HEADER`, `INQTRIX_GATEWAY_RESOLVER_HEADERS`, `INQTRIX_GATEWAY_TRUSTED_PROXIES` | unset | Mode `gateway` only: the identity header names and this process's own peer list; see [Gateway mode: web gateway variables](../configuration/settings-and-env.md#gateway-mode-web-gateway-variables). |
-| `INQTRIX_MAX_UPSTREAM_CONNECTIONS` | `512` | Per-worker ceiling for pooled backend connections; each browser tab holds one long-lived SSE stream. Sized against the API's own admission caps: chat and native runs each admit up to 100, and every open event stream holds a connection for the run's whole duration on top of that. Exhaustion is a `503` with a warning naming this variable, never a silent wait. Connections open on demand, so the ceiling costs nothing until the load arrives.  Helm: set via `web.maxUpstreamConnections`; the web pod has no `envFrom`, so `config:` reaches it only for the keys the chart re-emits (the identity header names of gateway mode among them). |
+| `INQTRIX_MAX_UPSTREAM_CONNECTIONS` | `4096` | Per-worker ceiling for pooled backend connections; each open browser tab holds one long-lived SSE stream, and so does each open run view. At the ceiling every request through that worker waits up to 10 seconds and then gets a `503` with a warning naming this variable, page loads included, so size it above the tabs you expect rather than close to them. Connections open on demand, so the ceiling costs nothing until the load arrives. A stream takes two file descriptors, a collaboration WebSocket two more and an idle browser connection one, so the process needs a limit (`ulimit -n`) well above twice this value; at start the gateway raises its soft limit to the hard limit and logs a `WARNING` naming the need of the streams when the hard limit is below it or the raise is refused. Podman starts containers with a hard limit of 524,288 and Docker usually with one far above the need, so only a deliberately low hard limit needs action.  Helm: set via `web.maxUpstreamConnections`; the web pod has no `envFrom`, so `config:` reaches it only for the keys the chart re-emits (the identity header names of gateway mode among them). |
 | `INQTRIX_PROXY_MAX_BODY_BYTES` | derived | Explicit request-body cap in bytes. Unset derives `INQTRIX_MAX_FILE_BYTES` + 10 MiB; mirror the backend variable in split-container setups or the gateway warns and uses the packaged default. |
 | `INQTRIX_DIST_DIR` | `<repo>/apps/research-desk/dist` | Override when serving a `dist/` from a release artifact path. |
 | `INQTRIX_COLLABORATION_MAX_FRAME_BYTES` / `INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES` | `2097152` / `32` | Collaboration relay frame-size and queue-depth limits; keep in sync with the collaboration service. |

@@ -443,10 +443,8 @@ class PatVerifier:
         ):
             # pat.used, SAMPLED on the same throttle as last_used_at:
             # one audit row per interval, never one per request.
-            from inqtrix.services.audit_service import (
-                AuditService,
-                build_audit_entry,
-            )
+            from inqtrix.auth.audit_entries import build_audit_entry
+            from inqtrix.services.audit_service import AuditService
 
             await AuditService(self._audit).record(
                 build_audit_entry(

@@ -28,6 +28,7 @@ from inqtrix.providers.base import (
 from inqtrix.providers.bedrock import BedrockLLM
 from inqtrix.providers.litellm import LiteLLM
 from inqtrix.settings import ModelSettings
+from tests._sdk_doubles import async_double
 
 _OPUS = "claude-opus-4-7"
 _HAIKU = "claude-haiku-4-5"
@@ -69,11 +70,11 @@ def test_litellm_completion_reasoning_effort_wire_payload(
     provider = LiteLLM(api_key="k")
     captured: dict[str, object] = {}
 
-    def fake_request(**kwargs):
+    async def fake_request(**kwargs):
         captured.update(kwargs["create_kwargs"])
         return _litellm_response("ok")
 
-    monkeypatch.setattr(provider, "_create_chat_completion_with_retry", fake_request)
+    monkeypatch.setattr(provider, "_acreate_chat_completion", fake_request)
     provider.complete_with_metadata("q", reasoning_effort=effort)
 
     assert captured.get("reasoning_effort") == expected
@@ -83,11 +84,11 @@ def test_litellm_structured_reasoning_effort_wire_payload(monkeypatch) -> None:
     provider = LiteLLM(api_key="k")
     captured: dict[str, object] = {}
 
-    def fake_request(**kwargs):
+    async def fake_request(**kwargs):
         captured.update(kwargs["create_kwargs"])
         return _litellm_response("{}")
 
-    monkeypatch.setattr(provider, "_create_chat_completion_with_retry", fake_request)
+    monkeypatch.setattr(provider, "_acreate_chat_completion", fake_request)
     provider.complete_structured(
         "q",
         schema={"type": "object", "properties": {}},
@@ -103,11 +104,11 @@ def test_litellm_chat_reasoning_effort_wire_payload(monkeypatch) -> None:
     provider = LiteLLM(api_key="k")
     captured: dict[str, object] = {}
 
-    def fake_request(**kwargs):
+    async def fake_request(**kwargs):
         captured.update(kwargs["create_kwargs"])
         return _litellm_response("ok")
 
-    monkeypatch.setattr(provider, "_create_chat_completion_with_retry", fake_request)
+    monkeypatch.setattr(provider, "_acreate_chat_completion", fake_request)
     provider.chat(
         [{"role": "user", "content": "q"}],
         reasoning_effort="high",
@@ -144,9 +145,10 @@ def test_anthropic_graded_turns_on_adaptive_plus_effort() -> None:
     assert llm._call_thinking_and_effort("high", use_model=_OPUS) == ({"type": "adaptive"}, "high")
 
 
-def test_anthropic_graded_on_haiku_keeps_adaptive_drops_effort() -> None:
+def test_anthropic_graded_on_haiku_4_5_runs_without_thinking() -> None:
+    """Haiku 4.5 takes only a fixed thinking budget; adaptive thinking would be a 400."""
     llm = AnthropicLLM(api_key="k", default_model=_OPUS)
-    assert llm._call_thinking_and_effort("high", use_model=_HAIKU) == ({"type": "adaptive"}, None)
+    assert llm._call_thinking_and_effort("high", use_model=_HAIKU) == (None, None)
 
 
 def test_anthropic_unknown_level_downgrades_to_off() -> None:
@@ -184,7 +186,7 @@ def _capture_payload(monkeypatch, llm, *, structured: bool = False):
                     "usage": {"input_tokens": 1, "output_tokens": 1}}
         return _fake_text_response()
 
-    monkeypatch.setattr(llm, "_request_json", fake_request_json)
+    monkeypatch.setattr(llm, "_arequest_json", async_double(fake_request_json))
     return captured
 
 
@@ -214,11 +216,11 @@ def test_anthropic_payload_unset_inherits_constructor(monkeypatch) -> None:
     assert captured["payload"]["output_config"] == {"effort": "medium"}
 
 
-def test_anthropic_payload_haiku_graded_keeps_adaptive_no_effort(monkeypatch) -> None:
+def test_anthropic_payload_haiku_4_5_graded_sends_no_thinking_and_no_effort(monkeypatch) -> None:
     llm = AnthropicLLM(api_key="k", default_model=_HAIKU)
     captured = _capture_payload(monkeypatch, llm)
     llm.complete_with_metadata("q", reasoning_effort="high")
-    assert captured["payload"]["thinking"] == {"type": "adaptive"}
+    assert "thinking" not in captured["payload"]
     assert "output_config" not in captured["payload"]
 
 
@@ -260,9 +262,9 @@ def test_bedrock_graded_turns_on_adaptive_plus_effort() -> None:
     assert llm._call_thinking_and_effort("high", use_model=_BEDROCK_OPUS) == ({"type": "adaptive"}, "high")
 
 
-def test_bedrock_graded_on_haiku_drops_effort() -> None:
+def test_bedrock_graded_on_haiku_4_5_runs_without_thinking() -> None:
     llm = BedrockLLM(default_model=_BEDROCK_OPUS)
-    assert llm._call_thinking_and_effort("high", use_model=_BEDROCK_HAIKU) == ({"type": "adaptive"}, None)
+    assert llm._call_thinking_and_effort("high", use_model=_BEDROCK_HAIKU) == (None, None)
 
 
 def test_bedrock_none_forces_off() -> None:

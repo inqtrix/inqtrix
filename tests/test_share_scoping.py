@@ -125,6 +125,8 @@ def make_world(*, restrict: bool):
         _arrange()
     )
     owned = container.run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="meine Recherche",
         stack_name="default",
         work=lambda handle: handle.complete({"answer": "ok"}),

@@ -146,8 +146,12 @@ moved value re-runs the full authorization chain before the next frame.
 Session or PAT EXPIRY writes no mutation, so a bounded time ceiling (well
 below a minute) re-runs the full chain on time alone — that ceiling is the
 revocation bound for expiry. The per-user event stream re-checks before
-each data frame as before. None of this claims that bytes already sent to
-a browser or an external provider can be recalled.
+each data frame. While it has nothing to send it only writes keepalive
+comments, which carry no data, and re-checks once within a minute: a signed-out
+or expired session ends it within 60 seconds. Disabling a user writes an
+invalidation in its own transaction and so ends the stream at the next frame.
+None of this claims that bytes already sent to a browser or an external
+provider can be recalled.
 
 Erasing an account (`DELETE /v1/admin/users/{id}`, instance admins with a
 browser session only, or a SCIM `DELETE` with the `erase` action in mode

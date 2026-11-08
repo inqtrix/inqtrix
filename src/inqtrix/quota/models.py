@@ -157,22 +157,6 @@ def consumed_tokens(usage: dict | None) -> int:
     )
 
 
-def estimate_tokens(text: str) -> int:
-    """Rough token count for embedding ingestion (no provider usage).
-
-    Document ingestion embeds chunks without a per-call usage object, so
-    its embedding-token spend is approximated with the standard
-    ~4-chars-per-token heuristic. Every LLM surface (chat, runs, editor,
-    text) records the provider's REAL usage instead. Embeddings estimate
-    because the ``EmbeddingProvider`` contract returns vectors only and
-    discards any provider-side usage object, not because the numbers are
-    unobtainable in principle. The usage ledger books the same estimate
-    over the same texts, so both accountings agree by construction.
-    Rounds up so non-empty text always costs at least one token.
-    """
-    return -(-len(text) // 4) if text else 0
-
-
 def current_period_start(now: float) -> float:
     """Unix timestamp of the start of *now*'s calendar month (UTC).
 

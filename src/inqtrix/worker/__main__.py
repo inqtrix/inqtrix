@@ -14,6 +14,10 @@ machinery (:class:`~inqtrix.worker.loop.BaseWorkerLoop`) over separate
 Valkey streams. With knowledge disabled, run and deletion loops remain;
 the missing reindex consumer is logged rather than silently omitted.
 
+The process has one event loop. Its long synchronous composition runs off the
+loop, between the bootstrap contract check and :func:`_serve`; both run on the
+same loop through one :class:`asyncio.Runner`.
+
 Graceful shutdown: stop claiming, drain in-flight jobs for a bounded
 window, then exit. Jobs that did not finish are NOT cancelled — the
 worker's heartbeat silence hands their dispatch entries to another
@@ -28,10 +32,13 @@ import os
 import secrets
 import signal
 import socket
-import threading
 import time
-from typing import Callable
+from collections.abc import Awaitable
+from dataclasses import dataclass
+from functools import partial
+from typing import Any, Callable
 
+from inqtrix import aio
 from inqtrix.logging_config import configure_logging, log_status_line
 from inqtrix.providers import create_providers
 from inqtrix.runs.postgres_store import PostgresRunStore
@@ -42,7 +49,6 @@ from inqtrix.strategies import (
     create_default_strategies,
     resolve_claim_extract_model,
 )
-from inqtrix.sync_bridge import run_coro_sync
 from inqtrix.worker.indexing_loop import IndexingWorkerLoop
 from inqtrix.worker.loop import (
     BaseWorkerLoop,
@@ -87,16 +93,16 @@ class _DatabaseClaimGuard:
         self._login_policy = login_policy
         self._interval_seconds = interval_seconds
         self._retry_seconds = retry_seconds
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._next_check = 0.0
         self._probe_count = 0
         self._probe_seconds = 0.0
         self._failure: str | None = None
         self._unavailable: str | None = None
 
-    def __call__(self) -> None:
+    async def __call__(self) -> None:
         """Verify when due, or fail immediately after any prior violation."""
-        self._verify(force=False)
+        await self._verify(force=False)
 
     _PROBE_REPORT_EVERY = 50
 
@@ -131,21 +137,21 @@ class _DatabaseClaimGuard:
         transaction, not inside this guard's own probe -- but its verdict
         is about the PROCESS (stale code), so it must stop every loop
         sharing this guard, exactly as a failed probe does. Idempotent;
-        the first message wins.
+        the first message wins. Runs on the process loop like everything
+        that reads the verdict, so no lock is taken.
         """
-        with self._lock:
-            if self._failure is None:
-                self._failure = message
+        if self._failure is None:
+            self._failure = message
 
-    def verify_now(self) -> None:
+    async def verify_now(self) -> None:
         """Force an uncoalesced probe; used only by the startup waits.
 
         The durable claim boundary itself is fenced in-transaction via
         assert_schema_head, so no per-claim forced probe exists.
         """
-        self._verify(force=True)
+        await self._verify(force=True)
 
-    def _verify(self, *, force: bool) -> None:
+    async def _verify(self, *, force: bool) -> None:
         """Run the shared latched probe, optionally bypassing coalescing."""
         from inqtrix.storage.runtime_contract import (
             DatabaseRuntimeUnavailableError,
@@ -153,7 +159,7 @@ class _DatabaseClaimGuard:
         )
         from inqtrix.urls import sanitize_log_message
 
-        with self._lock:
+        async with self._lock:
             if self._failure is not None:
                 raise WorkerClaimGuardError(self._failure)
             now = time.monotonic()
@@ -166,12 +172,10 @@ class _DatabaseClaimGuard:
                 return
             try:
                 probe_started = time.monotonic()
-                run_coro_sync(
-                    verify_database_url_runtime_contract(
-                        self._database_url,
-                        app_role=self._app_role,
-                        login_policy=self._login_policy,
-                    )
+                await verify_database_url_runtime_contract(
+                    self._database_url,
+                    app_role=self._app_role,
+                    login_policy=self._login_policy,
                 )
                 self._record_probe(time.monotonic() - probe_started)
             except DatabaseRuntimeUnavailableError as exc:
@@ -207,25 +211,25 @@ class _DatabaseClaimGuard:
                 )
 
 
-def _wait_for_database_claim_contract(
-    guard: Callable[[], None],
+async def _wait_for_database_claim_contract(
+    guard: Callable[[], Awaitable[None]],
     *,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Keep bootstrap alive for transient outages, not unsafe contracts."""
     while True:
         try:
-            guard()
+            await guard()
         except WorkerClaimUnavailableError as exc:
-            sleep(exc.retry_after_seconds)
+            await sleep(exc.retry_after_seconds)
             continue
         return
 
 
-def _verified_database_claim_contract(
-    guard: Callable[[], None],
+async def _verified_database_claim_contract(
+    guard: Callable[[], Awaitable[None]],
     *,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Hold the bootstrap until the contract holds, and NAME what stopped it.
 
@@ -245,7 +249,7 @@ def _verified_database_claim_contract(
     from inqtrix.urls import sanitize_log_message
 
     try:
-        _wait_for_database_claim_contract(guard, sleep=sleep)
+        await _wait_for_database_claim_contract(guard, sleep=sleep)
     except Exception as exc:
         cause = sanitize_log_message(exc)
         # The scrubbed cause travels in the exception below; the process hook
@@ -274,24 +278,25 @@ _TRACE_RETENTION_INTERVAL_SECONDS = 6 * 3600.0
 _TRACE_RETENTION_INITIAL_DELAY_SECONDS = 120.0
 _DAILY_RETENTION_INTERVAL_SECONDS = 24 * 3600.0
 _DAILY_RETENTION_INITIAL_DELAY_SECONDS = 300.0
+_RETENTION_CLOSE_SECONDS = 5.0
 
 
-def _start_retention_thread(
+def _start_retention(
     *,
     name: str,
     label: str,
-    stop_event: "threading.Event",
-    run_pass: "Callable[[], int | None]",
+    stop_event: asyncio.Event,
+    run_pass: "Callable[[], Awaitable[int | None]]",
     interval_seconds: float,
     initial_delay_seconds: float,
     event: str,
     retention_days: int,
-) -> None:
-    """Start ONE retention daemon thread (traces, audit, usage ledger).
+) -> "asyncio.Task[None]":
+    """Start ONE retention task (traces, audit, usage ledger).
 
-    Deliberately NOT a ``_periodic_maintenance`` hook: maintenance runs
-    synchronously on a claim thread, and a database or HTTP cleanup pass
-    must never stall claims. A failing pass costs one WARNING, never the
+    Deliberately NOT a ``_periodic_maintenance`` hook: the claim loop waits
+    for its maintenance, and a database or HTTP cleanup pass must never
+    stall claims. A failing pass costs one WARNING, never the
     worker. Overlapping replicas are harmless — every pass is a DELETE
     (or a delete request) that is idempotent by construction.
 
@@ -300,12 +305,12 @@ def _start_retention_thread(
             is logged when non-zero.
     """
 
-    def _run() -> None:
+    async def _run() -> None:
         delay = initial_delay_seconds
-        while not stop_event.wait(delay):
+        while not await aio.wait_for_event(stop_event, delay):
             delay = interval_seconds
             try:
-                pruned = run_pass()
+                pruned = await run_pass()
                 if pruned:
                     log.info(
                         "%s: deleted %d entries older than %d days.",
@@ -321,34 +326,35 @@ def _start_retention_thread(
             except Exception:  # noqa: BLE001 — cleanup never kills the worker
                 log.warning("%s pass failed.", label, exc_info=True)
 
-    threading.Thread(target=_run, name=name, daemon=True).start()
+    task = asyncio.create_task(_run(), name=name)
     log.info(
         "%s enabled: every %.0fh, entries older than %d days.",
         label,
         interval_seconds / 3600,
         retention_days,
     )
+    return task
 
 
-def _start_trace_retention_thread(
-    settings, stop_event: "threading.Event"
-) -> None:
+def _start_trace_retention(
+    settings, stop_event: asyncio.Event
+) -> "asyncio.Task[None] | None":
     """Langfuse trace retention — otlp mode with a positive day count."""
     observability = settings.observability
     days = int(observability.trace_retention_days or 0)
     if observability.tracing != "otlp" or days <= 0:
-        return
+        return None
 
     def _pass() -> None:
         from inqtrix.observability.trace_retention import run_trace_retention
 
         run_trace_retention(settings)
 
-    _start_retention_thread(
+    return _start_retention(
         name="inqtrix-trace-retention",
         label="Trace-Retention",
         stop_event=stop_event,
-        run_pass=_pass,
+        run_pass=partial(aio.run_legacy_segment, _pass),
         interval_seconds=_TRACE_RETENTION_INTERVAL_SECONDS,
         initial_delay_seconds=_TRACE_RETENTION_INITIAL_DELAY_SECONDS,
         event="trace.retention.completed",
@@ -356,19 +362,19 @@ def _start_trace_retention_thread(
     )
 
 
-def _start_audit_retention_thread(
-    settings, stop_event: "threading.Event", audit_sink
-) -> None:
+def _start_audit_retention(
+    settings, stop_event: asyncio.Event, audit_sink
+) -> "asyncio.Task[None] | None":
     """audit_log retention through the SECURITY DEFINER prune door."""
     days = int(settings.observability.audit_retention_days or 0)
     prune = getattr(audit_sink, "prune_audit_log", None)
     if days <= 0 or prune is None:
-        return
-    _start_retention_thread(
+        return None
+    return _start_retention(
         name="inqtrix-audit-retention",
         label="Audit-Retention",
         stop_event=stop_event,
-        run_pass=lambda: run_coro_sync(prune(days=days)),
+        run_pass=partial(prune, days=days),
         interval_seconds=_DAILY_RETENTION_INTERVAL_SECONDS,
         initial_delay_seconds=_DAILY_RETENTION_INITIAL_DELAY_SECONDS,
         event="audit.retention.completed",
@@ -376,19 +382,19 @@ def _start_audit_retention_thread(
     )
 
 
-def _start_usage_retention_thread(
-    settings, stop_event: "threading.Event", usage_store
-) -> None:
+def _start_usage_retention(
+    settings, stop_event: asyncio.Event, usage_store
+) -> "asyncio.Task[None] | None":
     """llm_usage retention through the SECURITY DEFINER prune door."""
     days = int(settings.observability.usage_retention_days or 0)
     prune = getattr(usage_store, "prune", None)
     if days <= 0 or prune is None:
-        return
-    _start_retention_thread(
+        return None
+    return _start_retention(
         name="inqtrix-usage-retention",
         label="Usage-Retention",
         stop_event=stop_event,
-        run_pass=lambda: run_coro_sync(prune(days=days)),
+        run_pass=partial(prune, days=days),
         interval_seconds=_DAILY_RETENTION_INTERVAL_SECONDS,
         initial_delay_seconds=_DAILY_RETENTION_INITIAL_DELAY_SECONDS,
         event="usage.retention.completed",
@@ -396,15 +402,15 @@ def _start_usage_retention_thread(
     )
 
 
-def _start_object_orphan_sweep_thread(
-    settings, stop_event: "threading.Event", session_factory
-) -> None:
+def _start_object_orphan_sweep(
+    settings, stop_event: asyncio.Event, session_factory
+) -> "asyncio.Task[None] | None":
     """Object-store/registry consistency sweep (files without a row)."""
     grace_hours = float(settings.storage.object_orphan_grace_hours or 0.0)
     if grace_hours <= 0 or session_factory is None:
-        return
+        return None
     if settings.storage.backend != "postgres":
-        return
+        return None
 
     def _pass() -> int:
         from inqtrix.server.container import build_object_store
@@ -419,11 +425,11 @@ def _start_object_orphan_sweep_thread(
             grace_seconds=grace_hours * 3600.0,
         )
 
-    _start_retention_thread(
+    return _start_retention(
         name="inqtrix-object-orphan-sweep",
         label="Object orphan sweep",
         stop_event=stop_event,
-        run_pass=_pass,
+        run_pass=partial(aio.run_legacy_segment, _pass),
         interval_seconds=_DAILY_RETENTION_INTERVAL_SECONDS,
         initial_delay_seconds=_DAILY_RETENTION_INITIAL_DELAY_SECONDS,
         event="object_store.orphan_sweep.completed",
@@ -446,6 +452,17 @@ _DOMAIN_CEILINGS = {
 def _ceiling_alias(group: object, field: str) -> str:
     """The environment-variable name a settings field is bound to."""
     return type(group).model_fields[field].alias or field
+
+
+def _vector_write_slots(settings: "Settings", loops: "list") -> int:
+    """Jobs of this worker that may each hold a connection across a vector write."""
+    if not settings.knowledge.enabled:
+        return 0
+    return sum(
+        width
+        for loop, width in zip(loops, _effective_loop_widths(settings, loops))
+        if type(loop).__name__ in {"IndexingWorkerLoop", "DeletionWorkerLoop"}
+    )
 
 
 def _effective_loop_widths(settings: "Settings", loops: "list") -> "list[int]":
@@ -500,6 +517,18 @@ def _report_binding_ceilings(settings: "Settings", loops: "list") -> None:
         )
 
 
+@dataclass
+class _Worker:
+    """What the synchronous composition hands to the process loop."""
+
+    worker_id: str
+    settings: Settings
+    container: Any
+    loops: list[BaseWorkerLoop]
+    stores: list[Any]
+    database_engine: Any
+
+
 def main() -> None:
     """Run one worker process until SIGTERM/SIGINT."""
     resolved = configure_logging(service="worker")
@@ -535,22 +564,29 @@ def main() -> None:
         app_role=settings.storage.app_role,
         login_policy=settings.storage.runtime_login_policy,
     )
-    _verified_database_claim_contract(database_claim_guard)
+    with asyncio.Runner() as runner:
+        runner.run(_verified_database_claim_contract(database_claim_guard))
+        worker = _compose_worker(settings, database_claim_guard)
+        aio.freeze_startup_heap()
+        runner.run(_serve(worker))
 
+
+def _compose_worker(
+    settings: Settings, database_claim_guard: _DatabaseClaimGuard
+) -> _Worker:
+    """Build stores, queues, container and claim loops, off the event loop."""
     worker_id = (
         f"{socket.gethostname()}-{os.getpid()}-{secrets.token_hex(4)}"
     )
 
-    from inqtrix.storage.db import build_engine
+    from inqtrix.storage.db import build_process_engine, build_session_factory
 
+    engine = build_process_engine(settings.storage)
     queue = ValkeyRunQueue(
         url=settings.queue.valkey_url, consumer=worker_id
     )
     store = PostgresRunStore(
-        engine=build_engine(
-            settings.storage.database_url,
-            **settings.storage.pool_kwargs(),
-        ),
+        engine=engine,
         app_role=settings.storage.app_role,
         # queue=None here is CLAIM-MODE wiring (the ValkeyRunQueue goes
         # to the WorkerLoop, not the store), not in-process ownership —
@@ -602,15 +638,12 @@ def main() -> None:
     index_store = None
     index_queue = None
     if settings.knowledge.enabled:
-        from inqtrix.indexing_auto_resume import AutoResumePolicy
+        from inqtrix.runs.indexing_auto_resume import AutoResumePolicy
         from inqtrix.runs.indexing_postgres import PostgresIndexingJobStore
         from inqtrix.runs.indexing_queue import ValkeyIndexingQueue
 
         index_store = PostgresIndexingJobStore(
-            engine=build_engine(
-                settings.storage.database_url,
-                **settings.storage.pool_kwargs(),
-            ),
+            engine=engine,
             app_role=settings.storage.app_role,
             # Claim-mode wiring like the run store above: never sweep.
             queue=None,
@@ -639,10 +672,7 @@ def main() -> None:
     from inqtrix.runs.deletion_queue import ValkeyDeletionQueue
 
     deletion_store = PostgresDeletionOperationStore(
-        engine=build_engine(
-            settings.storage.database_url,
-            **settings.storage.pool_kwargs(),
-        ),
+        engine=engine,
         app_role=settings.storage.app_role,
         queue=None,
         recover_orphans=False,
@@ -670,10 +700,7 @@ def main() -> None:
     from inqtrix.runs.upload_queue import ValkeyUploadQueue
 
     upload_store = PostgresUploadOperationStore(
-        engine=build_engine(
-            settings.storage.database_url,
-            **settings.storage.pool_kwargs(),
-        ),
+        engine=engine,
         app_role=settings.storage.app_role,
         queue=None,
         recover_orphans=False,
@@ -704,12 +731,8 @@ def main() -> None:
         indexing_store=index_store,
         deletion_store=deletion_store,
         upload_store=upload_store,
-        # The workspace agent drives the permission/identity repositories
-        # from sync worker threads via per-call asyncio.run; a pooled
-        # asyncpg connection reused across those short-lived loops crashes
-        # ("Future attached to a different loop"). NullPool makes the
-        # shared platform engine loop-agnostic here (the API stays pooled).
-        platform_persistence_null_pool=True,
+        database_engine=engine,
+        serves_http=False,
     )
     indexing_authority = None
     if container.knowledge_service is not None:
@@ -727,8 +750,8 @@ def main() -> None:
     # (gated on oidc) is never built here. Build it directly when quotas
     # are enabled: the worker meters by the canonical user UUID persisted on
     # the job row, not by a live principal, so the auth-mode gate does not apply.
-    # It records via the loop-agnostic NullPool store on the executor
-    # thread (record_blocking) — never admits (admission stays in the API).
+    # It records from the job body's thread (record_blocking) — never admits
+    # (admission stays in the API).
     quota_service = None
     if settings.quota.enabled:
         from inqtrix.services.quota_service import QuotaService
@@ -736,7 +759,7 @@ def main() -> None:
 
         quota_service = QuotaService(
             store=PostgresQuotaStore(
-                database_url=settings.storage.database_url,
+                session_factory=build_session_factory(engine),
                 app_role=settings.storage.app_role,
             ),
             settings=settings.quota,
@@ -828,34 +851,84 @@ def main() -> None:
                 claim_guard=database_claim_guard,
             )
         )
+    stores = [store, deletion_store, upload_store]
+    if index_store is not None:
+        stores.append(index_store)
+    return _Worker(
+        worker_id=worker_id,
+        settings=settings,
+        container=container,
+        loops=loops,
+        stores=stores,
+        database_engine=engine,
+    )
 
-    stop_event = threading.Event()
-    loop_failure: list[BaseException] = []
-    failure_lock = threading.Lock()
 
-    def _request_stop(signum: int, _frame: object) -> None:
-        log.info("Worker %s: received signal %d.", worker_id, signum)
+async def _close_at_shutdown(
+    worker_id: str, what: str, close: Callable[[], Awaitable[None]]
+) -> None:
+    """One failing close must not take the exit decision after it with it."""
+    try:
+        await close()
+    except Exception as exc:  # noqa: BLE001 - shutdown goes on, visibly
+        log.warning(
+            "Worker %s: closing the %s failed at shutdown (error_type=%s).",
+            worker_id,
+            what,
+            type(exc).__name__,
+        )
+
+
+async def _serve(worker: _Worker) -> None:
+    """Run the claim loops on the process loop until a signal or a fatal failure.
+
+    Leaves through ``os._exit`` when work is still running: the bodies are not
+    cancelled, their stream entries go to another worker through heartbeat
+    silence, and the runner's implicit cancel path must never reach them.
+    """
+    worker_id = worker.worker_id
+    settings = worker.settings
+    container = worker.container
+    loops = worker.loops
+    event_loop = asyncio.get_running_loop()
+    aio.configure_loop(
+        event_loop,
+        blocking_workers=settings.queue.blocking_pool_size,
+        provider_workers=settings.queue.provider_pool_size,
+        # One thread per slot, so the lane never bounds tighter than the claim, and
+        # room for the short sync steps a body's coroutines hand back to a thread.
+        legacy_segment_workers=(
+            sum(_effective_loop_widths(settings, loops)) + settings.queue.blocking_pool_size
+        ),
+    )
+    stop_event = asyncio.Event()
+    retention_stop = asyncio.Event()
+    loop_failure: list[Exception] = []
+
+    def _stop_everything() -> None:
         for active_loop in loops:
             active_loop.request_stop()
+        retention_stop.set()
         stop_event.set()
 
-    signal.signal(signal.SIGTERM, _request_stop)
-    signal.signal(signal.SIGINT, _request_stop)
+    def _request_stop(signum: int) -> None:
+        log.info("Worker %s: received signal %d.", worker_id, signum)
+        _stop_everything()
 
-    def _run_claim_loop(active_loop: BaseWorkerLoop) -> None:
+    event_loop.add_signal_handler(signal.SIGTERM, _request_stop, signal.SIGTERM)
+    event_loop.add_signal_handler(signal.SIGINT, _request_stop, signal.SIGINT)
+
+    async def _run_claim_loop(active_loop: BaseWorkerLoop) -> None:
         try:
-            active_loop.run_forever()
-        except BaseException as exc:
-            with failure_lock:
-                loop_failure.append(exc)
+            await active_loop.run_forever()
+        except Exception as exc:
+            loop_failure.append(exc)
             log.error(
                 "Worker database/claim contract failed; stopping all claims "
                 "(error_type=%s)",
                 type(exc).__name__,
             )
-            for loop_to_stop in loops:
-                loop_to_stop.request_stop()
-            stop_event.set()
+            _stop_everything()
 
     log.info(
         "Inqtrix worker starting | worker_id=%s | loops=%d "
@@ -876,95 +949,103 @@ def main() -> None:
     # rather than from a count kept by hand alongside them.
     from inqtrix.storage.connection_budget import report_connection_budget
 
-    run_coro_sync(
-        report_connection_budget(
-            database_url=settings.storage.database_url,
-            process_label="worker process",
-            pool_size=settings.storage.pool_size,
-            pool_max_overflow=settings.storage.pool_max_overflow,
-            # Every loop this process runs drives a NullPool bundle: one
-            # connection per operation, none while a job waits. They hold
-            # nothing at rest, so no pool count sees them -- but each loop
-            # can ask for one per job it has in flight, and the sum is what
-            # the server has to survive. The ceilings are the effective
-            # ones, so a bound loop is counted at its real width.
-            # The worker executes agent runs too: the checkpointer's own
-            # psycopg pool holds connections no engine count can see --
-            # same line item the API process reports.
-            extra_connections=(
-                container.agent_checkpointer.max_connections
-                if container.agent_checkpointer is not None
-                else 0
-            ),
-            extra_label="agent checkpointer",
-            transient_peak=sum(_effective_loop_widths(settings, loops)),
-            transient_label="worker loops, NullPool",
-            # In the worker the run lane is sized by execution, not
-            # admission: RUN_MAX_CONCURRENT never fires here.
-            transient_knob="INQTRIX_WORKER_CONCURRENCY",
-        )
+    await report_connection_budget(
+        database_url=settings.storage.database_url,
+        process_label="worker process",
+        pool_size=settings.storage.pool_size,
+        pool_max_overflow=settings.storage.pool_max_overflow,
+        # The worker executes agent runs too: the checkpointer's own
+        # psycopg pool holds connections no engine count can see --
+        # same line item the API process reports.
+        extra_connections=(
+            container.agent_checkpointer.max_connections
+            if container.agent_checkpointer is not None
+            else 0
+        ),
+        extra_label="agent checkpointer",
+        vector_write_slots=_vector_write_slots(settings, loops),
     )
     # Metrics holder BEFORE the claim loops start: jobs claimed in the
     # startup window (including the immediate crash-recovery drain)
     # would otherwise record nothing.
     from inqtrix.worker.metrics import start_worker_metrics
 
-    start_worker_metrics(settings)
+    start_worker_metrics(settings, worker.database_engine)
     # Usage-ledger recorder — same startup-window rule as the metrics
     # holder; the shutdown path below flushes the last buffer.
     from inqtrix.usage.recorder import install_usage_recorder
 
-    usage_recorder = install_usage_recorder(settings)
-    threads = [
-        threading.Thread(
-            target=_run_claim_loop,
-            args=(active_loop,),
-            name=f"inqtrix-claim-{index}",
-            daemon=True,
-        )
+    usage_recorder = install_usage_recorder(settings, engine=worker.database_engine)
+    usage_recorder.start()
+    claim_tasks = [
+        asyncio.create_task(_run_claim_loop(active_loop), name=f"inqtrix-claim-{index}")
         for index, active_loop in enumerate(loops)
     ]
-    for thread in threads:
-        thread.start()
-    _start_trace_retention_thread(settings, stop_event)
-    _start_audit_retention_thread(
-        settings, stop_event, container.permission_service.audit_sink
-    )
-    _start_usage_retention_thread(settings, stop_event, usage_recorder.store)
-    _start_object_orphan_sweep_thread(
-        settings, stop_event, container.session_factory
-    )
-    # The signal handler must run on the main thread; block here until it
-    # fires, then let each loop's run_forever observe its stop flag.
-    stop_event.wait()
-    for thread in threads:
-        thread.join(timeout=_DRAIN_SECONDS)
-
-    drained = all(active_loop.drain(_DRAIN_SECONDS) for active_loop in loops)
+    retention_tasks = [
+        task
+        for task in (
+            _start_trace_retention(settings, retention_stop),
+            _start_audit_retention(
+                settings, retention_stop, container.permission_service.audit_sink
+            ),
+            _start_usage_retention(settings, retention_stop, usage_recorder.store),
+            _start_object_orphan_sweep(
+                settings, retention_stop, container.session_factory
+            ),
+        )
+        if task is not None
+    ]
+    await stop_event.wait()
+    # Claims first: a claim in flight can still start a segment, so an empty
+    # active set means nothing before the claim tasks have ended. Both share one
+    # window, and a claim task still running counts as not drained.
+    window_ends = time.monotonic() + _DRAIN_SECONDS
+    _, still_claiming = await asyncio.wait(claim_tasks, timeout=_DRAIN_SECONDS)
+    if still_claiming:
+        log.warning(
+            "Worker %s: %d claim loops did not end within the drain window.",
+            worker_id,
+            len(still_claiming),
+        )
+    remaining_window = max(0.0, window_ends - time.monotonic())
+    drained = all(
+        await asyncio.gather(
+            *(active_loop.drain(remaining_window) for active_loop in loops)
+        )
+    ) and not still_claiming
     log.info(
         "Inqtrix worker stopping | worker_id=%s | drained=%s",
         worker_id,
         drained,
     )
+    if retention_tasks:
+        await asyncio.wait(retention_tasks, timeout=_RETENTION_CLOSE_SECONDS)
+    # Their connections live on this loop, so they go before it does. A body
+    # still running keeps its store until the process leaves through the exit below.
+    if drained:
+        for store in worker.stores:
+            await _close_at_shutdown(worker_id, "job store", store.aclose)
     # Flush the last span batch before exit (BatchSpanProcessor would
     # otherwise drop it — the documented SIGTERM span-loss window).
     from inqtrix.observability.otel import shutdown_tracing
 
-    shutdown_tracing()
+    async def _flush_tracing() -> None:
+        await aio.run_blocking(shutdown_tracing)
+
+    await _close_at_shutdown(worker_id, "tracing", _flush_tracing)
     # Same for the last ledger buffer (fail-safe: close never raises out
     # of the flusher; the os._exit paths below may still drop seconds).
     from inqtrix.usage.recorder import set_active_usage_recorder
 
-    usage_recorder.close()
+    await _close_at_shutdown(worker_id, "usage ledger", usage_recorder.aclose)
     set_active_usage_recorder(None)
-    _aclose_usage_store = getattr(usage_recorder.store, "aclose", None)
-    if callable(_aclose_usage_store):
-        # Its NullPool engine must be disposed like every other store's
-        # (the flusher's throwaway loops cannot do it).
-        asyncio.run(_aclose_usage_store())
-    if quota_service is not None:
-        asyncio.run(quota_service.aclose())
-    if loop_failure and not drained:
+    # Last of all that uses it, and only when no body still runs: such a body
+    # keeps its connections until the process leaves through the exit below.
+    if drained:
+        await _close_at_shutdown(worker_id, "database engine", worker.database_engine.dispose)
+    lanes_busy = any(lane.running for lane in aio.lane_snapshot(event_loop).values())
+    aio.close_loop(event_loop)
+    if loop_failure and (not drained or lanes_busy):
         os._exit(1)
     if loop_failure:
         # The claim loop's own exception was captured on its thread; it is
@@ -984,8 +1065,8 @@ def main() -> None:
             # Naming the cause and printing it raw are two different things;
             # only the first is owed to the reader.
         ) from None
-    if not drained:
-        # Executor threads are non-daemon and would block interpreter
+    if not drained or lanes_busy:
+        # Lane threads are non-daemon and would block interpreter
         # exit for up to the full job duration; the orchestrator's
         # SIGKILL window plus stream redelivery is the designed
         # recovery path, so leave decisively.

@@ -9,6 +9,7 @@ import pytest
 from openai.types.chat import ChatCompletion
 
 from inqtrix.providers.base import _normalize_completion_response, openai_usage_details
+from tests._sdk_doubles import async_double, serve_sdk_calls
 
 
 @pytest.mark.parametrize("kind", ["text", "structured", "chat"])
@@ -55,7 +56,7 @@ def _assert_traced_native_text(llm, state, *, input_tokens, reasoning_tokens):
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
     from inqtrix.observability.content import ContentCapturePolicy
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
 
     exporter = InMemorySpanExporter()
     tracer = TracerProvider()
@@ -135,17 +136,17 @@ def test_openai_provider_paths_preserve_token_subsets(
     if provider_name == "azure":
         from inqtrix.providers.azure import AzureOpenAILLM
 
-        monkeypatch.setattr("inqtrix.providers.azure.OpenAI", lambda **_: client)
         llm = AzureOpenAILLM(
             azure_endpoint="https://test.openai.azure.com",
             api_key="test-key",
             default_model="gpt-4o",
         )
+        serve_sdk_calls(llm, client)
     else:
         from inqtrix.providers.litellm import LiteLLM
 
         llm = LiteLLM(api_key="test-key", default_model="gpt-4o")
-        llm._client = client
+        serve_sdk_calls(llm, client)
     state = {"total_prompt_tokens": 0, "total_completion_tokens": 0}
     if operation == "text":
         _assert_traced_native_text(llm, state, input_tokens=20, reasoning_tokens=3)
@@ -195,7 +196,7 @@ def test_native_input_total_includes_both_cache_buckets(
                 "cache_creation_input_tokens": 2,
             },
         }
-        monkeypatch.setattr(llm, "_request_json", lambda **_: raw)
+        monkeypatch.setattr(llm, "_arequest_json", async_double(lambda **_: raw))
     else:
         from inqtrix.providers.bedrock import BedrockLLM
 
@@ -211,7 +212,7 @@ def test_native_input_total_includes_both_cache_buckets(
                 "cacheWriteInputTokens": 2,
             },
         }
-        monkeypatch.setattr(llm, "_converse_with_retry", lambda **_: raw)
+        monkeypatch.setattr(llm, "_aconverse", async_double(lambda **_: raw))
     state = {"total_prompt_tokens": 0, "total_completion_tokens": 0}
     if operation == "text":
         _assert_traced_native_text(llm, state, input_tokens=18, reasoning_tokens=None)
@@ -255,3 +256,17 @@ def test_raw_serialization_failure_does_not_break_the_provider_result(caplog):
     assert (result.prompt_tokens, result.completion_tokens) == (3, 1)
     assert not result.raw
     assert "raw response could not be serialized" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("prompt", "cached", "counted"),
+    [(1000, 950, 50), (1000, None, 1000), (1000, 0, 1000), (10, 20, 0), (0, None, 0)],
+)
+def test_a_limit_counts_the_input_read_anew(prompt, cached, counted):
+    from types import SimpleNamespace
+
+    from inqtrix.providers.base import counted_input_tokens
+
+    response = SimpleNamespace(prompt_tokens=prompt, cache_read_tokens=cached)
+
+    assert counted_input_tokens(response) == counted

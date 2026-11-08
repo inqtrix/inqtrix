@@ -394,12 +394,12 @@ other route wraps the same object in `detail`
 In this order:
 
 1. The header named by `INQTRIX_GATEWAY_JWT_HEADER` appears once. The
-   token is at most 16 KiB and has three parts. The whole request is
-   tighter: the web gateway image can refuse a request head (the request
-   line and every header, cookies included) above 16 KiB with 400,
-   depending on how its bytes arrive. Keep the token, the API gateway's
-   session cookies and the Inqtrix cookies together well below that, for
-   example with few groups in the token.
+   token is at most 16 KiB and has three parts. Both web edges accept a
+   request head (the request line and every header, cookies included) of
+   up to 32 KiB, however its bytes arrive; above that either edge may
+   refuse it with 400 ([Request limits at the web edge](react-ui.md#request-limits-at-the-web-edge)).
+   Keep the token, the API gateway's session cookies and the Inqtrix
+   cookies together below 32 KiB, for example with few groups in the token.
 2. The token header names an algorithm from
    `INQTRIX_GATEWAY_JWT_ALGORITHMS` (default `RS256,ES256`; allowed are
    `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`,

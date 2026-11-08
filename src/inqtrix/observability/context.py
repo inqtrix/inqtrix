@@ -10,13 +10,13 @@ log line inside that boundary.
 
 Two usage patterns:
 
-* **Boundaries that outlive their task** (the ASGI middleware, worker
-  job loops): keep the returned tokens and call
-  :func:`reset_log_context` in ``finally`` — those code paths reuse one
-  task/thread for many logical units, so values MUST NOT leak.
-* **Request-scoped enrichment** (auth dependencies): binding without a
-  reset is safe because every request runs in its own task context and
-  the values die with it.
+* **Boundaries that outlive their task** (the ASGI middleware): keep the
+  returned tokens and call :func:`reset_log_context` in ``finally`` — that
+  code path reuses one task for many logical units, so values MUST NOT leak.
+* **Request-scoped enrichment** (auth dependencies) and **job bodies**:
+  binding without a reset is safe because every request runs in its own
+  task context and every body in a context of its own on the transition
+  lane, and the values die with it.
 
 The user field always carries the stable pseudonym, never a raw id —
 the same reference that appears in audit correlation, so log lines and
@@ -200,15 +200,6 @@ def with_feature(feature: str):
     return decorate
 
 
-def clear_feature() -> None:
-    """Unconditional reset for reused executor/claim threads.
-
-    The loops call this in their ``finally`` so a segment's feature can
-    never leak into the next job on the same thread.
-    """
-    _FEATURE.set("")
-
-
 def current_feature() -> str:
     """The bound feature, or ``other`` when nothing was bound."""
     return _FEATURE.get() or "other"
@@ -259,7 +250,7 @@ def bind_usage_subject(
 
 
 def clear_usage_subject() -> None:
-    """Unconditional reset for reused executor/claim threads."""
+    """Unconditional reset of the bound subject."""
     _USAGE_SUBJECT.set(None)
 
 

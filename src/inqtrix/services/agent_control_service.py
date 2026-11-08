@@ -26,7 +26,7 @@ revocation between routing and the control write cannot revive stale access.
 
 from __future__ import annotations
 
-import asyncio
+import functools
 import logging
 import time
 import uuid
@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import ValidationError
 
+from inqtrix import aio
 from inqtrix.agents.report_requirement import split_composed_requirement
 from inqtrix.constants import MAX_PLAN_TASKS_DEFAULT
 from inqtrix.services.report_requirement_resolver import (
@@ -83,7 +84,14 @@ from inqtrix.exceptions import RunNotFound
 from inqtrix.i18n import t
 from inqtrix.execution_authority import pinned_knowledge_collection_ids
 from inqtrix.prompt_language import resolve_answer_language
+from inqtrix.runs.records import RunActive
 from inqtrix.runs.shared import TERMINAL_RUN_STATUS_VALUES
+from inqtrix.harness.contracts.events import (
+    APPROVAL_DECIDED_EVENT,
+    ARTIFACT_UPDATED_EVENT,
+    CLARIFICATION_ANSWERED_EVENT,
+    TASK_CANCEL_REQUESTED_EVENT,
+)
 
 if TYPE_CHECKING:
     from inqtrix.services.prompt_template_service import (
@@ -118,10 +126,6 @@ class CollectionPreflight(Protocol):
 
 log = logging.getLogger(__name__)
 
-APPROVAL_DECIDED_EVENT = "inqtrix.agent.approval.decided"
-CLARIFICATION_ANSWERED_EVENT = "inqtrix.agent.clarification.answered"
-ARTIFACT_UPDATED_EVENT = "inqtrix.agent.artifact.updated"
-TASK_CANCEL_REQUESTED_EVENT = "inqtrix.agent.task.cancel_requested"
 
 class AgentControlValidationError(ValueError):
     """Invalid decision/answer/edit input (HTTP 400).
@@ -398,9 +402,7 @@ class AgentControlService:
 
     async def _execution_context(self, run_id: str) -> "UserContext | None":
         """Resolve the current effective actor for internal reconciliation."""
-        principal = await asyncio.to_thread(
-            self._run_store.execution_principal, run_id
-        )
+        principal = await self._run_store.aexecution_principal(run_id)
         return self._caller_context(principal)
 
     async def _run_summary(
@@ -414,9 +416,7 @@ class AgentControlService:
         context = self._caller_context(principal, visible_to)
         if context is None and principal is None:
             context = await self._execution_context(run_id)
-        return await asyncio.to_thread(
-            self._run_store.get, run_id, visible_to=context
-        )
+        return await self._run_store.aget(run_id, visible_to=context)
 
     # -- plans ------------------------------------------------------------ #
 
@@ -555,24 +555,26 @@ class AgentControlService:
         for task in tasks:
             if task.status != "running" or not task.child_run_id:
                 continue
+            child_context = None
             try:
                 child_context = await self._execution_context(
                     task.child_run_id
                 )
-                child = await asyncio.to_thread(
-                    self._run_store.get,
+                child = await self._run_store.aget(
                     task.child_run_id,
                     visible_to=child_context,
                 )
             except RunNotFound:
                 child = {}
             attempt = max(1, int(child.get("parent_task_attempt", 1) or 1))
-            outcome = await asyncio.to_thread(
-                project_child_run_outcome,
-                self._run_store,
-                task.child_run_id,
-                attempt,
-                visible_to=child_context,
+            outcome = await aio.run_legacy_segment(
+                functools.partial(
+                    project_child_run_outcome,
+                    self._run_store,
+                    task.child_run_id,
+                    attempt,
+                    visible_to=child_context,
+                )
             )
             if outcome is None:
                 continue
@@ -913,10 +915,6 @@ class AgentControlService:
         decision: str,
         decision_payload: dict[str, Any],
     ) -> ApprovalRecord | None:
-        # Function-local import: the services layer must not pull in
-        # server modules at import time (layering regression test).
-        from inqtrix.server.runs import RunActive
-
         if not isinstance(exc, (ApprovalAlreadyDecided, RunActive)):
             return None
         stored = await self._store.get_approval(run_id, approval_id)
@@ -1110,9 +1108,7 @@ class AgentControlService:
                 )
                 break
         if composed is None:
-            body = await asyncio.to_thread(
-                self._run_store.execution_request_body, run_id
-            )
+            body = await self._run_store.aexecution_request_body(run_id)
             composed = str(body.get("report_requirement") or "")
             rules = list(body.get("report_rules") or [])
         if not rules:
@@ -1151,9 +1147,7 @@ class AgentControlService:
         """
         if self._knowledge is None:
             return None
-        request_body = await asyncio.to_thread(
-            self._run_store.execution_request_body, run_id
-        )
+        request_body = await self._run_store.aexecution_request_body(run_id)
         knowledge_filters = request_body.get("knowledge_filters")
         if knowledge_filters is None:
             knowledge_filters = {}
@@ -1305,7 +1299,7 @@ class AgentControlService:
         option_id: str,
         answers: dict[str, Any],
     ) -> ClarificationRecord | None:
-        from inqtrix.server.runs import RunActive
+        from inqtrix.runs.records import RunActive
 
         if not isinstance(exc, (ClarificationAlreadyAnswered, RunActive)):
             return None
@@ -1524,8 +1518,7 @@ class AgentControlService:
         caller = self._caller_context(principal, visible_to)
 
         async def _authorize(control_write: Any) -> Any:
-            return await asyncio.to_thread(
-                self._run_store.authorized_control_write,
+            return await self._run_store.aauthorized_control_write(
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=caller,
@@ -1555,8 +1548,7 @@ class AgentControlService:
             }
             if control_write is not None:
                 kwargs["control_write"] = control_write
-            return await asyncio.to_thread(
-                self._run_store.resume_run,
+            return await self._run_store.aresume_run(
                 run_id,
                 **kwargs,
             )
@@ -1597,13 +1589,10 @@ class AgentControlService:
 
         Signals never gate the row truth: approval decisions,
         clarification answers, and artifact edits emit only after their
-        authoritative write commits. Off-loop via ``to_thread`` — the durable
-        store blocks on a database round-trip.
+        authoritative write commits.
         """
         try:
-            await asyncio.to_thread(
-                self._run_store.emit, run_id, event_type, payload
-            )
+            await self._run_store.aemit(run_id, event_type, payload)
         except Exception:  # noqa: BLE001 — signal only, never roll back rows
             log.warning(
                 "Agent event %s for run %s could not be appended.",

@@ -32,7 +32,8 @@ from inqtrix.auth.principal import (
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
 from inqtrix.server.routers import runs as runs_router
-from inqtrix.server.runs import RunNotFound, RunStore
+from inqtrix.exceptions import RunAccessDenied, RunNotFound
+from inqtrix.runs.memory_store import RunStore
 from inqtrix.settings import Settings, StorageSettings
 
 from tests.contract._app import (
@@ -286,6 +287,42 @@ def test_visibility_denial_is_logged_for_operators(monkeypatch, caplog):
     assert all(run_id not in message for message in authz_messages)
 
 
+def test_a_denial_and_an_unknown_id_raise_their_own_types():
+    """Both run stores tell a denial from an unknown id; callers answer both alike.
+
+    The durable store audits a denial once the read's session has closed and
+    recognises it by its type, so the memory store raises the same type.
+    """
+    store = RunStore(
+        max_concurrent=1,
+        max_queue_size=4,
+        completed_ttl_seconds=60,
+        event_buffer_size=16,
+    )
+    done = threading.Event()
+
+    def work(handle):
+        handle.complete({"answer": "done"})
+        done.set()
+
+    run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
+        question="Testfrage?",
+        stack_name="default",
+        work=work,
+        created_by_user_id=_user_id("user-a"),
+        created_by_tenant_id="default",
+    )["run_id"]
+    assert done.wait(timeout=5)
+
+    with pytest.raises(RunAccessDenied):
+        store.get(run_id, visible_to=scoped_context("user-b"))
+    with pytest.raises(RunNotFound) as unknown:
+        store.get("run_unknown", visible_to=scoped_context("user-b"))
+    assert not isinstance(unknown.value, RunAccessDenied)
+
+
 def test_sub_collision_across_tenants_is_not_visible(monkeypatch):
     """OIDC subs are only unique per issuer — same sub in another
     tenant must not see the run."""
@@ -382,6 +419,8 @@ def test_cancel_of_running_run_denies_before_mutating():
         handle.complete({"answer": "done"})
 
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Testfrage?",
         stack_name="default",
         work=blocking_work,

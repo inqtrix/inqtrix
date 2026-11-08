@@ -49,6 +49,8 @@ import {
 } from './latexReportStyle'
 import { fileNameTimestamp } from './fileNameTimestamp'
 import { aiDisclosureDocumentProperties } from '@/lib/aiDisclosure'
+import type { Locale } from '@/i18n/translations'
+import { intlLocale } from '@/lib/time'
 
 export const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
@@ -390,10 +392,13 @@ export function exportTitle(title: string): string {
   return title.trim() || 'Dokument'
 }
 
-function buildTitleBlock(title: string): Paragraph[] {
+function buildTitleBlock(title: string, locale: Locale): Paragraph[] {
   return [
     new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(exportTitle(title))] }),
-    new Paragraph({ style: 'InqtrixSubtitle', children: [new TextRun(new Date().toLocaleDateString())] }),
+    new Paragraph({
+      style: 'InqtrixSubtitle',
+      children: [new TextRun(new Date().toLocaleDateString(intlLocale(locale)))],
+    }),
   ]
 }
 
@@ -427,6 +432,7 @@ export function downloadDocxBlob(blob: Blob, fileName: string): void {
 export function docxDocumentOptions(
   markdown: string,
   title: string,
+  locale: Locale,
   disclosure?: AiExportDisclosure,
 ): IPropertiesOptions {
   const properties = disclosure
@@ -439,7 +445,7 @@ export function docxDocumentOptions(
     styles: latexReportStyles,
     numbering: latexReportNumbering,
     sections: [latexReportSection(
-      [...buildTitleBlock(title), ...markdownToDocxBlocks(markdown)],
+      [...buildTitleBlock(title, locale), ...markdownToDocxBlocks(markdown)],
       disclosure?.notice,
     )],
   }
@@ -458,9 +464,10 @@ export function docxDocumentOptions(
 export async function exportMarkdownToDocx(
   markdown: string,
   title: string,
+  locale: Locale,
   disclosure?: AiExportDisclosure,
 ): Promise<void> {
-  const document_ = new Document(docxDocumentOptions(markdown, title, disclosure))
+  const document_ = new Document(docxDocumentOptions(markdown, title, locale, disclosure))
   const generated = await Packer.toBlob(document_)
   downloadDocxBlob(new Blob([generated], { type: DOCX_MIME }), docxFileName(title, new Date()))
 }

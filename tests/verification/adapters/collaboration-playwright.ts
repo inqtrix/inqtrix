@@ -223,7 +223,7 @@ function generatedSystemPreflight(
   try {
     normalizeSystemSmokeBaseURL(
       context.environment.INQTRIX_E2E_BASE_URL
-        ?? 'http://127.0.0.1:8080',
+        ?? 'http://localhost:8080',
     )
     baseURLCheck = passed(
       ENGINE,
@@ -302,7 +302,7 @@ function generatedFaultPreflight(
   try {
     normalizeSystemSmokeBaseURL(
       context.environment.INQTRIX_E2E_BASE_URL
-        ?? 'http://127.0.0.1:8080',
+        ?? 'http://localhost:8080',
     )
     baseURLCheck = passed(
       ENGINE,

@@ -15,6 +15,7 @@ stages is visible.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
@@ -37,12 +38,11 @@ from inqtrix.services.user_erasure_executor import (
     UserErasure,
     ensure_deleted_account,
 )
-from inqtrix.services.user_erasure_inventory import _tables, collect_inventory
+from inqtrix.storage.user_erasure_inventory import _tables, collect_inventory
 from inqtrix.storage.auth_postgres import PostgresUserDirectory, lock_tenant_security
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.migrate import run_migrations
 from inqtrix.storage.user_lifecycle_postgres import PostgresUserLifecycleTransaction
-from inqtrix.sync_bridge import run_coro_sync
 from tests.storage._canonical_users import ensure_canonical_users
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
@@ -88,7 +88,7 @@ def factory():
     # loop, and a pooled asyncpg connection must never cross loops.
     engine = build_engine(TEST_DATABASE_URL, null_pool=True)
     yield build_session_factory(engine)
-    run_coro_sync(engine.dispose())
+    asyncio.run(engine.dispose())
 
 
 @pytest.fixture()
@@ -121,7 +121,7 @@ def _transaction(factory, body):
             async with session.begin():
                 return await body(session)
 
-    return run_coro_sync(run())
+    return asyncio.run(run())
 
 
 def _count(factory, table: str, **where) -> int:
@@ -229,7 +229,7 @@ async def _promote(session, user_id: uuid.UUID) -> None:
 
 
 def _begin(factory, tenant: str, admin: uuid.UUID, subject: uuid.UUID) -> str:
-    outcome, report = run_coro_sync(
+    outcome, report = asyncio.run(
         _lifecycle(factory).begin_erasure(
             tenant_id=tenant,
             user_id=subject,
@@ -465,6 +465,8 @@ def test_a_decision_on_somebody_elses_run_keeps_the_run(factory, tenant) -> None
                 run_id=run_id,
                 tenant_id=tenant,
                 question="fixture",
+                mode="research",
+                workflow_contract=1,
                 created_at=_NOW,
                 created_by_user_id=owner,
                 execution_actor_user_id=subject,
@@ -510,7 +512,7 @@ def test_a_workspace_refuses_the_start_with_the_reason_the_preview_shows(
     preview = _transaction(
         factory, lambda session: collect_inventory(session, user_id=subject)
     )
-    outcome, report = run_coro_sync(
+    outcome, report = asyncio.run(
         _lifecycle(factory).begin_erasure(
             tenant_id=tenant,
             user_id=subject,
@@ -829,7 +831,7 @@ def test_the_start_cuts_the_account_off_and_keeps_it_off(factory, tenant) -> Non
     assert revoked_at is not None
     assert password_off is not None
 
-    again = run_coro_sync(
+    again = asyncio.run(
         lifecycle.begin_erasure(
             tenant_id=tenant,
             user_id=subject,
@@ -846,9 +848,9 @@ def test_the_start_cuts_the_account_off_and_keeps_it_off(factory, tenant) -> Non
             tenant_id=tenant, user_id=subject, role="admin", actor_user_id=admin
         ),
     ):
-        assert run_coro_sync(change) is UserLifecycleStatus.ERASING
+        assert asyncio.run(change) is UserLifecycleStatus.ERASING
     with pytest.raises(UserDisabledError):
-        run_coro_sync(
+        asyncio.run(
             lifecycle.provision_login(
                 LoginCommand(
                     tenant_id=tenant,
@@ -883,7 +885,7 @@ def test_an_admin_being_erased_is_no_longer_an_administrator(
     _begin(factory, tenant, admin, erasing)
     lifecycle = _lifecycle(factory)
 
-    demoted = run_coro_sync(
+    demoted = asyncio.run(
         lifecycle.set_role(
             tenant_id=tenant, user_id=admin, role="user", actor_user_id=admin
         )
@@ -891,7 +893,7 @@ def test_an_admin_being_erased_is_no_longer_an_administrator(
     assert demoted is UserLifecycleStatus.LAST_ADMIN
 
     woken_before = _count(factory, "user_events", target_user_id=erasing)
-    disabled = run_coro_sync(
+    disabled = asyncio.run(
         lifecycle.set_disabled(
             tenant_id=tenant,
             user_id=colleague,
@@ -915,7 +917,7 @@ def test_the_placeholder_never_appears_in_the_admin_listing(factory, tenant) -> 
 
     placeholder = _transaction(factory, make)
     again = _transaction(factory, make)
-    listed = run_coro_sync(
+    listed = asyncio.run(
         PostgresUserDirectory(session_factory=factory, app_role=APP_ROLE).list_users(
             tenant_id=tenant
         )

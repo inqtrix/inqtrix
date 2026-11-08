@@ -2276,7 +2276,7 @@ describe('collaboration document lifecycle', () => {
 
   it('enters the reconnect ladder when the initial open is rate limited', async () => {
     const limited = Object.assign(new Error('Zu viele Kollaborationssitzungen.'), {
-      detail: { reason: 'session_limit' },
+      detail: { reason: 'session_rate_limited' },
       status: 429,
     })
     const requestSession = vi.fn()

@@ -8,8 +8,8 @@ import { serializeEditorJson, setCitationLabelsLeftEscapedReporter } from '@inqt
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ConfigError, logLevelFromEnv, startFailureFields } from '../src/config'
-import { CollaborationError, collaborationError, quietHook, quietHooks } from '../src/errors'
-import { createJsonLogger, routeEditorSchemaWarnings } from '../src/logger'
+import { CollaborationError, HookRejection, collaborationError, quietHook, quietHooks } from '../src/errors'
+import { consoleSink, createJsonLogger, routeEditorSchemaWarnings, routeLibraryConsole } from '../src/logger'
 import { CollaborationSidecar } from '../src/sidecar'
 import { VERIFICATION_FAULT_ENV, verificationFaultGateFromEnv } from '../src/verificationFault'
 import { FakeCollaborationApi, settings, silentLogger } from './helpers'
@@ -24,6 +24,65 @@ const contract = JSON.parse(
 afterEach(() => {
   setCitationLabelsLeftEscapedReporter(null)
   vi.restoreAllMocks()
+})
+
+function libraryConsole() {
+  const printed = { debug: vi.fn(), error: vi.fn(), info: vi.fn(), log: vi.fn(), warn: vi.fn() }
+  const target = { ...printed }
+  routeLibraryConsole(createJsonLogger(consoleSink(target)), target)
+  const records = () => [printed.debug, printed.error, printed.info, printed.warn]
+    .flatMap((method) => method.mock.calls.map(([line]) => JSON.parse(String(line))))
+  return { printed, records, target }
+}
+
+describe('what a library prints past the logger', () => {
+  const refusal = () => new HookRejection(
+    new CollaborationError('access_revoked', { closeCode: 4403 }),
+  )
+
+  it('adds nothing for a connection a hook refused, in either form the library prints', () => {
+    const { printed, target } = libraryConsole()
+    target.error('closing connection a (while handling b) because of exception', refusal())
+    target.error(refusal())
+    expect(printed.error).not.toHaveBeenCalled()
+  })
+
+  it('makes one record of an unexpected error, with its frames and without its text below the first line', () => {
+    const { records, target } = libraryConsole()
+    const failure = new TypeError(`broken\n${MARKER}`)
+    target.error('closing connection a (while handling b) because of exception', failure)
+    const [record, ...rest] = records()
+    expect(rest).toEqual([])
+    expect(record).toMatchObject({
+      error_type: 'TypeError',
+      event: 'library_console',
+      level: 'ERROR',
+      service: 'collaboration',
+    })
+    expect(record.text).toBe('closing connection a (while handling b) because of exception TypeError: broken')
+    expect(record.stack).toContain('logger.test.ts')
+    expect(record.stack).not.toContain(MARKER)
+  })
+
+  it('keeps the level of the method the library called', () => {
+    const { records, target } = libraryConsole()
+    target.warn('a warning')
+    target.log('a note')
+    target.info('another note')
+    expect(records().map(({ level, text }) => [level, text])).toEqual([
+      ['INFO', 'a note'],
+      ['INFO', 'another note'],
+      ['WARNING', 'a warning'],
+    ])
+  })
+
+  it('bounds the text and drops an empty line', () => {
+    const { printed, records, target } = libraryConsole()
+    target.log()
+    expect(printed.info).not.toHaveBeenCalled()
+    target.log('x'.repeat(500))
+    expect(records()[0].text).toHaveLength(200)
+  })
 })
 
 function sinkFor() {

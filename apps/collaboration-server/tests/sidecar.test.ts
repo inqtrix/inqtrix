@@ -467,6 +467,43 @@ describe('private sidecar listener', () => {
     await sidecar.stop()
   })
 
+  it('tells every open room its comments may have changed when the policy feed requires a reset', async () => {
+    const api = new FakeCollaborationApi()
+    const configured = settings({ policyPollMs: 60_000 })
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    await sidecar.start()
+    const harness = sidecar as unknown as GuestPolicyHarness
+    await vi.waitFor(() => expect(harness.policyPollInFlight).toBeNull())
+    const otherDocument = 'ed_other'
+    const otherRoom = editorCollaborationRoom(otherDocument, 1)
+    const reader = policyConnection({ id: USER_ID, kind: 'user', policyCursor: 99, socketId: 'reader' })
+    const elsewhere = policyConnection({ id: USER_ID, kind: 'user', policyCursor: 99, socketId: 'elsewhere' })
+    elsewhere.context.documentId = otherDocument
+    harness.hocuspocus.documents.set(ROOM, { getConnections: () => [reader], name: ROOM })
+    harness.hocuspocus.documents.set(otherRoom, { getConnections: () => [elsewhere], name: otherRoom })
+    api.policyImplementation = async () => ({
+      cursor: 100,
+      events: [],
+      resetRequired: true,
+    })
+
+    await harness.pollPolicyEvents()
+
+    expect(reader.sendStateless).toHaveBeenCalledWith(
+      JSON.stringify({ document_id: DOCUMENT_ID, type: 'collaboration_comment_changed' }),
+    )
+    expect(elsewhere.sendStateless).toHaveBeenCalledWith(
+      JSON.stringify({ document_id: otherDocument, type: 'collaboration_comment_changed' }),
+    )
+
+    harness.hocuspocus.documents.delete(ROOM)
+    harness.hocuspocus.documents.delete(otherRoom)
+    await sidecar.stop()
+  })
+
   it('revalidates only guest sockets whose lease check predates a guest policy event', async () => {
     const api = new FakeCollaborationApi()
     const configured = settings({ policyPollMs: 60_000 })
@@ -4684,6 +4721,7 @@ type GuestPolicyConnection = {
     user: { id: string; kind: 'guest' | 'user' }
   }
   requestToken: ReturnType<typeof vi.fn>
+  sendStateless: ReturnType<typeof vi.fn>
   socketId: string
 }
 
@@ -4748,6 +4786,7 @@ function policyConnection({
       user: { id, kind },
     },
     requestToken: vi.fn(),
+    sendStateless: vi.fn(),
     socketId,
   }
 }

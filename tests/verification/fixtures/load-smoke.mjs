@@ -69,7 +69,7 @@ export function buildLoadDocumentSeed({
 export function normalizeLoadSmokeBaseURL(value) {
   let parsed
   try {
-    parsed = new URL(value ?? 'http://127.0.0.1:8080')
+    parsed = new URL(value ?? 'http://localhost:8080')
   } catch {
     throw new Error('INQTRIX_E2E_BASE_URL must be a valid HTTP(S) URL.')
   }

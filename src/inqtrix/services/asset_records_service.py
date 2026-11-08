@@ -27,7 +27,7 @@ from inqtrix.project.asset_records_ports import (
     InitialUploadStatus,
     SectionNotFound,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 if TYPE_CHECKING:
     from inqtrix.auth.principal import UserContext

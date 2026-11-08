@@ -1,11 +1,13 @@
 import { join } from 'node:path'
 
 import { assertFixture, isExpectedBrowserRequestAbort, redactPath } from './api.mjs'
+import { attemptCleanup } from './cleanup-step.mjs'
+import { httpsErrorsIgnored } from './https-errors.mjs'
 
 export function createSessionFixtures({
   baseURL,
   browser,
-  ignoreHTTPSErrors,
+  ignoreHTTPSErrors = httpsErrorsIgnored(),
   lifecycle,
   parseCollaborationFrame,
   runId,
@@ -120,7 +122,7 @@ export function createSessionFixtures({
       }
     } catch (error) {
       if (lifecycleSession) {
-        await logoutContext(context, lifecycleSession).catch(() => undefined)
+        await attemptCleanup('logout', () => logoutContext(context, lifecycleSession))
       }
       await context.close().catch(() => undefined)
       throw error

@@ -21,7 +21,7 @@ from inqtrix.project.knowledge_sessions_ports import (
 )
 from inqtrix.project.vector_index_memory import MemoryVectorIndexStore
 from inqtrix.project.vector_index_ports import VectorIndexNotFound
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 
 ALICE = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")

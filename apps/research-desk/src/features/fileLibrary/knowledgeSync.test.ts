@@ -4,6 +4,7 @@ import {
   createVectorIndexCollectionOnServer,
   ingestNewVectorIndexMembers,
   KnowledgeReindexPartialError,
+  listCollectionDocuments,
 } from './knowledgeSync'
 
 const mocks = vi.hoisted(() => ({
@@ -181,6 +182,35 @@ afterEach(() => {
 })
 
 describe('createVectorIndexCollectionOnServer', () => {
+  it('reports the collection and each document as soon as the server has them', async () => {
+    const seen: string[] = []
+    mocks.startDocumentRevisionJob.mockImplementationOnce(async () => {
+      seen.push('job started')
+      return {
+        collection_id: 'kc_fresh',
+        document_id: 'kd_async',
+        error: null,
+        events_url: '/events/ix_async',
+        job_id: 'ix_async',
+        operation_kind: 'document_revision',
+        phase: 'completed',
+        revision_id: 'rev_async',
+        status: 'completed',
+      }
+    })
+
+    await createVectorIndexCollectionOnServer(makeIndex(), [makeAsset()], {}, {
+      onCollectionCreated: ({ collectionId }) => {
+        seen.push(`collection ${collectionId}`)
+      },
+      onMemberDocument: ({ documentId }) => {
+        seen.push(`document ${documentId}`)
+      },
+    })
+
+    expect(seen).toEqual(['collection kc_fresh', 'job started', 'document kd_async'])
+  })
+
   it('uses SSE first and reconnects with backoff after transport loss', async () => {
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)
@@ -1026,5 +1056,27 @@ describe('ingestNewVectorIndexMembers', () => {
     expect(mocks.addKnowledgeDocument).toHaveBeenCalledTimes(1)
     expect(result.embeddedFileIds.sort()).toEqual(['file-a', 'file-b'])
     expect(result.serverDocumentIds['file-a']).toBe('kd_existing')
+  })
+})
+
+describe('listCollectionDocuments', () => {
+  it('reads every page: each id, and the first document per asset', async () => {
+    const document = (id: string, fileId?: string) => ({
+      chunk_count: 3,
+      collection_id: 'kc_1',
+      created_at: 0,
+      id,
+      metadata: fileId ? { fileId } : {},
+      title: id,
+    })
+    mocks.listKnowledgeDocuments
+      .mockResolvedValueOnce({ data: [document('kd_1', 'file-1'), document('kd_x')], next_cursor: 'next' })
+      .mockResolvedValueOnce({ data: [document('kd_2', 'file-1'), document('kd_3', 'file-3')], next_cursor: null })
+
+    const listed = await listCollectionDocuments('kc_1', { workspaceId: 'ws_1' })
+
+    expect([...listed.ids]).toEqual(['kd_1', 'kd_x', 'kd_2', 'kd_3'])
+    expect([...listed.byFileId]).toEqual([['file-1', 'kd_1'], ['file-3', 'kd_3']])
+    expect(mocks.listKnowledgeDocuments.mock.calls.map((call) => call[1].cursor)).toEqual([undefined, 'next'])
   })
 })

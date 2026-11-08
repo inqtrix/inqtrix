@@ -10,7 +10,7 @@ from inqtrix.project.agent_sessions_memory import MemoryAgentSessionStore
 from inqtrix.project.agent_sessions_ports import AgentSessionNotFound
 from inqtrix.project.knowledge_sessions_memory import MemoryKnowledgeSessionStore
 from inqtrix.project.knowledge_sessions_ports import KnowledgeSessionNotFound
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.runs.deletion_operations import (
     DeletionOperationStore,
     DeletionStage,
@@ -345,7 +345,7 @@ class _RunAggregate:
         if self.prepare_error is not None:
             raise self.prepare_error
 
-    def agent_session_residuals(self, *_: object, **__: object) -> dict[str, int]:
+    async def aagent_session_residuals(self, *_: object, **__: object) -> dict[str, int]:
         return dict(self.residuals)
 
     def delete_knowledge_session_aggregate(
@@ -360,7 +360,7 @@ class _RunAggregate:
         if self.prepare_error is not None:
             raise self.prepare_error
 
-    def knowledge_session_residuals(
+    async def aknowledge_session_residuals(
         self, *_: object, **__: object
     ) -> dict[str, int]:
         return dict(self.residuals)

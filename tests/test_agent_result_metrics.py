@@ -15,7 +15,8 @@ import time
 from types import SimpleNamespace
 
 from inqtrix.core.results import RunRequest
-from inqtrix.server.runs import RunHandle, RunStore
+from inqtrix.runs.memory_store import RunStore
+from inqtrix.runs.records import RunHandle
 from inqtrix.services.run_service import (
     _prune_uncollected_agent_metrics,
     execute_run_request,
@@ -120,6 +121,8 @@ def _agent_run_payload() -> dict:
     )
     release = threading.Event()
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="q", stack_name="default", work=lambda handle: release.wait(5)
     )
     run_id = str(summary["run_id"])

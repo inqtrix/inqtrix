@@ -38,7 +38,7 @@ from inqtrix.services.knowledge_service import (
     KnowledgeValidationError,
     canonical_source_id,
 )
-from inqtrix.source_authority import SourceScope
+from inqtrix.storage.source_authority import SourceScope
 
 
 class StubEmbeddings:

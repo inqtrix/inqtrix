@@ -38,6 +38,7 @@ from inqtrix.agents.report_quality import (
     validate_and_repair_citations,
     verify_quotes,
 )
+from inqtrix.model_cards import estimate_required_context_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -155,9 +156,8 @@ def choose_section_transport(prompt: str, *, role_available: bool) -> str:
     section that should have gone to one.
     """
     from inqtrix.agents.kernel.work_profiles import TRANSPORT_PROMPT, TRANSPORT_ROLE
-    from inqtrix.nodes import _estimate_required_context_tokens
 
-    estimated, _ = _estimate_required_context_tokens(
+    estimated, _ = estimate_required_context_tokens(
         system=agent_synthesis_system_prompt(),
         prompt=prompt,
         requested_output_tokens=0,

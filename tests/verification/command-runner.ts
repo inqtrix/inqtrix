@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { unlink } from 'node:fs/promises'
 
 import type { CleanupLedger } from './cleanup-ledger.ts'
+import { ignoreMissing } from './fixtures/cleanup-step.mjs'
 import type {
   EngineResult,
   VerificationEngine,
@@ -17,6 +18,8 @@ import {
   scenarioResultsPath,
 } from './scenario-results.ts'
 
+const DEFAULT_TERMINATION_GRACE_MS = 5_000
+
 export type CommandSpec = {
   args: readonly string[]
   command: string
@@ -28,6 +31,8 @@ export type CommandSpec = {
   }
   productCleanup?: ProductCleanup
   productLifecycle?: boolean
+  /** How long a child may take to wind down after SIGTERM before it is killed. */
+  terminationGraceMs?: number
 }
 
 export async function runCommand(
@@ -37,7 +42,7 @@ export async function runCommand(
 ): Promise<EngineResult> {
   const startedAt = new Date()
   const resultsPath = scenarioResultsPath(context, spec.engine)
-  await unlink(resultsPath).catch(() => undefined)
+  await unlink(resultsPath).catch(ignoreMissing)
   let child: ChildProcess | null = null
   const productResources = spec.productLifecycle
     ? new ProductResourceController(
@@ -52,7 +57,7 @@ export async function runCommand(
     async () => {
       if (!child || child.exitCode !== null || child.signalCode !== null) return
       child.kill('SIGTERM')
-      await waitForExit(child, 5_000)
+      await waitForExit(child, spec.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS)
       if (child.exitCode === null && child.signalCode === null) {
         child.kill('SIGKILL')
         await waitForExit(child, 1_000)
@@ -81,9 +86,9 @@ export async function runCommand(
       if (forceKillTimer) clearTimeout(forceKillTimer)
       context.abortSignal.removeEventListener('abort', abort)
       await cleanupLedger.complete(cleanupHandle)
-      const scenarios = await readScenarioResults(context, spec.engine)
+      const read = await readScenarioResults(context, spec.engine)
       resolveResult(
-        result(spec.engine, startedAt, status, exitCode, signal, scenarios),
+        result(spec.engine, startedAt, status, exitCode, signal, read.scenarios, read.problem),
       )
     }
     const abort = (): void => {
@@ -93,7 +98,7 @@ export async function runCommand(
         if (child && child.exitCode === null && child.signalCode === null) {
           child.kill('SIGKILL')
         }
-      }, 5_000)
+      }, spec.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS)
       forceKillTimer.unref()
     }
 
@@ -154,6 +159,7 @@ function result(
   exitCode: number | null,
   signal: NodeJS.Signals | null,
   scenarios: EngineResult['scenarios'],
+  scenarioResultsProblem: string | null = null,
 ): EngineResult {
   const finishedAt = new Date()
   return {
@@ -162,6 +168,7 @@ function result(
     exitCode,
     finishedAt: finishedAt.toISOString(),
     scenarios,
+    ...(scenarioResultsProblem === null ? {} : { scenarioResultsProblem }),
     signal,
     startedAt: startedAt.toISOString(),
     status,

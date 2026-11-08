@@ -419,13 +419,13 @@ async def append_audit_row(
 
     The envelope (actor pseudonym, request origin, correlation join keys)
     is derived from the ambient context here, exactly as
-    :func:`~inqtrix.services.audit_service.build_audit_entry` derives it for
+    :func:`~inqtrix.auth.audit_entries.build_audit_entry` derives it for
     the sink path. Two entry points that computed different envelopes left
     whole action families unfilterable in the admin panel depending on which
     one happened to write them.
     """
+    from inqtrix.auth.audit_entries import ambient_audit_envelope
     from inqtrix.auth.log_redaction import stable_pseudonym
-    from inqtrix.services.audit_service import ambient_audit_envelope
 
     ambient_origin, ambient_correlation = ambient_audit_envelope()
     if correlation:

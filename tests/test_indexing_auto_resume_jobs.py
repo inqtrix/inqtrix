@@ -11,7 +11,7 @@ from collections.abc import Callable
 import pytest
 
 from inqtrix.contextualization_circuit import MemoryContextualizationCircuitBreaker
-from inqtrix.indexing_auto_resume import (
+from inqtrix.runs.indexing_auto_resume import (
     SWEEP_INTERVAL_SECONDS,
     AutoResumePolicy,
     SweepReport,
@@ -21,7 +21,8 @@ from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
 from inqtrix.providers.base import LLMResponse, ProviderContext
 from inqtrix.server.container import build_container
-from inqtrix.server.indexing import IndexingJobHandle, IndexingJobStore
+from inqtrix.runs.indexing_memory import IndexingJobStore
+from inqtrix.runs.indexing_records import IndexingJobHandle
 from inqtrix.services.indexing_service import IndexingService
 from inqtrix.settings import KnowledgeSettings, ServerSettings, Settings, StorageSettings
 

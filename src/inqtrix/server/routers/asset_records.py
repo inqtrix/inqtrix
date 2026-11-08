@@ -155,7 +155,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, "Invalid body", "invalid_request_error")
         try:
             workspace_id = await workspace_id_for_write(req, principal, users)
-            deletion_service.assert_target_allowed(
+            await deletion_service.assert_target_allowed(
                 DeletionTargetKind.SECTION,
                 section_id,
                 principal=principal,
@@ -225,7 +225,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, "section_id is required", "invalid_request_error")
         try:
             workspace_id = await workspace_id_for_write(req, principal, users)
-            deletion_service.assert_target_allowed(
+            await deletion_service.assert_target_allowed(
                 DeletionTargetKind.GROUP,
                 group_id,
                 principal=principal,
@@ -332,7 +332,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             after = decode_cursor(req.query_params.get("cursor"))
         except InvalidCursor:
             return error_response(400, "Invalid cursor", "invalid_cursor")
-        operations, next_cursor = deletion_service.list_operations(
+        operations, next_cursor = await deletion_service.list_operations(
             principal=principal,
             workspace_id=workspace_id_from_request(req),
             limit=clamp_limit(req.query_params.get("limit")),
@@ -348,7 +348,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
     ):
         try:
-            return deletion_service.get(
+            return await deletion_service.get(
                 operation_id,
                 principal=principal,
                 workspace_id=workspace_id_from_request(req),
@@ -436,7 +436,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         workspace_id = await workspace_id_for_write(req, principal, users)
         try:
-            deletion_service.assert_upload_allowed(
+            await deletion_service.assert_upload_allowed(
                 asset_id,
                 principal=principal,
                 workspace_id=workspace_id,
@@ -509,7 +509,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, "page_count must be an integer or null", "invalid_request_error")
         try:
             workspace_id = await workspace_id_for_write(req, principal, users)
-            deletion_service.assert_upload_allowed(
+            await deletion_service.assert_upload_allowed(
                 asset_id,
                 principal=principal,
                 workspace_id=workspace_id,

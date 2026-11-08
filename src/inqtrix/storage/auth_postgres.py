@@ -75,8 +75,7 @@ class PostgresSessionStore:
     """Durable session store (login survives restarts and replicas).
 
     Args:
-        session_factory: Async session factory on the HTTP loop's
-            engine.
+        session_factory: Async session factory on the engine of the process.
         app_role: Restricted role assumed per transaction.
     """
 

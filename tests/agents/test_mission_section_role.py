@@ -27,7 +27,7 @@ from inqtrix.agents.kernel.work_profiles import (
     resolve_work_profile,
 )
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from inqtrix.providers.base import ChatTurn, ToolCallRequest  # noqa: E402
 from inqtrix.settings import AgentPlatformSettings  # noqa: E402

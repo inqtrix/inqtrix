@@ -5,7 +5,7 @@ import type {
   TestResult,
 } from '@playwright/test/reporter'
 
-import { writeScenarioResultFile } from './scenario-result-file.ts'
+import { writeScenarioSidecar } from '../tests/verification/fixtures/scenario-sidecar.mjs'
 import {
   scenariosForProfile,
   uiScenarioForTestTitle,
@@ -55,7 +55,7 @@ export default class UiScenarioReporter implements Reporter {
     const scenarios = evaluations
       .filter((scenario) => scenario.attempted)
       .map(({ attempted: _attempted, ...scenario }) => scenario)
-    await writeScenarioResultFile(scenarios, this.environment)
+    await writeScenarioSidecar(scenarios, this.environment)
     return evaluations.every((scenario) => scenario.status === 'passed')
       ? undefined
       : { status: 'failed' }

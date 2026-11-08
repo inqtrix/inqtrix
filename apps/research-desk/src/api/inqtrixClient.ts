@@ -4191,6 +4191,44 @@ export async function fetchAdminSystemRuntime(options: ClientOptions = {}) {
   return requestJson<AdminSystemRuntime>('/v1/admin/system/runtime', options)
 }
 
+/** Open runs per mode, status and workflow contract: counts, never content. */
+export type AdminRunBindings = {
+  /** The workflow contract this server carries, per registered mode. */
+  contracts: Record<string, number>
+  counts: Array<{
+    mode: string
+    status: string
+    workflow_contract: number
+    runs: number
+  }>
+}
+
+/** What an admin cancel of one mode's runs outside this server's version did. */
+export type AdminRunBindingsCancel = {
+  mode: string
+  server_contract: number | null
+  /** Runs that ended at once (queued or parked). */
+  cancelled: number
+  /** Running runs that end at their next step or when a worker takes them over. */
+  cancel_requested: number
+}
+
+/** The open runs by binding, as counts only; the list of run ids stays unread. */
+export async function fetchAdminRunBindings(options: ClientOptions = {}) {
+  return requestJson<AdminRunBindings>('/v1/admin/system/run-bindings', options)
+}
+
+/** Cancel the open runs of one mode that this server cannot run. */
+export async function cancelAdminRunBindings(
+  mode: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<AdminRunBindingsCancel>(
+    '/v1/admin/system/run-bindings/cancel',
+    { ...options, method: 'POST', body: { mode } },
+  )
+}
+
 /** One row of the instance audit trail (OCSF-oriented read model). */
 export type AdminAuditEvent = {
   id: number

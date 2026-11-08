@@ -11,7 +11,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.pagination import decode_cursor
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.project.vector_index_postgres import PostgresVectorIndexStore
 from inqtrix.project.vector_index_ports import (
     VectorIndexHistoryEntry,
@@ -73,7 +73,6 @@ async def store():
             )
     vector_store = PostgresVectorIndexStore(engine=engine, app_role=APP_ROLE)
     yield vector_store
-    await vector_store.aclose()
 
 
 async def _save(

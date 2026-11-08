@@ -1,9 +1,9 @@
 """What a process may hold must be derived, and said when it will not fit.
 
-The budget is the product of a pool size an operator chose and an engine
-count they cannot see. A count kept by hand beside the engines is wrong as
-soon as a store is added without anyone updating it, and a figure that is
-quietly too low is worse than none: it reads as headroom that is not there.
+The budget comes from the pool an operator sized and what the process holds
+beside it. A figure kept by hand is wrong as soon as something is added without
+anyone updating it, and a figure that is quietly too low is worse than none: it
+reads as headroom that is not there.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import logging
 
 import pytest
 
+from inqtrix.settings import Settings
 from inqtrix.storage import db as db_module
 from inqtrix.storage.connection_budget import (
     _looks_pooled,
@@ -58,7 +59,7 @@ def _capturing():
 
 
 def test_only_pooled_engines_count_toward_the_budget() -> None:
-    """A NullPool store holds nothing between operations, so it adds nothing."""
+    """A one-off probe holds nothing between operations, so it adds nothing."""
     before_engines, before_total = db_module.pooled_connection_budget()
 
     db_module.build_engine(_URL, null_pool=True)
@@ -117,8 +118,8 @@ async def test_pooler_urls_skip_the_comparison_and_say_so() -> None:
         await report_connection_budget(
             database_url="postgresql+asyncpg://u:p@pgbouncer:6432/inqtrix",
             process_label="API-Prozess",
-            pool_size=5,
-            pool_max_overflow=10,
+            pool_size=15,
+            pool_max_overflow=0,
         )
 
     assert any("transaction pooler" in m for m in _messages(handler))
@@ -133,8 +134,8 @@ async def test_unreachable_server_notes_once_and_keeps_going() -> None:
         await report_connection_budget(
             database_url=_URL,
             process_label="API-Prozess",
-            pool_size=5,
-            pool_max_overflow=10,
+            pool_size=15,
+            pool_max_overflow=0,
         )
 
     assert any("not checked against max_connections" in m for m in _messages(handler))
@@ -233,100 +234,52 @@ def test_both_processes_wire_the_checkpointer_into_their_budget_line() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_run_lane_peak_counts_toward_the_comparison(monkeypatch) -> None:
-    """The largest consumer the raised run cap creates must not be invisible.
-
-    Run threads drive a NullPool bundle, so they hold nothing at rest and no
-    pool count can see them. That is exactly why the comparison has to be
-    told about them: a synchronised burst can ask for one connection per
-    in-flight run, and a check that omits the term reports a budget that
-    fits while the server refuses connections.
-    """
-    import inqtrix.storage.connection_budget as module
-
-    async def _ceiling(_url: str) -> int:
-        return 100
-
-    # The pooled figure is a process-wide accumulator that every earlier test
-    # building an engine adds to, so it is pinned here rather than inherited:
-    # otherwise this test passes or fails by suite order, not by behaviour.
-    monkeypatch.setattr(module, "_server_max_connections", _ceiling)
-    # Patched at its source: report_connection_budget imports it inside the
-    # function, so patching the importing module would miss it.
-    monkeypatch.setattr(
-        db_module, "pooled_connection_budget", lambda: (4, 60)
-    )
-
-    with _capturing() as quiet:
-        await report_connection_budget(
-            database_url=_URL,
-            process_label="API-Prozess",
-            pool_size=5,
-            pool_max_overflow=10,
-        )
-    pooled_only = [r for r in quiet.records if r.levelno >= logging.WARNING]
-    assert not pooled_only, (
-        "60 pooled against max_connections=100 must fit; the run lane is "
-        "what has to tip it over"
-    )
-
-    with _capturing() as loud:
-        await report_connection_budget(
-            database_url=_URL,
-            process_label="API-Prozess",
-            pool_size=5,
-            pool_max_overflow=10,
-            transient_peak=100,
-            transient_label="Lauf-Threads, NullPool",
-            transient_knob="RUN_MAX_CONCURRENT",
-        )
-    with_run_lane = [r for r in loud.records if r.levelno >= logging.WARNING]
-
-    assert len(with_run_lane) > len(pooled_only), (
-        "adding the run lane must be able to turn a budget that appeared to "
-        "fit into one that does not; otherwise the term is decorative"
-    )
-    assert "RUN_MAX_CONCURRENT" in with_run_lane[-1].getMessage(), (
-        "the warning must name the knob that bounds the transient peak"
-    )
-    reported = [m for m in _messages(loud) if "connection budget |" in m]
-    assert "short-lived" in reported[-1]
-    assert "Lauf-Threads" in reported[-1]
-
-
-@pytest.mark.asyncio
-async def test_the_named_remedy_follows_the_caller(monkeypatch) -> None:
-    """Which knob bounds the transient peak differs per process.
-
-    The API admits runs and is bounded by RUN_MAX_CONCURRENT; a worker
-    executes already-admitted runs, where that variable never fires and
-    INQTRIX_WORKER_CONCURRENCY is the width. A hardcoded remedy sends half
-    the operators to a setting that does nothing where they read it.
-    """
-    import inqtrix.storage.connection_budget as module
-
-    async def _ceiling(_url: str) -> int:
-        return 10
-
-    monkeypatch.setattr(module, "_server_max_connections", _ceiling)
-    monkeypatch.setattr(db_module, "pooled_connection_budget", lambda: (4, 60))
-
+async def test_overflow_is_named_because_it_keeps_reconnecting() -> None:
     with _capturing() as handler:
         await report_connection_budget(
-            database_url=_URL,
-            process_label="Worker-Prozess",
+            database_url="postgresql+asyncpg://u:p@pgbouncer:6432/inqtrix",
+            process_label="API process",
             pool_size=5,
             pool_max_overflow=10,
-            transient_peak=114,
-            transient_label="Worker-Schleifen, NullPool",
-            transient_knob="INQTRIX_WORKER_CONCURRENCY",
         )
 
-    warnings = [r for r in handler.records if r.levelno >= logging.WARNING]
-    assert warnings
-    text = warnings[-1].getMessage()
-    assert "INQTRIX_WORKER_CONCURRENCY" in text
-    assert "RUN_MAX_CONCURRENT" not in text, (
-        "naming the API's knob in a worker warning points at a setting that "
-        "does not bound anything there"
-    )
+    warnings = [r.getMessage() for r in handler.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "INQTRIX_DATABASE_POOL_MAX_OVERFLOW=10" in warnings[0]
+    assert "keeps reconnecting" in warnings[0]
+
+
+@pytest.mark.parametrize(
+    ("slots", "warned"),
+    [(14, False), (15, True), (16, True)],
+)
+@pytest.mark.asyncio
+async def test_jobs_that_can_fill_the_pool_during_a_vector_write_are_named(
+    slots: int, warned: bool
+) -> None:
+    with _capturing() as handler:
+        await report_connection_budget(
+            database_url="postgresql+asyncpg://u:p@pgbouncer:6432/inqtrix",
+            process_label="worker process",
+            pool_size=15,
+            pool_max_overflow=0,
+            vector_write_slots=slots,
+        )
+
+    warnings = [r.getMessage() for r in handler.records if r.levelno >= logging.WARNING]
+    assert bool(warnings) is warned
+    if warned:
+        assert f"= {slots} jobs" in warnings[0]
+        assert "INQTRIX_REINDEX_MAX_CONCURRENT" in warnings[0]
+        assert "INQTRIX_DATABASE_POOL_SIZE" in warnings[0]
+
+
+def test_the_default_job_limits_leave_room_in_the_default_pool() -> None:
+    settings = Settings()
+
+    assert (
+        settings.knowledge.reindex_max_concurrent
+        + settings.server.deletion_max_concurrent
+    ) < settings.storage.pool_size + settings.storage.pool_max_overflow
+
+

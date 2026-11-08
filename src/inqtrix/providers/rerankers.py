@@ -10,30 +10,27 @@ model weights.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
+import weakref
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any, Mapping
+
+import httpx
 
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.exceptions import AgentCancelled
+from inqtrix.providers.attempts import call_on_loop, call_with_retries, estimate_request_tokens
 from inqtrix.providers.base import (
-    MAX_PROVIDER_ATTEMPTS,
-    ProviderRetryCallback,
-    _RetryNoticeMixin,
-    _check_provider_operation_deadline,
     _operation_deadline,
-    _retry_delay_seconds,
-    _sleep_before_retry,
 )
 from inqtrix.urls import sanitize_error
 
 log = logging.getLogger(__name__)
-
-_RETRYABLE_RERANK_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
 
 
 class RerankerError(RuntimeError):
@@ -94,7 +91,7 @@ class RerankerProvider(ABC):
         """
 
 
-class CohereRerank(_RetryNoticeMixin, RerankerProvider):
+class CohereRerank(RerankerProvider):
     """Cohere rerank API adapter (native endpoint or Azure AI Foundry).
 
     Speaks the Cohere ``/v2/rerank`` request schema with a Bearer key —
@@ -116,6 +113,9 @@ class CohereRerank(_RetryNoticeMixin, RerankerProvider):
             ``/providers/cohere/v2/rerank`` route), the URL is used
             verbatim and this path is ignored.
         timeout: Per-call timeout in seconds.
+        default_headers: Optional headers sent with every request, for
+            example the subscription header of an API gateway. The
+            ``Authorization`` header with the key always wins.
     """
 
     def __init__(
@@ -126,6 +126,7 @@ class CohereRerank(_RetryNoticeMixin, RerankerProvider):
         default_model: str,
         rerank_path: str = "/v2/rerank",
         timeout: float = REASONING_TIMEOUT,
+        default_headers: Mapping[str, str] | None = None,
     ) -> None:
         if not (api_key or "").strip():
             raise ValueError("CohereRerank requires a non-empty api_key")
@@ -133,7 +134,6 @@ class CohereRerank(_RetryNoticeMixin, RerankerProvider):
             raise ValueError("CohereRerank requires a non-empty base_url")
         if not (default_model or "").strip():
             raise ValueError("CohereRerank requires a non-empty default_model")
-        self._api_key = api_key
         clean_base = base_url.strip().rstrip("/")
         self._url = (
             clean_base
@@ -142,13 +142,48 @@ class CohereRerank(_RetryNoticeMixin, RerankerProvider):
         )
         self._default_model = default_model
         self._timeout = timeout
+        self._headers = {
+            **{
+                name: value
+                for name, value in (default_headers or {}).items()
+                if name.lower() != "authorization"
+            },
+            "Authorization": f"Bearer {api_key}",
+        }
+        # Tests put a transport here; the client is built per loop on first use.
+        self._client_kwargs: dict[str, Any] = {}
+        self._clients: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, httpx.AsyncClient
+        ] = weakref.WeakKeyDictionary()
 
     @property
     def default_model(self) -> str:
         """Model/deployment id used when a call names none."""
         return self._default_model
 
+    def _async_client(self) -> httpx.AsyncClient:
+        """The HTTP client of the running loop: one per adapter and loop, built on first use."""
+        loop = asyncio.get_running_loop()
+        client = self._clients.get(loop)
+        if client is None:
+            client = httpx.AsyncClient(**self._client_kwargs)
+            self._clients[loop] = client
+        return client
+
     def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        top_n: int,
+        model: str | None = None,
+    ) -> list[RerankResult]:
+        """Score *documents* via the rerank endpoint, best first; waits for :meth:`arerank`."""
+        if not documents:
+            return []
+        return call_on_loop(self.arerank(query, documents, top_n=top_n, model=model))
+
+    async def arerank(
         self,
         query: str,
         documents: list[str],
@@ -159,11 +194,6 @@ class CohereRerank(_RetryNoticeMixin, RerankerProvider):
         """Score *documents* via the rerank endpoint, best first."""
         if not documents:
             return []
-        import time
-
-        import httpx
-
-        self._clear_retry_notices()
         active_model = (model or "").strip() or self._default_model
         request_body = {
             "model": active_model,
@@ -171,89 +201,32 @@ class CohereRerank(_RetryNoticeMixin, RerankerProvider):
             "documents": documents,
             "top_n": min(top_n, len(documents)),
         }
-        operation_deadline = _operation_deadline(self._timeout, None)
+        deadline = _operation_deadline(self._timeout, None)
+        client = self._async_client()
+
+        async def send() -> Any:
+            response = await client.post(
+                self._url,
+                headers=self._headers,
+                json=request_body,
+                timeout=max(0.001, deadline - time.monotonic()),
+            )
+            response.raise_for_status()
+            return response.json()
+
         try:
-            for attempt in range(1, MAX_PROVIDER_ATTEMPTS + 1):
-                _check_provider_operation_deadline(
-                    operation_deadline,
-                    None,
-                    label="Rerank call",
-                )
-                try:
-                    response = httpx.post(
-                        self._url,
-                        headers={"Authorization": f"Bearer {self._api_key}"},
-                        json=request_body,
-                        timeout=max(0.001, operation_deadline - time.monotonic()),
-                    )
-                except httpx.TransportError as exc:
-                    if attempt >= MAX_PROVIDER_ATTEMPTS:
-                        raise
-                    delay = _retry_delay_seconds(attempt - 1)
-                    self._append_retry_notice({
-                        "provider": "CohereRerank",
-                        "model": active_model,
-                        "operation": "rerank",
-                        "error_code": type(exc).__name__,
-                        "attempt": attempt,
-                        "max_attempts": MAX_PROVIDER_ATTEMPTS,
-                        "delay_seconds": round(delay, 3),
-                        "configured_timeout_seconds": round(
-                            float(self._timeout), 3
-                        ),
-                    })
-                    log.warning(
-                        "Rerank transport error (model=%s, attempt=%d/%d). "
-                        "Retrying in %.1fs (error_type=%s).",
-                        active_model,
-                        attempt,
-                        MAX_PROVIDER_ATTEMPTS,
-                        delay,
-                        type(exc).__name__,
-                    )
-                    _sleep_before_retry(delay, operation_deadline)
-                    continue
-                if (
-                    response.status_code in _RETRYABLE_RERANK_STATUSES
-                    and attempt < MAX_PROVIDER_ATTEMPTS
-                ):
-                    retry_after = response.headers.get("retry-after", "")
-                    retry_after_seconds = (
-                        float(retry_after)
-                        if retry_after.replace(".", "", 1).isdigit()
-                        else None
-                    )
-                    delay = _retry_delay_seconds(
-                        attempt - 1,
-                        retry_after_seconds,
-                    )
-                    self._append_retry_notice({
-                        "provider": "CohereRerank",
-                        "model": active_model,
-                        "operation": "rerank",
-                        "error_code": f"HTTP {response.status_code}",
-                        "status_code": response.status_code,
-                        "attempt": attempt,
-                        "max_attempts": MAX_PROVIDER_ATTEMPTS,
-                        "delay_seconds": round(delay, 3),
-                        "configured_timeout_seconds": round(
-                            float(self._timeout), 3
-                        ),
-                    })
-                    log.warning(
-                        "Rerank transient response (model=%s, status=%d, "
-                        "attempt=%d/%d). Retrying in %.1fs.",
-                        active_model,
-                        response.status_code,
-                        attempt,
-                        MAX_PROVIDER_ATTEMPTS,
-                        delay,
-                    )
-                    _sleep_before_retry(delay, operation_deadline)
-                    continue
-                response.raise_for_status()
-                payload = response.json()
-                break
+            payload = await call_with_retries(
+                send,
+                provider_label="CohereRerank",
+                model=active_model,
+                operation="rerank",
+                deadline=deadline,
+                outer_deadline=None,
+                timeout_label="Rerank call",
+                configured_timeout_seconds=float(self._timeout),
+                kind="rerank",
+                estimated_input_tokens=estimate_request_tokens(request_body),
+            )
         except AgentCancelled:
             # Run cancellation (a probe bound via provider_cancel_scope)
             # must unwind as-is, never be misclassified as a broken
@@ -282,7 +255,6 @@ class CohereRerank(_RetryNoticeMixin, RerankerProvider):
             )
             for item in results
         ]
-
 
 class LLMReranker(RerankerProvider):
     """Listwise reranking through the deployment's own LLM.
@@ -330,35 +302,6 @@ class LLMReranker(RerankerProvider):
     def default_model(self) -> str:
         return self._default_model
 
-    @contextmanager
-    def observe_retries(
-        self, callback: ProviderRetryCallback
-    ) -> Iterator[object]:
-        """Forward retry observation to the wrapped LLM when available.
-
-        The listwise reranker performs no retries itself — the single
-        completion call retries inside the injected LLM provider, so this
-        adapter only exposes that provider's seam (mirrors
-        ``ConfiguredLLMProvider``). Both reranker types thereby offer the
-        same observation surface to the retrieval pipeline.
-        """
-        observer = getattr(self._llm, "observe_retries", None)
-        if callable(observer):
-            with observer(callback):
-                yield self
-        else:
-            yield self
-
-    def consume_retry_notices(self) -> list[dict[str, Any]]:
-        """Forward retry diagnostics from the wrapped LLM when available."""
-        consumer = getattr(self._llm, "consume_retry_notices", None)
-        if not callable(consumer):
-            return []
-        notices = consumer()
-        if not isinstance(notices, list):
-            return []
-        return [dict(item) for item in notices if isinstance(item, dict)]
-
     def rerank(
         self,
         query: str,
@@ -391,6 +334,10 @@ class LLMReranker(RerankerProvider):
                 response = self._llm.complete_with_metadata(
                     prompt, model=active_model, timeout=self._timeout
                 )
+        except AgentCancelled:
+            # A cancelled run ends the call it waits for; that is the run's
+            # end, never a broken rerank (as on the Cohere path).
+            raise
         except Exception as exc:  # noqa: BLE001 — normalized below, visibly
             raise RerankerError(
                 f"LLM rerank call failed: {sanitize_error(exc)}"

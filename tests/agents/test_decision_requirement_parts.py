@@ -7,6 +7,14 @@ import pytest
 from inqtrix.agents.control_ports import ApprovalRecord, public_decision_payload
 
 
+class _RequestBody:
+    def __init__(self, body: dict) -> None:
+        self._body = body
+
+    async def aexecution_request_body(self, run_id: str) -> dict:
+        return self._body
+
+
 def _decision(payload: dict) -> ApprovalRecord:
     return ApprovalRecord(
         approval_id="apr_1",
@@ -83,8 +91,8 @@ async def test_a_later_decision_is_no_part_of_the_rules_in_force():
 
     service = AgentControlService(
         store=SimpleNamespace(list_approvals=list_approvals),
-        run_store=SimpleNamespace(
-            execution_request_body=lambda run_id: {
+        run_store=_RequestBody(
+            {
                 "report_requirement": compose_requirement_blocks([block_a]),
                 "report_rules": [submitted],
             }

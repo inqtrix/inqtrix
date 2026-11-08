@@ -14,7 +14,7 @@ from inqtrix.runs.deletion_operations import (
     DeletionStage,
     DeletionTargetKind,
 )
-from inqtrix.source_authority import SourceLifecycleConflict, SourceScope
+from inqtrix.storage.source_authority import SourceLifecycleConflict, SourceScope
 
 
 def _wait_for(

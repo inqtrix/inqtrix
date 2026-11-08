@@ -29,7 +29,7 @@ from inqtrix.project.editor_ports import (
     EditorComment,
     EditorSuggestionDraft,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.editor_orm import (
     editor_comments,
@@ -116,10 +116,7 @@ async def store():
         # fixture found it.  A setup-only wipe leaks the final test's document
         # into the next module, where its RESTRICT owner FK correctly prevents
         # identity-fixture cleanup and makes the suite order-dependent.
-        try:
-            await reset(seed_users=False)
-        finally:
-            await editor_store.aclose()
+        await reset(seed_users=False)
 
 
 async def _save_doc(
@@ -256,7 +253,8 @@ async def test_document_facts_match_the_document_without_reading_any_body(
     selects a Markdown body column."""
     await _save_doc(store, "ed_live", owner=USER_ID, body="HEAVY BODY")
     await _save_doc(store, "ed_deleted", owner=USER_ID, body="GONE")
-    async with store._engine.begin() as connection:
+    engine = store._session_factory.kw["bind"]
+    async with engine.begin() as connection:
         await connection.execute(
             editor_documents.update()
             .where(editor_documents.c.id == "ed_deleted")
@@ -279,13 +277,13 @@ async def test_document_facts_match_the_document_without_reading_any_body(
     def record(conn, cursor, statement, parameters, context, executemany):
         statements.append(statement)
 
-    event.listen(store._engine.sync_engine, "before_cursor_execute", record)
+    event.listen(engine.sync_engine, "before_cursor_execute", record)
     try:
         facts = await store.get_document_facts(
             ["ed_live", "ed_deleted", "ed_foreign", "ed_missing"]
         )
     finally:
-        event.remove(store._engine.sync_engine, "before_cursor_execute", record)
+        event.remove(engine.sync_engine, "before_cursor_execute", record)
 
     full = await store.get_document("ed_live")
     assert set(facts) == {"ed_live"}

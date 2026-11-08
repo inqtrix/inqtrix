@@ -14,7 +14,6 @@ every such write is idempotent, keyed on ``(run_id, kind, round)``.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -23,6 +22,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, TypedDict
 
+from inqtrix import aio
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.agents import (
     critic_phase,
@@ -101,7 +101,6 @@ from inqtrix.agents.intake import (
     route_readiness,
     run_intake,
 )
-from inqtrix.agents.limit_contract import LIMIT_REACHED_EVENT
 from inqtrix.agents.phase_models import (
     AssignmentProfile,
     ClarificationOptionModel,
@@ -245,9 +244,29 @@ from inqtrix.model_routing import (
     describe_resolution,
     describe_unresolved_resolution,
 )
-from inqtrix.providers.base import observe_provider_retries
+from inqtrix.providers.attempts import observe_retries
+from inqtrix.providers.base import provider_cancel_scope
 from inqtrix.text import LOG_CUT_MARKER, shorten_visibly
 from inqtrix.urls import sanitize_error
+from inqtrix.harness.contracts.events import (
+    ACTIVITY_EVENT,
+    APPROVAL_REQUESTED_EVENT,
+    ARTIFACT_CREATED_EVENT,
+    ARTIFACT_EDIT_CONFLICT_EVENT,
+    ARTIFACT_UPDATED_EVENT,
+    CLARIFICATION_REQUESTED_EVENT,
+    LIMIT_REACHED_EVENT,
+    PATCH_PROPOSED_EVENT,
+    PHASE_CHANGED_EVENT,
+    PLAN_PROPOSED_EVENT,
+    PLAN_REVISED_EVENT,
+    REQUIREMENT_ATTACHED_EVENT,
+    TASK_FAILED_EVENT,
+    TASK_FINISHED_EVENT,
+    TASK_STARTED_EVENT,
+    TOOL_FINISHED_EVENT,
+    TOOL_STARTED_EVENT,
+)
 
 if TYPE_CHECKING:
     from inqtrix.agents.checkpointing import CheckpointerHandle
@@ -287,28 +306,6 @@ coverage checks keep their configured tiers. The kernel resolves its loop
 and final review separately, so it does not need this scope set.
 """
 
-PHASE_CHANGED_EVENT = "inqtrix.agent.phase.changed"
-PATCH_PROPOSED_EVENT = "inqtrix.agent.patch.proposed"
-PLAN_PROPOSED_EVENT = "inqtrix.agent.plan.proposed"
-PLAN_REVISED_EVENT = "inqtrix.agent.plan.revised"
-APPROVAL_REQUESTED_EVENT = "inqtrix.agent.approval.requested"
-CLARIFICATION_REQUESTED_EVENT = "inqtrix.agent.clarification.requested"
-TASK_STARTED_EVENT = "inqtrix.agent.task.started"
-TASK_FINISHED_EVENT = "inqtrix.agent.task.finished"
-TASK_FAILED_EVENT = "inqtrix.agent.task.failed"
-ARTIFACT_CREATED_EVENT = "inqtrix.agent.artifact.created"
-ARTIFACT_UPDATED_EVENT = "inqtrix.agent.artifact.updated"
-ARTIFACT_EDIT_CONFLICT_EVENT = "inqtrix.agent.artifact.edit_conflict"
-# The durable record of WHICH canvas comments rode a submission —
-# run summaries deliberately never carry the canvas context, so the
-# transcript surfaces it from this replayable event.
-CANVAS_CONTEXT_ATTACHED_EVENT = "inqtrix.agent.canvas_context.attached"
-# The durable record of the result requirement a run starts under: which
-# library rules at which frozen revision, how long the typed half is and
-# whether a review pass checks the result. Emitted once, when the first
-# segment seeds the run (kernel and mission alike).
-REQUIREMENT_ATTACHED_EVENT = "inqtrix.agent.requirement.attached"
-ACTIVITY_EVENT = "inqtrix.agent.activity"
 DELEGATED_CRITIC_RESEARCH_ROUNDS = 1
 """Critic research rounds a DELEGATED mission (kernel child) may open.
 
@@ -506,6 +503,7 @@ class WorkspaceAgentAlgorithm:
 
     id = "workspace_agent"
     display_name = "Workspace-Agent"
+    contract_version = 1
 
     def __init__(
         self,
@@ -558,7 +556,26 @@ class WorkspaceAgentAlgorithm:
         runtime: "RuntimeContext",
         context: "RunContext",
     ) -> "AgentResult":
-        """Execute or RESUME one agent run (segment-aware)."""
+        """Execute or RESUME one agent run (segment-aware).
+
+        The run's cancel probe is bound here, once for every provider call of
+        the run, including the calls of its task threads (they copy this
+        context), so a cancelled run ends the call it waits for.
+        """
+        probe = (
+            context.cancel_token.is_set if context.cancel_token is not None else None
+        )
+        with provider_cancel_scope(probe):
+            return self._run_in_cancel_scope(request, runtime=runtime, context=context)
+
+    def _run_in_cancel_scope(
+        self,
+        request: "RunRequest",
+        *,
+        runtime: "RuntimeContext",
+        context: "RunContext",
+    ) -> "AgentResult":
+        """The agent run behind :meth:`run`, inside the run's cancel scope."""
         from inqtrix.core.results import AgentResult
 
         if context.run_id is None or context.park is None:
@@ -592,7 +609,7 @@ class WorkspaceAgentAlgorithm:
                 run_id,
                 control=self._control,
                 run_store=self._run_service.run_store,
-                run_async=_run_async,
+                run_async=aio.call_from_thread,
             )
             # Whether this run IS a delegation: the run row is the only
             # truthful source (RunRequest carries no tree linkage), read
@@ -673,8 +690,8 @@ class WorkspaceAgentAlgorithm:
         _DEPS.set(deps)
         try:
             try:
-                with observe_provider_retries(
-                    deps.llm,
+                with observe_retries(
+                    "model",
                     lambda notice: deps.emit_model_retry(
                         "agent_model", notice
                     ),
@@ -688,7 +705,7 @@ class WorkspaceAgentAlgorithm:
                     final=cancel_final(exc),
                 )
                 usage_total = dict(getattr(exc, "usage", {}) or start_usage)
-                _run_async(
+                aio.call_from_thread(
                     settle_cancelled_plan_tasks(
                         self._control, run_id, language=_deps_language(deps)
                     )
@@ -847,7 +864,7 @@ class WorkspaceAgentAlgorithm:
             # reads their terminal outcomes from the run store itself.
             return {"kind": "children"}
         if kind == "clarification":
-            record = _run_async(
+            record = aio.call_from_thread(
                 self._control.get_clarification(
                     run_id, payload.get("id", "")
                 )
@@ -859,7 +876,7 @@ class WorkspaceAgentAlgorithm:
                 "option_id": record.option_id,
                 "answers": dict(record.answers),
             }
-        record = _run_async(
+        record = aio.call_from_thread(
             self._control.get_approval(run_id, payload.get("id", ""))
         )
         resume: dict[str, Any] = {
@@ -945,7 +962,7 @@ class _RunDeps:
             algorithm._permissions is not None
             and context.principal is not None
         ):
-            self.visible_to = _run_async(
+            self.visible_to = aio.call_from_thread(
                 algorithm._permissions.resolve_user_context(
                     context.principal
                 )
@@ -958,13 +975,12 @@ class _RunDeps:
             ),
         )
         # Long-term agent memory is opt-in per user (privacy default OFF),
-        # resolved ONCE per segment like visible_to. The read runs on the
-        # account-preferences NullPool store (loop-agnostic), safe from this
-        # sync worker thread; opt_in_enabled degrades to False visibly on any
-        # read error, so a failure never silently enables memory.
+        # resolved ONCE per segment like visible_to. opt_in_enabled degrades to
+        # False visibly on any read error, so a failure never silently enables
+        # memory.
         self.agent_memory_opt_in = False
         if algorithm._memory is not None and context.principal is not None:
-            self.agent_memory_opt_in = _run_async(
+            self.agent_memory_opt_in = aio.call_from_thread(
                 algorithm._memory.opt_in_enabled(context.principal)
             )
         self._collection_scope: list[str] | None = None
@@ -997,7 +1013,7 @@ class _RunDeps:
                 )
             for skill_id in request.skill_ids:
                 try:
-                    record, _access = _run_async(
+                    record, _access = aio.call_from_thread(
                         algorithm._skills.get_visible(
                             skill_id,
                             tenant_id=(
@@ -1176,7 +1192,7 @@ class _RunDeps:
         if self.knowledge is None:
             self._collection_scope = []
             return self._collection_scope
-        collections = _run_async(
+        collections = aio.call_from_thread(
             self.knowledge.list_collections(visible_to=self.visible_to)
         )
         self._collection_scope = [
@@ -1203,7 +1219,7 @@ class _RunDeps:
             raise RuntimeError(
                 "Collection access cannot be checked without the knowledge service."
             )
-        _run_async(
+        aio.call_from_thread(
             self.knowledge.assert_collections_visible(
                 collection_ids, visible_to=self.visible_to
             )
@@ -1339,11 +1355,6 @@ def _workspace_execution_payload(
         limits=limits,
         **knowledge_boundary_payload(deps.request.knowledge_filters),
     )
-
-
-def _run_async(coro: Any) -> Any:
-    """Drive one control-store coroutine from the worker thread."""
-    return asyncio.run(coro)
 
 
 def _emit_narration(
@@ -1596,7 +1607,7 @@ def _load_memory_briefing(
         state["memory_status"] = "disabled"
         return
     try:
-        briefing, memory_status = _run_async(
+        briefing, memory_status = aio.call_from_thread(
             service.recall_briefing(
                 principal=principal,
                 query=state.get("question", ""),
@@ -1857,7 +1868,7 @@ def _node_intake(state: AgentPhaseState) -> AgentPhaseState:
         from inqtrix.project.editor_ports import DocumentNotFound
 
         try:
-            _run_async(
+            aio.call_from_thread(
                 deps.editor_docs.get_document(
                     document_id, visible_to=deps.visible_to
                 )
@@ -1872,7 +1883,7 @@ def _node_intake(state: AgentPhaseState) -> AgentPhaseState:
     # the user's text).
     session_id = state.get("session_id", "")
     if session_id:
-        prior = _run_async(
+        prior = aio.call_from_thread(
             deps.control.get_session_artifact(session_id, "memo")
         )
         if prior is not None:
@@ -1889,7 +1900,7 @@ def _node_intake(state: AgentPhaseState) -> AgentPhaseState:
             session_id,
             run_store=deps.run_service.run_store,
             control=deps.control,
-            run_async=_run_async,
+            run_async=aio.call_from_thread,
             visible_to=deps.visible_to,
             current_run_id=deps.context.run_id or "",
         )
@@ -2188,11 +2199,11 @@ def _node_clarify(state: AgentPhaseState) -> AgentPhaseState:
         )
     _set_phase(state, "clarification")
     try:
-        record = _run_async(
+        record = aio.call_from_thread(
             deps.control.get_clarification(run_id, clarification_id)
         )
     except ClarificationNotFound:
-        record = _run_async(
+        record = aio.call_from_thread(
             deps.control.create_clarification(
                 build_clarification(
                     run_id,
@@ -2507,7 +2518,7 @@ def _node_discovery(state: AgentPhaseState) -> AgentPhaseState:
             }
             deps.emit(ACTIVITY_EVENT, event)
             try:
-                output = _run_async(
+                output = aio.call_from_thread(
                     deps.capabilities.invoke(
                         capability_id, payload, capability_context
                     )
@@ -2653,7 +2664,7 @@ def _node_plan(state: AgentPhaseState) -> AgentPhaseState:
         rejected: list[str] = []
         drop: Callable[[PlanTaskRecord], bool] | None = None
         if replan_round > 0:
-            previous_plan, previous_tasks = _run_async(
+            previous_plan, previous_tasks = aio.call_from_thread(
                 deps.control.get_plan(run_id)
             )
             view = _reading_view(state, previous_tasks, task_ids=before)
@@ -2931,7 +2942,7 @@ def _node_plan(state: AgentPhaseState) -> AgentPhaseState:
         record = replace(
             record, status="proposed" if needs_interrupt else "approved"
         )
-        saved = _run_async(
+        saved = aio.call_from_thread(
             deps.control.save_plan(run_id=run_id, plan=record, tasks=tasks)
         )
         state["plan_id"] = saved.plan_id
@@ -3081,7 +3092,7 @@ def _node_plan_approval(state: AgentPhaseState) -> AgentPhaseState:
     replan_round = state.get("replan_rounds", 0)
     plan_id = str(state.get("plan_id", ""))
     if not plan_id:
-        latest_plan, _tasks = _run_async(deps.control.get_plan(run_id))
+        latest_plan, _tasks = aio.call_from_thread(deps.control.get_plan(run_id))
         plan_id = latest_plan.plan_id
         state["plan_id"] = plan_id
     approval_id = f"apr_{run_id[-12:]}_plan_{replan_round}"
@@ -3148,7 +3159,7 @@ def _node_plan_approval(state: AgentPhaseState) -> AgentPhaseState:
         }
     # approve OR edit: the control store holds the authoritative latest
     # version (an edit appended one) — reload.
-    latest, latest_tasks = _run_async(deps.control.get_plan(run_id))
+    latest, latest_tasks = aio.call_from_thread(deps.control.get_plan(run_id))
     _plan_lineage_web_consent(
         deps,
         state,
@@ -3643,7 +3654,7 @@ def _current_plan_task(
     deps: "_RunDeps", task: PlanTaskRecord
 ) -> PlanTaskRecord:
     """Reload one task from the authoritative latest plan version."""
-    _plan, tasks = _run_async(deps.control.get_plan(task.run_id))
+    _plan, tasks = aio.call_from_thread(deps.control.get_plan(task.run_id))
     return next(
         row
         for row in tasks
@@ -3853,7 +3864,7 @@ def _node_execute(state: AgentPhaseState) -> AgentPhaseState:
     """
     deps = _deps()
     if deps.cancelled():
-        _run_async(
+        aio.call_from_thread(
             settle_cancelled_plan_tasks(
                 deps.control,
                 deps.context.run_id or "",
@@ -3863,7 +3874,7 @@ def _node_execute(state: AgentPhaseState) -> AgentPhaseState:
         return {"cancelled": True}
     _set_phase(state, "execution")
     run_id = deps.context.run_id or ""
-    plan_record, tasks = _run_async(deps.control.get_plan(run_id))
+    plan_record, tasks = aio.call_from_thread(deps.control.get_plan(run_id))
     _emit_legacy_budget_notices(deps, state, tasks)
     research_policy = _research_child_policy(
         deps,
@@ -4010,8 +4021,7 @@ def _node_execute(state: AgentPhaseState) -> AgentPhaseState:
                     )
         local_capacity = max_parallel - len(pending)
         if local_tasks and local_capacity > 0:
-            # Control-store clients may own loop-affine async engines. Persist
-            # task state serially on the graph thread; worker-pool functions
+            # Persist task state serially on the graph thread; worker-pool functions
             # execute provider work only and never touch the store. Mark only
             # the next executable batch running: queued work beyond the shared
             # capacity remains honestly pending if a cancel arrives.
@@ -4340,7 +4350,7 @@ def _node_children_wait(state: AgentPhaseState) -> AgentPhaseState:
     deps = _deps()
     if not state.get("pending_children"):
         if deps.cancelled():
-            _run_async(
+            aio.call_from_thread(
                 settle_cancelled_plan_tasks(
                     deps.control,
                     deps.context.run_id or "",
@@ -4350,7 +4360,7 @@ def _node_children_wait(state: AgentPhaseState) -> AgentPhaseState:
             return {"cancelled": True}
         return state
     run_id = deps.context.run_id or ""
-    plan_record, tasks = _run_async(deps.control.get_plan(run_id))
+    plan_record, tasks = aio.call_from_thread(deps.control.get_plan(run_id))
     _emit_legacy_budget_notices(deps, state, tasks)
     research_policy = _research_child_policy(
         deps,
@@ -4381,7 +4391,7 @@ def _node_children_wait(state: AgentPhaseState) -> AgentPhaseState:
         # A child may have committed its terminal run immediately before the
         # parent cancel arrived. Fold first so the authoritative completed
         # task cannot be downgraded to failed by cancellation settlement.
-        _run_async(
+        aio.call_from_thread(
             settle_cancelled_plan_tasks(
                 deps.control, run_id, language=str(state.get("language") or "")
             )
@@ -4417,7 +4427,7 @@ def _node_evidence(state: AgentPhaseState) -> AgentPhaseState:
     if references or web_search_ledger.get("searches"):
         # The run's ledger as an artifact: what a review role re-reads, and
         # the provenance of the deliverable. Knowledge-only runs have one too.
-        _run_async(
+        aio.call_from_thread(
             deps.control.upsert_artifact(
                 run_id=deps.context.run_id or "",
                 kind="evidence_bundle",
@@ -4522,7 +4532,7 @@ def _node_replan_gate(state: AgentPhaseState) -> AgentPhaseState:
     run_id = deps.context.run_id or ""
     current: tuple[PlanRecord, list[PlanTaskRecord]] | None = None
     if discovery is not None:
-        current = _run_async(deps.control.get_plan(run_id))
+        current = aio.call_from_thread(deps.control.get_plan(run_id))
         _plan, tasks = current
         covered_gaps = _covered_gap_ids(tasks, outcomes)
         blocking_uncovered = any(
@@ -4553,7 +4563,7 @@ def _node_replan_gate(state: AgentPhaseState) -> AgentPhaseState:
         # Decided before the round is counted: a replan that cannot reach
         # anything unread consumes no round, so no later text claims
         # research that never ran.
-        plan, tasks = current or _run_async(deps.control.get_plan(run_id))
+        plan, tasks = current or aio.call_from_thread(deps.control.get_plan(run_id))
         prospect = _research_prospect(
             deps, state, plan=plan, tasks=tasks, route="gate"
         )
@@ -4596,7 +4606,7 @@ def _restore_completed_synthesis(
         else session_memo_artifact_id(state.get("session_id"), run_id)
     )
     try:
-        artifact, _revisions = _run_async(
+        artifact, _revisions = aio.call_from_thread(
             deps.control.get_artifact(
                 run_id=run_id,
                 artifact_id=artifact_id,
@@ -4626,7 +4636,7 @@ def _node_synthesize(state: AgentPhaseState) -> AgentPhaseState:
     parked = _synthesis_parked(state)
     state["synthesis_pending"] = False
     run_id = deps.context.run_id or ""
-    _plan, tasks = _run_async(deps.control.get_plan(run_id))
+    _plan, tasks = aio.call_from_thread(deps.control.get_plan(run_id))
     task = next((row for row in tasks if row.tool_kind == "synthesis"), None)
     if task is None:
         state["failure"] = "synthesis_task_missing"
@@ -4944,7 +4954,7 @@ def _perform_synthesis(state: AgentPhaseState, tasks: list[Any]) -> AgentPhaseSt
     # outline, every section in either transport and the estimate that picks
     # a section's transport all refine the assignment with the same record.
     clarifications = run_clarifications(
-        _run_async(deps.control.list_clarifications(deps.context.run_id or ""))
+        aio.call_from_thread(deps.control.list_clarifications(deps.context.run_id or ""))
     )
     # What a section may reach for beyond its own preselection, as one
     # line per reference. Built ONCE and byte-identical for every section,
@@ -5345,7 +5355,7 @@ def _synthesize_chat_answer(
     tier even when retrieval yielded no references; all-internal work uses
     the mid tier.
     """
-    _plan, tasks = _run_async(
+    _plan, tasks = aio.call_from_thread(
         deps.control.get_plan(deps.context.run_id or "")
     )
     node = answer_node_for(tasks)
@@ -5607,7 +5617,7 @@ def _review_subject(
             # The run's clarifications as the store holds them, not as the
             # history phrased them.
             clarifications=run_clarifications(
-                _run_async(deps.control.list_clarifications(run_id))
+                aio.call_from_thread(deps.control.list_clarifications(run_id))
             ),
             user_text=_user_written_text(state),
             evidence_run_id=run_id,
@@ -5768,12 +5778,7 @@ def _section_by_role(
     material reaches the writer, never what the section may cite.
     """
     from inqtrix.agents.kernel.deps import KernelDeps
-    from inqtrix.agents.kernel.tools import (
-        TOOL_FINISHED_EVENT,
-        TOOL_STARTED_EVENT,
-        inherited_stufe,
-        submit_or_find_child,
-    )
+    from inqtrix.agents.kernel.tools import inherited_stufe, submit_or_find_child
     from inqtrix.agents.kernel.work_profiles import (
         SECTION_WRITER,
         resolve_work_profile,
@@ -6114,7 +6119,7 @@ def _node_critic(state: AgentPhaseState) -> AgentPhaseState:
         _set_phase(state, "critic")
     state["review_pending"] = False
     run_id = deps.context.run_id or ""
-    plan, tasks = _run_async(deps.control.get_plan(run_id))
+    plan, tasks = aio.call_from_thread(deps.control.get_plan(run_id))
     subject, quote_checks = _review_subject(deps, state, tasks, plan)
     host = _review_host(deps, state, tasks)
     (output_id,) = subject.outputs
@@ -6547,7 +6552,7 @@ def _node_patch(state: AgentPhaseState) -> AgentPhaseState:
     )
 
     try:
-        document = _run_async(
+        document = aio.call_from_thread(
             deps.editor_docs.get_document_for_ai(
                 document_id, visible_to=deps.visible_to
             )
@@ -6596,7 +6601,7 @@ def _node_patch(state: AgentPhaseState) -> AgentPhaseState:
         state["patch_decision"] = "no_changes"
         return state
     principal = deps.context.principal
-    patch = _run_async(
+    patch = aio.call_from_thread(
         deps.editor_patches.propose(
             document_id=document_id,
             run_id=run_id,
@@ -6615,7 +6620,7 @@ def _node_patch(state: AgentPhaseState) -> AgentPhaseState:
     # The artifact row references the patch id — the edits live
     # exactly once, in the editor_patches row.
     artifact_id = f"art_{run_id[-12:]}_patch"
-    _run_async(
+    aio.call_from_thread(
         deps.control.upsert_artifact(
             run_id=run_id,
             kind="editor_patch",
@@ -6676,7 +6681,7 @@ def _node_patch_approval(state: AgentPhaseState) -> AgentPhaseState:
         from inqtrix.project.editor_patch_ports import PatchAlreadyDecided
 
         try:
-            _run_async(
+            aio.call_from_thread(
                 deps.editor_patches.reject(
                     state.get("patch_id", ""),
                     note="",
@@ -6701,7 +6706,7 @@ def _node_finalize(state: AgentPhaseState) -> AgentPhaseState:
         # record says so instead of reading "not run".
         state["last_review"] = {"status": "waived", "round": 0}
     if state.get("cancelled"):
-        _run_async(
+        aio.call_from_thread(
             settle_cancelled_plan_tasks(
                 deps.control,
                 deps.context.run_id or "",
@@ -6732,7 +6737,7 @@ def _node_finalize(state: AgentPhaseState) -> AgentPhaseState:
     critic = state.get("critic")
     if critic is not None:
         run_id = deps.context.run_id or ""
-        _run_async(
+        aio.call_from_thread(
             deps.control.upsert_artifact(
                 run_id=run_id,
                 kind="critic_report",
@@ -6823,7 +6828,7 @@ def _flush_memo(
         cited_refs = synthesis.cited_references(
             content, state.get("references", [])
         )
-        return _run_async(
+        return aio.call_from_thread(
             deps.control.upsert_artifact(
                 run_id=run_id,
                 kind="memo",
@@ -6856,12 +6861,12 @@ def _flush_memo(
             # can never match, so a by-id read is the only witness).
             current: ArtifactRecord | None = None
             if session_id:
-                current = _run_async(
+                current = aio.call_from_thread(
                     deps.control.get_session_artifact(session_id, "memo")
                 )
             if current is None:
                 try:
-                    current, _ = _run_async(
+                    current, _ = aio.call_from_thread(
                         deps.control.get_artifact(run_id, resolved_id)
                     )
                 except ArtifactNotFound:
@@ -6971,7 +6976,7 @@ def _stage_memory_candidates(
     reflection = outcome.value
     if not isinstance(reflection, MemoryReflection):
         return
-    staged = _run_async(
+    staged = aio.call_from_thread(
         service.stage_candidates(
             principal=principal,
             candidates=[
@@ -7104,7 +7109,7 @@ def _transition_task(
     result_payload: dict[str, Any] | None = None,
 ) -> PlanTaskRecord:
     """Persist one authoritative task-state transition before UI events."""
-    return _run_async(
+    return aio.call_from_thread(
         deps.control.transition_plan_task(
             run_id=task.run_id,
             plan_id=task.plan_id,
@@ -7362,7 +7367,7 @@ def _run_web_instant(deps: "_RunDeps", task: PlanTaskRecord) -> TaskOutcome:
     }
     deps.emit(ACTIVITY_EVENT, activity)
     try:
-        output = _run_async(
+        output = aio.call_from_thread(
             deps.capabilities.invoke(
                 "web.search.instant",
                 payload,
@@ -7874,7 +7879,7 @@ def _search_documents(
         }
         deps.emit(ACTIVITY_EVENT, activity)
         try:
-            output = _run_async(
+            output = aio.call_from_thread(
                 deps.capabilities.invoke(
                     "knowledge.search",
                     {
@@ -7959,7 +7964,7 @@ def _select_documents(
     max_windows = int(deps.platform.document_analysis_max_windows)
 
     def invoke(capability_id: str, payload: dict[str, Any]) -> Any:
-        return _run_async(deps.capabilities.invoke(capability_id, payload, context))
+        return aio.call_from_thread(deps.capabilities.invoke(capability_id, payload, context))
 
     candidates: list[Candidate] = []
     for document_id, title in ranked:
@@ -8039,7 +8044,7 @@ def _execution_reading_view(
         return None
     if not readings_of(state.get("outcomes"), before):
         return None
-    _plan, tasks = _run_async(deps.control.get_plan(deps.context.run_id or ""))
+    _plan, tasks = aio.call_from_thread(deps.control.get_plan(deps.context.run_id or ""))
     return _reading_view(state, tasks, task_ids=before)
 
 
@@ -8279,7 +8284,7 @@ def _run_file_analysis(
     model, effort = deps.resolved("agent_file_analysis")
 
     def invoke(capability_id: str, payload: dict[str, Any]) -> Any:
-        return _run_async(deps.capabilities.invoke(capability_id, payload, context))
+        return aio.call_from_thread(deps.capabilities.invoke(capability_id, payload, context))
 
     def emit(payload: dict[str, Any]) -> None:
         # Row identity per task: two tasks may read the same document.
@@ -8465,7 +8470,7 @@ def _collection_catalog(
     admitted = set(deps.collection_scope())
     if not admitted:
         return []
-    collections = _run_async(
+    collections = aio.call_from_thread(
         deps.knowledge.list_collections(visible_to=deps.visible_to)
     )
     return [
@@ -8492,9 +8497,9 @@ def _ensure_approval(
     from inqtrix.agents.control_ports import ApprovalNotFound
 
     try:
-        return _run_async(deps.control.get_approval(run_id, approval_id))
+        return aio.call_from_thread(deps.control.get_approval(run_id, approval_id))
     except ApprovalNotFound:
-        record = _run_async(
+        record = aio.call_from_thread(
             deps.control.create_approval(
                 ApprovalRecord(
                     approval_id=approval_id,
@@ -8606,14 +8611,14 @@ def _plan_lineage_web_facts(
     if state.get("web_consent", False):
         return True, None
 
-    versions = _run_async(deps.control.list_plan_versions(run_id))
+    versions = aio.call_from_thread(deps.control.list_plan_versions(run_id))
     newest_version = max((plan.version for plan in versions), default=0)
     if int(state.get("web_consent_checked_version", 0) or 0) >= newest_version:
         return False, None
     for plan in versions:
         if plan.created_by != "user":
             continue
-        _stored, tasks = _run_async(
+        _stored, tasks = aio.call_from_thread(
             deps.control.get_plan(run_id, version=plan.version)
         )
         if _user_selected_web(plan, tasks):
@@ -8686,8 +8691,8 @@ def _web_task_in_lineage(deps: "_RunDeps") -> bool:
     and names the failed read.
     """
     run_id = deps.context.run_id or ""
-    for plan in _run_async(deps.control.list_plan_versions(run_id)):
-        _stored, tasks = _run_async(
+    for plan in aio.call_from_thread(deps.control.list_plan_versions(run_id)):
+        _stored, tasks = aio.call_from_thread(
             deps.control.get_plan(run_id, version=plan.version)
         )
         if any(task.tool_kind in WEB_TASK_KINDS for task in tasks):

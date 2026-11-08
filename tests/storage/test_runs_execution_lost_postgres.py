@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import threading
+import asyncio
 import time
 import uuid
 
@@ -36,11 +37,20 @@ pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 
+# The contracts a worker carries; every run these tests claim is bound to 1.
+WORKER_CONTRACTS = {
+    "research": 1,
+    "direct_llm": 1,
+    "knowledge": 1,
+    "workspace_agent": 1,
+    "agent_kernel": 1,
+}
+
 
 class _SilentQueue:
     """A dispatch channel nobody consumes (queue-mode store shape)."""
 
-    def enqueue(self, *, run_id: str, tenant_id: str) -> None:
+    async def enqueue(self, *, run_id: str, tenant_id: str) -> None:
         del run_id, tenant_id
 
     def ack(self, message_id: str) -> None:
@@ -96,6 +106,12 @@ def zero_grace(monkeypatch):
     monkeypatch.setattr(durable_store, "_EXECUTION_LOST_GRACE_SECONDS", 0.0)
 
 
+async def _started_store(**kwargs) -> PostgresRunStore:
+    store = _build_store(**kwargs)
+    await store.astart()
+    return store
+
+
 def _build_store(*, queue=None) -> PostgresRunStore:
     return PostgresRunStore(
         engine=build_engine(TEST_DATABASE_URL),
@@ -108,15 +124,17 @@ def _build_store(*, queue=None) -> PostgresRunStore:
     )
 
 
-@pytest.fixture()
-def store():
-    store = _build_store()
+@pytest_asyncio.fixture()
+async def store():
+    store = await _started_store()
     yield store
-    store.close()
+    await store.aclose()
 
 
-def _submit(store, work, question="Frage zur Verlust-Erkennung?"):
-    return store.submit(
+async def _submit(store, work, question="Frage zur Verlust-Erkennung?"):
+    return await store.asubmit(
+        mode="research",
+        workflow_contract=1,
         question=question,
         stack_name="default",
         work=work,
@@ -128,23 +146,23 @@ def _reset_fence_throttle(store) -> None:
     store._last_execution_lost_check = None
 
 
-def wait_for_status(store, run_id, statuses, timeout=10.0):
+async def wait_for_status(store, run_id, statuses, timeout=10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        summary = store.get(run_id)
+        summary = await store.aget(run_id)
         if summary["status"] in statuses:
             return summary
         _reset_fence_throttle(store)
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
     pytest.fail(f"run {run_id} never reached {statuses}")
 
 
-def _wait_until(predicate, timeout=10.0, message="condition"):
+async def _wait_until(predicate, timeout=10.0, message="condition"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
     pytest.fail(f"timed out waiting for {message}")
 
 
@@ -185,6 +203,8 @@ async def _seed_run(
         insert(runs).values(
             run_id=run_id,
             tenant_id="default",
+            mode="research",
+            workflow_contract=1,
             status=status,
             question="verwaiste Zeile",
             stack_name="default",
@@ -244,9 +264,9 @@ async def test_terminal_write_outage_is_retried_until_it_lands(
     def _work(handle):
         raise RuntimeError("kaputt")
 
-    summary = _submit(store, _work)
+    summary = await _submit(store, _work)
     run_id = summary["run_id"]
-    final = wait_for_status(store, run_id, {"failed"})
+    final = await wait_for_status(store, run_id, {"failed"})
     assert final["error"]["type"] == "server_error"
     assert state["raised"] == 2
     assert await _failed_event_count(run_id) == 1
@@ -286,22 +306,23 @@ async def test_exhausted_terminal_retry_converges_via_fence(
     def _work(handle):
         raise RuntimeError("kaputt")
 
-    summary = _submit(store, _work)
+    summary = await _submit(store, _work)
     run_id = summary["run_id"]
     # The worker thread gives up and unwinds; the row stays running with
     # no registry entry — the fence's candidate shape.
-    _wait_until(
+    await _wait_until(
         lambda: run_id not in store._local,
         message="worker unwind after exhausted retries",
     )
     broken["on"] = False
     _reset_fence_throttle(store)
-    final = wait_for_status(store, run_id, {"failed"})
+    final = await wait_for_status(store, run_id, {"failed"})
     assert final["error"]["type"] == "execution_lost"
     assert await _failed_event_count(run_id) == 1
 
 
-def test_owned_run_is_never_fenced(store, zero_grace):
+@pytest.mark.asyncio
+async def test_owned_run_is_never_fenced(store, zero_grace):
     release = threading.Event()
 
     def _work(handle):
@@ -309,16 +330,16 @@ def test_owned_run_is_never_fenced(store, zero_grace):
         handle.complete({"answer": "fertig"}, snapshot={"done": True})
 
     try:
-        summary = _submit(store, _work)
+        summary = await _submit(store, _work)
         run_id = summary["run_id"]
-        wait_for_status(store, run_id, {"running"})
+        await wait_for_status(store, run_id, {"running"})
         _reset_fence_throttle(store)
-        assert store.get(run_id)["status"] == "running"
+        assert (await store.aget(run_id))["status"] == "running"
         _reset_fence_throttle(store)
-        assert store.get(run_id)["status"] == "running"
+        assert (await store.aget(run_id))["status"] == "running"
     finally:
         release.set()
-    wait_for_status(store, run_id, {"completed"})
+    await wait_for_status(store, run_id, {"completed"})
 
 
 @pytest.mark.asyncio
@@ -329,6 +350,8 @@ async def test_waiting_rows_are_not_fence_candidates(store, zero_grace):
         insert(runs).values(
             run_id=run_id,
             tenant_id="default",
+            mode="research",
+            workflow_contract=1,
             status="waiting_for_approval",
             question="wartet auf Freigabe",
             stack_name="default",
@@ -337,7 +360,7 @@ async def test_waiting_rows_are_not_fence_candidates(store, zero_grace):
         )
     )
     _reset_fence_throttle(store)
-    assert store.get(run_id)["status"] == "waiting_for_approval"
+    assert (await store.aget(run_id))["status"] == "waiting_for_approval"
 
 
 @pytest.mark.asyncio
@@ -362,7 +385,7 @@ async def test_claim_exception_drops_local_ownership_and_converges(
     def _work(handle):
         handle.complete({"answer": "nie erreicht"})
 
-    summary = _submit(store, _work)
+    summary = await _submit(store, _work)
     run_id = summary["run_id"]
     assert run_id not in store._local
     assert any(
@@ -371,7 +394,7 @@ async def test_claim_exception_drops_local_ownership_and_converges(
         if record.levelname == "ERROR"
     )
     _reset_fence_throttle(store)
-    final = wait_for_status(store, run_id, {"failed"})
+    final = await wait_for_status(store, run_id, {"failed"})
     assert final["error"]["type"] == "execution_lost"
 
 
@@ -382,7 +405,7 @@ async def test_aged_queued_row_without_owner_converges(store, zero_grace):
         run_id, status="queued", age_seconds=300, queued_since_age=300
     )
     _reset_fence_throttle(store)
-    final = wait_for_status(store, run_id, {"failed"})
+    final = await wait_for_status(store, run_id, {"failed"})
     assert final["error"]["type"] == "execution_lost"
     assert await _failed_event_count(run_id) == 1
 
@@ -404,6 +427,8 @@ async def test_lost_agent_child_wakes_parent_which_converges(
         insert(runs).values(
             run_id=parent_id,
             tenant_id="default",
+            mode="research",
+            workflow_contract=1,
             status="waiting_for_children",
             kind="agent",
             question="Eltern-Lauf",
@@ -416,6 +441,8 @@ async def test_lost_agent_child_wakes_parent_which_converges(
         insert(runs).values(
             run_id=child_id,
             tenant_id="default",
+            mode="research",
+            workflow_contract=1,
             status="running",
             kind="agent_child",
             parent_run_id=parent_id,
@@ -427,9 +454,9 @@ async def test_lost_agent_child_wakes_parent_which_converges(
         )
     )
     _reset_fence_throttle(store)
-    final_child = wait_for_status(store, child_id, {"failed"})
+    final_child = await wait_for_status(store, child_id, {"failed"})
     assert final_child["error"]["type"] == "execution_lost"
-    final_parent = wait_for_status(store, parent_id, {"failed"})
+    final_parent = await wait_for_status(store, parent_id, {"failed"})
     assert final_parent["error"]["type"] == "execution_lost"
     assert any(
         "no execution remains" in record.message
@@ -438,7 +465,7 @@ async def test_lost_agent_child_wakes_parent_which_converges(
 
 
 @pytest.mark.asyncio
-async def test_restart_sweep_runs_eagerly_at_construction():
+async def test_restart_sweep_runs_when_the_store_starts():
     queued_id = f"run_boot_q_{uuid.uuid4().hex}"
     running_id = f"run_boot_r_{uuid.uuid4().hex}"
     await _seed_run(
@@ -447,7 +474,7 @@ async def test_restart_sweep_runs_eagerly_at_construction():
     await _seed_run(
         running_id, status="running", age_seconds=10, active_started_age=5
     )
-    store = _build_store()
+    store = await _started_store()
     try:
         assert store._sweep_orphans is False
         rows = await _db_fetch(
@@ -458,7 +485,7 @@ async def test_restart_sweep_runs_eagerly_at_construction():
         assert {row.status for row in rows} == {"failed"}
         assert {row.error["type"] for row in rows} == {"server_restarted"}
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -467,13 +494,13 @@ async def test_queue_mode_never_fences(zero_grace):
     await _seed_run(
         run_id, status="running", age_seconds=600, active_started_age=600
     )
-    store = _build_store(queue=_SilentQueue())
+    store = await _started_store(queue=_SilentQueue())
     try:
         assert store._recovers_orphans is False
         _reset_fence_throttle(store)
-        assert store.get(run_id)["status"] == "running"
+        assert (await store.aget(run_id))["status"] == "running"
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -487,9 +514,9 @@ async def test_stuck_row_failsafe_fails_first_and_deletes_later():
         age_seconds=8 * 86_400,
         active_started_age=8 * 86_400,
     )
-    store = _build_store(queue=_SilentQueue())
+    store = await _started_store(queue=_SilentQueue())
     try:
-        final = wait_for_status(store, run_id, {"failed"})
+        final = await wait_for_status(store, run_id, {"failed"})
         assert final["error"]["type"] == "execution_lost"
         assert await _failed_event_count(run_id) == 1
         rows = await _db_fetch(
@@ -501,7 +528,7 @@ async def test_stuck_row_failsafe_fails_first_and_deletes_later():
             .where(runs.c.run_id == run_id)
             .values(finished_at=time.time() - 400)
         )
-        store.list()
+        await store.alist()
         rows = await _db_fetch(
             select(runs.c.run_id).where(runs.c.run_id == run_id)
         )
@@ -509,7 +536,7 @@ async def test_stuck_row_failsafe_fails_first_and_deletes_later():
             "terminal retention must delete the aged failed row"
         )
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -550,10 +577,10 @@ async def test_takeover_claim_with_pending_cancel_terminalizes_instead_of_execut
         claimed_by="dead-worker",
         attempt=1,
     )
-    store = _build_store(queue=_SilentQueue())
+    store = await _started_store(queue=_SilentQueue())
     try:
-        claimed = store.claim_for_execution(
-            run_id, "default", allow_takeover=True
+        claimed = await store.aclaim_for_execution(
+            run_id, "default", allow_takeover=True, workflow_contracts=WORKER_CONTRACTS
         )
         assert claimed is None, (
             "the reclaim must resolve the cancel, not open a doomed attempt"
@@ -564,7 +591,7 @@ async def test_takeover_claim_with_pending_cancel_terminalizes_instead_of_execut
         assert rows[0].status == "cancelled"
         assert await _event_count(run_id, "inqtrix.run.cancelled") == 1
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -579,9 +606,9 @@ async def test_queued_ttl_fails_unconsumed_run_with_typed_error():
     await _seed_run(
         fresh_id, status="queued", age_seconds=90_000, queued_since_age=30
     )
-    store = _build_store(queue=_SilentQueue())
+    store = await _started_store(queue=_SilentQueue())
     try:
-        store.list()
+        await store.alist()
         rows = await _db_fetch(
             select(runs.c.run_id, runs.c.status, runs.c.error).where(
                 runs.c.run_id.in_((stale_id, fresh_id))
@@ -595,7 +622,44 @@ async def test_queued_ttl_fails_unconsumed_run_with_typed_error():
             "a recently queued run (fresh queued_since) must survive"
         )
     finally:
-        store.close()
+        await store.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_run_waits_at_most_two_hours_in_the_queue():
+    """Two hours since it last entered the queue; a resumed run counts anew."""
+    expired_id = f"run_q2h_{uuid.uuid4().hex}"
+    waiting_id = f"run_q1h_{uuid.uuid4().hex}"
+    resumed_id = f"run_qres_{uuid.uuid4().hex}"
+    await _seed_run(expired_id, status="queued", age_seconds=2 * 3600 + 120)
+    await _seed_run(waiting_id, status="queued", age_seconds=2 * 3600 - 120)
+    await _seed_run(
+        resumed_id,
+        status="queued",
+        age_seconds=5 * 3600,
+        queued_since_age=2 * 3600 - 120,
+    )
+    store = await _started_store(queue=_SilentQueue())
+    try:
+        await store.alist()
+        rows = await _db_fetch(
+            select(runs.c.run_id, runs.c.status, runs.c.error).where(
+                runs.c.run_id.in_((expired_id, waiting_id, resumed_id))
+            )
+        )
+        by_id = {row.run_id: row for row in rows}
+        assert by_id[expired_id].status == "failed"
+        assert by_id[expired_id].error == {
+            "message": (
+                "The run waited longer than 7200 seconds for an execution "
+                "worker and was terminated."
+            ),
+            "type": "queued_timeout",
+        }
+        assert by_id[waiting_id].status == "queued"
+        assert by_id[resumed_id].status == "queued"
+    finally:
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -609,15 +673,15 @@ async def test_stale_queued_feed_keys_on_queued_since():
     await _seed_run(
         stale_id, status="queued", age_seconds=900, queued_since_age=900
     )
-    store = _build_store(queue=_SilentQueue())
+    store = await _started_store(queue=_SilentQueue())
     try:
-        stale = dict(store.stale_queued_runs(older_than_seconds=120))
+        stale = dict(await store.astale_queued_runs(older_than_seconds=120))
         assert stale_id in stale
         assert resumed_id not in stale, (
             "an old submit freshly re-queued is NOT a stale dispatch"
         )
     finally:
-        store.close()
+        await store.aclose()
 
 
 def _build_worker_store(worker_id: str) -> PostgresRunStore:
@@ -642,21 +706,21 @@ async def test_dead_letter_fail_cannot_be_overwritten_by_a_superseded_attempt():
     owner = _build_worker_store("worker-partitioned")
     reaper = _build_worker_store("worker-reaper")
     try:
-        first = owner.claim_for_execution(
-            run_id, "default", allow_takeover=False
+        first = await owner.aclaim_for_execution(
+            run_id, "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
         )
         assert first is not None and first.attempt == 1
-        second = reaper.claim_for_execution(
-            run_id, "default", allow_takeover=True
+        second = await reaper.aclaim_for_execution(
+            run_id, "default", allow_takeover=True, workflow_contracts=WORKER_CONTRACTS
         )
         assert second is not None and second.attempt == 2
-        assert reaper.fail(
+        assert await reaper.afail(
             run_id,
             "Maximale Anzahl Ausfuehrungsversuche erreicht.",
             error_type="max_retries_exceeded",
             fence_attempt=second.attempt,
         )
-        assert owner.complete(
+        assert await owner.acomplete(
             run_id, {"answer": "zu spaet"}, fence_attempt=first.attempt
         ) is False, "the superseded attempt's write must be fenced out"
         rows = await _db_fetch(
@@ -667,8 +731,8 @@ async def test_dead_letter_fail_cannot_be_overwritten_by_a_superseded_attempt():
         assert rows[0].status == "failed"
         assert rows[0].error["type"] == "max_retries_exceeded"
     finally:
-        owner.close()
-        reaper.close()
+        await owner.aclose()
+        await reaper.aclose()
 
 
 @pytest.mark.asyncio
@@ -691,8 +755,8 @@ async def test_first_delivery_claim_leaves_a_live_cancelling_owner_alone():
     )
     bystander = _build_worker_store("worker-bystander")
     try:
-        claimed = bystander.claim_for_execution(
-            run_id, "default", allow_takeover=False
+        claimed = await bystander.aclaim_for_execution(
+            run_id, "default", allow_takeover=False, workflow_contracts=WORKER_CONTRACTS
         )
         assert claimed is None
         rows = await _db_fetch(
@@ -705,4 +769,4 @@ async def test_first_delivery_claim_leaves_a_live_cancelling_owner_alone():
         )
         assert rows[0].claimed_by == "live-worker"
     finally:
-        bystander.close()
+        await bystander.aclose()

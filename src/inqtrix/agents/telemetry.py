@@ -7,6 +7,9 @@ from typing import Any
 from inqtrix.i18n import t
 
 
+COMPACTION_PURPOSE = "agent_context_compaction"
+"""Purpose of the kernel's summary call, so it is billed, traced and retried as compaction."""
+
 _MODEL_RETRY_CONTEXT: dict[str, tuple[str, str]] = {
     # (translation key suffix, phase). The label is resolved at emission
     # time against the run's answer language — these lines surface exactly
@@ -26,7 +29,7 @@ _MODEL_RETRY_CONTEXT: dict[str, tuple[str, str]] = {
     "agent_file_analysis": ("file_analysis", "execution"),
     "agent_patch": ("patch", "patch"),
     "agent_kernel": ("kernel", "execution"),
-    "agent_context_projection": ("context_projection", "execution"),
+    COMPACTION_PURPOSE: ("context_compaction", "execution"),
     "agent_deep_review": ("deep_review", "critic"),
     "agent_model": ("model", "execution"),
 }
@@ -98,9 +101,6 @@ def provider_retry_activity(
         ),
         "effective_timeout_seconds": notice.get(
             "effective_timeout_seconds"
-        ),
-        "transport_timeout_seconds": notice.get(
-            "transport_timeout_seconds"
         ),
     }
 

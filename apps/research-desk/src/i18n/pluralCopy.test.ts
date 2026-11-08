@@ -11,13 +11,16 @@ const read = (file: string) => readFileSync(path.join(srcRoot, file), 'utf8')
 
 type Stream = { file: string; locale: CopyLocale; leaves: CopyLeaf[] }
 
-/** The copy the plural guards read: both locales of the dictionary and the
- * two demos, whose German stands in the same transcript as live copy. */
+/** The copy the plural guards read: both locales of the dictionary and of
+ * the editor's own copy, and the two demos, whose German stands in the same
+ * transcript as live copy. */
 function streams(): Stream[] {
   return [
-    ...(['de', 'en'] as const).map((locale) => ({
-      file: 'i18n/translations.ts', locale, leaves: copyLeaves(read('i18n/translations.ts'), 'i18n/translations.ts', locale),
-    })),
+    ...(['i18n/translations.ts', 'features/editor/editorCopy.ts'] as const).flatMap((file) => (
+      (['de', 'en'] as const).map((locale) => ({
+        file, locale, leaves: copyLeaves(read(file), file, locale),
+      }))
+    )),
     ...['features/agent/demo.ts', 'features/knowledge/demo.ts'].map((file) => ({
       file, locale: 'de' as const, leaves: copyLeaves(read(file), file),
     })),

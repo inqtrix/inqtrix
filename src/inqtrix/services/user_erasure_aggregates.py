@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 
+from inqtrix import aio
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.exceptions import RunNotFound
 from inqtrix.runs.deletion_execution import execute_claimed_deletion
@@ -30,10 +31,10 @@ from inqtrix.runs.deletion_operations import (
     DeletionOperationConflict,
     DeletionOperationStatus,
 )
+from inqtrix.runs.records import RunActive
 from inqtrix.services.user_erasure_executor import AggregateRef
-from inqtrix.services.user_erasure_inventory import _tables
+from inqtrix.storage.user_erasure_inventory import _tables
 from inqtrix.storage.db import tenant_session
-from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from inqtrix.runs.deletion_postgres import PostgresDeletionOperationStore
@@ -61,8 +62,14 @@ class _RegisterWithoutDispatch:
     def submit(self, **kwargs: Any) -> dict[str, Any]:
         return self._store.submit(dispatch=False, **kwargs)
 
+    async def asubmit(self, **kwargs: Any) -> dict[str, Any]:
+        return await self._store.asubmit(dispatch=False, **kwargs)
+
     def retry(self, operation_id: str, **kwargs: Any) -> dict[str, Any]:
         return self._store.retry(operation_id, dispatch=False, **kwargs)
+
+    async def aretry(self, operation_id: str, **kwargs: Any) -> dict[str, Any]:
+        return await self._store.aretry(operation_id, dispatch=False, **kwargs)
 
 
 class DeletionMachineAggregates:
@@ -98,7 +105,7 @@ class DeletionMachineAggregates:
         indexes. Last the sources that outlived their asset, section or
         document: every aggregate above settles its own sources itself.
         """
-        return run_coro_sync(self._pending(tenant_id, user_id))
+        return aio.call_from_thread(self._pending(tenant_id, user_id))
 
     async def _pending(
         self, tenant_id: str, user_id: uuid.UUID
@@ -289,7 +296,7 @@ class DeletionMachineAggregates:
             )
         else:
             raise ValueError(f"unknown aggregate kind: {ref.kind}")
-        summary = run_coro_sync(start)
+        summary = aio.call_from_thread(start)
         self._run_to_the_end(
             service,
             summary,
@@ -324,7 +331,7 @@ class DeletionMachineAggregates:
             )
         except DeletionOperationConflict as conflict:
             existing = (
-                self._store.find_for_asset(
+                await self._store.afind_for_asset(
                     str(conflict.args[0]),
                     tenant_id=principal.tenant_id,
                     created_by_user_id=principal.user_id,
@@ -385,10 +392,6 @@ class DeletionMachineAggregates:
         visible_to: UserContext,
         user_id: uuid.UUID,
     ) -> None:
-        # Function-local import: the services layer must not pull in
-        # server modules at import time (layering regression test).
-        from inqtrix.server.runs import RunActive
-
         run_id = ref.target_ids[0]
         try:
             self._run_store.delete(

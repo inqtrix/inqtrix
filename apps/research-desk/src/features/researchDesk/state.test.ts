@@ -29,7 +29,10 @@ import {
 import { DERIVED_AGENT_SESSION_UPDATED_AT } from '@/features/agent/model'
 import type { AutoResumePlan } from '@/features/fileLibrary/indexingTypes'
 import { researchDeskReducer, visibleResearchJobs } from './state'
-import { projectResearchJobs } from '@/features/project/selectors'
+import { projectResearchJobs, researchRunToJob } from '@/features/project/selectors'
+import { runFailureText } from '@/lib/runFailure'
+import { translations } from '@/i18n/translations'
+import { jobFilterOptions, JOB_FILTERS } from './jobFilters'
 
 function makeRunEvent(overrides: Partial<ResearchRunEvent> = {}): ResearchRunEvent {
   return {
@@ -2784,6 +2787,77 @@ describe('vector index reducer actions', () => {
     expect(state.indexingJobs[id].jobId).toBe('build-1')
   })
 
+  it('keeps the server identity of a run as soon as it exists', () => {
+    let state = researchDeskReducer(withAssets('a', 'b'), { fileIds: ['a', 'b'], title: 'Idx', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { indexId: id, jobId: 'build-1', source: 'build', totalDocuments: 2, type: 'startVectorIndexReindex' })
+
+    state = researchDeskReducer(state, { indexId: id, serverCollectionId: 'kc-1', serverCollectionModel: 'm', type: 'adoptVectorIndexIdentity' })
+    state = researchDeskReducer(state, { indexId: id, member: { fileId: 'b', serverDocumentId: 'kd-b' }, type: 'adoptVectorIndexIdentity' })
+
+    expect(state.vectorIndexes[id]).toMatchObject({ serverCollectionId: 'kc-1', serverCollectionModel: 'm', status: 'indexing' })
+    expect(state.vectorIndexes[id].members).toEqual([
+      { fileId: 'a', state: 'pending' },
+      { fileId: 'b', serverDocumentId: 'kd-b', state: 'pending' },
+    ])
+    expect(state.indexingJobs[id].jobId).toBe('build-1')
+  })
+
+  it('takes over what the server finished while no page was open', () => {
+    let state = researchDeskReducer(withAssets('a', 'b'), { fileIds: ['a', 'b'], title: 'Idx', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+
+    state = researchDeskReducer(state, { embeddedFileIds: ['a'], failureMessage: null, indexId: id, type: 'reconcileVectorIndexDocumentJobs' })
+    expect(state.vectorIndexes[id].members.map((member) => member.state)).toEqual(['embedded', 'pending'])
+    expect(state.vectorIndexes[id].status).toBe('stale')
+
+    state = researchDeskReducer(state, { embeddedFileIds: ['b'], failureMessage: null, indexId: id, type: 'reconcileVectorIndexDocumentJobs' })
+    expect(state.vectorIndexes[id].status).toBe('ready')
+  })
+
+  it('adopts the server document of a member the collection already holds', () => {
+    let state = researchDeskReducer(withAssets('a', 'b'), { fileIds: ['a', 'b'], title: 'Idx', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+
+    state = researchDeskReducer(state, {
+      embeddedFileIds: ['a', 'b'],
+      failureMessage: null,
+      indexId: id,
+      serverDocumentIds: { b: 'kd-b' },
+      type: 'reconcileVectorIndexDocumentJobs',
+    })
+
+    expect(state.vectorIndexes[id].members).toEqual([
+      { fileId: 'a', state: 'embedded' },
+      { fileId: 'b', serverDocumentId: 'kd-b', state: 'embedded' },
+    ])
+    expect(state.vectorIndexes[id].status).toBe('ready')
+  })
+
+  it('shows a failure of the server once and does not repeat it', () => {
+    let state = researchDeskReducer(withAssets('a'), { fileIds: ['a'], title: 'Idx', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    const failed = { embeddedFileIds: [], failureMessage: 'Fehlgeschlagen.', indexId: id, type: 'reconcileVectorIndexDocumentJobs' as const }
+
+    state = researchDeskReducer(state, failed)
+    expect(state.vectorIndexes[id]).toMatchObject({ lastError: 'Fehlgeschlagen.', status: 'error' })
+    expect(state.vectorIndexes[id].history).toHaveLength(1)
+
+    const settled = state
+    state = researchDeskReducer(state, failed)
+    expect(state).toBe(settled)
+  })
+
+  it('leaves a run in flight to that run', () => {
+    let state = researchDeskReducer(withAssets('a'), { fileIds: ['a'], title: 'Idx', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { indexId: id, jobId: 'build-1', source: 'build', totalDocuments: 1, type: 'startVectorIndexReindex' })
+
+    const running = state
+    state = researchDeskReducer(state, { embeddedFileIds: ['a'], failureMessage: 'Fehlgeschlagen.', indexId: id, type: 'reconcileVectorIndexDocumentJobs' })
+    expect(state).toBe(running)
+  })
+
   it('only members actually in flight read as running', () => {
     let state = researchDeskReducer(withAssets('a', 'b', 'c'), { fileIds: ['a', 'b', 'c'], title: 'X', type: 'createVectorIndex' })
     const id = state.vectorIndexOrder[0]
@@ -5189,11 +5263,32 @@ describe('unavailable runs and the status buckets', () => {
       ...createEmptyProjectState(),
       researchRunOrder: [run.runId],
       researchRuns: { [run.runId]: run },
-    })
+    }, 'de')
     expect(jobs).toHaveLength(1)
     expect(jobs[0].unavailable).toBe(true)
     expect(visibleResearchJobs(jobs, 'all')).toHaveLength(1)
     expect(visibleResearchJobs(jobs, 'running')).toHaveLength(0)
+  })
+
+  it('is not selected under a filter whose list does not show it', () => {
+    // The selection asks the same rule as the list: a selected card that
+    // the filtered list hides would leave the detail pane on a run the
+    // user cannot see.
+    const locked = {
+      ...fromRunSummary(makeRunSummary({ run_id: 'run-lock', status: 'running' }), 'test-stack'),
+      unavailable: true,
+    }
+    const live = fromRunSummary(makeRunSummary({ run_id: 'run-live', status: 'running' }), 'test-stack')
+    const state = {
+      ...createEmptyProjectState(),
+      researchRunOrder: [locked.runId, live.runId],
+      researchRuns: { [locked.runId]: locked, [live.runId]: live },
+    }
+    const filtered = researchDeskReducer(
+      { ...state, ui: { ...state.ui, selectedJobId: locked.runId } },
+      { filter: 'running', type: 'setActiveFilter' },
+    )
+    expect(filtered.ui.selectedJobId).toBe(live.runId)
   })
 })
 
@@ -5580,5 +5675,50 @@ describe('a finished result that cannot be loaded', () => {
     })
     expect(failed.knowledgeItems['ki-1'].status).toBe('failed')
     expect(failed.knowledgeItems['ki-1'].error).toBe('Zeitüberschreitung')
+  })
+})
+
+describe('a run that fails inside its first round', () => {
+  // The server stores the state the run reached with its failure; the card
+  // shows that state and names the failure by its code instead of the
+  // provider's raw English 429 body.
+  it('shows the phase and round it reached and names the failure by its code', () => {
+    let record = fromRunSummary(
+      makeRunSummary({ started_at: Date.parse('2026-01-01T00:00:01.000Z') / 1000, status: 'running' }),
+      'test-stack',
+    )
+    record = applyRunEvent(record, makeRunEvent({
+      data: {
+        error: { message: "Rate limit reached for model 'web-search-agent': Error code: 429 - {...}", type: 'rate_limited' },
+        snapshot: { active_round: 1, current_node: 'search', max_rounds: 1, total_queries: 6, total_sources: 4 },
+        status: 'failed',
+      },
+      sequence: 3,
+      type: 'inqtrix.run.failed',
+    }))
+
+    expect(record.status).toBe('failed')
+    expect(record.phaseState.activePhase).toBe('search')
+    expect(record.metrics.rounds).toBe('1 / 1')
+    const job = researchRunToJob(record, 'de')
+    expect(job.errorCode).toBe('rate_limited')
+    const shown = runFailureText(job.error ?? '', translations.de, job.errorCode)
+    expect(shown).toContain('ausgelastet')
+    expect(shown).not.toContain('Error code')
+    expect(runFailureText(job.error ?? '', translations.en, job.errorCode)).toContain('busy')
+  })
+
+  it('offers a failed filter whose count is exactly what it shows', () => {
+    const jobs = [
+      { ...researchRunToJob(fromRunSummary(makeRunSummary({ run_id: 'run-a', status: 'failed' }), 'test-stack'), 'de') },
+      { ...researchRunToJob(fromRunSummary(makeRunSummary({ run_id: 'run-b', status: 'completed' }), 'test-stack'), 'de') },
+      { ...researchRunToJob(fromRunSummary(makeRunSummary({ run_id: 'run-c', status: 'cancelled' }), 'test-stack'), 'de'), unavailable: true },
+    ]
+    const options = jobFilterOptions(jobs, translations.de.home.tabs)
+    expect(options.find((option) => option.key === 'failed')).toEqual({ count: 1, key: 'failed', label: 'Fehlgeschlagen' })
+    for (const key of JOB_FILTERS) {
+      const option = options.find((candidate) => candidate.key === key)
+      expect(option?.count).toBe(visibleResearchJobs(jobs, key).length)
+    }
   })
 })

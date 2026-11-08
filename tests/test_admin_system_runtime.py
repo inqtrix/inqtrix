@@ -11,12 +11,13 @@ from fastapi.testclient import TestClient
 
 from inqtrix.auth.api_key import build_local_provider
 from inqtrix.providers.base import ProviderContext
-from inqtrix.server.container import build_container
+from inqtrix.server.container import AppContainer, build_container
 from inqtrix.server.routers.admin import build_admin_router
 from inqtrix.server.routers.admin_system import build_router
 from inqtrix.server.routers.auth import build_auth_router
 from inqtrix.services import system_runtime as system_runtime_module
 from inqtrix.services.system_runtime import (
+    RuntimeContainer,
     runtime_feature_overrides,
     system_runtime_payload,
     system_runtime_payload_checked,
@@ -224,6 +225,31 @@ def test_runtime_payload_checked_reports_unreachable_backends(monkeypatch):
     assert features["document_parser"] is True
 
 
+def test_runtime_payload_reads_the_queue_group_and_closes_its_client(monkeypatch):
+    monkeypatch.setattr(system_runtime_module, "_ping_valkey", lambda url: True)
+    closed: list[bool] = []
+
+    class Queue:
+        def __init__(self, *, url: str) -> None:
+            del url
+
+        async def group_info(self) -> dict[str, int]:
+            return {"consumers": 2, "pending": 1, "depth": 3}
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr("inqtrix.runs.valkey_queue.ValkeyRunQueue", Queue)
+
+    results = asyncio.run(
+        system_runtime_module.runtime_probe_results(_unreachable_runtime_container())
+    )
+
+    assert results.queue_available is True
+    assert (results.queue_consumers, results.queue_depth) == (2, 3)
+    assert closed == [True]
+
+
 def _default_container(tmp_path, **storage):
     """The container a plain deployment builds: knowledge stays off."""
     settings = Settings(
@@ -401,3 +427,7 @@ def test_agents_block_hides_the_pool_without_a_durable_checkpointer():
     assert system_runtime_payload(container)["agents"] == {
         "checkpointer_pool_size": None
     }
+
+
+def test_the_app_container_offers_what_the_runtime_view_reads() -> None:
+    assert set(RuntimeContainer.__annotations__) <= set(AppContainer.__dataclass_fields__)

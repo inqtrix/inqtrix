@@ -65,6 +65,7 @@ services:
       # reaches for when that budget will not fit.
       - INQTRIX_DATABASE_POOL_SIZE
       - INQTRIX_DATABASE_POOL_MAX_OVERFLOW
+      - INQTRIX_DATABASE_POOL_TIMEOUT_SECONDS
     ports:
       # Loopback only: the harness scrapes /metrics directly rather than
       # through the web edge.
@@ -78,5 +79,8 @@ services:
       # port stays dark and a measurement sees only the API side of the queue.
       - INQTRIX_WORKER_METRICS_PORT=9109
       - INQTRIX_WORKER_CONCURRENCY
+      - INQTRIX_DATABASE_POOL_SIZE
+      - INQTRIX_DATABASE_POOL_MAX_OVERFLOW
+      - INQTRIX_DATABASE_POOL_TIMEOUT_SECONDS
     ports:
       - "127.0.0.1:9109:9109"

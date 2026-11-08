@@ -2,8 +2,8 @@
 
 Lockstep counterpart of
 :class:`~inqtrix.project.editor_patch_memory.MemoryEditorPatchStore` —
-same port, same error types, same ordering. HTTP-loop only (NullPool
-engine via :class:`~inqtrix.project.base_session_store.BaseSessionStore`);
+same port, same error types, same ordering. Built on
+:class:`~inqtrix.project.base_session_store.BaseSessionStore`;
 the ``mark_*`` decision writes are single-row CAS updates guarded by
 ``status = 'pending'`` so a concurrent decision loses deterministically
 with :class:`~inqtrix.project.editor_patch_ports.PatchAlreadyDecided`.

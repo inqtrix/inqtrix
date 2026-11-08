@@ -26,6 +26,7 @@ import {
 } from '@/api/inqtrixClient'
 import type {
   EmbedModelId,
+  FileAssetRecord,
   VectorIndexMemberRecord,
   VectorIndexMemberState,
   VectorIndexRecord,
@@ -100,6 +101,54 @@ export function vectorIndexRecordFromServer(index: ServerVectorIndex): VectorInd
 
 // -- record -> server payload ---------------------------------------------- #
 
+/** Whether an index write may name a member yet.
+ *
+ * The server refuses a whole index write that names a file it does not hold
+ * ("At least one file is no longer available; the index was not changed").
+ * A file uploaded INTO an index is such a file until its upload reservation
+ * returns: the reducer shows it as a pending member at once, but the server
+ * learns of it only with the reservation. The write therefore leaves that
+ * member out and names it as soon as the reservation is confirmed. An upload
+ * that failed or was cancelled before its reservation returned leaves the
+ * file unknown to the server just the same, until a retry confirms it. Only
+ * such a positive "this upload never reached the server" leaves a member
+ * out: a file this client does not hold, or holds from an earlier session,
+ * is left to the server to judge, so no write ever drops a member the server
+ * keeps. */
+export type MemberOnServer = (fileId: string) => boolean
+
+const EVERY_MEMBER: MemberOnServer = () => true
+
+export function memberOnServerFor(
+  assets: Readonly<Record<string, FileAssetRecord>>,
+): MemberOnServer {
+  return (fileId) => {
+    const asset = assets[fileId]
+    if (!asset || asset.serverSynced === true) return true
+    return !(
+      asset.uploadPending === true
+      || asset.uploadStatus === 'failed'
+      || asset.uploadStatus === 'cancelled'
+    )
+  }
+}
+
+/** The members no index write may name yet, as one stable key. The autosave
+ * runs again when it changes, so a member reaches the server the moment its
+ * reservation is confirmed instead of waiting for the next unrelated edit. */
+export function unconfirmedMemberKey(
+  indexes: Readonly<Record<string, VectorIndexRecord>>,
+  onServer: MemberOnServer,
+): string {
+  const waiting: string[] = []
+  for (const [indexId, record] of Object.entries(indexes)) {
+    for (const member of record.members) {
+      if (!onServer(member.fileId)) waiting.push(`${indexId}\u0000${member.fileId}`)
+    }
+  }
+  return waiting.sort().join('\u0001')
+}
+
 function serverMemberPayload(member: VectorIndexMemberRecord): ServerVectorIndexMember {
   return {
     file_id: member.fileId,
@@ -123,7 +172,10 @@ function serverHistoryPayload(
   }
 }
 
-export function serverVectorIndexPayload(record: VectorIndexRecord): {
+export function serverVectorIndexPayload(
+  record: VectorIndexRecord,
+  onServer: MemberOnServer = EVERY_MEMBER,
+): {
   created_at: number
   dims: number
   handle: string
@@ -143,11 +195,16 @@ export function serverVectorIndexPayload(record: VectorIndexRecord): {
     handle: record.handle,
     history: (record.history ?? []).map(serverHistoryPayload),
     last_error: record.lastError ?? null,
-    members: record.members.map(serverMemberPayload),
+    members: record.members
+      .filter((member) => onServer(member.fileId))
+      .map(serverMemberPayload),
     model: record.model,
     server_collection_id: record.serverCollectionId ?? null,
     server_collection_model: record.serverCollectionModel ?? null,
-    status: record.status,
+    // A run's status is transient: a reload that finds the run sets it again.
+    status: record.status === 'indexing'
+      ? record.members.some((member) => member.state === 'pending') ? 'stale' : 'ready'
+      : record.status,
     title: record.title,
     updated_at: unixSecondsFromIso(record.updatedAt),
   }
@@ -155,29 +212,69 @@ export function serverVectorIndexPayload(record: VectorIndexRecord): {
 
 // -- autosave fingerprint -------------------------------------------------- #
 
-/** {updatedAt, status}: a record is pushed only on a content change AND while
- * it is NOT mid-reindex, so a transient 'indexing' status is never persisted. */
-export type VectorIndexFingerprint = { status: string; updatedAt: string }
+/** A record is pushed on a content change, but mid-reindex only for its server
+ * identity: a reload has to find the collection and the documents of a run that
+ * nobody watches any more. */
+export type VectorIndexFingerprint = {
+  identity: string
+  /** The members the last write named; a member confirmed later changes it. */
+  members: string
+  status: string
+  updatedAt: string
+}
 
-export function vectorIndexFingerprint(record: VectorIndexRecord): VectorIndexFingerprint {
-  return { status: record.status, updatedAt: record.updatedAt }
+function serverIdentity(record: VectorIndexRecord): string {
+  return JSON.stringify([
+    record.serverCollectionId ?? null,
+    record.members.map((member) => member.serverDocumentId ?? null),
+  ])
+}
+
+export function vectorIndexFingerprint(
+  record: VectorIndexRecord,
+  onServer: MemberOnServer = EVERY_MEMBER,
+): VectorIndexFingerprint {
+  return {
+    identity: serverIdentity(record),
+    members: JSON.stringify(
+      record.members
+        .filter((member) => onServer(member.fileId))
+        .map((member) => member.fileId),
+    ),
+    status: record.status,
+    updatedAt: record.updatedAt,
+  }
 }
 
 export function vectorIndexChanged(
   previous: VectorIndexFingerprint | undefined,
   current: VectorIndexFingerprint,
 ): boolean {
-  // Never push an in-flight reindex (defer until it reaches a terminal status);
-  // otherwise push on any updatedAt change (or a first sight).
-  if (current.status === 'indexing' || current.status === 'deleting' || current.status === 'delete_failed') return false
-  return previous === undefined || previous.updatedAt !== current.updatedAt
+  // Defer an in-flight reindex until it reaches a terminal status, except for a
+  // server identity it just found; otherwise push on any updatedAt change (or a
+  // first sight).
+  if (current.status === 'indexing') {
+    return previous !== undefined && previous.identity !== current.identity
+  }
+  if (current.status === 'deleting' || current.status === 'delete_failed') return false
+  return previous === undefined
+    || previous.updatedAt !== current.updatedAt
+    || previous.members !== current.members
 }
 
-/** Debounce override for the vector-index autosave: membership GROWTH flushes
- * immediately (delay 0), everything else keeps the regular debounce. New
- * members are a structural change whose loss window should be as small as the
- * upload's — a reload right after adding documents must find them on the
- * server. Pure so the trigger is unit-testable. */
+function gainedServerIdentity(before: VectorIndexRecord, record: VectorIndexRecord): boolean {
+  if (record.serverCollectionId && record.serverCollectionId !== before.serverCollectionId) return true
+  const known = new Map(before.members.map((member) => [member.fileId, member.serverDocumentId]))
+  return record.members.some((member) => (
+    member.serverDocumentId && member.serverDocumentId !== known.get(member.fileId)
+  ))
+}
+
+/** Debounce override for the vector-index autosave: membership GROWTH and a new
+ * server identity flush immediately (delay 0), everything else keeps the regular
+ * debounce. Their loss window should be as small as the upload's — a reload right
+ * after adding documents or starting a run must find them on the server. Pure so
+ * the trigger is unit-testable. */
 export function autosaveDelayForVectorIndexes(
   previous: Record<string, VectorIndexRecord>,
   next: Record<string, VectorIndexRecord>,
@@ -188,8 +285,23 @@ export function autosaveDelayForVectorIndexes(
     if (before ? record.members.length > before.members.length : record.members.length > 0) {
       return 0
     }
+    if (before && gainedServerIdentity(before, record)) return 0
   }
   return debounceMs
+}
+
+/** {@link autosaveDelayForVectorIndexes}, plus: a member whose reservation
+ * was just confirmed flushes at once (delay 0), because its loss window is
+ * the upload's own. */
+export function autosaveDelayAfterConfirmation(
+  previous: Record<string, VectorIndexRecord>,
+  next: Record<string, VectorIndexRecord>,
+  previousUnconfirmed: string,
+  nextUnconfirmed: string,
+  debounceMs: number,
+): number {
+  if (previousUnconfirmed !== nextUnconfirmed) return 0
+  return autosaveDelayForVectorIndexes(previous, next, debounceMs)
 }
 
 // -- whole-project push (the explicit import) ------------------------------ #

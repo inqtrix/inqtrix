@@ -504,6 +504,27 @@ def test_signing_keys_with_tls_build_without_that_warning(caplog) -> None:
     assert "does not use https" not in caplog.text
 
 
+def test_the_provider_brings_the_engine_of_its_stores() -> None:
+    from inqtrix.auth.api_key import build_oidc_provider
+    from inqtrix.settings import StorageSettings
+
+    settings = _oidc_settings()
+    settings.storage = StorageSettings(
+        backend="postgres", database_url="postgresql+asyncpg://u:p@127.0.0.1:1/db"
+    )
+
+    provider = build_oidc_provider(settings)
+
+    assert provider.database_engine is not None
+    assert provider.users._session_factory.kw["bind"] is provider.database_engine
+
+
+def test_a_provider_on_memory_brings_no_engine() -> None:
+    from inqtrix.auth.api_key import build_oidc_provider
+
+    assert build_oidc_provider(_oidc_settings()).database_engine is None
+
+
 def test_replayed_state_is_rejected():
     idp = FakeIdp()
     provider, _users = make_provider(idp)

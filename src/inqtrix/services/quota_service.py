@@ -13,8 +13,7 @@ Two checks, two records:
   * ``record`` books the actual cost AFTER the fact. Most surfaces are
     synchronous-in-an-async-route and record inline; a research run
     completes on a worker thread, so its token consumption is booked
-    through :meth:`record_blocking` (a sync bridge — see the NullPool
-    store engine that makes that loop-safe).
+    through :meth:`record_blocking` (a sync bridge to the process loop).
 
 Unscoped principals (anonymous/static) are never metered: every entry
 resolves them to ``None`` and short-circuits, so existing deployments
@@ -24,11 +23,11 @@ oidc.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from typing import TYPE_CHECKING, Sequence
 
+from inqtrix import aio
 from inqtrix.auth.log_redaction import pseudonymous_log_reference
 from inqtrix.quota.models import (
     DEFAULT_USER_ID,
@@ -72,17 +71,7 @@ def _active_period(dimension: QuotaDimension, now: float) -> float:
 
 
 class QuotaService:
-    """Per-user usage admission + accounting over a :class:`QuotaStore`.
-
-    Two lanes, the split every durable repository uses: *store* is
-    loop-agnostic and serves run threads and every recording or stock
-    path (``asyncio.run`` / ``run_coro_sync`` on throwaway loops);
-    *request_store* serves what only routers call on the request loop —
-    admission, the composer meter, the admin overview and its mutations —
-    and on Postgres borrows the pooled request-path engine. Without a
-    *request_store* both lanes are *store* (memory backend, the worker,
-    injected persistence).
-    """
+    """Per-user usage admission + accounting over a :class:`QuotaStore`."""
 
     def __init__(
         self,
@@ -90,10 +79,8 @@ class QuotaService:
         store: "QuotaStore",
         settings: "QuotaSettings",
         clock=None,
-        request_store: "QuotaStore | None" = None,
     ) -> None:
         self._store = store
-        self._request_store = request_store if request_store is not None else store
         self._settings = settings
         # Injectable clock keeps the month-window tests deterministic.
         self._clock = clock
@@ -153,7 +140,7 @@ class QuotaService:
         if subject is None:
             return
         now = self._now()
-        usage, limits = await self._request_store.read_usage_with_limits(
+        usage, limits = await self._store.read_usage_with_limits(
             tenant_id=subject.tenant_id,
             subject_user_ids=[subject.user_id],
             limit_subject_user_ids=[subject.user_id, DEFAULT_USER_ID],
@@ -322,10 +309,8 @@ class QuotaService:
     ) -> None:
         """Synchronous bridge for the run-execution thread.
 
-        A research run finishes off the event loop (a worker thread with
-        no running loop), so ``asyncio.run`` is safe here. The Postgres
-        store's NullPool engine makes the cross-loop write safe; the
-        memory store is loop-indifferent. No-op for an exempt subject.
+        A research run finishes off the event loop, on a thread that waits
+        for the write on the process loop. No-op for an exempt subject.
 
         Recording is a non-fatal side-effect (see :meth:`_record_subject`):
         a store failure is logged, never raised, so a completed run is
@@ -333,7 +318,7 @@ class QuotaService:
         """
         if subject is None or amount == 0:
             return
-        asyncio.run(self._record_subject(subject, dimension, amount))
+        aio.call_from_thread(self._record_subject(subject, dimension, amount))
 
     def record_blocking_once(
         self,
@@ -361,7 +346,7 @@ class QuotaService:
                 adjustment_id=adjustment_id,
             )
 
-        asyncio.run(_record())
+        aio.call_from_thread(_record())
 
     def tombstone_stock_blocking(
         self,
@@ -372,7 +357,7 @@ class QuotaService:
     ) -> StockLifecycleState:
         """Synchronous worker bridge for a durable stock tombstone."""
 
-        return asyncio.run(
+        return aio.call_from_thread(
             self.tombstone_stock_for_subject(
                 subject,
                 dimension,
@@ -388,7 +373,7 @@ class QuotaService:
     ) -> StockLifecycleState | None:
         """Synchronous worker bridge for stock residual verification."""
 
-        return asyncio.run(self.stock_state(tenant_id=tenant_id, stock_key=stock_key))
+        return aio.call_from_thread(self.stock_state(tenant_id=tenant_id, stock_key=stock_key))
 
     # -- the UI / admin view --------------------------------------------- #
 
@@ -402,7 +387,7 @@ class QuotaService:
         count."""
         dims = list(dimensions) if dimensions is not None else list(QuotaDimension)
         now = self._now()
-        usage, limits = await self._request_store.read_usage_with_limits(
+        usage, limits = await self._store.read_usage_with_limits(
             tenant_id=subject.tenant_id,
             subject_user_ids=[subject.user_id],
             limit_subject_user_ids=[subject.user_id, DEFAULT_USER_ID],
@@ -438,8 +423,8 @@ class QuotaService:
         """
         dims = list(QuotaDimension)
         now = self._now()
-        subs = await self._request_store.list_subjects(tenant_id=tenant_id)
-        usage, limits = await self._request_store.read_usage_with_limits(
+        subs = await self._store.list_subjects(tenant_id=tenant_id)
+        usage, limits = await self._store.read_usage_with_limits(
             tenant_id=tenant_id,
             subject_user_ids=subs,
             limit_subject_user_ids=[*subs, DEFAULT_USER_ID],
@@ -488,7 +473,7 @@ class QuotaService:
         """Upsert one limit (a per-user override, or the tenant default
         when *subject_user_id* is ``DEFAULT_USER_ID``). ``0`` is an explicit
         unlimited; the operator ceiling still clamps at read time."""
-        await self._request_store.set_limit(
+        await self._store.set_limit(
             tenant_id=tenant_id,
             subject_user_id=subject_user_id,
             dimension=dimension,
@@ -504,7 +489,7 @@ class QuotaService:
         dimension: QuotaDimension,
     ) -> None:
         """Drop one limit row so it falls back to the next layer."""
-        await self._request_store.clear_limit(
+        await self._store.clear_limit(
             tenant_id=tenant_id,
             subject_user_id=subject_user_id,
             dimension=dimension,
@@ -522,24 +507,9 @@ class QuotaService:
         Raises ``ValueError`` for a stock dimension (the store enforces
         it): stock is freed by deletion, never reset.
         """
-        await self._request_store.reset_usage(
+        await self._store.reset_usage(
             tenant_id=tenant_id,
             subject_user_id=subject_user_id,
             dimension=dimension,
             now=self._now(),
         )
-
-    async def aclose(self) -> None:
-        """Release any store-owned resources at application shutdown.
-
-        Only a Postgres store built from a URL owns an engine; a borrowed
-        request-path store and the memory store are no-ops. Delegates so
-        the lifespan teardown stays uniform with the run store's ``close``.
-        """
-        stores = [self._store]
-        if self._request_store is not self._store:
-            stores.append(self._request_store)
-        for store in stores:
-            closer = getattr(store, "aclose", None)
-            if closer is not None:
-                await closer()

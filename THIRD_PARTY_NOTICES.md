@@ -11,10 +11,10 @@ and the canonical npm `package-lock.json`.
 
 | Surface | Packages |
 |---|---:|
-| python | 94 |
-| python-dev | 41 |
+| python | 86 |
+| python-dev | 29 |
 | react-prod | 478 |
-| react-dev | 203 |
+| react-dev | 192 |
 | node-prod | 5 |
 | node-dev | 32 |
 
@@ -29,10 +29,6 @@ and the canonical npm `package-lock.json`.
 | python | `argon2-cffi` | 23.1.0 | MIT | python package metadata: License-Expression |
 | python | `argon2-cffi-bindings` | 25.1.0 | MIT | python package metadata: License-Expression |
 | python | `asyncpg` | 0.31.0 | Apache-2.0 | python package metadata: License-Expression |
-| python | `azure-ai-projects` | 2.1.0 | MIT | manual override: Azure SDK for Python repository license |
-| python | `azure-core` | 1.39.0 | MIT | manual override: Azure SDK for Python repository license |
-| python | `azure-identity` | 1.25.3 | MIT | manual override: Azure SDK for Python repository license |
-| python | `azure-storage-blob` | 12.29.0 | MIT License | python package metadata: classifiers |
 | python | `beautifulsoup4` | 4.15.0 | MIT License | python package metadata: classifiers |
 | python | `boto3` | 1.42.85 | Apache-2.0 | python package metadata: License |
 | python | `botocore` | 1.42.85 | Apache-2.0 | python package metadata: License |
@@ -54,10 +50,9 @@ and the canonical npm `package-lock.json`.
 | python | `httpx` | 0.28.1 | BSD License | python package metadata: classifiers |
 | python | `httpx2` | 2.16.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `idna` | 3.20 | BSD-3-Clause | python package metadata: License-Expression |
-| python | `isodate` | 0.7.2 | BSD License | python package metadata: classifiers |
 | python | `jiter` | 0.13.0 | MIT License | python package metadata: classifiers |
 | python | `jmespath` | 1.1.0 | MIT License | python package metadata: classifiers |
-| python | `joserfc` | 1.7.1 | BSD License | python package metadata: classifiers |
+| python | `joserfc` | 1.7.7 | BSD License | python package metadata: classifiers |
 | python | `jsonpatch` | 1.33 | BSD License | python package metadata: classifiers |
 | python | `jsonpointer` | 3.1.1 | BSD License | python package metadata: classifiers |
 | python | `langchain-core` | 1.6.3 | MIT License | python package metadata: classifiers |
@@ -74,8 +69,6 @@ and the canonical npm `package-lock.json`.
 | python | `markitdown` | 0.1.6 | MIT | python package metadata: License-Expression |
 | python | `markupsafe` | 3.0.3 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `mdurl` | 0.1.2 | MIT License | python package metadata: classifiers |
-| python | `msal` | 1.39.0 | MIT License | python package metadata: classifiers |
-| python | `msal-extensions` | 1.3.1 | MIT License | python package metadata: classifiers |
 | python | `numpy` | 2.4.4 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | python package metadata: License-Expression |
 | python | `onnxruntime` | 1.26.0 | MIT License | python package metadata: classifiers |
 | python | `openai` | 2.32.0 | Apache Software License | python package metadata: classifiers |
@@ -89,7 +82,6 @@ and the canonical npm `package-lock.json`.
 | python | `pydantic-core` | 2.41.5 | MIT | python package metadata: License-Expression |
 | python | `pydantic-settings` | 2.16.2 | MIT | python package metadata: License-Expression |
 | python | `pygments` | 2.21.0 | BSD-2-Clause | python package metadata: License-Expression |
-| python | `pyjwt` | 2.15.1 | MIT | python package metadata: License-Expression |
 | python | `python-dateutil` | 2.9.0.post0 | Apache Software License / BSD License | python package metadata: classifiers |
 | python | `python-dotenv` | 1.2.2 | BSD-3-Clause | python package metadata: License |
 | python | `python-multipart` | 0.0.32 | Apache-2.0 | python package metadata: License-Expression |
@@ -116,20 +108,11 @@ and the canonical npm `package-lock.json`.
 | python | `websockets` | 15.0.1 | BSD License | python package metadata: classifiers |
 | python | `xxhash` | 3.6.0 | BSD License | python package metadata: classifiers |
 | python | `zstandard` | 0.25.0 | BSD-3-Clause | python package metadata: License-Expression |
-| python-dev | `anthropic` | 1.5.0 | MIT License | python package metadata: classifiers |
-| python-dev | `bracex` | 3.0 | MIT | python package metadata: License-Expression |
-| python-dev | `deepagents` | 0.7.13 | MIT License | python package metadata: classifiers |
-| python-dev | `docstring-parser` | 0.18.0 | MIT License | python package metadata: classifiers |
 | python-dev | `fakeredis` | 2.36.1 | BSD-3-Clause | python package metadata: License-Expression |
-| python-dev | `filetype` | 1.2.0 | MIT License | python package metadata: classifiers |
-| python-dev | `google-auth` | 2.58.0 | Apache Software License | python package metadata: classifiers |
-| python-dev | `google-genai` | 2.23.0 | Apache-2.0 | python package metadata: License-Expression |
 | python-dev | `googleapis-common-protos` | 1.75.0 | Apache Software License | python package metadata: classifiers |
 | python-dev | `grpcio` | 1.81.1 | Apache-2.0 | python package metadata: License-Expression |
 | python-dev | `iniconfig` | 2.3.0 | MIT | python package metadata: License-Expression |
 | python-dev | `langchain` | 1.4.0 | MIT License | python package metadata: classifiers |
-| python-dev | `langchain-anthropic` | 1.7.2 | MIT License | python package metadata: classifiers |
-| python-dev | `langchain-google-genai` | 4.4.0 | MIT | python package metadata: License |
 | python-dev | `langgraph-checkpoint-postgres` | 3.2.0 | MIT | python package metadata: License-Expression |
 | python-dev | `opentelemetry-api` | 1.45.2 | Apache-2.0 | python package metadata: License-Expression |
 | python-dev | `opentelemetry-exporter-http-transport` | 0.66b2 | Apache-2.0 | python package metadata: License-Expression |
@@ -144,18 +127,15 @@ and the canonical npm `package-lock.json`.
 | python-dev | `prometheus-client` | 0.25.0 | Apache-2.0 AND BSD-2-Clause | python package metadata: License-Expression |
 | python-dev | `psycopg` | 3.3.4 | LGPL-3.0-only | python package metadata: License-Expression |
 | python-dev | `psycopg-pool` | 3.3.1 | LGPL-3.0-only | python package metadata: License-Expression |
-| python-dev | `pyasn1` | 0.6.5 | BSD-2-Clause | python package metadata: License |
-| python-dev | `pyasn1-modules` | 0.4.2 | BSD License | python package metadata: classifiers |
-| python-dev | `pytest` | 9.0.2 | MIT | python package metadata: License-Expression |
+| python-dev | `pytest` | 9.2.0 | MIT | python package metadata: License-Expression |
 | python-dev | `pytest-asyncio` | 1.3.0 | Apache-2.0 | python package metadata: License-Expression |
-| python-dev | `pytest-recording` | 0.13.4 | MIT | python package metadata: License-Expression |
+| python-dev | `pytest-recording` | 0.14.0 | MIT | python package metadata: License-Expression |
 | python-dev | `qdrant-client` | 1.19.0 | Apache Software License | python package metadata: classifiers |
 | python-dev | `redis` | 8.0.0 | MIT | python package metadata: License-Expression |
 | python-dev | `ruff` | 0.16.0 | MIT | python package metadata: License-Expression |
 | python-dev | `sortedcontainers` | 2.4.0 | Apache Software License | python package metadata: classifiers |
 | python-dev | `valkey` | 6.1.1 | MIT License | python package metadata: classifiers |
-| python-dev | `vcrpy` | 8.1.1 | MIT License | python package metadata: classifiers |
-| python-dev | `wcmatch` | 11.0.1 | MIT | python package metadata: License-Expression |
+| python-dev | `vcrpy` | 9.2.0 | MIT License | python package metadata: classifiers |
 | python-dev | `wrapt` | 2.1.2 | BSD-2-Clause | python package metadata: License-Expression |
 
 ## JavaScript Dependencies
@@ -536,7 +516,7 @@ and the canonical npm `package-lock.json`.
 | react-prod | `motion-dom` | 12.42.2 | MIT | package-lock.json metadata |
 | react-prod | `motion-utils` | 12.39.0 | MIT | package-lock.json metadata |
 | react-prod | `ms` | 2.1.3 | MIT | package-lock.json metadata |
-| react-prod | `nanoid` | 3.3.18 | MIT | package-lock.json metadata |
+| react-prod | `nanoid` | 3.3.20 | MIT | package-lock.json metadata |
 | react-prod | `nanoid` | 6.0.2 | MIT | package-lock.json metadata |
 | react-prod | `oniguruma-parser` | 0.12.2 | MIT | package-lock.json metadata |
 | react-prod | `oniguruma-to-es` | 4.3.6 | MIT | package-lock.json metadata |
@@ -641,11 +621,8 @@ and the canonical npm `package-lock.json`.
 | react-prod | `yjs` | 13.6.31 | MIT | package-lock.json metadata |
 | react-prod | `zwitch` | 2.0.4 | MIT | package-lock.json metadata |
 | react-dev | `@emnapi/core` | 1.10.0 | MIT | package-lock.json metadata |
-| react-dev | `@emnapi/core` | 1.11.1 | MIT | package-lock.json metadata |
 | react-dev | `@emnapi/runtime` | 1.10.0 | MIT | package-lock.json metadata |
-| react-dev | `@emnapi/runtime` | 1.11.1 | MIT | package-lock.json metadata |
 | react-dev | `@emnapi/wasi-threads` | 1.2.1 | MIT | package-lock.json metadata |
-| react-dev | `@emnapi/wasi-threads` | 1.2.2 | MIT | package-lock.json metadata |
 | react-dev | `@eslint-community/eslint-utils` | 4.9.1 | MIT | package-lock.json metadata |
 | react-dev | `@eslint-community/regexpp` | 4.12.2 | MIT | package-lock.json metadata |
 | react-dev | `@eslint/config-array` | 0.23.5 | Apache-2.0 | package-lock.json metadata |
@@ -665,39 +642,22 @@ and the canonical npm `package-lock.json`.
 | react-dev | `@jridgewell/sourcemap-codec` | 1.5.5 | MIT | package-lock.json metadata |
 | react-dev | `@jridgewell/trace-mapping` | 0.3.31 | MIT | package-lock.json metadata |
 | react-dev | `@napi-rs/wasm-runtime` | 1.1.4 | MIT | package-lock.json metadata |
-| react-dev | `@napi-rs/wasm-runtime` | 1.1.6 | MIT | package-lock.json metadata |
-| react-dev | `@oxc-project/types` | 0.133.0 | MIT | package-lock.json metadata |
-| react-dev | `@oxc-project/types` | 0.139.0 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-android-arm64` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-android-arm64` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-darwin-arm64` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-darwin-arm64` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-darwin-x64` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-darwin-x64` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-freebsd-x64` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-freebsd-x64` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-arm-gnueabihf` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-arm-gnueabihf` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-arm64-gnu` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-arm64-gnu` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-arm64-musl` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-arm64-musl` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-ppc64-gnu` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-ppc64-gnu` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-s390x-gnu` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-s390x-gnu` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-x64-gnu` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-x64-gnu` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-x64-musl` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-linux-x64-musl` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-openharmony-arm64` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-openharmony-arm64` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-wasm32-wasi` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-wasm32-wasi` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-win32-arm64-msvc` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-win32-arm64-msvc` | 1.1.5 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-win32-x64-msvc` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `@rolldown/binding-win32-x64-msvc` | 1.1.5 | MIT | package-lock.json metadata |
+| react-dev | `@oxc-project/types` | 0.156.0 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-android-arm-eabi` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-android-arm64` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-darwin-arm64` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-darwin-x64` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-freebsd-x64` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-linux-arm-gnueabihf` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-linux-arm64-gnu` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-linux-arm64-musl` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-linux-ppc64-gnu` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-linux-s390x-gnu` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-linux-x64-gnu` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-linux-x64-musl` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-openharmony-arm64` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-win32-arm64-msvc` | 1.2.16 | MIT | package-lock.json metadata |
+| react-dev | `@rolldown/binding-win32-x64-msvc` | 1.2.16 | MIT | package-lock.json metadata |
 | react-dev | `@rolldown/pluginutils` | 1.0.0-rc.7 | MIT | package-lock.json metadata |
 | react-dev | `@rolldown/pluginutils` | 1.0.1 | MIT | package-lock.json metadata |
 | react-dev | `@standard-schema/spec` | 1.1.0 | MIT | package-lock.json metadata |
@@ -717,7 +677,6 @@ and the canonical npm `package-lock.json`.
 | react-dev | `@tailwindcss/oxide-win32-x64-msvc` | 4.3.0 | MIT | package-lock.json metadata |
 | react-dev | `@tailwindcss/vite` | 4.3.0 | MIT | package-lock.json metadata |
 | react-dev | `@tybys/wasm-util` | 0.10.1 | MIT | package-lock.json metadata |
-| react-dev | `@tybys/wasm-util` | 0.10.3 | MIT | package-lock.json metadata |
 | react-dev | `@types/chai` | 5.2.3 | MIT | package-lock.json metadata |
 | react-dev | `@types/deep-eql` | 4.0.2 | MIT | package-lock.json metadata |
 | react-dev | `@types/esrecurse` | 4.3.1 | MIT | package-lock.json metadata |
@@ -733,20 +692,20 @@ and the canonical npm `package-lock.json`.
 | react-dev | `@typescript-eslint/utils` | 8.59.3 | MIT | package-lock.json metadata |
 | react-dev | `@typescript-eslint/visitor-keys` | 8.59.3 | MIT | package-lock.json metadata |
 | react-dev | `@vitejs/plugin-react` | 6.0.1 | MIT | package-lock.json metadata |
-| react-dev | `@vitest/expect` | 4.1.7 | MIT | package-lock.json metadata |
-| react-dev | `@vitest/mocker` | 4.1.7 | MIT | package-lock.json metadata |
-| react-dev | `@vitest/pretty-format` | 4.1.7 | MIT | package-lock.json metadata |
-| react-dev | `@vitest/runner` | 4.1.7 | MIT | package-lock.json metadata |
-| react-dev | `@vitest/snapshot` | 4.1.7 | MIT | package-lock.json metadata |
-| react-dev | `@vitest/spy` | 4.1.7 | MIT | package-lock.json metadata |
-| react-dev | `@vitest/utils` | 4.1.7 | MIT | package-lock.json metadata |
+| react-dev | `@vitest/expect` | 4.1.12 | MIT | package-lock.json metadata |
+| react-dev | `@vitest/mocker` | 4.1.12 | MIT | package-lock.json metadata |
+| react-dev | `@vitest/pretty-format` | 4.1.12 | MIT | package-lock.json metadata |
+| react-dev | `@vitest/runner` | 4.1.12 | MIT | package-lock.json metadata |
+| react-dev | `@vitest/snapshot` | 4.1.12 | MIT | package-lock.json metadata |
+| react-dev | `@vitest/spy` | 4.1.12 | MIT | package-lock.json metadata |
+| react-dev | `@vitest/utils` | 4.1.12 | MIT | package-lock.json metadata |
 | react-dev | `acorn` | 8.17.0 | MIT | package-lock.json metadata |
 | react-dev | `acorn-jsx` | 5.3.2 | MIT | package-lock.json metadata |
 | react-dev | `ajv` | 6.15.0 | MIT | package-lock.json metadata |
 | react-dev | `assertion-error` | 2.0.1 | MIT | package-lock.json metadata |
 | react-dev | `balanced-match` | 4.0.4 | MIT | package-lock.json metadata |
-| react-dev | `brace-expansion` | 5.0.9 | MIT | package-lock.json metadata |
-| react-dev | `chai` | 6.2.2 | MIT | package-lock.json metadata |
+| react-dev | `brace-expansion` | 5.0.12 | MIT | package-lock.json metadata |
+| react-dev | `chai` | 6.3.0 | MIT | package-lock.json metadata |
 | react-dev | `convert-source-map` | 2.0.0 | MIT | package-lock.json metadata |
 | react-dev | `cross-spawn` | 7.0.6 | MIT | package-lock.json metadata |
 | react-dev | `deep-is` | 0.1.4 | MIT | package-lock.json metadata |
@@ -790,17 +749,29 @@ and the canonical npm `package-lock.json`.
 | react-dev | `keyv` | 4.5.4 | MIT | package-lock.json metadata |
 | react-dev | `levn` | 0.4.1 | MIT | package-lock.json metadata |
 | react-dev | `lightningcss` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-android-arm64` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-android-arm64` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-darwin-arm64` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-darwin-arm64` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-darwin-x64` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-darwin-x64` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-freebsd-x64` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-freebsd-x64` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-linux-arm-gnueabihf` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-linux-arm-gnueabihf` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-linux-arm64-gnu` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-linux-arm64-gnu` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-linux-arm64-musl` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-linux-arm64-musl` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-linux-x64-gnu` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-linux-x64-gnu` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-linux-x64-musl` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-linux-x64-musl` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-win32-arm64-msvc` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-win32-arm64-msvc` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `lightningcss-win32-x64-msvc` | 1.32.0 | MPL-2.0 | package-lock.json metadata |
+| react-dev | `lightningcss-win32-x64-msvc` | 1.33.0 | MPL-2.0 | package-lock.json metadata |
 | react-dev | `locate-path` | 6.0.0 | MIT | package-lock.json metadata |
 | react-dev | `magic-string` | 0.30.21 | MIT | package-lock.json metadata |
 | react-dev | `minimatch` | 10.2.5 | BlueOak-1.0.0 | package-lock.json metadata |
@@ -813,17 +784,16 @@ and the canonical npm `package-lock.json`.
 | react-dev | `path-key` | 3.1.1 | MIT | package-lock.json metadata |
 | react-dev | `pathe` | 2.0.3 | MIT | package-lock.json metadata |
 | react-dev | `picocolors` | 1.1.1 | ISC | package-lock.json metadata |
-| react-dev | `picomatch` | 4.0.5 | MIT | package-lock.json metadata |
-| react-dev | `postcss` | 8.5.26 | MIT | package-lock.json metadata |
+| react-dev | `picomatch` | 4.0.7 | MIT | package-lock.json metadata |
+| react-dev | `postcss` | 8.5.32 | MIT | package-lock.json metadata |
 | react-dev | `prelude-ls` | 1.2.1 | MIT | package-lock.json metadata |
 | react-dev | `punycode` | 2.3.1 | MIT | package-lock.json metadata |
-| react-dev | `rolldown` | 1.0.3 | MIT | package-lock.json metadata |
-| react-dev | `rolldown` | 1.1.5 | MIT | package-lock.json metadata |
+| react-dev | `rolldown` | 1.2.16 | MIT | package-lock.json metadata |
 | react-dev | `semver` | 7.8.5 | ISC | package-lock.json metadata |
 | react-dev | `shebang-command` | 2.0.0 | MIT | package-lock.json metadata |
 | react-dev | `shebang-regex` | 3.0.0 | MIT | package-lock.json metadata |
 | react-dev | `siginfo` | 2.0.0 | ISC | package-lock.json metadata |
-| react-dev | `source-map-js` | 1.2.1 | BSD-3-Clause | package-lock.json metadata |
+| react-dev | `source-map-js` | 1.2.2 | BSD-3-Clause | package-lock.json metadata |
 | react-dev | `stackback` | 0.0.2 | MIT | package-lock.json metadata |
 | react-dev | `std-env` | 4.2.0 | MIT | package-lock.json metadata |
 | react-dev | `tailwindcss` | 4.3.0 | MIT | package-lock.json metadata |
@@ -836,9 +806,8 @@ and the canonical npm `package-lock.json`.
 | react-dev | `typescript` | 6.0.3 | Apache-2.0 | package-lock.json metadata |
 | react-dev | `typescript-eslint` | 8.59.3 | MIT | package-lock.json metadata |
 | react-dev | `uri-js` | 4.4.1 | BSD-2-Clause | package-lock.json metadata |
-| react-dev | `vite` | 8.0.16 | MIT | package-lock.json metadata |
-| react-dev | `vite` | 8.1.4 | MIT | package-lock.json metadata |
-| react-dev | `vitest` | 4.1.7 | MIT | package-lock.json metadata |
+| react-dev | `vite` | 8.3.5 | MIT | package-lock.json metadata |
+| react-dev | `vitest` | 4.1.12 | MIT | package-lock.json metadata |
 | react-dev | `which` | 2.0.2 | ISC | package-lock.json metadata |
 | react-dev | `why-is-node-running` | 2.3.0 | MIT | package-lock.json metadata |
 | react-dev | `word-wrap` | 1.2.5 | MIT | package-lock.json metadata |

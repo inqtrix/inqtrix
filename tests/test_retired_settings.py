@@ -153,6 +153,25 @@ def test_forwarded_allow_ips_only_warns_in_the_other_modes(
     assert SECRET_VALUE not in caplog.text
 
 
+@pytest.mark.parametrize("name", ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"])
+def test_the_azure_service_principal_variables_only_warn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    # Azure is reached with keys only. Other Azure tools in the same
+    # environment may still read these names, so the start continues.
+    monkeypatch.setenv(name, SECRET_VALUE)
+
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        found = settings_module.check_retired_settings()
+
+    assert [entry.name for entry in found] == [name]
+    assert (
+        f"Retired setting {name} is set and has no effect; use AZURE_OPENAI_API_KEY "
+        "and AZURE_AI_PROJECT_API_KEY (keys only) instead." in caplog.text
+    )
+    assert SECRET_VALUE not in caplog.text
+
+
 def test_the_mode_in_the_env_file_decides_too(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("INQTRIX_AUTH_MODE", raising=False)
     env_file = tmp_path / ".env"

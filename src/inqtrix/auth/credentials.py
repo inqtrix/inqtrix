@@ -26,6 +26,7 @@ from typing import Protocol
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
+from inqtrix import aio
 from inqtrix.auth.log_redaction import pseudonymous_log_reference
 
 log = logging.getLogger(__name__)
@@ -264,10 +265,10 @@ class LocalAuthenticator:
         if credential is None:
             # Spend a comparable amount of work so a missing account is
             # not distinguishable from a wrong password by timing.
-            verify_password(_DUMMY_HASH, password)
+            await aio.run_blocking(verify_password, _DUMMY_HASH, password)
             log.warning("Local login failed: unknown email.")
             raise CredentialError("Invalid credentials.")
-        if not verify_password(credential.password_hash, password):
+        if not await aio.run_blocking(verify_password, credential.password_hash, password):
             log.warning(
                 "Local login failed: wrong password for actor_ref=%s.",
                 pseudonymous_log_reference("usr", credential.user_id),

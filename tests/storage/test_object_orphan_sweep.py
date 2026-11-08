@@ -2,10 +2,8 @@
 
 Same gating and conventions as the content suite: disposable database via
 ``INQTRIX_TEST_DATABASE_URL``, registry writes through the restricted app
-role, RLS active. The tests are deliberately SYNC on a NullPool engine —
-that mirrors the production shape (a worker retention thread without a
-running loop, per-call loops via ``run_coro_sync``), where a pooled
-engine would crash with cross-loop connection reuse.
+role, RLS active. The tests are deliberately SYNC on a NullPool engine:
+the sweep is a synchronous pass on a thread that reaches the process loop.
 """
 
 from __future__ import annotations

@@ -23,6 +23,8 @@ export type ResearchJob = {
   confidence?: string
   duration?: string
   error?: string
+  /** Server failure code; the card names it in the reader's language. */
+  errorCode?: string
   events: Array<{
     active?: boolean
     /** Carried from the record: present only for events that arrived on the
@@ -60,7 +62,7 @@ export type ResearchJob = {
   title: LocalizedText
 }
 
-export type JobFilter = Extract<JobStatus, 'cancelled' | 'completed' | 'queued' | 'running'> | 'all'
+export type JobFilter = Extract<JobStatus, 'cancelled' | 'completed' | 'failed' | 'queued' | 'running'> | 'all'
 
 export type AppView = 'research' | 'chat' | 'agent' | 'editor' | 'knowledge' | 'prompt-library' | 'database' | 'settings'
 

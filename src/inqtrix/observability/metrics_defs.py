@@ -22,8 +22,11 @@ call it measures (fail-safe, WARNING once — never fail-silent).
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
+
+from inqtrix.aio import lane_snapshot, loop_lag, stall_count
 
 log = logging.getLogger(__name__)
 
@@ -132,8 +135,8 @@ _fallback_cap_warned = False
 def metric_model_label(model_id: str | None) -> str:
     """Canonical model label with a hard cardinality guard.
 
-    Card matches use the card id (region/version variants collapse).
-    Unmatched ids fall back to the region/version-stripped normal form,
+    Card matches use the card id (case, path prefix, region, version and
+    snapshot variants collapse). Unmatched ids fall back to the normal form,
     admitted into a bounded per-process set: legitimate operator-config
     names register early and stay stable, while an unbounded spray of
     per-request override strings collapses to ``other`` after the cap
@@ -220,6 +223,7 @@ class CallMetrics:
     indexing_auto_resumes: Any
     gateway_rejections: Any
     jwks_refresh_failures: Any
+    blocked_checkpoint_types: Any
 
     # ---- recording helpers (fail-safe, never fail-silent) ---------- #
 
@@ -234,6 +238,18 @@ class CallMetrics:
             self.gateway_rejections.labels(outcome=outcome).inc()
         except Exception:  # noqa: BLE001 -- metrics never break the call
             _warn_once("gateway_rejections")
+
+    def count_blocked_checkpoint_type(self, kind: str) -> None:
+        """Count one checkpoint value left as raw data because its type is not allowed.
+
+        ``kind`` is ``type`` for a class and ``method`` for a method call the
+        payload asked for; the names themselves stay in the log only, since
+        they come from the stored data.
+        """
+        try:
+            self.blocked_checkpoint_types.labels(kind=kind).inc()
+        except Exception:  # noqa: BLE001 -- metrics never break the call
+            _warn_once("blocked_checkpoint_types")
 
     def count_jwks_refresh_failure(self, cache: str) -> None:
         """Count one failed key set refresh; the known keys stay in use.
@@ -388,6 +404,44 @@ def _warn_once(family: str) -> None:
     )
 
 
+class _ProcessLoopCollector:
+    """Reads the thread bridge at scrape time; only numbers leave it."""
+
+    def collect(self) -> Iterator[Any]:
+        from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
+
+        lag = loop_lag()
+        lag_family = GaugeMetricFamily(
+            "inqtrix_event_loop_lag_milliseconds",
+            "How late the event loop's probe woke up in the recent window.",
+            labels=["quantile"],
+        )
+        lag_family.add_metric(["0.5"], lag.p50_ms)
+        lag_family.add_metric(["0.99"], lag.p99_ms)
+        yield lag_family
+        yield CounterMetricFamily(
+            "inqtrix_event_loop_stalls",
+            "Stalls of the event loop the watchdog reported.",
+            value=stall_count(),
+        )
+        jobs = GaugeMetricFamily(
+            "inqtrix_thread_lane_jobs",
+            "Jobs running and waiting on each thread lane of this process.",
+            labels=["lane", "state"],
+        )
+        workers = GaugeMetricFamily(
+            "inqtrix_thread_lane_workers",
+            "Threads each lane of this process may use.",
+            labels=["lane"],
+        )
+        for lane, snapshot in lane_snapshot().items():
+            jobs.add_metric([lane, "running"], snapshot.running)
+            jobs.add_metric([lane, "waiting"], snapshot.waiting)
+            workers.add_metric([lane], snapshot.workers)
+        yield jobs
+        yield workers
+
+
 def build_call_metrics(registry: Any) -> CallMetrics:
     """Construct every shared instrument bound to *registry*.
 
@@ -395,6 +449,8 @@ def build_call_metrics(registry: Any) -> CallMetrics:
     after ``prometheus_client`` imported successfully.
     """
     from prometheus_client import Counter, Histogram
+
+    registry.register(_ProcessLoopCollector())
 
     llm_requests = Counter(
         "inqtrix_llm_requests",
@@ -498,6 +554,13 @@ def build_call_metrics(registry: Any) -> CallMetrics:
         registry=registry,
     )
 
+    blocked_checkpoint_types = Counter(
+        "inqtrix_checkpoint_types_blocked",
+        "Checkpoint values left as raw data because their type is not allowed.",
+        labelnames=("kind",),
+        registry=registry,
+    )
+
     return CallMetrics(
         llm_requests=llm_requests,
         llm_duration=llm_duration,
@@ -514,6 +577,7 @@ def build_call_metrics(registry: Any) -> CallMetrics:
         indexing_auto_resumes=indexing_auto_resumes,
         gateway_rejections=gateway_rejections,
         jwks_refresh_failures=jwks_refresh_failures,
+        blocked_checkpoint_types=blocked_checkpoint_types,
     )
 
 

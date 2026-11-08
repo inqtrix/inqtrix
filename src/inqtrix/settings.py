@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
 
+from inqtrix import aio
 from inqtrix.constants import (
     MAX_PLAN_TASKS_DEFAULT,
     ANSWER_PROMPT_CITATIONS_MAX,
@@ -108,6 +109,22 @@ RETIRED_SETTINGS: tuple[RetiredSetting, ...] = (
         "INQTRIX_TRUSTED_PROXY_HOPS (Inqtrix reads X-Forwarded-For itself)",
         "warn",
         abort_in_modes=frozenset({"gateway"}),
+    ),
+    # Azure OpenAI and the Foundry search are reached with keys only.
+    RetiredSetting(
+        "AZURE_TENANT_ID",
+        "AZURE_OPENAI_API_KEY and AZURE_AI_PROJECT_API_KEY (keys only)",
+        "warn",
+    ),
+    RetiredSetting(
+        "AZURE_CLIENT_ID",
+        "AZURE_OPENAI_API_KEY and AZURE_AI_PROJECT_API_KEY (keys only)",
+        "warn",
+    ),
+    RetiredSetting(
+        "AZURE_CLIENT_SECRET",
+        "AZURE_OPENAI_API_KEY and AZURE_AI_PROJECT_API_KEY (keys only)",
+        "warn",
     ),
 )
 
@@ -1358,34 +1375,31 @@ class StorageSettings(BaseSettings):
     )
     """Runtime-login security policy: production-safe ``restricted`` by default, or the explicit ``bundled_legacy`` compatibility boundary used only by the provided bundled database stacks."""
     pool_size: int = Field(
-        5,
+        15,
         alias="INQTRIX_DATABASE_POOL_SIZE",
         ge=1,
         description=(
-            "Persistent connections per POOLED engine. The engines are "
-            "NOT enumerated here -- every process counts the ones it "
-            "actually builds and logs the total at startup, because a "
-            "list in prose goes stale the day a store is added. "
-            "NullPool stores are unaffected by this value. The "
-            "worst-case budget of one process is "
-            "pooled_engines x (pool_size + max_overflow) "
-            "plus the in-flight NullPool connections — size the sum of "
-            "all replicas below Postgres max_connections (or front it "
-            "with a transaction pooler)."
+            "Connections the process keeps to Postgres. Every store of an "
+            "API or worker process shares one engine. Connections open on "
+            "demand and stay until recycled, so a process at rest holds its "
+            "peak so far. One process may hold "
+            "pool_size + max_overflow plus the agent checkpointer's pool; "
+            "size the sum of all replicas below Postgres max_connections "
+            "(or front it with a transaction pooler)."
         ),
     )
-    """Persistent connections per POOLED engine (default 5, the SQLAlchemy default — existing deployments see zero change). The number of pooled engines is NOT enumerated here: every process counts the ones it actually builds and logs the worst case at startup, because a list written down in prose goes stale the moment a store is added. NullPool stores open per-operation connections and ignore this setting -- including the API's run-thread lane (``build_run_thread_persistence``), which therefore holds nothing idle; its transient use is bounded by the run-concurrency cap (``RUN_MAX_CONCURRENT`` in the API, ``INQTRIX_WORKER_CONCURRENCY`` in a worker), not by this value. That worst case IS part of the startup comparison against ``max_connections``, because a synchronised burst can ask for all of it at once. Budget arithmetic: pooled_engines x (pool_size + max_overflow) per process, summed over replicas, plus the run lane's transient peak, must stay below Postgres ``max_connections`` unless a transaction pooler fronts the database."""
+    """Connections the process keeps to Postgres, shared by all its stores (default 15). See ``docs/configuration/settings-and-env.md``."""
     pool_max_overflow: int = Field(
-        10,
+        0,
         alias="INQTRIX_DATABASE_POOL_MAX_OVERFLOW",
         ge=0,
         description=(
-            "Burst connections a pooled engine may open beyond "
-            "pool_size (closed again when idle). Part of the same "
-            "budget arithmetic as pool_size."
+            "Burst connections beyond pool_size. The pool closes them on "
+            "return, so a process that stays above pool_size keeps "
+            "reconnecting. Raise pool_size instead unless the burst is rare."
         ),
     )
-    """Burst connections a pooled engine may open beyond ``pool_size`` (default 10, the SQLAlchemy default). Counted in the same worst-case budget as ``pool_size``."""
+    """Burst connections beyond ``pool_size``, closed on return (default 0). See ``docs/configuration/settings-and-env.md``."""
     pool_timeout_seconds: float = Field(
         30.0,
         alias="INQTRIX_DATABASE_POOL_TIMEOUT_SECONDS",
@@ -1402,8 +1416,9 @@ class StorageSettings(BaseSettings):
         alias="INQTRIX_DATABASE_COMMAND_TIMEOUT_SECONDS",
         ge=0,
         description=(
-            "Per-STATEMENT ceiling on pooled engines (asyncpg "
-            "command_timeout; 0 disables). A statement on a silently "
+            "Per-STATEMENT ceiling on the engine of a process (asyncpg "
+            "command_timeout; 0 disables), retention passes and large "
+            "cascading deletes included. A statement on a silently "
             "dead connection otherwise hangs its worker thread "
             "indefinitely — with the ceiling it fails loudly and the "
             "run-store recovery paths turn it into an ordinary, "
@@ -1411,16 +1426,10 @@ class StorageSettings(BaseSettings):
             "ceiling need a raised value, never a disabled one."
         ),
     )
-    """Per-STATEMENT wall-clock ceiling for pooled engines, enforced client-side by asyncpg (default 120 s, ``0`` disables). Bounds the one hang class connection pre-ping cannot catch: an in-flight statement on a dead connection. A fired ceiling surfaces as an ordinary database error wherever such errors already surface; per-statement scope means multi-statement transactions are bounded additively, not in total."""
+    """Per-STATEMENT wall-clock ceiling for the engine of a process, enforced client-side by asyncpg (default 120 s, ``0`` disables). Bounds the one hang class connection pre-ping cannot catch: an in-flight statement on a dead connection. A fired ceiling surfaces as an ordinary database error wherever such errors already surface; per-statement scope means multi-statement transactions are bounded additively, not in total."""
 
     def pool_kwargs(self) -> dict[str, Any]:
-        """The pooled-engine sizing bundle for :func:`build_engine`.
-
-        Defined ONCE so every pooled call site (container, auth bundle,
-        worker) splats the same policy and the per-process budget stays
-        reviewable as ``engines x (pool_size + max_overflow)``.
-        NullPool engines must NOT receive these (they ignore sizing).
-        """
+        """The sizing bundle for the one engine of a process."""
         return {
             "pool_size": self.pool_size,
             "max_overflow": self.pool_max_overflow,
@@ -2517,6 +2526,17 @@ class KnowledgeSettings(BaseSettings):
         description="API key for the rerank endpoint.",
     )
     """API key for the rerank endpoint."""
+    reranker_extra_headers: str = Field(
+        "",
+        alias="INQTRIX_RERANKER_EXTRA_HEADERS",
+        description=(
+            "Extra HTTP headers for every call of the ``cohere`` reranker, in "
+            "the form of ``INQTRIX_LLM_EXTRA_HEADERS``. The ``llm`` reranker "
+            "calls the LLM provider, which carries the LLM headers; with it "
+            "a value set here is ignored with a WARNING."
+        ),
+    )
+    """Extra HTTP headers (JSON object) for every call of the ``cohere`` reranker; values never logged."""
     reranker_model: str = Field(
         "",
         alias="INQTRIX_RERANKER_MODEL",
@@ -2699,6 +2719,17 @@ class KnowledgeSettings(BaseSettings):
         ),
     )
     """API key for the embeddings endpoint. Empty (default) reuses ``LITELLM_API_KEY``."""
+    embedding_extra_headers: str = Field(
+        "",
+        alias="INQTRIX_EMBEDDING_EXTRA_HEADERS",
+        description=(
+            "Extra HTTP headers for every embedding call, in the form of "
+            "``INQTRIX_LLM_EXTRA_HEADERS``. Its own setting even when the "
+            "embeddings reuse the LiteLLM gateway, so headers for one "
+            "endpoint never reach another one."
+        ),
+    )
+    """Extra HTTP headers (JSON object) for every embedding call; values never logged."""
     embedding_model: str = Field(
         "text-embedding-3-small",
         alias="INQTRIX_EMBEDDING_MODEL",
@@ -2868,7 +2899,7 @@ class KnowledgeSettings(BaseSettings):
 
 
 class QueueSettings(BaseSettings):
-    """Run-queue backend selection and worker tuning.
+    """Run-queue backend selection, worker tuning and the thread lanes of a process.
 
     Two orthogonal switches keep the zero-infrastructure default
     intact: run *records* become durable via
@@ -2975,6 +3006,33 @@ class QueueSettings(BaseSettings):
         ),
     )
     """Idle threshold after which another worker may reclaim a pending stream entry (XAUTOCLAIM). Sized to heartbeat loss, not to maximum run duration."""
+    blocking_pool_size: int = Field(
+        default_factory=aio.default_lane_size,
+        alias="INQTRIX_BLOCKING_POOL_SIZE",
+        ge=2,
+        description=(
+            "Threads per API or worker process for short blocking and "
+            "CPU-heavy work. This pool is also the event loop's default "
+            "executor, so library calls of asyncio.to_thread land in it. "
+            "Defaults to the standard library's min(32, CPU count + 4). The "
+            "transition lane gets as many threads again for the short "
+            "synchronous services coroutines hand to it. At least 2, so that "
+            "one such service never holds up the others."
+        ),
+    )
+    """Threads per process for short blocking and CPU-heavy work, also the event loop's default executor. Defaults to min(32, CPU count + 4)."""
+    provider_pool_size: int = Field(
+        default_factory=aio.default_lane_size,
+        alias="INQTRIX_PROVIDER_POOL_SIZE",
+        ge=1,
+        description=(
+            "Threads per API or worker process for long synchronous "
+            "provider calls, kept apart from short work so that a slow "
+            "provider never queues in front of it. Defaults to "
+            "min(32, CPU count + 4)."
+        ),
+    )
+    """Threads per process for long synchronous provider calls, kept apart from short work. Defaults to min(32, CPU count + 4)."""
 
 
 class QuotaSettings(BaseSettings):
@@ -3159,6 +3217,30 @@ class ProviderSettings(BaseSettings):
         ),
     )
     """Selects the search axis of the server-mode provider stack (``perplexity`` default). Independent of ``llm_provider``."""
+    llm_extra_headers: str = Field(
+        "",
+        alias="INQTRIX_LLM_EXTRA_HEADERS",
+        description=(
+            "Extra HTTP headers for every call of the selected LLM provider, "
+            "as a JSON object of header names to text values, for example the "
+            "subscription header of an API gateway. The values may be secrets: "
+            "the log names the headers, never their values. Authentication and "
+            "framing headers are refused, and so is ``llm_provider=bedrock``; "
+            "an invalid value stops the start."
+        ),
+    )
+    """Extra HTTP headers (JSON object) for every call of the selected LLM provider; values never logged."""
+    search_extra_headers: str = Field(
+        "",
+        alias="INQTRIX_SEARCH_EXTRA_HEADERS",
+        description=(
+            "Extra HTTP headers for every call of the selected search "
+            "provider, in the form of ``INQTRIX_LLM_EXTRA_HEADERS``. Kept "
+            "apart from the LLM headers so a gateway header never reaches a "
+            "search provider outside the gateway."
+        ),
+    )
+    """Extra HTTP headers (JSON object) for every call of the selected search provider; values never logged."""
 
     anthropic_api_key: str = Field(
         "",
@@ -3195,34 +3277,11 @@ class ProviderSettings(BaseSettings):
         "",
         alias="AZURE_OPENAI_API_KEY",
         description=(
-            "Azure OpenAI API key (key-auth path). Either this or the full "
-            "Service-Principal trio (``AZURE_TENANT_ID``/``AZURE_CLIENT_ID``/"
-            "``AZURE_CLIENT_SECRET``) is required when ``llm_provider=azure``."
+            "Azure OpenAI API key of the resource. Required when "
+            "``llm_provider=azure``; Azure is reached with keys only."
         ),
     )
-    """Azure OpenAI API key (key-auth path). Alternative to the Service-Principal trio for ``llm_provider=azure``."""
-    azure_tenant_id: str = Field(
-        "",
-        alias="AZURE_TENANT_ID",
-        description=(
-            "Entra tenant id for Service-Principal auth, shared by the Azure "
-            "OpenAI LLM and the Azure Foundry search provider. Supply all "
-            "three SP vars together or none."
-        ),
-    )
-    """Entra tenant id for Service-Principal auth (shared by Azure LLM + Foundry search)."""
-    azure_client_id: str = Field(
-        "",
-        alias="AZURE_CLIENT_ID",
-        description="Entra client id for Service-Principal auth (see ``azure_tenant_id``).",
-    )
-    """Entra client id for Service-Principal auth (see ``azure_tenant_id``)."""
-    azure_client_secret: str = Field(
-        "",
-        alias="AZURE_CLIENT_SECRET",
-        description="Entra client secret for Service-Principal auth (see ``azure_tenant_id``).",
-    )
-    """Entra client secret for Service-Principal auth (see ``azure_tenant_id``)."""
+    """Azure OpenAI API key of the resource. Required when ``llm_provider=azure``."""
 
     aws_profile: str = Field(
         "",
@@ -3230,10 +3289,22 @@ class ProviderSettings(BaseSettings):
         description=(
             "Optional AWS named profile for the Bedrock provider. Empty "
             "(default) lets boto3 resolve credentials from the standard AWS "
-            "chain (env vars, instance role, etc.)."
+            "chain (env vars, instance role, etc.). Not used when "
+            "``AWS_BEARER_TOKEN_BEDROCK`` is set."
         ),
     )
     """Optional AWS named profile for Bedrock. Empty lets boto3 use the default credential chain."""
+    aws_bearer_token_bedrock: str = Field(
+        "",
+        alias="AWS_BEARER_TOKEN_BEDROCK",
+        description=(
+            "Optional Amazon Bedrock API key for the Bedrock provider. Set, it "
+            "replaces the AWS credentials: every Bedrock call carries it as a "
+            "bearer token, and ``AWS_PROFILE`` is not used. Read like every "
+            "setting, so the dotenv file works as well as the environment."
+        ),
+    )
+    """Optional Amazon Bedrock API key; set, it replaces the AWS credentials of Bedrock calls."""
     aws_region: str = Field(
         "eu-central-1",
         alias="AWS_REGION",
@@ -3255,12 +3326,12 @@ class ProviderSettings(BaseSettings):
         "",
         alias="AZURE_AI_PROJECT_API_KEY",
         description=(
-            "Optional Foundry project API key for the Azure Foundry search "
-            "provider. Either this or the shared Service-Principal trio "
-            "authenticates the agent."
+            "Foundry project API key for the Azure Foundry search provider, "
+            "sent in the ``api-key`` header. Required when "
+            "``search_provider=azure_foundry``."
         ),
     )
-    """Optional Foundry project API key for Azure Foundry search (alternative to the Service-Principal trio)."""
+    """Foundry project API key. Required when ``search_provider=azure_foundry``."""
     web_search_agent_name: str = Field(
         "",
         alias="WEB_SEARCH_AGENT_NAME",
@@ -3307,10 +3378,12 @@ class ProviderSettings(BaseSettings):
             "Optional sampling temperature for the Anthropic/Azure/Bedrock "
             "LLM providers. ``None`` (default) leaves it unset. LiteLLM is a "
             "generic gateway and ignores this; setting it under "
-            "``llm_provider=litellm`` logs a visible warning."
+            "``llm_provider=litellm`` logs a visible warning. Under "
+            "``anthropic`` or ``bedrock``, a configured Claude model that "
+            "rejects sampling parameters stops the provider at start."
         ),
     )
-    """Optional sampling temperature (Anthropic/Azure/Bedrock). Ignored by LiteLLM (logged when set)."""
+    """Optional sampling temperature (Anthropic/Azure/Bedrock). Ignored by LiteLLM (logged when set); a Claude model that rejects it stops the Anthropic or Bedrock provider at start."""
     token_budget_parameter: str = Field(
         "",
         alias="INQTRIX_TOKEN_BUDGET_PARAMETER",
@@ -3711,14 +3784,6 @@ class CollaborationSettings(BaseSettings):
         description="Maximum Markdown or Yjs document accepted for conversion.",
     )
     """Maximum document size in bytes. Default ``10 MiB``; larger activation requests fail with HTTP 413."""
-    max_sessions_per_user_document: int = Field(
-        5,
-        alias="INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT",
-        ge=1,
-        le=50,
-        description="Concurrent session cap per user and document.",
-    )
-    """Concurrent collaboration-session cap per user and document. Default ``5``."""
     session_rate_per_minute: int = Field(
         30,
         alias="INQTRIX_COLLABORATION_SESSION_RATE_PER_MINUTE",
@@ -3936,23 +4001,23 @@ class AgentPlatformSettings(BaseSettings):
     )
     """Character budget of the model-facing skill disclosure block (default 4000). Deterministic cut with a visible overflow line — a silent truncation would hide activatable skills from the model."""
     kernel_max_iterations: int = Field(
-        121,
+        120,
         ge=1,
         alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS",
         description=(
             "Initial cumulative LangGraph super-step allowance for one "
-            "kernel run. deepagents lifts the default bound to 9999; "
+            "kernel run. The kernel graph lifts the default bound to 9999; "
             "this restores a durable user-decision point. Sized by "
-            "formula: 9 (answer turn) + N tool turns x 8 super-steps; "
-            "the default 121 buys 14 sequential tool turns plus the "
+            "formula: 8 (answer turn) + N tool turns x 8 super-steps; "
+            "the default 120 buys 14 sequential tool turns plus the "
             "answer — a research child, a follow-up search, the todo "
             "bookkeeping and a document fit without an extension "
             "decision."
         ),
     )
-    """Cumulative checkpointed LangGraph super-step limit per kernel run (default 121 = 9 + 14x8). The limit counts graph super-steps, NOT model turns: the final answer turn costs 9 (``_ANSWER_TURN_SUPERSTEPS``) and every tool-calling turn 8 (``_SUPERSTEPS_PER_TOOL_TURN``) — both measured and pinned by the harness contract test. 121 therefore buys exactly 14 sequential tool turns plus the answer; lower limits may allow barely one ordinary tool turn. ``kernel_max_tool_calls`` (30) stays the limit on PARALLEL batch work; sequentially this recursion ceiling binds first. Reaching it parks the checkpointed run for an explicit user decision; no partial answer is implied."""
+    """Cumulative checkpointed LangGraph super-step limit per kernel run (default 120 = 8 + 14x8). The limit counts graph super-steps, NOT model turns: the final answer turn costs 8 (``_ANSWER_TURN_SUPERSTEPS``) and every tool-calling turn 8 (``_SUPERSTEPS_PER_TOOL_TURN``) — both measured and pinned by the harness contract test. 120 therefore buys exactly 14 sequential tool turns plus the answer; lower limits may allow barely one ordinary tool turn. ``kernel_max_tool_calls`` (30) stays the limit on PARALLEL batch work; sequentially this recursion ceiling binds first. Reaching it parks the checkpointed run for an explicit user decision; no partial answer is implied."""
     kernel_max_iterations_deep: int = Field(
-        121,
+        120,
         ge=1,
         alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_DEEP",
         description=(
@@ -3964,9 +4029,9 @@ class AgentPlatformSettings(BaseSettings):
             "decision."
         ),
     )
-    """LangGraph ``recursion_limit`` per kernel run when ``depth=deep`` (default 121 = 9 + 14x8). Same measured arithmetic as the normal ceiling and the same 14 sequential tool turns plus the answer; Deep buys more tool calls and the verification pass, not more turns and never an unbounded loop. The equality with the normal ceiling is deliberate: a thorough run is bounded by its tool calls, not by its steps, so raising this would buy turns a run does not use; the thoroughness a Stufe promises is bought in tool calls. Reaching the ceiling parks a durable run for an explicit partial/cancel/extension decision; the extension remains bounded by ``kernel_max_iterations_extension_ceiling_deep``. When a deployment lengthens deep runs further, raise the edge route timeout (Helm ``timeout: 3630s``) and ``INQTRIX_MAX_TOTAL_SECONDS`` in the same change, otherwise a K8s route cuts the SSE stream mid-run."""
+    """LangGraph ``recursion_limit`` per kernel run when ``depth=deep`` (default 120 = 8 + 14x8). Same measured arithmetic as the normal ceiling and the same 14 sequential tool turns plus the answer; Deep buys more tool calls and the verification pass, not more turns and never an unbounded loop. The equality with the normal ceiling is deliberate: a thorough run is bounded by its tool calls, not by its steps, so raising this would buy turns a run does not use; the thoroughness a Stufe promises is bought in tool calls. Reaching the ceiling parks a durable run for an explicit partial/cancel/extension decision; the extension remains bounded by ``kernel_max_iterations_extension_ceiling_deep``. When a deployment lengthens deep runs further, raise the edge route timeout (Helm ``timeout: 3630s``) and ``INQTRIX_MAX_TOTAL_SECONDS`` in the same change, otherwise a K8s route cuts the SSE stream mid-run."""
     kernel_max_iterations_extension_ceiling: int = Field(
-        241,
+        240,
         ge=1,
         alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_EXTENSION_CEILING",
         description=(
@@ -3974,9 +4039,9 @@ class AgentPlatformSettings(BaseSettings):
             "kernel step limit. It can never reduce the configured base."
         ),
     )
-    """Maximum cumulative checkpointed kernel super-steps after an explicit user extension in normal mode (default 241). This is an operator safety ceiling, not a model-controlled budget."""
+    """Maximum cumulative checkpointed kernel super-steps after an explicit user extension in normal mode (default 240 = 8 + 29x8). This is an operator safety ceiling, not a model-controlled budget."""
     kernel_max_iterations_extension_ceiling_deep: int = Field(
-        241,
+        240,
         ge=1,
         alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_EXTENSION_CEILING_DEEP",
         description=(
@@ -3984,7 +4049,7 @@ class AgentPlatformSettings(BaseSettings):
             "kernel step limit. It can never reduce the configured base."
         ),
     )
-    """Maximum cumulative checkpointed kernel super-steps after an explicit user extension in Deep mode (default 241)."""
+    """Maximum cumulative checkpointed kernel super-steps after an explicit user extension in Deep mode (default 240)."""
     kernel_max_tool_calls: int = Field(
         30,
         ge=1,
@@ -4100,10 +4165,11 @@ class AgentPlatformSettings(BaseSettings):
             "Explicit token threshold at which the kernel compacts its "
             "transcript. 0 (default) derives the threshold from the "
             "resolved model's card (context window x trigger fraction, "
-            "floor 128k); a nonzero value pins it verbatim."
+            "floor 128k); a nonzero value pins it. With a model card, "
+            "the threshold never exceeds the model's input budget."
         ),
     )
-    """Explicit kernel compaction threshold in tokens (default 0 = auto). Auto derives ``context_window_tokens x kernel_context_trigger_fraction`` from the resolved model's card with a 128k floor; models without a card use the floor. A nonzero pin wins over the derivation — operators with unusual serving limits set it directly."""
+    """Explicit kernel compaction threshold in tokens (default 0 = auto). Auto derives ``context_window_tokens x kernel_context_trigger_fraction`` from the resolved model's card with a 128k floor; models without a card use the floor. A nonzero pin wins over the derivation; operators with unusual serving limits set it directly. Either value is capped at the model's input budget (window less output and a margin) when the model has a card, with a WARNING; above it the input check of the model call would act first and compaction would never run. From 100k tokens, or from the threshold when it is lower, answered tool results that can be read again first give way to placeholders in the model's input; a summary follows only when the input still reaches the threshold."""
     kernel_context_trigger_fraction: float = Field(
         0.75,
         gt=0.0,
@@ -4115,14 +4181,14 @@ class AgentPlatformSettings(BaseSettings):
             "is 0)."
         ),
     )
-    """Fraction of the model context window that arms compaction when no explicit pin is set (default 0.75). Deliberately below deepagents' 0.85 default: the kernel must compact BEFORE a provider over-budget rejection, and the summary call itself still needs headroom."""
+    """Fraction of the model context window that arms compaction when no explicit pin is set (default 0.75). Deliberately below the common 0.85 library default: the kernel must compact BEFORE a provider over-budget rejection, and the summary call itself still needs headroom."""
     kernel_context_keep_messages: int = Field(
         12,
         ge=2,
         alias="INQTRIX_AGENT_KERNEL_CONTEXT_KEEP_MESSAGES",
         description=(
             "Newest messages kept verbatim when the kernel compacts; "
-            "everything older is summarized into the run archive."
+            "everything older is summarized, and its originals go to the run archive."
         ),
     )
     """Newest transcript messages preserved verbatim per compaction (default 12). Aggressive on purpose: compacting RARELY and LARGELY breaks the provider prompt-cache prefix once per compaction instead of on every turn (halve-not-trim)."""
@@ -4133,11 +4199,12 @@ class AgentPlatformSettings(BaseSettings):
         description=(
             "Bulk tool results above this many characters are archived "
             "without shortening the model handover. 0 disables eager archival. "
-            "Model-input planning owns any task-specific projection; explicit "
-            "evidence reads use their own bounded continuation windows."
+            "Once answered, an archived result may give way to a placeholder "
+            "naming its archive part in the model input; explicit evidence "
+            "reads use their own bounded continuation windows."
         ),
     )
-    """Character threshold for eager tool-result archival (default 8000, 0 = off). The full text lands in the run's ``context_archive`` artifact (readable via ``read_canvas``) and remains in the handover. Only model-input planning may substitute a task-specific projection with a readable original. Explicit evidence reads use bounded continuation windows."""
+    """Character threshold for eager tool-result archival (default 8000, 0 = off). The full text lands in the run's ``context_archive`` artifact (readable via ``read_canvas``) and remains in the handover. Once the model has answered it, the model input may show a placeholder naming that archive part instead (stage one of the context compaction, or recovery). Explicit evidence reads use bounded continuation windows."""
     max_parallel_children: int = Field(
         8,
         alias="INQTRIX_AGENT_MAX_PARALLEL_CHILDREN",

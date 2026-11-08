@@ -48,7 +48,7 @@ from inqtrix.storage.knowledge_orm import (
     knowledge_index_generations,
 )
 from inqtrix.storage.source_lifecycle_orm import source_lifecycles
-from inqtrix.source_authority import SourceScope
+from inqtrix.storage.source_authority import SourceScope
 from inqtrix.storage.migrate import run_migrations
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
@@ -122,7 +122,6 @@ async def store():
         engine=engine, app_role=APP_ROLE, vector_index=MemoryVectorIndex()
     )
     yield knowledge_store
-    await knowledge_store.aclose()
 
 
 @pytest.mark.asyncio
@@ -143,13 +142,14 @@ async def test_collection_share_facts_read_owner_and_name_only(store) -> None:
     def record(conn, cursor, statement, parameters, context, executemany):
         statements.append(statement)
 
-    event.listen(store._engine.sync_engine, "before_cursor_execute", record)
+    engine = store._session_factory.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", record)
     try:
         facts = await store.collection_share_facts(
             [owned.id, legacy.id, "kc_missing"]
         )
     finally:
-        event.remove(store._engine.sync_engine, "before_cursor_execute", record)
+        event.remove(engine, "before_cursor_execute", record)
 
     assert facts == {
         owned.id: ShareFacts(OWNER_USER_ID, "Owned"),

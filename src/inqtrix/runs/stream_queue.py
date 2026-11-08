@@ -52,7 +52,7 @@ worker connection from being dropped while idle."""
 
 
 class StreamJobQueue(Generic[TJob]):
-    """Synchronous Valkey-Streams queue (valkey-py client).
+    """Valkey-Streams queue on the asyncio client.
 
     Args:
         stream: Job stream key.
@@ -80,21 +80,42 @@ class StreamJobQueue(Generic[TJob]):
         consumer: str = "",
         client: Any | None = None,
     ) -> None:
+        self._url = url
+        self._injected_client = client
+        self._client_class: Any | None = None
         if client is None:
-            import valkey
+            # Imported where the queue is built, which the worker does before
+            # its loop runs: the package is an optional extra, and importing
+            # it on first use would hold up the event loop for the import.
+            from valkey.asyncio import Valkey
 
-            client = valkey.Valkey.from_url(
-                url,
-                decode_responses=True,
-                socket_timeout=_SOCKET_TIMEOUT_SECONDS,
-                socket_keepalive=True,
-            )
-        self._client = client
+            self._client_class = Valkey
+        self._own_client: Any | None = None
         self._consumer = consumer
         self._stream = stream
         self._dead_stream = dead_stream
         self._group = group
         self._entity_field = entity_field
+
+    @property
+    def _client(self) -> Any:
+        """The client of this queue, built on its first use."""
+        if self._injected_client is not None:
+            return self._injected_client
+        if self._own_client is None:
+            self._own_client = self._client_class.from_url(
+                self._url,
+                decode_responses=True,
+                socket_timeout=_SOCKET_TIMEOUT_SECONDS,
+                socket_keepalive=True,
+            )
+        return self._own_client
+
+    async def aclose(self) -> None:
+        """Close the client; a later use opens a new one."""
+        client, self._own_client = self._own_client, None
+        if client is not None:
+            await client.aclose()
 
     # -- subclass hook ---------------------------------------------------- #
 
@@ -109,7 +130,7 @@ class StreamJobQueue(Generic[TJob]):
         """Build the concrete dispatch dataclass for this job kind."""
         raise NotImplementedError
 
-    def group_info(self) -> dict[str, int] | None:
+    async def group_info(self) -> dict[str, int] | None:
         """Consumer-group liveness snapshot for the runtime manifest.
 
         Returns ``{'consumers': n, 'pending': m, 'depth': k}`` for this
@@ -118,7 +139,7 @@ class StreamJobQueue(Generic[TJob]):
         group does not exist yet (no worker ever attached).
         """
         try:
-            groups = self._client.xinfo_groups(self._stream)
+            groups = await self._client.xinfo_groups(self._stream)
             for group in groups:
                 if group.get("name") != self._group:
                     continue
@@ -128,7 +149,7 @@ class StreamJobQueue(Generic[TJob]):
                 # longer than the recency window is a dead husk, not an
                 # attached worker.
                 active = 0
-                for consumer in self._client.xinfo_consumers(
+                for consumer in await self._client.xinfo_consumers(
                     self._stream, self._group
                 ):
                     idle_ms = int(consumer.get("idle", 0) or 0)
@@ -137,7 +158,7 @@ class StreamJobQueue(Generic[TJob]):
                 return {
                     "consumers": active,
                     "pending": int(group.get("pending", 0) or 0),
-                    "depth": int(self._client.xlen(self._stream)),
+                    "depth": int(await self._client.xlen(self._stream)),
                 }
         except Exception:  # noqa: BLE001 — degrade to None, never raise
             return None
@@ -145,47 +166,48 @@ class StreamJobQueue(Generic[TJob]):
 
     # -- producer side ---------------------------------------------------- #
 
-    def _enqueue(self, *, entity_id: str, tenant_id: str) -> None:
+    async def _enqueue(self, *, entity_id: str, tenant_id: str) -> None:
         """Append one dispatch message; subclasses expose a typed alias."""
-        self._client.xadd(
+        await self._client.xadd(
             self._stream,
             {self._entity_field: entity_id, "tenant_id": tenant_id},
         )
 
     # -- consumer side ---------------------------------------------------- #
 
-    def ensure_group(self) -> None:
+    async def ensure_group(self) -> None:
         """Create the consumer group, tolerating prior creation."""
         try:
-            self._client.xgroup_create(
+            await self._client.xgroup_create(
                 self._stream, self._group, id="$", mkstream=True
             )
         except Exception as exc:  # noqa: BLE001 — only BUSYGROUP is benign
             if "BUSYGROUP" not in str(exc):
                 raise
 
-    def claim_pending(self) -> list[TJob]:
+    async def claim_pending(self) -> list[TJob]:
         """Drain this consumer's own pending entries (crash recovery)."""
-        response = self._client.xreadgroup(
+        response = await self._client.xreadgroup(
             self._group, self._consumer, {self._stream: "0"}
         )
-        return self._jobs_from_read(response)
+        return await self._jobs_from_read(response)
 
-    def claim_new(self, *, block_ms: int, count: int = 1) -> list[TJob]:
+    async def claim_new(self, *, block_ms: int, count: int = 1) -> list[TJob]:
         """Claim never-delivered messages, blocking up to *block_ms*."""
-        response = self._client.xreadgroup(
+        response = await self._client.xreadgroup(
             self._group,
             self._consumer,
             {self._stream: ">"},
             count=count,
             block=block_ms,
         )
-        return self._jobs_from_read(response)
+        return await self._jobs_from_read(response)
 
-    def reclaim(self, *, min_idle_ms: int, count: int = 10) -> list[TJob]:
-        """Take over entries whose owner stopped heartbeating.
+    async def reclaim(self, *, min_idle_ms: int, count: int = 10) -> list[TJob]:
+        """Take over at most *count* entries whose owner stopped heartbeating.
 
-        Uses the full XAUTOCLAIM form (not JUSTID) so the delivery
+        A worker takes only what it can start; the rest stays for whoever has
+        room. Uses the full XAUTOCLAIM form (not JUSTID) so the delivery
         counter increments — the counter is the dead-letter budget.
         The loop terminates on the ``0-0`` cursor OR when an iteration
         yields nothing new — claiming resets idle time, so a low
@@ -194,14 +216,14 @@ class StreamJobQueue(Generic[TJob]):
         jobs: list[TJob] = []
         seen: set[str] = set()
         cursor = "0-0"
-        while True:
-            response = self._client.xautoclaim(
+        while len(jobs) < count:
+            response = await self._client.xautoclaim(
                 self._stream,
                 self._group,
                 self._consumer,
                 min_idle_time=min_idle_ms,
                 start_id=cursor,
-                count=count,
+                count=count - len(jobs),
             )
             cursor, entries = response[0], response[1]
             fresh = [
@@ -211,11 +233,12 @@ class StreamJobQueue(Generic[TJob]):
             ]
             for message_id, fields in fresh:
                 seen.add(message_id)
-                jobs.append(self._job(message_id, fields))
+                jobs.append(await self._job(message_id, fields))
             if cursor == "0-0" or not fresh:
-                return jobs
+                break
+        return jobs
 
-    def heartbeat(self, message_ids: list[str]) -> None:
+    async def heartbeat(self, message_ids: list[str]) -> None:
         """Reset idle time on in-flight entries WITHOUT a retry bump.
 
         ``JUSTID`` is load-bearing: a plain XCLAIM would increment the
@@ -223,7 +246,7 @@ class StreamJobQueue(Generic[TJob]):
         """
         if not message_ids:
             return
-        self._client.xclaim(
+        await self._client.xclaim(
             self._stream,
             self._group,
             self._consumer,
@@ -232,20 +255,21 @@ class StreamJobQueue(Generic[TJob]):
             justid=True,
         )
 
-    def ack(self, message_id: str) -> None:
+    async def ack(self, message_id: str) -> None:
         """Acknowledge and delete one finished dispatch message.
 
         Call order is load-bearing: the terminal state must be
         committed to Postgres FIRST — a crash between commit and ack
         causes one redelivery that the job-row state machine absorbs.
         """
-        self._client.xack(self._stream, self._group, message_id)
-        self._client.xdel(self._stream, message_id)
+        client = self._client
+        await client.xack(self._stream, self._group, message_id)
+        await client.xdel(self._stream, message_id)
 
-    def dead_letter(self, job: TJob, *, reason: str) -> None:
+    async def dead_letter(self, job: TJob, *, reason: str) -> None:
         """Move one poisoned job to the dead-letter stream and ack it."""
         entity_id = getattr(job, self._entity_field)
-        self._client.xadd(
+        await self._client.xadd(
             self._dead_stream,
             {
                 self._entity_field: entity_id,
@@ -261,11 +285,11 @@ class StreamJobQueue(Generic[TJob]):
             job.delivery_count,  # type: ignore[attr-defined]
             reason,
         )
-        self.ack(job.message_id)  # type: ignore[attr-defined]
+        await self.ack(job.message_id)  # type: ignore[attr-defined]
 
     # -- helpers ---------------------------------------------------------- #
 
-    def _jobs_from_read(self, response: Any) -> list[TJob]:
+    async def _jobs_from_read(self, response: Any) -> list[TJob]:
         jobs: list[TJob] = []
         for _stream, entries in response or []:
             for message_id, fields in entries:
@@ -276,12 +300,12 @@ class StreamJobQueue(Generic[TJob]):
                         "Job stream entry %s discarded because it has no payload.",
                         message_id,
                     )
-                    self._client.xack(self._stream, self._group, message_id)
+                    await self._client.xack(self._stream, self._group, message_id)
                     continue
-                jobs.append(self._job(message_id, fields))
+                jobs.append(await self._job(message_id, fields))
         return jobs
 
-    def _job(self, message_id: str, fields: dict[str, str]) -> TJob:
+    async def _job(self, message_id: str, fields: dict[str, str]) -> TJob:
         tenant_id = fields.get("tenant_id", "")
         if not tenant_id:
             log.warning(
@@ -293,11 +317,11 @@ class StreamJobQueue(Generic[TJob]):
             message_id=message_id,
             entity_id=fields[self._entity_field],
             tenant_id=tenant_id,
-            delivery_count=self._delivery_count(message_id),
+            delivery_count=await self._delivery_count(message_id),
         )
 
-    def _delivery_count(self, message_id: str) -> int:
-        pending = self._client.xpending_range(
+    async def _delivery_count(self, message_id: str) -> int:
+        pending = await self._client.xpending_range(
             self._stream,
             self._group,
             min=message_id,

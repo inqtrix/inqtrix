@@ -9,6 +9,7 @@ never the input.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
@@ -284,6 +285,7 @@ def test_an_invalid_api_port_names_the_variable(monkeypatch: pytest.MonkeyPatch)
         lambda: SimpleNamespace(collaboration=SimpleNamespace(max_frame_bytes=1, max_queued_frames=2)),
     )
     monkeypatch.setattr(server_main, "create_app", lambda settings: "app")
+    monkeypatch.setattr(server_main, "freeze_startup_heap", lambda: None)
     monkeypatch.setattr(server_main.uvicorn, "run", lambda app, **kwargs: None)
     monkeypatch.setenv("INQTRIX_SERVER_PORT", MARKER)
 
@@ -299,12 +301,12 @@ def test_the_worker_contract_error_line_carries_no_cause_text(
 ) -> None:
     from inqtrix.worker import __main__ as worker_main
 
-    def _guard() -> None:
+    async def _guard() -> None:
         raise RuntimeError(f"contract violated {MARKER}")
 
     with caplog.at_level(logging.ERROR, logger="inqtrix"):
         with pytest.raises(RuntimeError):
-            worker_main._verified_database_claim_contract(_guard, sleep=lambda seconds: None)
+            asyncio.run(worker_main._verified_database_claim_contract(_guard))
 
     errors = [record for record in caplog.records if record.levelno == logging.ERROR]
     assert errors

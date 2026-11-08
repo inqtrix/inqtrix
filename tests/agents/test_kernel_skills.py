@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -262,7 +262,7 @@ def test_disclosure_load_and_allowlist_block():
         load_reply = [
             m for m in llm.chat_calls[1]["messages"] if m.get("role") == "tool"
         ][-1]["content"]
-        assert load_reply.startswith(f"[skill_geladen:{skill_id}@")
+        assert load_reply.startswith(f"[skill_loaded:{skill_id}@")
         assert "knapp und freundlich" in load_reply
 
         # The allowlist blocked web_instant VISIBLY.

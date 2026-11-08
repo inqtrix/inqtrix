@@ -11,7 +11,9 @@ import {
   PanelRightClose,
 } from '@/components/icons'
 import {
+  createContext,
   memo,
+  useContext,
   useDeferredValue,
   useEffect,
   useLayoutEffect,
@@ -50,7 +52,7 @@ import {
   isAgentStepScrollKey,
 } from './agentStepScroll'
 import { copyTextToClipboard } from '@/lib/clipboard'
-import { formatDuration } from '@/lib/time'
+import { formatDuration, formatTimeOfDay } from '@/lib/time'
 import { AgentDisclosure } from '@/features/agent/AgentDisclosure'
 import { agentArtifactReferences } from '@/features/agent/artifactCitations'
 import { evidenceLineageFromArtifactPayload } from '@/features/agent/evidenceProvenance'
@@ -59,12 +61,22 @@ import { readerError } from '@/api/requestErrorText'
 
 type ReportPanelProps = {
   onHide: () => void
+  /** Load the stored steps of a finished run whose step log is opened. */
+  onRequestSteps?: (runId: string) => void
   onSetReportAutocomplete?: (runId: string, includeInAutocomplete: boolean) => void
   onUseReportInChat?: (runId: string) => void
   /** Load the report again after its result failed to load. */
   onRetryResult?: (runId: string) => void
   selectedRun: ResearchRunRecord | null
+  /** Where loading the selected run's stored steps stands. */
+  stepsLoad?: 'done' | 'loading'
 }
+
+/** How a step log of a finished run asks for its stored steps, and where that stands. */
+const RunStepsContext = createContext<{
+  load?: 'done' | 'loading'
+  request?: (runId: string) => void
+}>({})
 
 type ReportPanelMode =
   | 'completed-loading'
@@ -90,10 +102,12 @@ export function reportStructuralIdentity(
 
 export const ReportPanel = memo(function ReportPanel({
   onHide,
+  onRequestSteps,
   onRetryResult,
   onSetReportAutocomplete,
   onUseReportInChat,
   selectedRun,
+  stepsLoad,
 }: ReportPanelProps) {
   const { t } = useLocale()
   // The navigation card acknowledges the click urgently in the parent. The
@@ -117,160 +131,166 @@ export const ReportPanel = memo(function ReportPanel({
   const canUseReportInChat = Boolean(
     targetRun && panelState.mode === 'completed-with-report' && onUseReportInChat,
   )
+  const runSteps = useMemo(
+    () => ({ load: stepsLoad, request: onRequestSteps }),
+    [onRequestSteps, stepsLoad],
+  )
 
   return (
     // Header and body form one identity-owned surface. The boundary therefore
     // never exposes a newly selected title above the previous report body.
-    <aside
-      className="h-full min-h-0 w-full min-w-0 max-w-full overflow-hidden border-t border-border bg-background lg:border-t-0"
-    >
-      <StructuralLoadBoundary
-        className="h-full"
-        fallback={<ReportSurfaceSkeleton />}
-        identity={reportStructuralIdentity(targetRun?.runId ?? null, panelState.mode)}
-        phase={targetRun
-          ? isRunningRun
-            ? 'refreshing'
-            : panelState.mode === 'completed-loading' ? 'pending' : 'ready'
-          : 'empty'}
+    <RunStepsContext.Provider value={runSteps}>
+      <aside
+        className="h-full min-h-0 w-full min-w-0 max-w-full overflow-hidden border-t border-border bg-background lg:border-t-0"
       >
-      <Tabs
-        className="flex h-full min-h-0 flex-col"
-        data-report-surface-run-id={targetRun?.runId ?? ''}
-        defaultValue="preview"
-      >
-        <div>
-          <div className="flex inqtrix-panel-header items-center justify-between gap-3 border-b border-border px-3">
-            <div className="min-w-0">
-              <h2 className="t-section truncate text-foreground">
-                {panelTitle}
-              </h2>
-            </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    aria-label={t.report.useInChat}
-                    className="size-7"
-                    disabled={!canUseReportInChat}
-                    onClick={() => {
-                      if (!targetRun || !canUseReportInChat) return
-                      onUseReportInChat?.(targetRun.runId)
-                    }}
-                    size="icon"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <MessageSquarePlus className="size-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{t.report.useInChat}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    aria-label={t.report.hide}
-                    className="size-7"
-                    onClick={onHide}
-                    size="icon"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <PanelRightClose className="size-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{t.report.hide}</TooltipContent>
-              </Tooltip>
-            </div>
-          </div>
-          {targetRun && (
-            <div className="border-b border-border px-4 py-2.5">
+        <StructuralLoadBoundary
+          className="h-full"
+          fallback={<ReportSurfaceSkeleton />}
+          identity={reportStructuralIdentity(targetRun?.runId ?? null, panelState.mode)}
+          phase={targetRun
+            ? isRunningRun
+              ? 'refreshing'
+              : panelState.mode === 'completed-loading' ? 'pending' : 'ready'
+            : 'empty'}
+        >
+        <Tabs
+          className="flex h-full min-h-0 flex-col"
+          data-report-surface-run-id={targetRun?.runId ?? ''}
+          defaultValue="preview"
+        >
+          <div>
+            <div className="flex inqtrix-panel-header items-center justify-between gap-3 border-b border-border px-3">
               <div className="min-w-0">
-                <p className="t-meta line-clamp-3 break-words text-muted-foreground">
-                  {targetRun.summary.title}
-                </p>
-                {isRunningRun ? (
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <span className="inline-flex h-6 items-center gap-1.5 rounded-md border border-success/20 bg-success-subtle px-2 text-xs font-semibold text-success">
-                      <span className="size-1.5 rounded-full bg-success" />
-                      {t.report.live}
-                    </span>
-                    <span className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 text-xs font-semibold text-muted-foreground">
-                      {visibleEventCount} {t.report.events}
-                    </span>
-                  </div>
-                ) : (
-                  panelState.mode === 'completed-with-report' && targetRun.source === 'mock' && (
-                    <Badge
-                      className="mt-1.5 shrink-0 border-border bg-muted text-muted-foreground hover:bg-muted"
-                      variant="outline"
+                <h2 className="t-section truncate text-foreground">
+                  {panelTitle}
+                </h2>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label={t.report.useInChat}
+                      className="size-7"
+                      disabled={!canUseReportInChat}
+                      onClick={() => {
+                        if (!targetRun || !canUseReportInChat) return
+                        onUseReportInChat?.(targetRun.runId)
+                      }}
+                      size="icon"
+                      type="button"
+                      variant="ghost"
                     >
-                      {t.report.mockReport}
-                    </Badge>
-                  )
+                      <MessageSquarePlus className="size-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{t.report.useInChat}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label={t.report.hide}
+                      className="size-7"
+                      onClick={onHide}
+                      size="icon"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <PanelRightClose className="size-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{t.report.hide}</TooltipContent>
+                </Tooltip>
+              </div>
+            </div>
+            {targetRun && (
+              <div className="border-b border-border px-4 py-2.5">
+                <div className="min-w-0">
+                  <p className="t-meta line-clamp-3 break-words text-muted-foreground">
+                    {targetRun.summary.title}
+                  </p>
+                  {isRunningRun ? (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <span className="inline-flex h-6 items-center gap-1.5 rounded-md border border-success/20 bg-success-subtle px-2 text-xs font-semibold text-success">
+                        <span className="size-1.5 rounded-full bg-success" />
+                        {t.report.live}
+                      </span>
+                      <span className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 text-xs font-semibold text-muted-foreground">
+                        {visibleEventCount} {t.report.events}
+                      </span>
+                    </div>
+                  ) : (
+                    panelState.mode === 'completed-with-report' && targetRun.source === 'mock' && (
+                      <Badge
+                        className="mt-1.5 shrink-0 border-border bg-muted text-muted-foreground hover:bg-muted"
+                        variant="outline"
+                      >
+                        {t.report.mockReport}
+                      </Badge>
+                    )
+                  )}
+                </div>
+                {isCompletedRun && (
+                  <div className="mt-3 flex min-w-0 items-center">
+                    <TabsList className="h-9 bg-surface">
+                      <TabsTrigger className="h-7 px-2 text-xs" value="preview">
+                        {t.report.tabs.preview}
+                      </TabsTrigger>
+                      <TabsTrigger className="h-7 px-2 text-xs" value="evidence">
+                        {t.report.tabs.evidence}
+                      </TabsTrigger>
+                      <TabsTrigger className="h-7 px-2 text-xs" value="agentSteps">
+                        {t.report.tabs.agentSteps}
+                      </TabsTrigger>
+                      <TabsTrigger className="h-7 px-2 text-xs" value="export">
+                        {t.report.tabs.export}
+                      </TabsTrigger>
+                    </TabsList>
+                  </div>
                 )}
               </div>
-              {isCompletedRun && (
-                <div className="mt-3 flex min-w-0 items-center">
-                  <TabsList className="h-9 bg-surface">
-                    <TabsTrigger className="h-7 px-2 text-xs" value="preview">
-                      {t.report.tabs.preview}
-                    </TabsTrigger>
-                    <TabsTrigger className="h-7 px-2 text-xs" value="evidence">
-                      {t.report.tabs.evidence}
-                    </TabsTrigger>
-                    <TabsTrigger className="h-7 px-2 text-xs" value="agentSteps">
-                      {t.report.tabs.agentSteps}
-                    </TabsTrigger>
-                    <TabsTrigger className="h-7 px-2 text-xs" value="export">
-                      {t.report.tabs.export}
-                    </TabsTrigger>
-                  </TabsList>
-                </div>
+            )}
+          </div>
+
+          {!targetRun ? (
+            <div className="flex min-h-0 flex-1" key="empty">
+              <EmptyReportPanel />
+            </div>
+          ) : isCompletedRun ? (
+            <div className="min-h-0 flex-1 overflow-hidden" key="report">
+              <ScrollArea className="h-full min-h-0" key={targetRun.runId}>
+                <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="preview">
+                  <ReportPreview
+                    markdown={panelState.markdown}
+                    onRetryResult={onRetryResult}
+                    run={targetRun}
+                  />
+                </TabsContent>
+                <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="evidence">
+                  <ReportEvidence run={targetRun} />
+                </TabsContent>
+                <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="agentSteps">
+                  <ReportAgentSteps run={targetRun} />
+                </TabsContent>
+                <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="export">
+                  <ReportExport markdown={panelState.markdown} onSetAutocomplete={onSetReportAutocomplete} run={targetRun} />
+                </TabsContent>
+              </ScrollArea>
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 overflow-hidden" key="status">
+              {isRunningRun ? (
+                <RunStatusPanel key={targetRun.runId} run={targetRun} />
+              ) : (
+                <ScrollArea className="h-full min-h-0" key={targetRun.runId}>
+                  <RunStatusPanel run={targetRun} />
+                </ScrollArea>
               )}
             </div>
           )}
-        </div>
-
-        {!targetRun ? (
-          <div className="flex min-h-0 flex-1" key="empty">
-            <EmptyReportPanel />
-          </div>
-        ) : isCompletedRun ? (
-          <div className="min-h-0 flex-1 overflow-hidden" key="report">
-            <ScrollArea className="h-full min-h-0" key={targetRun.runId}>
-              <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="preview">
-                <ReportPreview
-                  markdown={panelState.markdown}
-                  onRetryResult={onRetryResult}
-                  run={targetRun}
-                />
-              </TabsContent>
-              <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="evidence">
-                <ReportEvidence run={targetRun} />
-              </TabsContent>
-              <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="agentSteps">
-                <ReportAgentSteps run={targetRun} />
-              </TabsContent>
-              <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="export">
-                <ReportExport markdown={panelState.markdown} onSetAutocomplete={onSetReportAutocomplete} run={targetRun} />
-              </TabsContent>
-            </ScrollArea>
-          </div>
-        ) : (
-          <div className="min-h-0 flex-1 overflow-hidden" key="status">
-            {isRunningRun ? (
-              <RunStatusPanel key={targetRun.runId} run={targetRun} />
-            ) : (
-              <ScrollArea className="h-full min-h-0" key={targetRun.runId}>
-                <RunStatusPanel run={targetRun} />
-              </ScrollArea>
-            )}
-          </div>
-        )}
-      </Tabs>
-      </StructuralLoadBoundary>
-    </aside>
+        </Tabs>
+        </StructuralLoadBoundary>
+      </aside>
+    </RunStepsContext.Provider>
   )
 })
 
@@ -609,10 +629,17 @@ function AgentStepTimeline({
   mode: 'archive' | 'live'
   run: ResearchRunRecord
 }) {
-  const { t } = useLocale()
+  const { locale, t } = useLocale()
   const reduceMotion = Boolean(useReducedMotion())
   const isLive = mode === 'live'
   const events = run.events.filter(isDisplayableAgentEvent)
+  const steps = useContext(RunStepsContext)
+  const requestSteps = steps.request
+  // A finished run's log holds no steps after a reload until they are
+  // loaded; it asks for them once it is open.
+  useEffect(() => {
+    if (!isLive && events.length === 0 && requestSteps) requestSteps(run.runId)
+  }, [events.length, isLive, requestSteps, run.runId])
   const activeEventIndex = isLive ? events.findIndex((event) => event.active) : -1
   const derivedActiveEventIndex = isLive
     ? activeEventIndex >= 0
@@ -815,7 +842,7 @@ function AgentStepTimeline({
                           ) : (
                             <Info className="size-3 text-muted-foreground/70" />
                           )}
-                          <time>{formatTime(event.createdAt)}</time>
+                          <time>{formatTimeOfDay(event.createdAt, locale)}</time>
                         </span>
                       </div>
                       {isActive && isLive && (
@@ -844,7 +871,11 @@ function AgentStepTimeline({
         </div>
       ) : (
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          {isLive ? t.report.noEvents : t.report.agentStepsEmpty}
+          {isLive
+            ? t.report.noEvents
+            : steps.request && steps.load !== 'done'
+              ? t.report.agentStepsLoading
+              : t.report.agentStepsEmpty}
         </p>
       )}
     </section>
@@ -1075,13 +1106,6 @@ function formatPercent(value: number | undefined) {
   return `${Math.round(value * 100)}%`
 }
 
-function formatTime(iso: string) {
-  return new Intl.DateTimeFormat('de-DE', {
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(iso))
-}
-
 function ReportExport({
   markdown,
   onSetAutocomplete,
@@ -1091,7 +1115,7 @@ function ReportExport({
   onSetAutocomplete?: (runId: string, includeInAutocomplete: boolean) => void
   run: ResearchRunRecord
 }) {
-  const { t } = useLocale()
+  const { locale, t } = useLocale()
   const hasReport = Boolean(markdown)
   const [isExportingWord, setIsExportingWord] = useState(false)
   const [wordFailed, setWordFailed] = useState(false)
@@ -1118,7 +1142,7 @@ function ReportExport({
     try {
       // Reuse the editor's markdown->docx export (code-split, browser-only).
       const { exportMarkdownToDocx } = await import('@/features/editor/export/docxExport')
-      await exportMarkdownToDocx(markdown.trimEnd(), run.summary.title, {
+      await exportMarkdownToDocx(markdown.trimEnd(), run.summary.title, locale, {
         notice: t.aiTransparency.exportNotice,
       })
     } catch (error) {

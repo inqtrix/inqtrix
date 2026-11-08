@@ -72,11 +72,11 @@ def test_rate_limit_replay(monkeypatch: pytest.MonkeyPatch) -> None:
 
     A 429 is retried with backoff; the single-429 cassette covers the
     escalation path, so the rate-limit retry budget is set to 0 here to
-    exhaust it on the first hit. anthropic.py imports the constant by
-    value, so patch it on the anthropic module.
+    exhaust it on the first hit. The shared retry loop reads the
+    constant from the base module.
     """
     monkeypatch.setattr(
-        "inqtrix.providers.anthropic._SDK_RATE_LIMIT_MAX_RETRIES", 0
+        "inqtrix.providers.base._SDK_RATE_LIMIT_MAX_RETRIES", 0
     )
     provider = _build_provider()
 

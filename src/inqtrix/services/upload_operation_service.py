@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import threading
 import time
 from typing import TYPE_CHECKING, Callable
 
+from inqtrix import aio
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.content.ports import FileRecord
 from inqtrix.project.asset_records_ports import (
@@ -35,7 +35,6 @@ from inqtrix.services.file_service import (
     SpooledUpload,
 )
 from inqtrix.storage.migration_contract import SchemaHeadMismatch
-from inqtrix.sync_bridge import run_coro_sync
 from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
@@ -43,6 +42,9 @@ if TYPE_CHECKING:
     from inqtrix.services.quota_service import QuotaService
 
 log = logging.getLogger(__name__)
+
+UPLOAD_RECONCILE_SECONDS = 5.0
+"""How often a process without a queue executes what a worker would have been sent."""
 
 
 class UploadExecutionDeferred(RuntimeError):
@@ -208,7 +210,7 @@ class UploadOperationService:
                 owner_user_id=asset.created_by_user_id,
                 workspace_id=asset.workspace_id,
             )
-        return self.operations.start_or_resume(
+        return await self.operations.astart_or_resume(
             asset=asset,
             proposed_file=proposed,
             binding=binding,
@@ -247,7 +249,7 @@ class UploadOperationService:
         except UploadExecutionDeferred:
             raise
         except UploadBytesRequired as exc:
-            self._land_failure(
+            await self._land_failure(
                 record,
                 attempt.attempt,
                 str(exc),
@@ -263,14 +265,14 @@ class UploadOperationService:
             try:
                 await self._discard_if_unbound(record)
             except Exception as cleanup_exc:
-                self._defer_dependency_failure(
+                await self._defer_dependency_failure(
                     record,
                     attempt.attempt,
                     cleanup_exc,
                     error_type="upload_cleanup_error",
                 )
                 raise  # pragma: no cover - helper always raises
-            self._land_failure(
+            await self._land_failure(
                 record,
                 attempt.attempt,
                 sanitize_error(exc),
@@ -278,7 +280,7 @@ class UploadOperationService:
             )
             raise
         except (FileRegistryConflict, UploadOperationConflict) as exc:
-            self._land_failure(
+            await self._land_failure(
                 record,
                 attempt.attempt,
                 sanitize_error(exc),
@@ -286,7 +288,7 @@ class UploadOperationService:
             )
             raise
         except Exception as exc:
-            self._defer_dependency_failure(
+            await self._defer_dependency_failure(
                 record,
                 attempt.attempt,
                 exc,
@@ -297,7 +299,7 @@ class UploadOperationService:
             heartbeat_stop.set()
             await heartbeat
 
-        final = self.operations.get_record(
+        final = await self.operations.aget_record(
             record.operation_id, tenant_id=record.tenant_id
         )
         asset = await self._assets.get_asset(record.asset_id, visible_to=visible_to)
@@ -311,7 +313,7 @@ class UploadOperationService:
         visible_to: UserContext | None,
         spooled: SpooledUpload | None,
     ) -> None:
-        self._assert_current(record, fence_attempt)
+        await self._assert_current(record, fence_attempt)
         # An operation that was ready before only prepares its stored
         # original again (queue_missing_preparations); that is no new upload.
         prepared_again = record.finished_at is not None
@@ -330,7 +332,7 @@ class UploadOperationService:
                 )
             await self._files.store_prepared_object(record.file, spooled)
             self._fault("after_object_store", record)
-        self._checkpoint(record, fence_attempt, UploadStage.OBJECT_STORED)
+        await self._checkpoint(record, fence_attempt, UploadStage.OBJECT_STORED)
 
         registered = await self._files.prepared_file_record(
             record.file.id, tenant_id=record.tenant_id
@@ -340,7 +342,7 @@ class UploadOperationService:
             self._fault("after_file_registry", record)
         elif registered != record.file:
             raise FileRegistryConflict(record.file.id)
-        self._checkpoint(record, fence_attempt, UploadStage.FILE_REGISTERED)
+        await self._checkpoint(record, fence_attempt, UploadStage.FILE_REGISTERED)
 
         asset = await self._assets.get_asset(record.asset_id, visible_to=visible_to)
         if asset.lifecycle_status != "active":
@@ -373,17 +375,17 @@ class UploadOperationService:
             self._fault("after_asset_bind", record)
         elif asset.server_file_id != record.file.id:
             raise AssetUploadConflict(record.asset_id)
-        self._checkpoint(record, fence_attempt, UploadStage.ASSET_BOUND)
+        await self._checkpoint(record, fence_attempt, UploadStage.ASSET_BOUND)
 
         if self._files.text_extraction_available:
             if _stage_before(record.stage, UploadStage.PARSING):
-                self._checkpoint(record, fence_attempt, UploadStage.PARSING)
+                await self._checkpoint(record, fence_attempt, UploadStage.PARSING)
             if record.stage == UploadStage.PARSING:
                 # The request owns the temporary upload spool.  Once bytes and
                 # binding are durable it hands the potentially long parser to
                 # the existing worker lifecycle and returns 202 immediately.
                 if spooled is not None:
-                    self._queue_parser_continuation(record, fence_attempt)
+                    await self._queue_parser_continuation(record, fence_attempt)
                 asset = await self._assets.get_asset(
                     record.asset_id, visible_to=visible_to
                 )
@@ -453,10 +455,10 @@ class UploadOperationService:
                             prepared_at=time.time(),
                         )
                 self._fault("after_parse_result", record)
-                self._checkpoint(record, fence_attempt, UploadStage.PARSE_FINISHED)
+                await self._checkpoint(record, fence_attempt, UploadStage.PARSE_FINISHED)
 
         if self._quota is not None and record.file.owner_user_id is not None:
-            self._assert_current(record, fence_attempt)
+            await self._assert_current(record, fence_attempt)
             stock = await self._quota.set_stock_for_subject(
                 QuotaSubject(
                     tenant_id=record.tenant_id,
@@ -469,9 +471,9 @@ class UploadOperationService:
             if stock.tombstoned:
                 raise AssetDeletionInProgress(record.asset_id)
         self._fault("after_quota_receipt", record)
-        self._checkpoint(record, fence_attempt, UploadStage.QUOTA_BOOKED)
+        await self._checkpoint(record, fence_attempt, UploadStage.QUOTA_BOOKED)
 
-        landed = self.operations.complete(
+        landed = await self.operations.acomplete(
             record.operation_id,
             tenant_id=record.tenant_id,
             fence_attempt=fence_attempt,
@@ -482,13 +484,13 @@ class UploadOperationService:
             await self._audit_uploaded(record)
         self._fault("after_ready_commit", record)
 
-    def _checkpoint(
+    async def _checkpoint(
         self,
         record: UploadOperationRecord,
         fence_attempt: int,
         stage: UploadStage,
     ) -> None:
-        landed = self.operations.checkpoint(
+        landed = await self.operations.acheckpoint(
             record.operation_id,
             tenant_id=record.tenant_id,
             stage=stage,
@@ -499,10 +501,10 @@ class UploadOperationService:
         if not _stage_before(stage, record.stage):
             record.stage = stage
 
-    def _queue_parser_continuation(
+    async def _queue_parser_continuation(
         self, record: UploadOperationRecord, fence_attempt: int
     ) -> None:
-        landed = self.operations.queue_continuation(
+        landed = await self.operations.aqueue_continuation(
             record.operation_id,
             tenant_id=record.tenant_id,
             fence_attempt=fence_attempt,
@@ -510,7 +512,7 @@ class UploadOperationService:
         if not landed:
             raise UploadAttemptSuperseded(record.operation_id)
         raise UploadExecutionDeferred(
-            self.operations.get(
+            await self.operations.aget(
                 record.operation_id,
                 tenant_id=record.tenant_id,
                 created_by_user_id=record.created_by_user_id,
@@ -518,17 +520,17 @@ class UploadOperationService:
             )
         )
 
-    def _assert_current(
+    async def _assert_current(
         self, record: UploadOperationRecord, fence_attempt: int
     ) -> None:
-        if not self.operations.is_attempt_current(
+        if not await self.operations.ais_attempt_current(
             record.operation_id,
             tenant_id=record.tenant_id,
             fence_attempt=fence_attempt,
         ):
             raise UploadAttemptSuperseded(record.operation_id)
 
-    def _land_failure(
+    async def _land_failure(
         self,
         record: UploadOperationRecord,
         fence_attempt: int,
@@ -537,7 +539,7 @@ class UploadOperationService:
         error_type: str,
         awaiting_bytes: bool = False,
     ) -> None:
-        landed = self.operations.fail(
+        landed = await self.operations.afail(
             record.operation_id,
             message,
             tenant_id=record.tenant_id,
@@ -561,7 +563,7 @@ class UploadOperationService:
         if linked is None:
             await self._files.discard_prepared_file(record.file)
 
-    def _defer_dependency_failure(
+    async def _defer_dependency_failure(
         self,
         record: UploadOperationRecord,
         fence_attempt: int,
@@ -571,7 +573,7 @@ class UploadOperationService:
     ) -> None:
         message = sanitize_error(exc)
         if fence_attempt < self._max_attempts:
-            landed = self.operations.queue_retry(
+            landed = await self.operations.aqueue_retry(
                 record.operation_id,
                 message,
                 tenant_id=record.tenant_id,
@@ -588,14 +590,14 @@ class UploadOperationService:
                 error_type,
             )
             raise UploadExecutionDeferred(
-                self.operations.get(
+                await self.operations.aget(
                     record.operation_id,
                     tenant_id=record.tenant_id,
                     created_by_user_id=record.created_by_user_id,
                     workspace_id=record.workspace_id,
                 )
             ) from exc
-        self._land_failure(
+        await self._land_failure(
             record,
             fence_attempt,
             message,
@@ -626,8 +628,7 @@ class UploadOperationService:
                 return
             except TimeoutError:
                 try:
-                    landed = await asyncio.to_thread(
-                        self.operations.heartbeat,
+                    landed = await self.operations.aheartbeat(
                         record.operation_id,
                         tenant_id=record.tenant_id,
                         fence_attempt=fence_attempt,
@@ -643,7 +644,7 @@ class UploadOperationService:
                 if not landed:
                     return
 
-    def queue_missing_preparations(self, *, limit: int = 20) -> list[tuple[str, str]]:
+    async def aqueue_missing_preparations(self, *, limit: int = 20) -> list[tuple[str, str]]:
         """Send ready uploads whose preparation was skipped back to parsing.
 
         An upload completed while no parser was configured is ready without
@@ -655,10 +656,10 @@ class UploadOperationService:
         """
         if not self._files.text_extraction_available:
             return []
-        return self.operations.queue_missing_preparations(limit=limit)
+        return await self.operations.aqueue_missing_preparations(limit=limit)
 
-    def execute_claimed(self, claimed) -> dict:
-        """Synchronous worker bridge over the same service implementation."""
+    async def aexecute_claimed(self, claimed) -> dict:
+        """One claimed attempt, with the identity its stored operation carries."""
 
         record = claimed.record
         principal = Principal(
@@ -671,82 +672,46 @@ class UploadOperationService:
             principal=principal,
             workspace_ids=((record.workspace_id,) if record.workspace_id else ()),
         )
-        _, _, summary = run_coro_sync(
-            self.execute(
-                UploadAttempt(record=record, attempt=claimed.attempt),
-                visible_to=visible_to,
-                spooled=None,
-            )
+        _, _, summary = await self.execute(
+            UploadAttempt(record=record, attempt=claimed.attempt),
+            visible_to=visible_to,
+            spooled=None,
         )
         return summary
 
+    def execute_claimed(self, claimed) -> dict:
+        """Synchronous worker bridge over the same service implementation."""
 
-class UploadReconciler:
-    """Lifespan-owned no-queue recovery for durable upload operations.
+        return aio.call_from_thread(self.aexecute_claimed(claimed))
 
-    Construction is deliberately inert.  The ASGI lifespan starts the loop
-    only after application startup has succeeded and closes it before stores
-    are disposed.  ``start`` and ``close`` are idempotent, and the same app
-    object may enter a fresh lifespan after a clean shutdown in tests or an
-    embedded server.
-    """
+    async def reconcile(self, *, stale_after_seconds: float = 30.0) -> None:
+        """Without a queue, execute what a worker would have been sent.
 
-    def __init__(
-        self,
-        *,
-        service: UploadOperationService,
-        interval_seconds: float = 5.0,
-        stale_after_seconds: float = 30.0,
-    ) -> None:
-        self._service = service
-        self._interval = max(1.0, interval_seconds)
-        self._stale_after = max(1.0, stale_after_seconds)
-        self._lifecycle_lock = threading.Lock()
-        self._stop: threading.Event | None = None
-        self._thread: threading.Thread | None = None
-
-    @property
-    def running(self) -> bool:
-        """Whether the current lifespan owns a live reconciliation loop."""
-        with self._lifecycle_lock:
-            return self._thread is not None and self._thread.is_alive()
-
-    def start(self) -> None:
-        """Start one loop, or leave the already-running loop untouched."""
-        with self._lifecycle_lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            stop = threading.Event()
-            thread = threading.Thread(
-                target=self._run,
-                args=(stop,),
-                name="inqtrix-upload-reconciler",
-                daemon=True,
+        Run on a clock by :class:`~inqtrix.periodic_sweep.PeriodicSweep`.
+        """
+        try:
+            await self._execute_due(stale_after_seconds)
+        except SchemaHeadMismatch as exc:
+            # The claim transaction's schema fence fired: the database
+            # moved past the head this process was built for. That can
+            # never heal for THIS process (its expected head is a code
+            # constant), so retrying every pass would only downgrade a
+            # fatal state to warning spam. Stop loudly; the upgraded
+            # process brings a matching reconciler.
+            log.error(
+                "Upload reconciler: schema head changed under this process; the "
+                "reconciler is stopping so an updated process can take over "
+                "(installed=%s, expected=%s).",
+                exc.installed,
+                exc.expected,
             )
-            self._stop = stop
-            self._thread = thread
-            thread.start()
+            raise
 
-    def close(self) -> None:
-        """Stop the current loop and make a later clean restart possible."""
-        with self._lifecycle_lock:
-            stop = self._stop
-            thread = self._thread
-        if stop is None or thread is None:
-            return
-        stop.set()
-        if thread is not threading.current_thread() and thread.is_alive():
-            thread.join(timeout=5)
-        with self._lifecycle_lock:
-            if self._thread is thread and not thread.is_alive():
-                self._thread = None
-                self._stop = None
-
-    def _queued_preparations(self) -> list[tuple[str, str]]:
+    async def _queued_preparations(self) -> list[tuple[str, str]]:
         """Preparations skipped for want of a parser, queued for this pass;
         failing that never blocks the stale dispatches."""
         try:
-            return list(self._service.queue_missing_preparations())
+            return list(await self.aqueue_missing_preparations())
         except Exception as exc:
             log.warning(
                 "Missing upload preparations could not be queued (error_type=%s).",
@@ -754,52 +719,30 @@ class UploadReconciler:
             )
             return []
 
-    def _run(self, stop: threading.Event) -> None:
-        while not stop.wait(self._interval):
+    async def _execute_due(self, stale_after_seconds: float) -> None:
+        due = dict.fromkeys(
+            [
+                *await self._queued_preparations(),
+                *await self.operations.astale_dispatches(
+                    older_than_seconds=max(1.0, stale_after_seconds)
+                ),
+            ]
+        )
+        for operation_id, tenant_id in due:
+            claimed = await self.operations.aclaim_for_execution(
+                operation_id, tenant_id, allow_takeover=False
+            )
+            if claimed is None:
+                continue
             try:
-                due = dict.fromkeys(
-                    [
-                        *self._queued_preparations(),
-                        *self._service.operations.stale_dispatches(
-                            older_than_seconds=self._stale_after
-                        ),
-                    ]
-                )
-                for operation_id, tenant_id in due:
-                    claimed = self._service.operations.claim_for_execution(
-                        operation_id, tenant_id, allow_takeover=False
-                    )
-                    if claimed is None:
-                        continue
-                    try:
-                        self._service.execute_claimed(claimed)
-                    except UploadBytesRequired:
-                        continue
-                    except UploadExecutionDeferred:
-                        continue
-                    except Exception as exc:
-                        log.warning(
-                            "Upload reconciler could not finalize %s (error_type=%s).",
-                            operation_id,
-                            type(exc).__name__,
-                        )
-            except SchemaHeadMismatch as exc:
-                # The claim transaction's schema fence fired: the database
-                # moved past the head this process was built for. That can
-                # never heal for THIS process (its expected head is a code
-                # constant), so retrying every pass would only downgrade a
-                # fatal state to warning spam. Stop loudly; the upgraded
-                # process brings a matching reconciler.
-                log.error(
-                    "Upload reconciler: schema head changed under this process; the "
-                    "reconciler is stopping so an updated process can take over "
-                    "(installed=%s, expected=%s).",
-                    exc.installed,
-                    exc.expected,
-                )
-                return
+                await self.aexecute_claimed(claimed)
+            except UploadBytesRequired:
+                continue
+            except UploadExecutionDeferred:
+                continue
             except Exception as exc:
                 log.warning(
-                    "Upload reconciler pass failed (error_type=%s).",
+                    "Upload reconciler could not finalize %s (error_type=%s).",
+                    operation_id,
                     type(exc).__name__,
                 )

@@ -8,7 +8,7 @@ The `inqtrix-parity` CLI compares a live agent run against a pre-recorded baseli
 
 ## Canonical questions and baselines
 
-- Canonical questions live in `tests/integration/questions.json`. The whole `tests/integration/` tree is git-ignored and has never been versioned, so a fresh clone contains neither the question set nor any baselines: put your own parity assets in place first, otherwise `inqtrix-parity contract` aborts with a `FileNotFoundError` on the missing questions file.
+- Canonical questions live in `tests/integration/questions.json`. The whole `tests/integration/` tree is git-ignored and has never been versioned, so a fresh clone contains neither the question set nor any baselines: put your own parity assets in place first, otherwise `inqtrix-parity contract` aborts with a `FileNotFoundError` on the missing questions file. The test suite does not depend on this tree: `tests/test_parity.py` reads the tracked sample `tests/fixtures/parity/questions.json`.
 - Baseline artefacts live in `tests/integration/baselines/`: this is the default target of `import-baselines --output-dir` and the default `--baseline-dir` of `compare`. Run artefacts are written to `tests/integration/runs/` and compare reports to `tests/integration/reports/`; both directories are created on first use.
 - The parity CLI does not invent baselines; you import them from another repository or re-record them intentionally.
 

@@ -22,7 +22,7 @@ from inqtrix.agents.scheduler import TaskOutcome
 from inqtrix.exceptions import AgentCancelled
 from inqtrix.i18n import t
 from inqtrix.providers.base import StructuredLLMResponse
-from inqtrix.runs.shared import ANSWER_DRAFT_EVENT, OUTCOME_EVENT, expand_run_event
+from inqtrix.runs.shared import expand_run_event
 from inqtrix.search_result import GroundedSearchResult
 from tests.agents.test_research_prospect import (
     NEUTRAL_REFERENCE,
@@ -46,6 +46,7 @@ from tests.agents.test_workspace_agent import (
     wait_status,
 )
 from tests.test_untrusted_content import PLANTED
+from inqtrix.harness.contracts.events import ANSWER_DRAFT_EVENT, OUTCOME_EVENT
 
 
 def _records(client, run_id: str) -> list[dict[str, Any]]:
@@ -958,7 +959,6 @@ def test_a_record_carries_the_review_report_it_was_built_from(monkeypatch):
     }
     assert [line["kind"] for line in record["lines"]] == ["output_requirement"]
     assert "Die Anbieter fehlen." in record["lines"][0]["text"]
-
 
 
 # -- a review from general knowledge ----------------------------------------- #

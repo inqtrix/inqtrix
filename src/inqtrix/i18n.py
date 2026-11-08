@@ -844,6 +844,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Not cited in the text; examined by the research run and contained in the evidence ledger.",
     },
     "answer_reference_label": {"de": "Quelle", "en": "Source"},
+    "answer_evidence_label_unassigned": {
+        "de": "[{label}: nicht zugeordnet]",
+        "en": "[{label}: not assigned]",
+    },
     "answer_completeness_heading": {"de": "## Hinweis zur Vollständigkeit", "en": "## Note on completeness"},
     "answer_completeness_status": {"de": "- Status: unvollständig", "en": "- Status: incomplete"},
     "answer_completeness_provider_stop": {
@@ -956,6 +960,10 @@ MESSAGES: dict[str, dict[str, str]] = {
     "run_aborted": {
         "de": "Recherche abgebrochen: {exc}",
         "en": "Research aborted: {exc}",
+    },
+    "run_rate_limited": {
+        "de": "Recherche abgebrochen: Der Modelldienst ist gerade ausgelastet (Anfragelimit erreicht).",
+        "en": "Research aborted: the model service is busy right now (request limit reached).",
     },
     "run_failed": {
         "de": "Recherche fehlgeschlagen: {exc}",
@@ -1159,6 +1167,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Suchquery-Planung lieferte keine valide JSON-Liste",
         "en": "Query planning did not return a valid JSON list",
     },
+    "research_answer_failed_fallback_failed_body": {
+        "de": (
+            "Antwort-Synthese fehlgeschlagen ({error}); das Fallback-Modell "
+            "`{model}` ist ebenfalls fehlgeschlagen ({fallback_error})."
+        ),
+        "en": (
+            "Answer synthesis failed ({error}); the fallback model `{model}` "
+            "failed as well ({fallback_error})."
+        ),
+    },
     "research_answer_failed_no_fallback_body": {
         "de": (
             "Antwort-Synthese fehlgeschlagen ({error}); kein Fallback-Modell "
@@ -1169,16 +1187,20 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
     },
     "kernel_recovery_context_window": {
-        "de": "Der Modellkontext ist zu groß. Die vollständigen Werkzeugdaten sind gesichert; ich bereite eine kleinere, aufgabenbezogene Ansicht vor.",
-        "en": "The model context is too large. Full tool data is preserved; I am preparing a smaller, task-specific view.",
+        "de": "Der Modellkontext ist zu groß. Ich nehme das größte Werkzeugergebnis aus der Ansicht; es bleibt vollständig gesichert und nachlesbar.",
+        "en": "The model context is too large. I am taking the largest tool result out of the view; it stays fully preserved and readable.",
     },
     "kernel_recovery_tool_arguments": {
         "de": "Das Modell hat ungültige Werkzeugargumente geliefert. Aus dieser Antwort wurde kein Werkzeug ausgeführt; ich lasse den Aufruf korrigieren.",
         "en": "The model returned invalid tool arguments. No tool from that response was executed; I am requesting a corrected call.",
     },
+    "kernel_recovery_required_tool": {
+        "de": "Das Modell hat in Text geantwortet, wo ein Werkzeugaufruf nötig war. Ich lasse den Aufruf nachholen.",
+        "en": "The model answered in text where a tool call was required. I am asking it for the call.",
+    },
     "kernel_recovery_context_budget": {
-        "de": "Ich verdichte die vollständigen Ergebnisse für den verfügbaren Modellkontext. Die Originale bleiben nachlesbar.",
-        "en": "I am condensing the complete results for the available model context. The originals remain readable.",
+        "de": "Die Ergebnisse sind zu groß für den verfügbaren Modellkontext. Ich nehme die größten aus der Ansicht; die Originale bleiben nachlesbar.",
+        "en": "The results do not fit the available model context. I am taking the largest out of the view; the originals remain readable.",
     },
     "kernel_context_source_read_preview": {
         "de": "Original aus dem Gespräch",
@@ -1232,17 +1254,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": (
             "Context compacted: older steps summarized and kept in the run "
             "archive."
-        ),
-    },
-    "kernel_context_compacted_without_summary": {
-        "de": (
-            "Kontext-Komprimierung ohne Zusammenfassung (Fehler im "
-            "Zusammenfassungs-Aufruf) — ältere Schritte unverdichtet im "
-            "Lauf-Archiv gesichert."
-        ),
-        "en": (
-            "Context compacted without a summary (the summarization call "
-            "failed) — older steps kept uncondensed in the run archive."
         ),
     },
     "agent_synthesis_summary_cancelled": {
@@ -2218,9 +2229,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Agent-Antwort wird fortgesetzt",
         "en": "The agent answer is being continued",
     },
-    "telemetry_context_projection": {
-        "de": "Eine kleinere Kontextansicht wird vorbereitet",
-        "en": "A smaller context view is being prepared",
+    "telemetry_context_compaction": {
+        "de": "Ältere Schritte werden zusammengefasst",
+        "en": "Earlier steps are being summarized",
     },
     "telemetry_deep_review": {
         # One review for both agent engines: the wording names the step,
@@ -2854,15 +2865,17 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "kernel_partial_intro": {
         "de": (
-            "Der Lauf wurde auf deine Entscheidung als Teilstand beendet, nachdem "
-            "das konfigurierte {limit_name} erreicht wurde. Es wurde keine "
-            "vollständige Synthese vorgetäuscht."
+            "Auf deine Entscheidung endet der Lauf hier als Teilstand, weil das "
+            "{limit_name} erreicht wurde. Eine abschließende Antwort wurde nicht "
+            "erzeugt."
         ),
         "en": (
-            "The run ended as a partial result on your decision, after the "
-            "configured {limit_name} was reached. No complete synthesis was "
-            "simulated."
+            "On your decision the run ends here as a partial result, because the "
+            "{limit_name} was reached. No final answer was produced."
         ),
+    },
+    "kernel_partial_documents_heading": {
+        "de": "### Bereits im Canvas", "en": "### Already in the canvas",
     },
     "kernel_partial_evidence_heading": {
         "de": "### Gesicherte Belegbasis", "en": "### Secured evidence base",
@@ -2888,15 +2901,14 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "kernel_partial_gap_text": {
         "de": (
-            "Bewertung, Widerspruchsprüfung und finale Antwort wurden nicht "
-            "vollständig abgeschlossen. Für eine belastbare Endantwort muss der "
-            "Auftrag mit einem ausreichend hohen, vom Betreiber erlaubten Limit "
-            "fortgesetzt oder neu eingegrenzt werden."
+            "Bewertung, Widerspruchsprüfung und abschließende Antwort fehlen. Für "
+            "eine vollständige Antwort stelle den Auftrag mit einer höheren Stufe "
+            "erneut oder grenze ihn ein."
         ),
         "en": (
-            "Assessment, contradiction check and final answer were not completed "
-            "in full. For a dependable final answer the assignment has to continue "
-            "under a sufficiently high operator-permitted limit, or be narrowed."
+            "Assessment, contradiction check and the final answer are missing. For "
+            "a complete answer, ask again with a higher tier or narrow the "
+            "assignment."
         ),
     },
     "kernel_citation_marker_unsupported": {
@@ -2912,7 +2924,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Werkzeugaufrufe", "en": "tool calls",
     },
     "agent_limit_noun_steps": {
-        "de": "Ausführungsschritte", "en": "execution steps",
+        "de": "Arbeitsschritten", "en": "work steps",
     },
     "agent_limit_option_extend_label": {
         "de": "Auf {proposed} erweitern", "en": "Extend to {proposed}",
@@ -2958,8 +2970,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
     },
     "agent_limit_ceiling_fixed": {
-        "de": " Die Betreibergrenze {ceiling} lässt keine Erweiterung zu.",
-        "en": " The operator limit {ceiling} allows no extension.",
+        "de": " Eine Erweiterung ist hier nicht möglich.",
+        "en": " It cannot be extended here.",
     },
     "agent_limit_reached_tool_calls": {
         "de": (
@@ -2974,14 +2986,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
     },
     "agent_limit_reached_steps": {
-        "de": (
-            "Der Agent hat {used} {noun} verwendet und damit das aktuelle "
-            "Limit {current} erreicht."
-        ),
-        "en": (
-            "The agent has used {used} {noun} and thereby reached the current "
-            "limit {current}."
-        ),
+        "de": "Der Agent hat seine Grenze von {current} {noun} erreicht.",
+        "en": "The agent has reached its limit of {current} {noun}.",
     },
     "agent_limit_question_suffix": {
         "de": " Wie soll der Lauf fortgesetzt werden?",

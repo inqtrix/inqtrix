@@ -121,6 +121,7 @@ import {
 import { useLocale } from '@/i18n/LocaleProvider'
 import { formatMessageTimestamp } from '@/lib/time'
 import { withAiDisclosure } from '@/lib/aiDisclosure'
+import { reasoningLevelOptions } from '@/lib/modelCard'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import {
@@ -2683,24 +2684,13 @@ function AssistantRetryModelMenu({
         )}
       </div>
       {effortLevels.length > 0 && (
-        <div className="border-t border-border bg-surface/40 px-2.5 py-1.5">
-          <div className="mb-1 t-caption text-muted-foreground/65">{t.chat.modelReasoningLabel}</div>
-          <div className="flex flex-wrap gap-1">
-            <RetryEffortButton
-              active={selectedEffort == null}
-              label={t.chat.modelEffortDefault}
-              onSelect={() => onEffortChange(null)}
-            />
-            {effortLevels.map((effort) => (
-              <RetryEffortButton
-                active={selectedEffort === effort}
-                key={effort}
-                label={effort}
-                onSelect={() => onEffortChange(effort)}
-              />
-            ))}
-          </div>
-        </div>
+        <RetryEffortChoices
+          defaultLabel={t.chat.modelEffortDefault}
+          heading={t.chat.modelReasoningLabel}
+          levels={effortLevels}
+          onEffortChange={onEffortChange}
+          selectedEffort={selectedEffort}
+        />
       )}
     </>
   )
@@ -2743,6 +2733,42 @@ function RetryModelRow({
         {active ? <Check className="size-3.5 text-brand" /> : null}
       </span>
     </DropdownMenuItem>
+  )
+}
+
+/** The effort row of the retry menu, labelled like the model picker (Off, Med, XHigh, Max). */
+export function RetryEffortChoices({
+  defaultLabel,
+  heading,
+  levels,
+  onEffortChange,
+  selectedEffort,
+}: {
+  defaultLabel: string
+  heading: string
+  levels: string[]
+  onEffortChange: (effort: string | null) => void
+  selectedEffort: string | null
+}) {
+  return (
+    <div className="border-t border-border bg-surface/40 px-2.5 py-1.5">
+      <div className="mb-1 t-caption text-muted-foreground/65">{heading}</div>
+      <div className="flex flex-wrap gap-1">
+        <RetryEffortButton
+          active={selectedEffort == null}
+          label={defaultLabel}
+          onSelect={() => onEffortChange(null)}
+        />
+        {reasoningLevelOptions(levels).map((option) => (
+          <RetryEffortButton
+            active={selectedEffort === option.token}
+            key={option.token}
+            label={option.label}
+            onSelect={() => onEffortChange(option.token)}
+          />
+        ))}
+      </div>
+    </div>
   )
 }
 

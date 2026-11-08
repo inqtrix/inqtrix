@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { chmod, mkdir, unlink } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
+import { ignoreMissing } from './cleanup-step.mjs'
+
 const PROTOCOL = 'inqtrix-verification-resource-v1'
 
 export class VerificationLifecycleClient {
@@ -73,7 +75,7 @@ export class VerificationLifecycleClient {
   async completeSession(session) {
     if (!session) return
     await this.complete(session.handle)
-    await unlink(session.storageStatePath).catch(() => undefined)
+    await unlink(session.storageStatePath).catch(ignoreMissing)
   }
 
   close() {

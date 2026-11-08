@@ -38,27 +38,50 @@ def error_response(
     return JSONResponse(status_code=status_code, content={"error": error})
 
 
-HISTORY_MESSAGE_CHAR_LIMIT = 500
-"""Per-message bound of the client-supplied history block."""
+HISTORY_CHAR_BUDGET = 32_000
+"""Character budget of the whole client-supplied history block (about 8,000
+tokens)."""
+
+USER_TURN_OPENING_CHARS = 500
+"""What every earlier user turn keeps before newer messages are spent: an
+instruction the user gave early ("always answer in English") stays in force
+however long the answers after it grow."""
 
 _MESSAGE_CUT_MARKER = " [... message shortened]"
+_USER_LABEL = "Nutzer"
+_ROLE_LABELS = {
+    "user": _USER_LABEL,
+    "assistant": "Assistent",
+    "system": "System",
+    "developer": "System",
+}
+# Any other role (a tool result, a function answer) is no text of the user's.
+_OTHER_ROLE_LABEL = "Tool"
+
+
+def _omitted_line(count: int) -> str:
+    noun = "message" if count == 1 else "messages"
+    return f"[... {count} earlier {noun} omitted]"
 
 
 def format_history(messages: list[dict], max_messages: int = 20) -> str:
     """Format message history for agent context, with VISIBLE cuts.
 
-    The bound keeps a client-supplied transcript from crowding out the
-    task. It is not silent: a shortened message says so, because the
-    caller assumes everything it sent is in force -- a standing
-    requirement tends to sit at the END of a long message, which is
-    exactly the part a fixed cut drops.
+    The budget keeps a client-supplied transcript from crowding out the
+    task. Every user turn first keeps its opening, so an instruction the user
+    gave early stays in force; the rest of the budget is spent from the
+    newest message backwards, so the answer a follow-up asks about arrives
+    whole: a fixed cut of every message leaves a follow-up with the opening
+    of a long answer, and the model answers that the rest cannot be checked.
+    No cut is silent: a shortened message says so, and every run of left-out
+    messages, those beyond the window of *max_messages* included, stands as
+    one line in its place, because the caller assumes everything it sent is
+    in force.
     """
     if len(messages) <= 1:
         return ""
-    history_msgs = messages[:-1][-max_messages:]
-    parts: list[str] = []
-    for msg in history_msgs:
-        role = msg.get("role", "user")
+    entries: list[tuple[str, str]] = []
+    for msg in messages[:-1]:
         content = msg.get("content", "")
         if isinstance(content, list):
             content = " ".join(
@@ -66,14 +89,43 @@ def format_history(messages: list[dict], max_messages: int = 20) -> str:
                 if isinstance(p, dict) and p.get("type") == "text"
             )
         if content:
-            label = {"user": "Nutzer", "assistant": "Assistent",
-                     "system": "System"}.get(role, role)
-            if len(content) > HISTORY_MESSAGE_CHAR_LIMIT:
-                content = (
-                    content[:HISTORY_MESSAGE_CHAR_LIMIT].rstrip()
-                    + _MESSAGE_CUT_MARKER
-                )
-            parts.append(f"{label}: {content}")
+            role = msg.get("role", "user")
+            entries.append((_ROLE_LABELS.get(role, _OTHER_ROLE_LABEL), content))
+    window = entries[-max_messages:] if max_messages > 0 else []
+    beyond_window = len(entries) - len(window)
+
+    # The openings of the user turns, newest first, within the budget.
+    floors: dict[int, int] = {}
+    remaining = HISTORY_CHAR_BUDGET
+    for index in reversed(range(len(window))):
+        label, content = window[index]
+        if label == _USER_LABEL:
+            floors[index] = min(len(content), USER_TURN_OPENING_CHARS, remaining)
+            remaining -= floors[index]
+
+    kept: list[str | None] = [None] * len(window)
+    for index in reversed(range(len(window))):
+        label, content = window[index]
+        floor = floors.get(index, 0)
+        if len(content) - floor <= remaining:
+            kept[index] = f"{label}: {content}"
+            remaining -= len(content) - floor
+        elif floor + remaining > 0:
+            kept[index] = f"{label}: {content[:floor + remaining].rstrip()}{_MESSAGE_CUT_MARKER}"
+            remaining = 0
+
+    parts: list[str] = []
+    left_out = beyond_window
+    for line in kept:
+        if line is None:
+            left_out += 1
+            continue
+        if left_out:
+            parts.append(_omitted_line(left_out))
+            left_out = 0
+        parts.append(line)
+    if left_out:
+        parts.append(_omitted_line(left_out))
     return "\n".join(parts)
 
 

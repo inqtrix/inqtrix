@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import asdict, replace
 
+from inqtrix import aio
 from inqtrix.agents.context_archive import (
     ARCHIVE_READ_WINDOW_CHARS, TRANSCRIPT_PAYLOAD_KEY, ArchiveVersionConflict,
     ArchiveWindow, is_private_archive, part_info, text_hash, window_bounds,
@@ -116,12 +117,15 @@ class AgentSourceService:
         await self._scope(context)
 
     async def _scope(self, context):
+        # The check is sync code that reaches back to this loop.
         if context.authority_check is not None:
-            context.authority_check()
+            await aio.run_legacy_segment(context.authority_check)
         if not context.run_id or (context.principal is not None and context.principal.user_id is not None and context.visible_to is None):
             raise _unavailable()
         try:
-            current = self.runs.get(context.run_id, visible_to=context.visible_to, workspace_id=context.workspace_id)
+            current = await self.runs.aget(
+                context.run_id, visible_to=context.visible_to, workspace_id=context.workspace_id,
+            )
             if (current.get("access") or {}).get("mode") not in {"owner", "unscoped"}:
                 raise _unavailable()
             session_id = current.get("session_id") or ""
@@ -148,7 +152,9 @@ class AgentSourceService:
         """
         current, session_id = await self._scope(context)
         try:
-            origin = self.runs.get(origin_id, visible_to=context.visible_to, workspace_id=context.workspace_id)
+            origin = await self.runs.aget(
+                origin_id, visible_to=context.visible_to, workspace_id=context.workspace_id,
+            )
         except RunNotFound as exc:
             raise _unavailable() from exc
         if (origin.get("access") or {}).get("mode") not in {"owner", "unscoped"}:
@@ -189,7 +195,7 @@ class AgentSourceService:
                 raise _unavailable()
         await self._authorize_rules(descriptor.get("rule_revisions") or {}, context, current_origin=current_origin)
         for field, owner_only in (("origin_run_ids", False), ("owner_origin_run_ids", True)):
-            if not self.runs.source_origins_visible(
+            if not await self.runs.asource_origins_visible(
                 list(descriptor.get(field) or ()), visible_to=context.visible_to, owner_only=owner_only,
             ):
                 raise _unavailable()
@@ -209,8 +215,10 @@ class AgentSourceService:
         """
         bound = {str(template_id): int(revision) for template_id, revision in rule_revisions.items()}
         if bound and current_origin:
-            body = self.runs.source_request_body(context.run_id, visible_to=context.visible_to,
-                                                 workspace_id=context.workspace_id)
+            body = await self.runs.asource_request_body(
+                context.run_id, visible_to=context.visible_to,
+                workspace_id=context.workspace_id,
+            )
             own = {(str(part.get("template_id") or ""), int(part.get("revision") or 0))
                    for part in body.get("report_rules") or () if isinstance(part, dict)}
             bound = {template_id: revision for template_id, revision in bound.items()
@@ -258,8 +266,10 @@ class AgentSourceService:
         descriptor = row.payload.get(TRANSCRIPT_PAYLOAD_KEY)
         if descriptor is None and row.run_id == context.run_id:
             # Current-run text already lies inside the executing run boundary.
-            body = self.runs.source_request_body(row.run_id, visible_to=context.visible_to,
-                                                 workspace_id=context.workspace_id)
+            body = await self.runs.asource_request_body(
+                row.run_id, visible_to=context.visible_to,
+                workspace_id=context.workspace_id,
+            )
             descriptor = {
                 "schema": 1,
                 "collection_ids": list((body.get("knowledge_filters") or {}).get("collection_ids") or ()),
@@ -277,7 +287,7 @@ class AgentSourceService:
 
     async def _catalogue(self, context):
         current, session_id = await self._scope(context)
-        runs = self.runs.source_run_catalogue(
+        runs = await self.runs.asource_run_catalogue(
             session_id, visible_to=context.visible_to, workspace_id=context.workspace_id,
         ) if session_id else [current]
         by_id = {row["run_id"]: row for row in runs}
@@ -347,7 +357,9 @@ class AgentSourceService:
             elif kind == "result":
                 if local_id or version != "result":
                     raise _unavailable()
-                result = self.runs.result(origin_id, visible_to=context.visible_to, workspace_id=context.workspace_id)
+                result = await self.runs.aresult(
+                    origin_id, visible_to=context.visible_to, workspace_id=context.workspace_id,
+                )
                 text, title = result.get("answer"), "Published answer"
                 if not isinstance(text, str):
                     raise _unavailable()

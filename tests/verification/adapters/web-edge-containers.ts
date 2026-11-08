@@ -1,4 +1,5 @@
 import { request as httpRequest } from 'node:http'
+import { connect } from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
 
 import type { VerificationAdapter } from '../adapter.ts'
@@ -26,6 +27,11 @@ const BACKEND_PORT = 5100
 const BODY_LIMIT_BYTES = 64
 const START_TIMEOUT_MS = 30_000
 const REQUEST_TIMEOUT_MS = 5_000
+// Both edges accept a request head of this size however its bytes arrive
+// (src/inqtrix_web_gateway/settings.py, deploy/nginx/inqtrix.conf.template).
+const REQUEST_HEAD_LIMIT_BYTES = 32 * 1024
+const HEAD_PIECE_BYTES = 4 * 1024
+const HEAD_PIECE_PAUSE_MS = 20
 const SYNTHETIC_BACKEND_SOURCE = `
 import asyncio
 import uvicorn
@@ -147,6 +153,10 @@ const EDGE_SCENARIOS: readonly EdgeScenario[] = [
   {
     id: 'edge.request-body-limit',
     run: verifyRequestBodyLimit,
+  },
+  {
+    id: 'edge.request-head-limit',
+    run: verifyRequestHeadLimit,
   },
   {
     id: 'edge.websocket-contract',
@@ -667,6 +677,99 @@ async function verifyRequestBodyLimit(stack: WebEdgeStack): Promise<void> {
     const recovery = await edgeRequest(endpoint, '/health')
     ensure(recovery.status === 200, 'The edge did not recover after rejecting a body.')
   }
+}
+
+async function verifyRequestHeadLimit(stack: WebEdgeStack): Promise<void> {
+  for (const endpoint of stack.allEndpoints()) {
+    // A 16 KiB value stands in for a gateway token; cookies fill the head to
+    // the limit exactly.
+    const fitting = requestHead(endpoint, [
+      `X-Inqtrix-Head-Probe: ${'a'.repeat(16 * 1024)}`,
+    ], REQUEST_HEAD_LIMIT_BYTES)
+    for (const pieceBytes of [null, HEAD_PIECE_BYTES]) {
+      const status = await headStatus(endpoint, fitting, pieceBytes)
+      ensure(
+        status === 200,
+        `${endpoint.adapter} answered ${status} to a ${fitting.length}-byte request head `
+          + `sent ${pieceBytes === null ? 'at once' : 'in pieces'}.`,
+      )
+    }
+    const oversized = requestHead(
+      endpoint,
+      Array.from({ length: 5 }, (_, index) => `X-Inqtrix-Head-Fill-${index}: ${'f'.repeat(14 * 1024)}`),
+    )
+    const refused = await headStatus(endpoint, oversized, HEAD_PIECE_BYTES)
+    ensure(
+      refused === 400,
+      `${endpoint.adapter} answered ${refused} to a ${oversized.length}-byte request head sent in pieces.`,
+    )
+    const recovery = await edgeRequest(endpoint, '/health')
+    ensure(recovery.status === 200, 'The edge did not recover after refusing a request head.')
+  }
+}
+
+// A GET of the SPA root, which the edge answers itself; with ``fillTo`` a
+// cookie fills the head (request line through the closing blank line) to
+// exactly that many bytes.
+function requestHead(endpoint: EdgeEndpoint, lines: readonly string[], fillTo?: number): Buffer {
+  const head = [
+    'GET / HTTP/1.1',
+    `Host: 127.0.0.1:${endpoint.port}`,
+    'Connection: close',
+    ...lines,
+  ]
+  if (fillTo !== undefined) {
+    const prefix = 'Cookie: inqtrix_head_probe='
+    const used = Buffer.byteLength(head.map((line) => `${line}\r\n`).join('') + `${prefix}\r\n\r\n`)
+    ensure(fillTo > used, 'The probe head is larger than its target size.')
+    head.push(prefix + 'c'.repeat(fillTo - used))
+  }
+  const bytes = Buffer.from(`${head.map((line) => `${line}\r\n`).join('')}\r\n`, 'latin1')
+  ensure(fillTo === undefined || bytes.length === fillTo, 'The probe head missed its target size.')
+  return bytes
+}
+
+// Sends a raw request head at once or in pieces with a pause between them and
+// returns the status the edge answered. Sending stops when the edge answers,
+// because a refusing edge may close while pieces are still on their way.
+function headStatus(endpoint: EdgeEndpoint, head: Buffer, pieceBytes: number | null): Promise<number> {
+  return new Promise<number>((resolveStatus, reject) => {
+    const received: Buffer[] = []
+    let settled = false
+    let socketError: Error | null = null
+    const socket = connect({ host: '127.0.0.1', port: endpoint.port })
+    socket.setNoDelay(true)
+    const settle = (outcome: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      outcome()
+    }
+    const finish = () => settle(() => {
+      const match = /^HTTP\/1\.[01] (\d{3}) /.exec(Buffer.concat(received).toString('latin1'))
+      if (match) resolveStatus(Number(match[1]))
+      else reject(new Error(`${endpoint.adapter} closed without a status line${socketError ? ` (${socketError.message})` : ''}.`))
+    })
+    const timer = setTimeout(() => settle(() => {
+      reject(new Error(`${endpoint.adapter} did not answer a ${head.length}-byte request head in time.`))
+    }), REQUEST_TIMEOUT_MS)
+    socket.on('data', (chunk: Buffer) => received.push(chunk))
+    socket.on('error', (error: Error) => {
+      socketError = error
+    })
+    socket.once('close', finish)
+    socket.once('connect', () => {
+      void (async () => {
+        const size = pieceBytes ?? head.length
+        for (let offset = 0; offset < head.length; offset += size) {
+          if (settled || received.length > 0 || socket.destroyed) return
+          socket.write(head.subarray(offset, offset + size))
+          if (pieceBytes !== null) await delay(HEAD_PIECE_PAUSE_MS)
+        }
+      })()
+    })
+  })
 }
 
 async function verifyWebSocketContract(stack: WebEdgeStack): Promise<void> {

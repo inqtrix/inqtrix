@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, get_args, runtime_checkable
 
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 # The two intents a caller can create an asset row with. A Literal rather
 # than a free string: the store contract knows exactly these two, and a typo
@@ -470,5 +470,3 @@ class AssetStore(Protocol):
     ) -> list[AssetRecord]:
         """Return full records covered by an owner-scoped container target."""
         ...
-
-    async def aclose(self) -> None: ...

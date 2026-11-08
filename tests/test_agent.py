@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -607,7 +606,6 @@ class TestResearchAgentConstruction:
         assert settings.confidence_stop == 7
 
     def test_default_initialisation_reads_dotenv(self, tmp_path, monkeypatch):
-        import inqtrix.providers as providers_module
         from tests._hermetic import PRODUCT_ENV_FILES
 
         # The session ignores ``.env`` files; this test reads one as the
@@ -632,14 +630,6 @@ class TestResearchAgentConstruction:
             encoding="utf-8",
         )
 
-        class DummyOpenAI:
-            def __init__(self, *, base_url, api_key, **_kw):
-                self.base_url = base_url
-                self.api_key = api_key
-                self.chat = SimpleNamespace(completions=SimpleNamespace(create=None))
-
-        monkeypatch.setattr(providers_module, "OpenAI", DummyOpenAI)
-
         agent = ResearchAgent()
 
         providers, _, settings = agent._ensure_initialised()
@@ -647,8 +637,8 @@ class TestResearchAgentConstruction:
         assert settings.max_rounds == 7
         assert providers.llm.models.reasoning_model == "dotenv-reasoning"
         assert providers.search._model == "dotenv-search"
-        assert providers.llm._client.base_url == "http://dotenv/v1"
-        assert providers.llm._client.api_key == "dotenv-key"
+        assert providers.llm._client_kwargs["base_url"] == "http://dotenv/v1"
+        assert providers.llm._client_kwargs["api_key"] == "dotenv-key"
 
     def test_custom_config(self):
         cfg = AgentConfig(max_rounds=2, confidence_stop=6)
@@ -662,7 +652,6 @@ class TestResearchAgentConstruction:
         assert agent.config is cfg
 
     def test_ensure_initialised_respects_explicit_config_over_env(self, monkeypatch):
-        import inqtrix.providers as providers_module
         from inqtrix.providers.litellm import LiteLLM
         from inqtrix.providers.perplexity import PerplexitySearch
 
@@ -670,14 +659,6 @@ class TestResearchAgentConstruction:
         monkeypatch.setenv("REASONING_MODEL", "env-model")
         monkeypatch.setenv("LITELLM_BASE_URL", "http://env/v1")
         monkeypatch.setenv("LITELLM_API_KEY", "env-key")
-
-        class DummyOpenAI:
-            def __init__(self, *, base_url, api_key, **_kw):
-                self.base_url = base_url
-                self.api_key = api_key
-                self.chat = SimpleNamespace(completions=SimpleNamespace(create=None))
-
-        monkeypatch.setattr(providers_module, "OpenAI", DummyOpenAI)
 
         llm = LiteLLM(
             api_key="custom-key",
@@ -688,7 +669,6 @@ class TestResearchAgentConstruction:
             api_key="custom-key",
             base_url="http://custom/v1",
             model="sonar-pro",
-            _client=llm._client,
         )
         cfg = AgentConfig(
             llm=llm,
@@ -703,8 +683,8 @@ class TestResearchAgentConstruction:
         assert settings.max_rounds == 2
         assert settings.answer_prompt_citations_max == 11
         assert providers.llm.models.reasoning_model == "custom-model"
-        assert str(providers.llm._client.base_url).rstrip("/") == "http://custom/v1"
-        assert providers.llm._client.api_key == "custom-key"
+        assert providers.llm._client_kwargs["base_url"] == "http://custom/v1"
+        assert providers.llm._client_kwargs["api_key"] == "custom-key"
 
     def test_default_claim_extraction_uses_provider_interface(self):
         class DummyLLM(LLMProvider):
@@ -806,6 +786,7 @@ class TestResearchAgentConstruction:
             providers,
             strategies,
             settings,
+            cancel_event,
         ):
             progress_queue.put(("progress", "Schritt 1"))
             return {"answer": "Hallo Welt"}
@@ -830,6 +811,7 @@ class TestResearchAgentConstruction:
             providers,
             strategies,
             settings,
+            cancel_event,
         ):
             assert progress_queue is None
             return {"answer": "Hallo Welt"}

@@ -27,6 +27,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from inqtrix import aio
+
 
 @dataclass(frozen=True)
 class ChunkVector:
@@ -474,17 +476,13 @@ class MemoryVectorIndex:
     ) -> list[VectorHit]:
         by_collection = {scope.collection_id: scope for scope in scopes}
         with self._lock:
-            hits = [
-                VectorHit(
-                    chunk_id=chunk_id,
-                    score=_cosine(entry.dense, query_embedding),
-                )
+            entries = [
+                (chunk_id, entry.dense)
                 for chunk_id, entry in self._entries.items()
                 if entry.embedding_model == embedding_model
                 and _memory_entry_is_active(chunk_id, entry, by_collection)
             ]
-        hits.sort(key=lambda hit: hit.score, reverse=True)
-        return hits[: max(0, top_k)]
+        return await aio.run_blocking(_ranked_hits, entries, query_embedding, top_k)
 
     async def hybrid_search(
         self,
@@ -526,6 +524,20 @@ class MemoryVectorIndex:
                 for chunk_id, entry in self._entries.items()
                 if entry.embedding_model == embedding_model
             ]
+
+
+def _ranked_hits(
+    entries: list[tuple[str, tuple[float, ...]]],
+    query_embedding: list[float],
+    top_k: int,
+) -> list[VectorHit]:
+    """Score and order: pure Python over every entry, so never on the loop."""
+    hits = [
+        VectorHit(chunk_id=chunk_id, score=_cosine(dense, query_embedding))
+        for chunk_id, dense in entries
+    ]
+    hits.sort(key=lambda hit: hit.score, reverse=True)
+    return hits[: max(0, top_k)]
 
 
 def _memory_entry_is_active(

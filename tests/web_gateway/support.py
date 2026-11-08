@@ -125,9 +125,15 @@ _GATEWAY_ENV_VARS = (
 
 @pytest.fixture
 def clean_gateway_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """Remove all gateway environment knobs before the test sets its own."""
+    """Remove all gateway environment knobs before the test sets its own.
+
+    ``main()`` raises the process's open-file limit; in a test that process is
+    the test runner, so the call does nothing here. The limit's own tests call
+    ``open_files`` directly.
+    """
     for name in _GATEWAY_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(gateway_cli, "ensure_open_file_limit", lambda _ceiling: None)
     return monkeypatch
 
 def _run_stubbed_main(
@@ -158,9 +164,15 @@ def _run_stubbed_main(
         captured["uvicorn_app"] = received_app
         captured["uvicorn_options"] = kwargs
 
+    def fake_open_file_limit(max_upstream_connections: int) -> None:
+        captured["order"].append("open_file_limit")
+        captured["open_file_limit"] = max_upstream_connections
+
     monkeypatch.setattr(gateway_settings, "_resolve_dist_dir", lambda: fake_dist)
     monkeypatch.setattr(gateway_app, "build_app", fake_build_app)
     monkeypatch.setattr(gateway_cli.uvicorn, "run", fake_run)
+    # The process limit is the test runner's own: record the call, change nothing.
+    monkeypatch.setattr(gateway_cli, "ensure_open_file_limit", fake_open_file_limit)
     gateway_cli.main(argv)
     return captured
 

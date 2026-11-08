@@ -1,6 +1,11 @@
 import type { VerificationAdapter } from './adapter.ts'
 import { VERIFICATION_ADAPTERS } from './adapters/index.ts'
 import { CleanupLedger } from './cleanup-ledger.ts'
+import {
+  inspectRunLogs,
+  logInspectionIsMandatory,
+  type LogSource,
+} from './log-inspection.ts'
 import type {
   EngineResult,
   RunStatus,
@@ -22,6 +27,7 @@ export type RunVerificationOptions = RunContextOptions
 export async function runVerification(
   options: RunVerificationOptions,
   adapters: readonly VerificationAdapter[] = VERIFICATION_ADAPTERS,
+  logSource?: LogSource,
 ): Promise<VerificationReport> {
   const context = await createRunContext(options)
   const selectedAdapters = selectAdapters(context.profile, adapters)
@@ -116,12 +122,16 @@ export async function runVerification(
 
   const cleanup = await cleanupLedger.cleanupAll()
   await writer.setCleanup(cleanup)
+  // Last, so that the window also holds what cleaning up logged.
+  const logInspection = await inspectRunLogs(context, logSource)
+  await writer.setLogInspection(logInspection)
   // A red adapter stays the verdict even when the run is interrupted later.
-  const executionStatus: RunStatus = failed
+  const executionStatus: RunStatus = failed || logInspection.status === 'failed'
     ? 'failed'
     : interrupted
       ? 'interrupted'
       : blockedEngines.size > 0
+          || (logInspection.status === 'not_run' && logInspectionIsMandatory(context))
         ? 'blocked'
         : 'passed'
   const status = cleanup.some((record) => record.status === 'failed')
@@ -135,18 +145,35 @@ function requireExplicitPassedScenarios(
   result: EngineResult,
 ): EngineResult {
   if (result.status !== 'passed') return result
-  const expected = scenariosForProfile(profile)
+  const inventory = scenariosForProfile(profile)
     .filter((scenario) => scenario.engine === result.engine)
-    .map((scenario) => scenario.id)
+  const expected = inventory.map((scenario) => scenario.id)
+  const skippable = new Set(
+    inventory.filter((scenario) => scenario.mayBeSkipped).map((scenario) => scenario.id),
+  )
+  // A skip carries its reason (the reader refuses one without) and shows in
+  // the report, but counts only for a scenario the inventory lets skip;
+  // not_run means unmeasured and keeps a passing engine red.
   const passed = new Set(
     (result.scenarios ?? [])
-      .filter((scenario) => scenario.status === 'passed')
+      .filter((scenario) => scenario.status === 'passed'
+        || (scenario.status === 'skipped' && skippable.has(scenario.id)))
       .map((scenario) => scenario.id),
   )
   if (expected.length === passed.size && expected.every((id) => passed.has(id))) {
     return result
   }
-  return { ...result, status: 'failed' }
+  // The engine exited 0, so nothing else says why it is red.
+  const reported = new Map((result.scenarios ?? []).map((scenario) => [scenario.id, scenario]))
+  const gap = expected
+    .filter((id) => !passed.has(id))
+    .map((id) => {
+      const scenario = reported.get(id)
+      if (!scenario) return `${id} not reported`
+      const status = scenario.status === 'skipped' ? 'skipped, which it may not be' : scenario.status
+      return scenario.reason ? `${id} ${status}: ${scenario.reason}` : `${id} ${status}`
+    })
+  return { ...result, scenarioGap: gap.join('; '), status: 'failed' }
 }
 
 export function selectAdapters(

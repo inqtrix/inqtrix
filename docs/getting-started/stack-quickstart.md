@@ -69,6 +69,8 @@ INQTRIX_QUOTA_MAX_TOKENS_PER_RUN=900000
 The first four values budget one logical operation including every retry;
 retries do not receive another full timeout. The optional 900,000-token run
 quota stops at the next safe graph boundary and never shortens a stored answer.
+An agent run counts what the model reads anew here, not what the provider serves
+from its prompt cache.
 
 That minimum gets you research + chat. The config example has one canonical
 assignment location per key; corresponding credentials stay in the one secrets

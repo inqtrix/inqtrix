@@ -14,7 +14,7 @@ Two artifacts, both derived from traces of real runs rather than authored:
 | Artifact | Contents | Version control |
 | --- | --- | --- |
 | `profiles/*.json` | per-operation p50/p95/max latency, median token counts, calls per run | tracked |
-| `corpus/` | the captured provider answers themselves, plus the routing signatures | **untracked** |
+| `corpus/` | the captured provider answers and tool-call conversations, plus the routing signatures | **untracked** |
 
 The corpus stays out of version control because it holds real questions,
 answers, and source material, and because a routing signature is the opening
@@ -41,14 +41,23 @@ not replayed by this stand-in. Search generations and older search spans both
 contribute to search timing and inclusive token counts. A replayed extraction
 is not semantically derived from the synthetic sources accompanying it.
 
-Tool-calling operations are not replayable as plain text. Calibration retains
-their timing samples and names them in `non_replayable_operations`, but removes
-their response pools and routing entries. Otherwise a captured final
-acknowledgement could erase all preceding tool work. This does not change the
-real Agent Desk; it prevents claiming a faithful agent load measurement from
-this stand-in. Embeddings remain synthetic, with local generation time rather
-than a calibrated provider delay. `/healthz` degradation, unmatched requests or
-synthetic replies must be reviewed before treating any result as representative.
+Tool-calling operations replay as conversations. Calibration keeps the model
+turns of one run and purpose in order, tool calls included. A request that
+offers tools gets the turn at its position, counted by the assistant messages
+it already holds, from the recording of the same assignment or else from one
+whose tools this request offers. Identifiers in the recorded arguments are
+rebound to ones the request holds, so `read_evidence` and `read_canvas` do real
+work; a call whose identifier or tool the request lacks is dropped and counted
+in `tool_calls_dropped`. Citations in a replayed text are pointed at evidence
+labels the request knows, because a label from the recorded run would send the
+caller down a citation repair no recorded run took. Tool results still depend on
+synthetic sources, so a recorded review does not judge the text it sees. Workspace
+agent children end as failed behind this stand-in, because their recorded outline
+does not pass validation there, and the parent run carries on without them; that
+is about three runs in five hundred. Embeddings remain synthetic,
+with local generation time rather than a calibrated provider delay. `/healthz`
+degradation, unmatched requests, synthetic replies or dropped tool calls must be
+reviewed before treating any result as representative.
 
 The measurand is resource use and call shape, not answer correctness. Compare
 fan-out and wall-clock with real runs. A partial profile is not a replacement
@@ -117,6 +126,7 @@ must be produced at `1.0`.
 | --- | --- |
 | `POST /azure/openai/v1/chat/completions` | Azure OpenAI chat completions |
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions |
+| `POST /azure/openai/v1/responses` | Azure OpenAI Responses API, for the models whose card names it (GPT-6, GPT-5.6); answered from the same catalogue as chat completions, with function calls and structured output. The latency profile stays the calibrated one, so a run measures the platform's Responses path, not the latency of those models |
 | `POST /azure-embeddings/openai/deployments/{deployment}/embeddings` | Azure embeddings |
 | `POST /v1/embeddings` | OpenAI-compatible embeddings |
 | `POST /perplexity/v1/responses` | Perplexity search |
@@ -133,9 +143,13 @@ application requests, so no streaming surface is implemented.
 `GET /admin/stats` records the requests received by this stand-in; compare them
 with the application's trace to establish coverage. Its counts alone cannot
 rule out an additional call to a real provider. Counts per operation show the fan-out the run actually
-produced. `unmatched_instructions` must be empty: an entry means an
-instruction changed and those calls ran on neutral fallback timing rather than
-calibrated timing. The stand-in logs a warning the first time it sees each
+produced. `in_flight` is the number of provider calls holding a connection right
+now and `disconnected` counts clients that hung up first, which together time a
+cancel down to the provider socket; `in_flight_per_operation` says which calls those are.
+`evidence_errors` counts replayed documents the application refused for their citations: the run
+continues without them, so their writes are missing from what it measures. Each entry in
+`unmatched_instructions` means an instruction changed or was never recorded, and those calls ran
+on neutral fallback timing rather than calibrated timing; `run-load` tolerates a small share of them. The stand-in logs a warning the first time it sees each
 unrecognised or ambiguous identity, using a hash rather than copying prompt
 content into logs; `GET /healthz` reports a missing profile or corpus
 as `degraded` rather than serving quietly from defaults.

@@ -1,4 +1,4 @@
-"""Postgres usage-ledger store (NullPool — sync-thread flusher safe).
+"""Postgres usage-ledger store.
 
 Every operation runs in one tenant-scoped transaction (``tenant_session``
 sets the RLS GUC); batches are grouped per tenant before insert because
@@ -13,11 +13,11 @@ from __future__ import annotations
 import time
 import uuid
 from collections import defaultdict
-from typing import Sequence
+from typing import Any, Sequence
 
 import sqlalchemy as sa
 
-from inqtrix.storage.db import build_engine, build_session_factory, tenant_session
+from inqtrix.storage.db import tenant_session
 from inqtrix.storage.usage_orm import llm_usage
 from inqtrix.usage.grouping import (
     USAGE_GROUP_DEFAULT,
@@ -29,9 +29,8 @@ from inqtrix.usage.models import UsageRow
 class PostgresUsageStore:
     """Durable ledger twin of :class:`MemoryUsageStore`."""
 
-    def __init__(self, *, database_url: str, app_role: str) -> None:
-        self._engine = build_engine(database_url, null_pool=True)
-        self._session_factory = build_session_factory(self._engine)
+    def __init__(self, *, session_factory: Any, app_role: str) -> None:
+        self._session_factory = session_factory
         self._app_role = app_role
 
     async def insert_rows(self, rows: Sequence[UsageRow]) -> int:
@@ -150,6 +149,3 @@ class PostgresUsageStore:
                 }
                 for row in result.all()
             ]
-
-    async def aclose(self) -> None:
-        await self._engine.dispose()

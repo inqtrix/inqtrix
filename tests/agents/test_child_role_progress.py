@@ -109,7 +109,7 @@ def test_the_parent_reads_its_review_roles_steps_while_it_works(monkeypatch) -> 
     """
     import pytest
 
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel import review_pass
     from tests.agents.test_kernel_deep_mode import (
         StructuredScriptedLLM,
@@ -163,7 +163,7 @@ def test_the_parent_sees_a_parallel_batch_of_reads_cross_by_position(monkeypatch
     """
     import pytest
 
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel import review_pass
     from inqtrix.providers.base import ChatTurn, ToolCallRequest
     from tests.agents.test_kernel_deep_mode import (

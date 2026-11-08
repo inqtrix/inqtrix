@@ -91,12 +91,13 @@ def build_router(container: "AppContainer") -> APIRouter:
         loop = asyncio.get_running_loop()
         try:
             result = await asyncio.wait_for(
-                # Deliberately the shared pool, not the AI lane: this
-                # diagnostic route passes no admission gate, so counting it
-                # against a lane sized from that gate would let it displace
-                # the request path it exists to inspect.
+                # On the AI lane, like every AI call of this server: its
+                # threads may wait for the process loop, as a provider's sync
+                # face does. The loop's default executor is the short-work
+                # lane, which refuses that wait. The route runs in testing
+                # mode only, and the lane's headroom takes it.
                 loop.run_in_executor(
-                    None,
+                    container.execution_lanes.ai,
                     partial(
                         web_research.run_web_graph_test,
                         question,

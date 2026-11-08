@@ -40,7 +40,9 @@ from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.execution_authority import AuthorizationRevoked
-from inqtrix.server.runs import RunActive, RunHandle, RunNotFound, RunStore
+from inqtrix.exceptions import RunNotFound
+from inqtrix.runs.memory_store import RunStore
+from inqtrix.runs.records import RunActive, RunHandle
 from inqtrix.services.agent_control_service import (
     AgentControlService,
     AgentControlUnavailable,
@@ -163,6 +165,8 @@ def _parked_agent_run(
         handle.complete({"answer": "fortgesetzt"})
 
     summary = run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agentenauftrag",
         stack_name="default",
         work=segmented,
@@ -409,6 +413,8 @@ async def test_decision_on_non_waiting_run_rolls_back(
     service: AgentControlService, run_store: RunStore
 ) -> None:
     summary = run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="normal",
         stack_name="default",
         work=lambda handle: handle.complete({}),
@@ -833,6 +839,8 @@ async def test_shared_editor_task_cancel_reaches_the_running_child(
             handle.complete({"answer": "late"})
 
     child = run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Child research",
         stack_name="default",
         work=child_work,
@@ -978,6 +986,8 @@ async def test_cancel_settlement_folds_child_completed_before_parent_cancel(
     """The synchronous waiting-run cancel cannot downgrade a finished child."""
     run_id = _parked_agent_run(run_store)
     child = run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Child research",
         stack_name="default",
         work=lambda handle: handle.complete(
@@ -1045,6 +1055,44 @@ async def test_cancel_settlement_folds_child_completed_before_parent_cancel(
 
 
 @pytest.mark.asyncio
+async def test_cancel_settles_a_running_task_whose_child_is_gone(
+    service: AgentControlService,
+    run_store: RunStore,
+) -> None:
+    """A retained task with a deleted child row ends as failed, not as a 500."""
+    run_id = _parked_agent_run(run_store)
+    await service.store.save_plan(
+        run_id=run_id,
+        plan=PlanRecord(
+            plan_id="plan-cancel-missing-child",
+            run_id=run_id,
+            version=1,
+            status="approved",
+            created_by="agent",
+        ),
+        tasks=[
+            PlanTaskRecord(
+                task_id="r",
+                plan_id="plan-cancel-missing-child",
+                run_id=run_id,
+                ordinal=0,
+                title="Research",
+                tool_kind="web_research",
+                status="running",
+                child_run_id="run_child_row_is_gone",
+            ),
+        ],
+    )
+
+    assert run_store.cancel(run_id, visible_to=VISIBLE)["status"] == "cancelled"
+    await service.settle_cancelled_tasks(run_id)
+
+    _plan, tasks, _versions = await service.get_plan(run_id)
+    assert tasks[0].status == "failed"
+    assert tasks[0].result_payload["failure_code"] == "child_row_missing"
+
+
+@pytest.mark.asyncio
 async def test_tree_cancel_reconciles_nested_agent_plan_rows(
     service: AgentControlService,
     run_store: RunStore,
@@ -1056,6 +1104,8 @@ async def test_tree_cancel_reconciles_nested_agent_plan_rows(
         handle.wait("waiting_for_input")
 
     child = run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Nested mission",
         stack_name="default",
         work=parked_child,
@@ -1367,6 +1417,8 @@ async def test_edited_research_plan_uses_server_selected_profile(
     accepted: bool,
 ) -> None:
     summary = run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent assignment",
         stack_name="default",
         work=lambda handle: handle.complete({"answer": "done"}),
@@ -1891,6 +1943,8 @@ async def test_runtime_control_write_revalidates_effective_actor_after_revoke(
         handle.complete({"answer": "done"})
 
     summary = run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agentenauftrag",
         stack_name="default",
         work=segmented,
@@ -2612,6 +2666,8 @@ async def test_failed_edit_resume_restores_prior_plan_status(
     """Memory revert must undo the supersede flip too (Postgres gets it
     from the transaction rollback — lockstep on the failure path)."""
     summary = run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="normal",
         stack_name="default",
         work=lambda handle: handle.complete({}),

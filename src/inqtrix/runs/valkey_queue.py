@@ -85,9 +85,9 @@ class ValkeyRunQueue(StreamJobQueue[QueuedJob]):
             client=client,
         )
 
-    def enqueue(self, *, run_id: str, tenant_id: str) -> None:
+    async def enqueue(self, *, run_id: str, tenant_id: str) -> None:
         """Append one dispatch message for *run_id*."""
-        self._enqueue(entity_id=run_id, tenant_id=tenant_id)
+        await self._enqueue(entity_id=run_id, tenant_id=tenant_id)
 
     def _make_job(
         self,

@@ -31,8 +31,9 @@ dependencies = [
     "pydantic-settings>=2.14.2,<3.0",
     "python-dotenv>=1.2,<2.0",
     "rich>=13.0",
-    "boto3>=1.35",
-    "azure-identity>=1.18",
+    # Floor = the release the Bedrock API-key tests prove (bearer sign-in per
+    # provider instance, SigV4 next to a blank AWS_BEARER_TOKEN_BEDROCK).
+    "boto3>=1.42.85",
     # Pure-Python readline replacement that ships line editing (arrow-key
     # cursor movement, history, Ctrl+A/E/W/U) for input() on Windows. GNU
     # readline is part of the stdlib on Linux/macOS; the marker below
@@ -40,7 +41,6 @@ dependencies = [
     # interactive examples under examples/provider_stacks/*_chat.py.
     "pyreadline3>=3.4 ; sys_platform == 'win32'",
     "perplexityai>=0.34.0",
-    "azure-ai-projects>=2.1.0",
     # Platform persistence layer (identity schema, RLS). SQLAlchemy 2.1
     # is still beta as of mid-2026 — stay on 2.0.x until it stabilizes.
     "sqlalchemy[asyncio]>=2.0.50,<2.1",
@@ -63,7 +63,7 @@ dependencies = [
     # explicit algorithm allowlist, JWKS key sets). Same maintainer as
     # Authlib but without the framework client's SessionMiddleware
     # coupling; floor avoids the 2025/2026 Authlib JOSE CVE class.
-    "joserfc>=1.7.0,<2.0",
+    "joserfc>=1.7.6,<2.0",
     # Password hashing for native local auth (INQTRIX_AUTH_MODE=local):
     # argon2id via the reference CFFI binding. Memory-hard, the modern
     # default; the only credential-at-rest format Inqtrix mints.
@@ -109,22 +109,20 @@ observability = [
     "opentelemetry-sdk>=1.45.1,<2.0",
     "opentelemetry-exporter-otlp-proto-http>=1.45.1,<2.0",
 ]
-# Workspace-agent runtime (mode=workspace_agent):
-# deepagents is the sub-agent harness, the Postgres checkpointer keeps
-# interrupted phase machines resumable across workers. deepagents pulls
-# langchain-anthropic + langchain-google-genai unconditionally (see
-# THIRD_PARTY_NOTICES).
+# Agent runtimes (mode=workspace_agent, mode=agent_kernel): the kernel runs on
+# LangChain's agent loop, and the Postgres checkpointer keeps interrupted runs
+# resumable across workers.
 agent = [
-    "deepagents>=0.7.13,<0.8",
     "langchain>=1.3.11,<2.0",
+    "langchain-core>=1.6.3,<2.0",
     "langgraph-checkpoint-postgres>=3.1.0,<4",
     "psycopg[binary,pool]>=3.2",
 ]
 dev = [
     "ruff>=0.14.5",
-    "pytest>=9.0.2",
+    "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
-    "vcrpy>=8.1",
+    "vcrpy>=8.2.1",
     "pytest-recording>=0.13",
     "fakeredis>=2.26",
     "valkey>=6.1,<7.0",
@@ -139,10 +137,10 @@ inqtrix-migrate = "inqtrix.storage.migrate:main"
 inqtrix-worker = "inqtrix.worker.__main__:main"
 inqtrix-deploy = "inqtrix.deploy.cli:main"
 
-# Single source of truth for the product version: __version__ in src/inqtrix/__init__.py.
+# Single source of truth for the product version: __version__ in src/inqtrix/version.py.
 # Hatchling reads it here, so the package version is derived from that one line.
 [tool.hatch.version]
-path = "src/inqtrix/__init__.py"
+path = "src/inqtrix/version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/inqtrix", "src/inqtrix_web_gateway"]
@@ -178,4 +176,8 @@ markers = [
     "replay: provider tests using VCR cassettes or botocore.Stubber (offline-replayable)",
     "postgres: tests needing a disposable Postgres via INQTRIX_TEST_DATABASE_URL",
     "qdrant: tests needing a disposable Qdrant via INQTRIX_TEST_QDRANT_URL",
+    "valkey: tests needing a disposable Valkey via INQTRIX_TEST_VALKEY_URL",
+    "blocks_the_loop_on_purpose: tests of what reports a blocked loop, exempt from the loop guard",
+    "refuses_the_bridge_on_purpose: tests of what a refused bridge does, exempt from failing on one",
+    "two_connections_on_purpose: tests that hold a transaction open while another one runs, exempt from the connection guard",
 ]

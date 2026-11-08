@@ -46,7 +46,7 @@ from inqtrix.settings import (
     Settings,
     StorageSettings,
 )
-from inqtrix.source_authority import SourceScope
+from inqtrix.storage.source_authority import SourceScope
 
 from tests.contract._app import parse_sse_frames, wait_for_run_status
 from tests.test_knowledge_engine import StubEmbeddings
@@ -1010,20 +1010,20 @@ def test_capabilities_publishes_agent_tool_manifest():
     assert limits["kernel"]["schnell"] == {
         "tool_calls": 30,
         "tool_calls_ceiling": 30,
-        "steps": 57,
-        "steps_ceiling": 57,
+        "steps": 96,
+        "steps_ceiling": 96,
     }
     assert limits["kernel"]["normal"] == {
         "tool_calls": 30,
         "tool_calls_ceiling": 60,
-        "steps": 121,
-        "steps_ceiling": 241,
+        "steps": 120,
+        "steps_ceiling": 240,
     }
     assert limits["kernel"]["deep"] == {
         "tool_calls": 60,
         "tool_calls_ceiling": 120,
-        "steps": 121,
-        "steps_ceiling": 241,
+        "steps": 120,
+        "steps_ceiling": 240,
     }
     assert limits["mission"]["discovery_tool_calls"] == 15
     assert limits["mission"]["plan_tasks"] == 8

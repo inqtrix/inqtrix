@@ -1,0 +1,7 @@
+[
+ {
+  "content": "[\"Wie arbeitet das Modellgerät?\", \"Welche Kennzahl gilt beim Modellgerät als gut?\", \"Welche Teile hat das Modellgerät?\", \"Wie wird die Kennzahl des Modellgeräts gemessen?\", \"Welche Wartung braucht das Modellgerät?\", \"Welche Fehler treten beim Modellgerät auf?\"]",
+  "prompt_tokens": 120,
+  "completion_tokens": 40
+ }
+]

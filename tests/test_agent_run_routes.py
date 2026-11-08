@@ -63,6 +63,8 @@ def _parked_agent_run(client, *, sub: str = OWNER) -> str:
         handle.complete({"answer": "fertig"})
 
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agentenauftrag",
         stack_name="default",
         work=segmented,

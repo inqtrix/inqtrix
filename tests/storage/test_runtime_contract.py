@@ -24,6 +24,7 @@ from inqtrix.storage.migration_contract import (
 from inqtrix.storage.runtime_contract import (
     DatabaseRuntimeContractError,
     DatabaseRuntimeUnavailableError,
+    _is_database_runtime_unavailable,
     verify_database_runtime_contract,
     verify_database_url_runtime_contract,
 )
@@ -594,6 +595,46 @@ async def test_runtime_contract_executes_policy_function_probe(
             _SESSION_FACTORY,
             app_role="inqtrix_app",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sqlstate", "expected"),
+    [
+        ("57P01", OperationalError),
+        ("42501", DatabaseRuntimeContractError),
+    ],
+    ids=["database-shutting-down", "probe-refused"],
+)
+async def test_runtime_contract_leaves_a_lost_connection_in_the_policy_probe_to_the_caller(
+    monkeypatch,
+    sqlstate: str,
+    expected: type[BaseException],
+) -> None:
+    """A database going away answers nothing about the contract; a refusal does."""
+    session = _bind_tenant_session(monkeypatch, _valid_row())
+    execute = session.execute
+    failure = OperationalError(
+        "SELECT inqtrix_current_tenant_id()", {}, SimpleNamespace(sqlstate=sqlstate)
+    )
+
+    async def fail_at_the_policy_probe(statement, parameters=None):
+        if "runtime_policy_tenant" in str(statement):
+            raise failure
+        return await execute(statement, parameters)
+
+    session.execute = fail_at_the_policy_probe
+
+    with pytest.raises(Exception) as caught:
+        await verify_database_runtime_contract(
+            _SESSION_FACTORY,
+            app_role="inqtrix_app",
+        )
+
+    assert type(caught.value) is expected
+    # Readiness reads the first as unreachable and keeps the gate as it was; the
+    # second still closes it.
+    assert _is_database_runtime_unavailable(caught.value) is (expected is OperationalError)
 
 
 @pytest.mark.asyncio

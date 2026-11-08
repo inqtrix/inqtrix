@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass, replace
+from collections.abc import Awaitable
 from typing import Callable
 
 import pytest
@@ -13,7 +15,7 @@ from inqtrix.content.ports import FileNotFound
 from inqtrix.knowledge.source_cleanup import empty_source_cleanup_plan
 from inqtrix.project.asset_records_memory import MemoryAssetStore
 from inqtrix.project.asset_records_ports import AssetNotFound
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.project.vector_index_memory import MemoryVectorIndexStore
 from inqtrix.project.vector_index_ports import VectorIndexMember
 from inqtrix.quota.models import StockLifecycleState
@@ -22,12 +24,12 @@ from inqtrix.runs.deletion_operations import DeletionOperationStore
 from inqtrix.services.asset_deletion_service import AssetDeletionService
 from inqtrix.services.asset_records_service import AssetRecordsService
 from inqtrix.services.vector_index_service import VectorIndexService
-from inqtrix.source_authority import (
+from inqtrix.storage.source_authority import (
     MemorySourceLifecycleAuthority,
     SourceLifecycleConflict,
     SourceScope,
 )
-from inqtrix.sync_bridge import run_coro_sync
+from inqtrix.runs.shared import finish_inline
 
 
 @dataclass(frozen=True)
@@ -269,7 +271,7 @@ async def _fixture():
     return service, assets, indexes, files, knowledge, principal, visible
 
 
-def _terminal(
+async def _terminal(
     service: AssetDeletionService,
     operation_id: str,
     principal: Principal,
@@ -277,10 +279,10 @@ def _terminal(
 ) -> dict:
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
-        result = service.get(operation_id, principal=principal, workspace_id="ws-1")
+        result = await service.get(operation_id, principal=principal, workspace_id="ws-1")
         if result["status"] == expected:
             return result
-        time.sleep(0.01)
+        await asyncio.sleep(0.01)
     raise AssertionError(f"operation did not reach {expected}")
 
 
@@ -293,7 +295,7 @@ async def test_asset_delete_converges_all_resources_before_success() -> None:
         visible_to=visible,
         workspace_id="ws-1",
     )
-    result = _terminal(service, started["operation_id"], principal, "deleted")
+    result = await _terminal(service, started["operation_id"], principal, "deleted")
 
     assert result["completed_items"] == 1
     assert "fl_1" not in files.present
@@ -323,7 +325,7 @@ async def test_asset_delete_releases_file_binding_before_registry_delete() -> No
         visible_to=visible,
         workspace_id="ws-1",
     )
-    result = _terminal(service, started["operation_id"], principal, "deleted")
+    result = await _terminal(service, started["operation_id"], principal, "deleted")
 
     assert result["completed_items"] == 1
     assert files.delete_calls == ["fl_1"]
@@ -375,7 +377,7 @@ async def test_group_delete_keeps_child_sources_and_only_removes_membership() ->
         visible_to=visible,
         workspace_id="ws-1",
     )
-    completed = _terminal(
+    completed = await _terminal(
         service, started["operation_id"], principal, "deleted"
     )
 
@@ -430,7 +432,7 @@ async def test_group_delete_failure_retains_identity_and_retry_converges() -> No
         visible_to=visible,
         workspace_id="ws-1",
     )
-    failed = _terminal(
+    failed = await _terminal(
         service, started["operation_id"], principal, "delete_failed"
     )
     assert failed["error"]["message"] == "database unavailable"
@@ -447,7 +449,7 @@ async def test_group_delete_failure_retains_identity_and_retry_converges() -> No
         principal=principal,
         workspace_id="ws-1",
     )
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
     assert not any(
         group.id == "fg_retry"
         for group in await assets.list_groups(
@@ -488,7 +490,7 @@ async def test_invisible_asset_id_cannot_mint_a_deletion_operation() -> None:
     )
     assert retained.lifecycle_status == "active"
     assert "asset:fa_1" in knowledge.active
-    assert service.list_operations(
+    assert await service.list_operations(
         principal=stranger,
         workspace_id="ws-attacker",
         limit=10,
@@ -513,7 +515,7 @@ async def test_bulk_delete_rejects_the_whole_request_when_one_id_is_unknown() ->
     retained = await assets.get_asset("fa_1", visible_to=visible)
     assert retained.lifecycle_status == "active"
     assert "asset:fa_1" in knowledge.active
-    assert service.list_operations(
+    assert await service.list_operations(
         principal=principal,
         workspace_id="ws-1",
         limit=10,
@@ -547,7 +549,7 @@ async def test_delete_refreshes_blob_manifest_after_winning_upload_binding() -> 
     files.present = {"fl_late"}
 
     def _complete_upload_before_fence() -> None:
-        run_coro_sync(
+        finish_inline(
             assets.bind_uploaded_file(
                 id="fa_1",
                 section_id="sec_1",
@@ -579,7 +581,7 @@ async def test_delete_refreshes_blob_manifest_after_winning_upload_binding() -> 
         visible_to=visible,
         workspace_id="ws-1",
     )
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
 
     record = service.operation_store.get_record(
         started["operation_id"],
@@ -603,7 +605,7 @@ async def test_failed_blob_delete_keeps_asset_and_retry_identity() -> None:
         visible_to=visible,
         workspace_id="ws-1",
     )
-    failed = _terminal(service, started["operation_id"], principal, "delete_failed")
+    failed = await _terminal(service, started["operation_id"], principal, "delete_failed")
     retained = await assets.store.get_asset("fa_1")
     assert retained.lifecycle_status == "delete_failed"
     assert retained.deletion_operation_id == started["operation_id"]
@@ -615,7 +617,7 @@ async def test_failed_blob_delete_keeps_asset_and_retry_identity() -> None:
         started["operation_id"], principal=principal, workspace_id="ws-1"
     )
     assert retried["operation_id"] == started["operation_id"]
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
     assert files.delete_calls == ["fl_1", "fl_1"]
     with pytest.raises(AssetNotFound):
         await assets.store.get_asset("fa_1")
@@ -634,7 +636,7 @@ async def test_missing_knowledge_dependency_never_confirms_linked_asset_deleted(
         visible_to=visible,
         workspace_id="ws-1",
     )
-    failed = _terminal(service, started["operation_id"], principal, "delete_failed")
+    failed = await _terminal(service, started["operation_id"], principal, "delete_failed")
 
     assert failed["retryable"] is True
     assert failed["error"]["type"] == "dependency_unavailable"
@@ -658,7 +660,7 @@ async def test_missing_knowledge_dependency_never_confirms_linked_asset_deleted(
         principal=principal,
         workspace_id="ws-1",
     )
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
     with pytest.raises(AssetNotFound):
         await assets.store.get_asset("fa_1")
 
@@ -675,7 +677,7 @@ async def test_missing_cleanup_registries_are_not_interpreted_as_zero() -> None:
         visible_to=visible,
         workspace_id="ws-1",
     )
-    failed = _terminal(service, started["operation_id"], principal, "delete_failed")
+    failed = await _terminal(service, started["operation_id"], principal, "delete_failed")
 
     assert failed["error"]["type"] == "dependency_unavailable"
     assert "fl_1" in files.present
@@ -699,7 +701,7 @@ async def test_missing_knowledge_dependency_accepts_proven_volatile_absence() ->
         visible_to=visible,
         workspace_id="ws-1",
     )
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
 
     assert "fl_1" not in files.present
     with pytest.raises(AssetNotFound):
@@ -720,7 +722,7 @@ async def test_empty_fenced_cleanup_plan_allows_retry_without_knowledge_service(
         visible_to=visible,
         workspace_id="ws-1",
     )
-    _terminal(service, started["operation_id"], principal, "delete_failed")
+    await _terminal(service, started["operation_id"], principal, "delete_failed")
     record = service.operation_store.get_record(
         started["operation_id"],
         tenant_id="default",
@@ -738,7 +740,7 @@ async def test_empty_fenced_cleanup_plan_allows_retry_without_knowledge_service(
         principal=principal,
         workspace_id="ws-1",
     )
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
     with pytest.raises(AssetNotFound):
         await assets.store.get_asset("fa_1")
 
@@ -762,7 +764,7 @@ async def test_delete_waits_for_running_upload_cleanup_before_terminal_success()
         visible_to=visible,
         workspace_id="ws-1",
     )
-    failed = _terminal(service, started["operation_id"], principal, "delete_failed")
+    failed = await _terminal(service, started["operation_id"], principal, "delete_failed")
     assert failed["retryable"] is True
     retained = await assets.store.get_asset("fa_1")
     assert retained.lifecycle_status == "delete_failed"
@@ -770,10 +772,10 @@ async def test_delete_waits_for_running_upload_cleanup_before_terminal_success()
 
     upload.ready = True
     await service.retry(started["operation_id"], principal=principal, workspace_id="ws-1")
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
     with pytest.raises(AssetNotFound):
         await assets.store.get_asset("fa_1")
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
     with pytest.raises(AssetNotFound):
         await assets.store.get_asset("fa_1")
 
@@ -799,7 +801,7 @@ async def test_legacy_shared_blob_is_deleted_and_released_once_in_same_bulk() ->
         visible_to=visible,
         workspace_id="ws-1",
     )
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
 
     assert files.delete_calls == ["fl_1"]
     assert len(quota.adjustments) == 1
@@ -822,7 +824,7 @@ async def test_legacy_shared_blob_outside_manifest_fails_before_blob_delete() ->
         visible_to=visible,
         workspace_id="ws-1",
     )
-    _terminal(service, started["operation_id"], principal, "delete_failed")
+    await _terminal(service, started["operation_id"], principal, "delete_failed")
 
     assert files.delete_calls == []
     assert "fl_1" in files.present
@@ -870,21 +872,21 @@ async def test_an_account_erasure_runs_as_one_operation_of_the_administrator() -
     )
     deadline = time.monotonic() + 2
     while (
-        service.get("del_marked", principal=principal, workspace_id=None)["status"]
+        (await service.get("del_marked", principal=principal, workspace_id=None))["status"]
         != "deleted"
     ):
         assert time.monotonic() < deadline, "the erasure operation never finished"
-        time.sleep(0.01)
+        await asyncio.sleep(0.01)
 
     assert started["operation_id"] == "del_marked"
     assert erased == [("default", account, principal.user_id, "del_marked")]
 
 
-def _wait_for(condition: Callable[[], bool]) -> None:
+async def _wait_for_status(status: Callable[[], Awaitable[str]], expected: str) -> None:
     deadline = time.monotonic() + 2
-    while not condition():
+    while await status() != expected:
         assert time.monotonic() < deadline, "the erasure operation never got there"
-        time.sleep(0.01)
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -906,17 +908,17 @@ async def test_an_erasure_provisioning_started_belongs_to_nobody() -> None:
     account = uuid.uuid4()
     nobody = operation_principal("default", None)
 
-    def status() -> str:
-        return service.get("del_scim", principal=nobody, workspace_id=None)["status"]
+    async def status() -> str:
+        return (await service.get("del_scim", principal=nobody, workspace_id=None))["status"]
 
     await service.start_user_erasure(
         account, actor=ProvisioningActor(), tenant_id="default", operation_id="del_scim"
     )
-    _wait_for(lambda: status() == "delete_failed")
+    await _wait_for_status(status, "delete_failed")
     await service.retry_user_erasure(
         "del_scim", actor=ProvisioningActor(), tenant_id="default"
     )
-    _wait_for(lambda: status() == "deleted")
+    await _wait_for_status(status, "deleted")
 
     assert attempts == [("default", account, None, "del_scim")] * 2
 
@@ -956,7 +958,7 @@ async def test_an_orphaned_source_is_cleaned_up_before_its_tombstone() -> None:
     started = await service.start_orphaned_source(
         scope.source_id, principal=principal, workspace_id="ws-1"
     )
-    _terminal(service, started["operation_id"], principal, "deleted")
+    await _terminal(service, started["operation_id"], principal, "deleted")
 
     assert scope.source_id in knowledge.detached
     assert scope.source_id not in knowledge.active
@@ -978,7 +980,7 @@ async def test_an_orphaned_source_with_knowledge_left_fails_visibly() -> None:
     started = await service.start_orphaned_source(
         scope.source_id, principal=principal, workspace_id="ws-1"
     )
-    _terminal(service, started["operation_id"], principal, "delete_failed")
+    await _terminal(service, started["operation_id"], principal, "delete_failed")
 
     assert scope.source_id in knowledge.active
 
@@ -991,5 +993,5 @@ async def test_without_the_knowledge_service_an_orphaned_source_is_not_assumed_e
         scope.source_id, principal=principal, workspace_id="ws-1"
     )
 
-    _terminal(service, started["operation_id"], principal, "delete_failed")
+    await _terminal(service, started["operation_id"], principal, "delete_failed")
 

@@ -4,7 +4,7 @@ This index connects observation types, content boundaries and the detailed
 event catalogs. Attribute definitions live in
 [`semconv.py`](../../src/inqtrix/observability/semconv.py); recording and content
 handling live in [`otel.py`](../../src/inqtrix/observability/otel.py),
-[`provider_tracing.py`](../../src/inqtrix/observability/provider_tracing.py) and
+[`providers/tracing.py`](../../src/inqtrix/providers/tracing.py) and
 [`content.py`](../../src/inqtrix/observability/content.py).
 
 ## Observation levels
@@ -17,10 +17,10 @@ handling live in [`otel.py`](../../src/inqtrix/observability/otel.py),
 | `inqtrix.answer.publish` | Span | Publication of a finished answer: `inqtrix.answer.started`, byte-bounded `inqtrix.output_text.delta` events of at most 2 KB and `inqtrix.answer.ready`; `inqtrix.answer.bytes` is the answer's UTF-8 size. For an agent answer it includes the publisher's artifact writes. |
 | `inqtrix.run.complete` | Span | The terminal write of a successful run segment: result payload and snapshot. |
 | Research `classify`, `plan`, `search`, `evaluate`, `answer` | Span | Node/round, numeric snapshots and the decision/status attributes exported by `graph._set_node_span_attributes`. |
-| Provider `chat` or `text_completion` | Generation | Purpose, effective model/effort, the forced tool choice of a role's turn (`inqtrix.request.tool_choice`, absent when the model may answer in text), usage, finish reason and the provider-call boundary. A response the provider stopped before it was finished (finish reason `content_filter`, `length`, `max_tokens` and the like) has level WARNING and a status message naming the finish reason. |
+| Provider `chat` or `text_completion` | Generation | Purpose, effective model/effort (the effort asked for in `inqtrix.request.reasoning_effort`, the one the request carried in `inqtrix.request.reasoning_effort.sent` where the adapter reports it, as Azure and LiteLLM do), the forced tool choice of a role's turn (`inqtrix.request.tool_choice`, absent when the model may answer in text), usage, finish reason and the provider-call boundary. `inqtrix.provider.attempts` (also in the observation metadata as `attempts`) counts the requests the logical call sent, its retries included; a request the deadline stopped before it was sent does not count, and a provider outside the shared attempt hook reports none. `gen_ai.request.max_tokens` is the output budget actually sent, which Claude raises when thinking is on. A response the provider stopped before it was finished (finish reason `content_filter`, `length`, `max_tokens` and the like) has level WARNING and a status message naming the finish reason. A generation also has level WARNING from the third answer in a row with zero reasoning tokens at reasoning effort `medium` or higher, for a model whose card lists that effort (the provider may ignore the reasoning setting); an answer without a reasoning figure is not judged. |
 | Kernel tool call `execute_tool <name>` | Tool | One per call the kernel's tool node executes, per execution segment, keyed by `gen_ai.tool.call.id` (the timeline row's `invocation_id`); outcome in `inqtrix.outcome`. See [Tool spans](#tool-spans). |
 | `inqtrix.session_title` | Span | Optional short-title work alongside a conversation. Its generation has purpose `session_title`, the dedicated Fast model and actual usage. The request records the final outcome after the title revision check and returns an optional `trace_id`. It is not a reasoning step of the answer. A timed-out HTTP waiter does not erase a provider completion or its quota booking. |
-| Grounded `web_search` | Generation | Standard input/output show the actual query and provider answer. Source metadata retains provider provenance and annotation offsets. The search engine is the model identity; provider-reported search tokens contribute to trace usage. Missing prices are not zero-cost evidence. |
+| Grounded `web_search` | Generation | Standard input/output show the actual query and provider answer. Source metadata retains provider provenance and annotation offsets. The search engine is the model identity; provider-reported search tokens contribute to trace usage. Missing prices are not zero-cost evidence. `inqtrix.provider.attempts` (and `attempts` in the observation metadata) counts the requests the call sent, as for a provider generation. A search that degraded (an empty result after a provider failure, an answer the provider did not finish) has level WARNING and its notices as the status message. |
 | Detailed lineage such as `claim_merge` or `evidence_verification_projection` | Forensic event | Full authorized audit payload and a content-minimized span-event projection; it is not an extra provider call. |
 
 Tool requests and replies are part of the provider conversation. A tool named
@@ -40,11 +40,20 @@ the protected conversation/audit path. This separation keeps normal activity lin
 readable without replacing the data used for forensic inspection.
 
 Kernel context compaction emits one `inqtrix.agent.context.compacted` event
-and its existing narration after the replacement model call succeeds. Sync and
-async summary hooks use the same run-bound archive and task state. The summary
-generation goes through the provider's existing content capture and retry
-authority; middleware must not add an independent retry budget. Failure or
-cancellation propagates without a successful compaction event.
+and its existing narration after the replacement model call succeeds. The
+kernel runs synchronously; its summary hook uses the run-bound archive and task
+state. The summary
+generation runs under the purpose `agent_context_compaction` and goes through the
+provider's existing content capture and retry authority; middleware must not add
+an independent retry budget. Failure or cancellation propagates without a
+successful compaction event, and so does a summary the provider cut off or
+filtered. A compaction that would not shrink the model's input is not taken.
+Before any summary, tool results the model has already answered give way to
+placeholders in the model's input once it reaches the clearing threshold; each
+placeholder names how to read the result again and the evidence labels it
+listed. This adds no generation and no event: the placeholders are visible in
+the input of the generation they belong to, and the summary condenses the
+input as that generation saw it, while the archive keeps the originals.
 
 Captured-text archives share the existing run-artifact lifecycle. One logical
 source may contain several immutable storage parts; publishing those parts adds
@@ -76,12 +85,13 @@ per-invocation attempt/deadline budget; independent summary operations retain
 their own provider budget. Archive failure prevents context replacement.
 Retry logs and activity events use the same shared attempt coordinates. The
 kernel binds its existing run-cancellation signal to provider retry waits.
-`agent_context_projection` identifies the generation that reduces a complete
-tool result after a context rejection or a conservative input-budget check. It uses the same model and the shared
-remaining budget; this purpose distinguishes projection work from the answer
-without inventing another tool execution. The checkpoint's kernel usage
-aggregate includes these and proactive summary calls, so resuming a run cannot
-discard their known spend. Message-level receipts remain the input for graphs
+After a context rejection or a conservative input-budget check, the kernel
+clears tool results of that call, answered ones before those the model has not
+seen yet and the largest first: a placeholder names how to read the result
+again, and a result that cannot be read again goes to the run archive first.
+This makes no model call, so it adds no generation. The checkpoint's
+kernel usage aggregate includes proactive summary calls, so resuming a run
+cannot discard their known spend. Message-level receipts remain the input for graphs
 without the kernel aggregate.
 
 Conversation-source tools use the kernel tool observation and activity channel;
@@ -189,9 +199,11 @@ Credential redaction of product search evidence is independent of telemetry
 limits: it preserves complete answer/snippet text, valid annotation offsets and
 usage metadata. Its raw provider envelope stays exclusively on the protected
 trace path. Capture backstops must not shorten the product evidence beforehand.
-The `context_budget` recovery reason denotes preflight projection; `context_window`
-denotes a provider rejection. A projection whose own input cannot fit produces
-no generation or retry charge. A failed archive write retains the checkpoint and
+The `context_budget` recovery reason denotes clearing before the call, after a
+conservative input-budget check; `context_window` denotes clearing after a
+provider rejection. When the input exceeds the budget before the call even with
+every clearable result cleared, the call fails without a generation and without
+a recovery event. A failed archive write retains the checkpoint and
 reports the failure instead of claiming a successful completed transcript.
 A failed execution-cache purge warns with its error type and keeps the native
 run anchor available for deletion retry. A deferred retention purge is not

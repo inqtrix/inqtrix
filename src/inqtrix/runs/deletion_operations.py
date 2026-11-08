@@ -15,16 +15,18 @@ explicitly retryable instead.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from functools import partial
 from typing import Any, Callable
 
+from inqtrix import aio
 from inqtrix.pagination import keyset_page
+from inqtrix.runs.shared import inline_on_loop, on_transition_lane
 
 log = logging.getLogger(__name__)
 
@@ -39,25 +41,6 @@ class DeletionOperationConflict(RuntimeError):
 
 class DeletionAttemptSuperseded(RuntimeError):
     """Raised when a worker no longer owns the destructive attempt fence."""
-
-
-def refuse_on_event_loop(action: str) -> None:
-    """Refuse a deletion-store write on a thread that runs an event loop.
-
-    Registering or reopening an operation can wait for row and tenant locks
-    that other requests hold. Their transactions run on the same event loop
-    and can only commit while it keeps running, so a write that blocked the
-    loop would wait for itself. A caller on a loop hands the write to a
-    worker thread.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    raise RuntimeError(
-        f"a deletion {action} must not run on an event loop thread; "
-        "hand it to a worker thread"
-    )
 
 
 class DeletionOperationStatus(StrEnum):
@@ -472,7 +455,7 @@ class DeletionOperationStore:
         self._worker_id = worker_id
         self._records: dict[str, DeletionOperationRecord] = {}
         self._lock = threading.RLock()
-        from inqtrix.source_authority import MemorySourceLifecycleAuthority
+        from inqtrix.storage.source_authority import MemorySourceLifecycleAuthority
 
         self._source_authority = MemorySourceLifecycleAuthority()
         self._authority: Any | None = None
@@ -548,7 +531,6 @@ class DeletionOperationStore:
         ``operation_id`` lets a caller that already recorded the id
         elsewhere register under that id, as an account erasure does.
         """
-        refuse_on_event_loop("registration")
         now = time.time()
         with self._lock:
             destructive_collection_id = (
@@ -647,7 +629,7 @@ class DeletionOperationStore:
                     ):
                         raise DeletionOperationConflict(existing.operation_id)
             operation_id = operation_id or new_deletion_operation_id()
-            from inqtrix.source_authority import SourceLifecycleConflict, SourceScope
+            from inqtrix.storage.source_authority import SourceLifecycleConflict, SourceScope
 
             source_scopes = [
                 SourceScope(
@@ -826,7 +808,6 @@ class DeletionOperationStore:
         work: DeletionWork | None = None,
         before_dispatch: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
-        refuse_on_event_loop("retry")
         with self._lock:
             record = self._visible(
                 operation_id,
@@ -1028,7 +1009,7 @@ class DeletionOperationStore:
                 return False
             if record.terminal_action is not None:
                 record.terminal_action()
-            from inqtrix.source_authority import SourceScope
+            from inqtrix.storage.source_authority import SourceScope
 
             source_scopes = [
                 SourceScope(
@@ -1099,9 +1080,6 @@ class DeletionOperationStore:
             )
             return True
 
-    def close(self) -> None:
-        return None
-
     def _visible(
         self,
         operation_id: str,
@@ -1125,13 +1103,7 @@ class DeletionOperationStore:
         return record
 
     def _dispatch(self, record: DeletionOperationRecord) -> None:
-        thread = threading.Thread(
-            target=self._run,
-            args=(record.operation_id,),
-            name=f"inqtrix-delete-{record.operation_id}",
-            daemon=True,
-        )
-        thread.start()
+        aio.start_legacy_segment(partial(self._run, record.operation_id))
 
     def _run(self, operation_id: str) -> None:
         with self._lock:
@@ -1158,3 +1130,21 @@ class DeletionOperationStore:
                     getattr(exc, "error_type", None) or "server_error"
                 ),
             )
+
+    # A registration's callbacks reach the loop, so it runs on a thread; the rest
+    # has nothing to wait for.
+    asubmit = on_transition_lane(submit)
+    aretry = on_transition_lane(retry)
+    aget = inline_on_loop(get)
+    aget_record = inline_on_loop(get_record)
+    alist_operations = inline_on_loop(list_operations)
+    afind_for_asset = inline_on_loop(find_for_asset)
+    afind_for_target = inline_on_loop(find_for_target)
+    ahas_collection_deletion = inline_on_loop(has_collection_deletion)
+    ahas_document_deletion = inline_on_loop(has_document_deletion)
+    aprogress = inline_on_loop(progress)
+    ais_current = inline_on_loop(is_current)
+    acheckpoint_source_cleanup = inline_on_loop(checkpoint_source_cleanup)
+    asource_deletion_permit = inline_on_loop(source_deletion_permit)
+    acomplete = inline_on_loop(complete)
+    afail = inline_on_loop(fail)

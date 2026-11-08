@@ -9,11 +9,12 @@ import {
 import * as Y from 'yjs'
 
 import { validateSuggestionUpdate } from '../../collaboration-server/src/suggestPolicy'
+import { inFreshTab } from './freshTab'
 
 const fixturePath = '/browser-tests/fixtures/editor-lifecycle.html'
 
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
+test.beforeEach(async ({ context, page }) => {
+  await context.addInitScript(() => {
     // Where a fixture follows the app language, these specs assert its German
     // copy, so they state the language instead of inheriting the English
     // first-render fallback.
@@ -585,7 +586,7 @@ test('slash heading creates a server-valid collaboration document', async ({ pag
   serverDocument.destroy()
 })
 
-test('all eleven slash actions keep the collaboration document schema-valid', async ({ page }) => {
+test('all eleven slash actions keep the collaboration document schema-valid', async ({ context }) => {
   const matrix = [
     { label: 'Absatz', selector: 'p', minimum: 2 },
     { label: 'Überschrift 1', selector: 'h1' },
@@ -601,26 +602,28 @@ test('all eleven slash actions keep the collaboration document schema-valid', as
   ]
 
   for (const action of matrix) {
-    await page.goto(`${fixturePath}?scenario=slash-collaboration`)
-    const editor = page.getByTestId('slash-collaboration-editor').locator('.ProseMirror')
-    await editor.click()
-    await page.keyboard.press('Control+End')
-    await page.keyboard.press('Enter')
-    await page.keyboard.type('/')
-    const item = page.getByRole('button', { name: action.label })
-    await expect(item).toBeEnabled()
-    await item.click()
-    await expect(editor.locator(action.selector)).toHaveCount(
-      action.minimum ?? 1,
-    )
+    await inFreshTab(context, async (page) => {
+      await page.goto(`${fixturePath}?scenario=slash-collaboration`)
+      const editor = page.getByTestId('slash-collaboration-editor').locator('.ProseMirror')
+      await editor.click()
+      await page.keyboard.press('Control+End')
+      await page.keyboard.press('Enter')
+      await page.keyboard.type('/')
+      const item = page.getByRole('button', { name: action.label })
+      await expect(item).toBeEnabled()
+      await item.click()
+      await expect(editor.locator(action.selector)).toHaveCount(
+        action.minimum ?? 1,
+      )
 
-    const encoded = await page.evaluate(
-      () => window.__slashCollaborationUpdate ?? [],
-    )
-    const document = new Y.Doc()
-    Y.applyUpdate(document, Uint8Array.from(encoded))
-    expect(() => validateEditorYDoc(document)).not.toThrow()
-    document.destroy()
+      const encoded = await page.evaluate(
+        () => window.__slashCollaborationUpdate ?? [],
+      )
+      const document = new Y.Doc()
+      Y.applyUpdate(document, Uint8Array.from(encoded))
+      expect(() => validateEditorYDoc(document)).not.toThrow()
+      document.destroy()
+    })
   }
 })
 

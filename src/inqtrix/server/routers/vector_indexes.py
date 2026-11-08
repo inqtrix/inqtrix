@@ -185,7 +185,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         try:
             # One namespace for the deletion guard and the write.
             workspace_id = await workspace_id_for_write(req, principal, users)
-            deletion_service.assert_target_allowed(
+            await deletion_service.assert_target_allowed(
                 DeletionTargetKind.VECTOR_INDEX,
                 index_id,
                 principal=principal,

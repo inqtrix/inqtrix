@@ -23,6 +23,10 @@ apps/research-desk/dist
 apps/collaboration-server/dist
 packages/editor-schema/dist
 
+# Desktop clutter: a build from a folder the macOS Finder has opened would
+# carry src/.DS_Store and src/inqtrix/.DS_Store into the image.
+**/.DS_Store
+
 # VCS, local agent memory, IDE
 .git
 .gitignore

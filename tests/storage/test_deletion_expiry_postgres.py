@@ -60,7 +60,7 @@ class _SilentQueue:
     no-queue case — no restart ever comes to clean it up.
     """
 
-    def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
+    async def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
         del operation_id, tenant_id
 
     def ack(self, message_id: str) -> None:
@@ -165,8 +165,8 @@ async def _session_row(session_id: str) -> dict:
         await engine.dispose()
 
 
-def _submit_session_deletion(store, session_id: str, *, owner=OWNER_ID) -> str:
-    summary = store.submit(
+async def _submit_session_deletion(store, session_id: str, *, owner=OWNER_ID) -> str:
+    summary = await store.asubmit(
         target_kind=DeletionTargetKind.AGENT_SESSION,
         target_id=session_id,
         manifest=(),
@@ -183,8 +183,8 @@ def _submit_session_deletion(store, session_id: str, *, owner=OWNER_ID) -> str:
     return summary["operation_id"]
 
 
-def _get(store, operation_id: str) -> dict:
-    return store.get(
+async def _get(store, operation_id: str) -> dict:
+    return await store.aget(
         operation_id,
         tenant_id="default",
         created_by_user_id=OWNER_ID,
@@ -199,14 +199,14 @@ async def test_unclaimed_operation_expires_and_frees_the_session() -> None:
     await _seed_session("as_expire")
     store = _store(queue=_SilentQueue(), dispatch_timeout_seconds=0.0)
     try:
-        operation_id = await asyncio.to_thread(_submit_session_deletion, store, "as_expire")
+        operation_id = await _submit_session_deletion(store, "as_expire")
         # submit runs (and throttles) an expiry pass of its own; the next
         # read triggers the one under test.
         store._last_expiry_check = None
-        assert _get(store, operation_id)["status"] == (
+        assert (await _get(store, operation_id))["status"] == (
             DeletionOperationStatus.DELETE_FAILED.value
         )
-        summary = _get(store, operation_id)
+        summary = await _get(store, operation_id)
         assert summary["error"]["type"] == "dispatch_timeout"
 
         row = await _session_row("as_expire")
@@ -215,9 +215,7 @@ async def test_unclaimed_operation_expires_and_frees_the_session() -> None:
 
         # Retry requires delete_failed, so this call is the proof that the
         # operation is reachable again instead of stuck behind a 409.
-        retried = await asyncio.to_thread(
-            store.retry,
-            operation_id,
+        retried = await store.aretry(operation_id,
             tenant_id="default",
             created_by_user_id=OWNER_ID,
             workspace_id=WORKSPACE,
@@ -225,7 +223,7 @@ async def test_unclaimed_operation_expires_and_frees_the_session() -> None:
         )
         assert retried["status"] == DeletionOperationStatus.QUEUED.value
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -235,15 +233,15 @@ async def test_fresh_operation_survives_the_expiry_pass() -> None:
     await _seed_session("as_fresh")
     store = _store(queue=_SilentQueue(), dispatch_timeout_seconds=240.0)
     try:
-        operation_id = await asyncio.to_thread(_submit_session_deletion, store, "as_fresh")
+        operation_id = await _submit_session_deletion(store, "as_fresh")
         store._last_expiry_check = None
-        assert _get(store, operation_id)["status"] == (
+        assert (await _get(store, operation_id))["status"] == (
             DeletionOperationStatus.QUEUED.value
         )
         row = await _session_row("as_fresh")
         assert row["lifecycle_status"] == "deleting"
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -253,18 +251,18 @@ async def test_expiry_is_idempotent() -> None:
     await _seed_session("as_twice")
     store = _store(queue=_SilentQueue(), dispatch_timeout_seconds=0.0)
     try:
-        operation_id = await asyncio.to_thread(_submit_session_deletion, store, "as_twice")
+        operation_id = await _submit_session_deletion(store, "as_twice")
         store._last_expiry_check = None
-        first = _get(store, operation_id)
+        first = await _get(store, operation_id)
         store._last_expiry_check = None
-        second = _get(store, operation_id)
+        second = await _get(store, operation_id)
 
         assert first["status"] == DeletionOperationStatus.DELETE_FAILED.value
         assert second["status"] == first["status"]
         assert second["error"]["type"] == "dispatch_timeout"
         assert second["finished_at"] == first["finished_at"]
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -274,9 +272,9 @@ async def test_restart_sweep_fails_orphans_of_a_previous_process() -> None:
     await _seed_session("as_orphan")
     producer = _store(queue=_SilentQueue(), worker_id="previous-process")
     try:
-        operation_id = await asyncio.to_thread(_submit_session_deletion, producer, "as_orphan")
+        operation_id = await _submit_session_deletion(producer, "as_orphan")
     finally:
-        producer.close()
+        await producer.aclose()
 
     # queue=None is the in-process shape, the only one resolve_orphan_sweep
     # lets sweep. The generous timeout keeps the dispatch-timeout path out
@@ -287,14 +285,14 @@ async def test_restart_sweep_fails_orphans_of_a_previous_process() -> None:
         worker_id="new-process",
     )
     try:
-        summary = _get(successor, operation_id)
+        summary = await _get(successor, operation_id)
         assert summary["status"] == DeletionOperationStatus.DELETE_FAILED.value
         assert summary["error"]["type"] == "server_restarted"
 
         row = await _session_row("as_orphan")
         assert row["lifecycle_status"] == "delete_failed"
     finally:
-        successor.close()
+        await successor.aclose()
 
 
 @pytest.mark.asyncio
@@ -304,9 +302,9 @@ async def test_queue_mode_never_sweeps_live_worker_rows() -> None:
     await _seed_session("as_queued")
     producer = _store(queue=_SilentQueue(), worker_id="previous-process")
     try:
-        operation_id = await asyncio.to_thread(_submit_session_deletion, producer, "as_queued")
+        operation_id = await _submit_session_deletion(producer, "as_queued")
     finally:
-        producer.close()
+        await producer.aclose()
 
     successor = _store(
         queue=_SilentQueue(),
@@ -314,14 +312,14 @@ async def test_queue_mode_never_sweeps_live_worker_rows() -> None:
         worker_id="new-process",
     )
     try:
-        assert _get(successor, operation_id)["status"] == (
+        assert (await _get(successor, operation_id))["status"] == (
             DeletionOperationStatus.QUEUED.value
         )
     finally:
-        successor.close()
+        await successor.aclose()
 
 
-def _orphan_running_operation(store, session_id: str, monkeypatch) -> str:
+async def _orphan_running_operation(store, session_id: str, monkeypatch) -> str:
     """Produce a RUNNING receipt whose executing thread died terminal-less.
 
     The terminal write is broken while the in-process worker unwinds, so
@@ -356,7 +354,7 @@ def _orphan_running_operation(store, session_id: str, monkeypatch) -> str:
     def _dying_work(handle):
         raise RuntimeError("kaputt")
 
-    summary = store.submit(
+    summary = await store.asubmit(
         target_kind=DeletionTargetKind.AGENT_SESSION,
         target_id=session_id,
         manifest=(),
@@ -375,7 +373,7 @@ def _orphan_running_operation(store, session_id: str, monkeypatch) -> str:
     while _time.monotonic() < deadline:
         if operation_id not in store._local:
             break
-        _time.sleep(0.05)
+        await asyncio.sleep(0.05)
     else:
         pytest.fail("worker thread never unwound")
     broken["on"] = False
@@ -398,15 +396,13 @@ async def test_lost_running_operation_expires_and_stays_retryable(
     await _seed_session("as_lost_running")
     store = _store(queue=None, dispatch_timeout_seconds=10_000.0)
     try:
-        operation_id = await asyncio.to_thread(
-            _orphan_running_operation,
-            store, "as_lost_running", monkeypatch
+        operation_id = await _orphan_running_operation(store, "as_lost_running", monkeypatch
         )
         monkeypatch.setattr(
             deletion_module, "_EXECUTION_LOST_GRACE_SECONDS", 0.0
         )
         store._last_expiry_check = None
-        summary = _get(store, operation_id)
+        summary = await _get(store, operation_id)
         assert summary["status"] == (
             DeletionOperationStatus.DELETE_FAILED.value
         )
@@ -415,9 +411,7 @@ async def test_lost_running_operation_expires_and_stays_retryable(
         row = await _session_row("as_lost_running")
         assert row["lifecycle_status"] == "delete_failed"
 
-        retried = await asyncio.to_thread(
-            store.retry,
-            operation_id,
+        retried = await store.aretry(operation_id,
             tenant_id="default",
             created_by_user_id=OWNER_ID,
             workspace_id=WORKSPACE,
@@ -429,7 +423,7 @@ async def test_lost_running_operation_expires_and_stays_retryable(
             DeletionOperationStatus.DELETED.value,
         )
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -444,12 +438,10 @@ async def test_queue_mode_never_expires_running_rows(monkeypatch) -> None:
     await _seed_session("as_worker_running")
     producer = _store(queue=None, dispatch_timeout_seconds=10_000.0)
     try:
-        operation_id = await asyncio.to_thread(
-            _orphan_running_operation,
-            producer, "as_worker_running", monkeypatch
+        operation_id = await _orphan_running_operation(producer, "as_worker_running", monkeypatch
         )
     finally:
-        producer.close()
+        await producer.aclose()
 
     successor = _store(
         queue=_SilentQueue(),
@@ -461,11 +453,11 @@ async def test_queue_mode_never_expires_running_rows(monkeypatch) -> None:
             deletion_module, "_EXECUTION_LOST_GRACE_SECONDS", 0.0
         )
         successor._last_expiry_check = None
-        assert _get(successor, operation_id)["status"] == (
+        assert (await _get(successor, operation_id))["status"] == (
             DeletionOperationStatus.RUNNING.value
         )
     finally:
-        successor.close()
+        await successor.aclose()
 
 
 @pytest.mark.asyncio
@@ -481,22 +473,20 @@ async def test_submit_pass_expires_stale_receipts_first(monkeypatch) -> None:
     await _seed_session("as_new_target")
     store = _store(queue=None, dispatch_timeout_seconds=10_000.0)
     try:
-        lost_id = await asyncio.to_thread(
-            _orphan_running_operation,
-            store, "as_lost_before_submit", monkeypatch
+        lost_id = await _orphan_running_operation(store, "as_lost_before_submit", monkeypatch
         )
         monkeypatch.setattr(
             deletion_module, "_EXECUTION_LOST_GRACE_SECONDS", 0.0
         )
         store._last_expiry_check = None
-        await asyncio.to_thread(_submit_session_deletion, store, "as_new_target")
-        summary = _get(store, lost_id)
+        await _submit_session_deletion(store, "as_new_target")
+        summary = await _get(store, lost_id)
         assert summary["status"] == (
             DeletionOperationStatus.DELETE_FAILED.value
         )
         assert summary["error"]["type"] == "execution_lost"
     finally:
-        store.close()
+        await store.aclose()
 
 
 async def _notifications(operation_id: str) -> list[dict]:
@@ -527,7 +517,7 @@ async def test_deletion_lifecycle_notifies_only_its_owner_without_progress_noise
     await _seed_session("as_notify")
     store = _store(queue=_SilentQueue())
     try:
-        operation_id = await asyncio.to_thread(_submit_session_deletion, store, "as_notify")
+        operation_id = await _submit_session_deletion(store, "as_notify")
         expected = {
             "tenant_id": "default",
             "target_user_id": OWNER_ID,
@@ -537,11 +527,11 @@ async def test_deletion_lifecycle_notifies_only_its_owner_without_progress_noise
         }
         assert await _notifications(operation_id) == [expected]
 
-        claimed = store.claim_for_execution(
+        claimed = await store.aclaim_for_execution(
             operation_id, "default", allow_takeover=False
         )
         assert claimed is not None
-        assert store.progress(
+        assert await store.aprogress(
             operation_id,
             stage=DeletionStage.SESSION_DATA_REMOVED,
             completed_items=1,
@@ -550,33 +540,31 @@ async def test_deletion_lifecycle_notifies_only_its_owner_without_progress_noise
         )
         assert await _notifications(operation_id) == [expected]
 
-        assert not store.complete(operation_id, fence_attempt=claimed.attempt + 1)
+        assert not await store.acomplete(operation_id, fence_attempt=claimed.attempt + 1)
         assert await _notifications(operation_id) == [expected]
-        assert store.fail(operation_id, "Dependency unavailable", fence_attempt=claimed.attempt)
+        assert await store.afail(operation_id, "Dependency unavailable", fence_attempt=claimed.attempt)
         assert await _notifications(operation_id) == [expected] * 2
 
-        await asyncio.to_thread(
-            store.retry,
-            operation_id,
+        await store.aretry(operation_id,
             tenant_id="default",
             created_by_user_id=OWNER_ID,
             workspace_id=WORKSPACE,
             work=lambda handle: None,
         )
         assert await _notifications(operation_id) == [expected] * 3
-        retried = store.claim_for_execution(
+        retried = await store.aclaim_for_execution(
             operation_id, "default", allow_takeover=False
         )
         assert retried is not None
         assert await _notifications(operation_id) == [expected] * 3
-        assert store.complete(operation_id, fence_attempt=retried.attempt)
+        assert await store.acomplete(operation_id, fence_attempt=retried.attempt)
         assert await _notifications(operation_id) == [expected] * 4
         assert await _session_row("as_notify") == {}
 
-        assert not store.complete(operation_id, fence_attempt=retried.attempt)
+        assert not await store.acomplete(operation_id, fence_attempt=retried.attempt)
         assert await _notifications(operation_id) == [expected] * 4
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -605,7 +593,7 @@ async def test_deletion_notification_rolls_back_with_its_receipt(monkeypatch) ->
     store = _store(queue=_SilentQueue())
     try:
         with pytest.raises(RuntimeError, match="abort notification transaction"):
-            await asyncio.to_thread(_submit_session_deletion, store, "as_notification_rollback")
+            await _submit_session_deletion(store, "as_notification_rollback")
         assert len(attempted_ids) == 1
         assert await _notifications(attempted_ids[0]) == []
         assert (await _session_row("as_notification_rollback"))["lifecycle_status"] == "active"
@@ -624,7 +612,7 @@ async def test_deletion_notification_rolls_back_with_its_receipt(monkeypatch) ->
         finally:
             await engine.dispose()
     finally:
-        store.close()
+        await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -632,17 +620,15 @@ async def test_unowned_deletion_does_not_require_a_user_notification() -> None:
     await _seed_session("as_unowned_notification", owner=None)
     store = _store(queue=_SilentQueue())
     try:
-        operation_id = await asyncio.to_thread(
-            _submit_session_deletion,
-            store, "as_unowned_notification", owner=None
+        operation_id = await _submit_session_deletion(store, "as_unowned_notification", owner=None
         )
         assert await _notifications(operation_id) == []
-        claimed = store.claim_for_execution(
+        claimed = await store.aclaim_for_execution(
             operation_id, "default", allow_takeover=False
         )
         assert claimed is not None
-        assert store.complete(operation_id, fence_attempt=claimed.attempt)
+        assert await store.acomplete(operation_id, fence_attempt=claimed.attempt)
         assert await _notifications(operation_id) == []
         assert await _session_row("as_unowned_notification") == {}
     finally:
-        store.close()
+        await store.aclose()

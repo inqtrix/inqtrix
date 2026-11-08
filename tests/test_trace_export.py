@@ -372,38 +372,60 @@ def test_prune_old_traces_excludes_already_requested_ids():
     assert deleted == [["t-new"]]
 
 
-def test_retention_thread_starts_only_for_otlp_with_positive_days(
-    monkeypatch,
-):
-    import threading
+def test_retention_starts_only_for_otlp_with_positive_days():
+    import asyncio
 
     import inqtrix.worker.__main__ as worker_main
 
-    started: list[str] = []
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        assert worker_main._start_trace_retention(_settings("file"), stop) is None
 
-    class _FakeThread:
-        def __init__(self, *, target, name, daemon):
-            started.append(name)
+        otlp = _settings("otlp")
+        otlp.observability.trace_retention_days = 0
+        assert worker_main._start_trace_retention(otlp, stop) is None
 
-        def start(self):
-            pass
+        otlp.observability.trace_retention_days = 30
+        task = worker_main._start_trace_retention(otlp, stop)
+        assert task is not None
+        assert task.get_name() == "inqtrix-trace-retention"
+        stop.set()
+        await task
 
-    monkeypatch.setattr(threading, "Thread", _FakeThread)
-    stop = threading.Event()
+    asyncio.run(scenario())
 
-    worker_main._start_trace_retention_thread(
-        _settings("file"), stop
-    )
-    assert started == []
 
-    otlp = _settings("otlp")
-    otlp.observability.trace_retention_days = 0
-    worker_main._start_trace_retention_thread(otlp, stop)
-    assert started == []
+def test_a_retention_pass_leaves_the_loop(monkeypatch):
+    import asyncio
+    import threading
 
-    otlp.observability.trace_retention_days = 30
-    worker_main._start_trace_retention_thread(otlp, stop)
-    assert started == ["inqtrix-trace-retention"]
+    import inqtrix.worker.__main__ as worker_main
+    from inqtrix.observability import trace_retention
+
+    threads: list[str] = []
+    monkeypatch.setattr(worker_main, "_TRACE_RETENTION_INITIAL_DELAY_SECONDS", 0.0)
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        passed = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def one_pass(settings) -> None:
+            del settings
+            threads.append(threading.current_thread().name)
+            loop.call_soon_threadsafe(passed.set)
+
+        monkeypatch.setattr(trace_retention, "run_trace_retention", one_pass)
+        otlp = _settings("otlp")
+        otlp.observability.trace_retention_days = 30
+        task = worker_main._start_trace_retention(otlp, stop)
+        await asyncio.wait_for(passed.wait(), timeout=5)
+        stop.set()
+        await task
+
+    asyncio.run(scenario())
+
+    assert threads[0].startswith("inqtrix-legacy_segment")
 
 
 def test_prune_old_traces_noop_when_nothing_expired():

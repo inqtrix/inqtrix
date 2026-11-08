@@ -38,6 +38,7 @@ import { Input } from '@/components/ui/input'
 import type { EditorDocumentRecord } from '@/features/project/types'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
+import { intlLocale } from '@/lib/time'
 import { COLLABORATION_NOTICES } from './collaborationNotices'
 import {
   CollaborationEditRefusalLine,
@@ -204,6 +205,7 @@ function GuestUnlock({
   onUnlocked: (access: EditorGuestAccessSession) => void
   token: string
 }) {
+  const { locale } = useLocale()
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [pending, setPending] = useState(false)
@@ -223,7 +225,7 @@ function GuestUnlock({
             <p className="t-meta mt-1 text-muted-foreground">
               {permissionLabel(description.permission, labels)}
               {' · '}
-              {labels.expires} {formatDate(description.expires_at)}
+              {labels.expires} {formatDate(description.expires_at, locale)}
             </p>
           </div>
         </div>
@@ -469,7 +471,7 @@ function GuestWorkspace({
             </span>
             <span className="t-hint inline-flex items-center gap-1 text-muted-foreground">
               <Clock3 className="icon-xs" />
-              {labels.expires} {formatDate(access.expires_at)}
+              {labels.expires} {formatDate(access.expires_at, locale)}
             </span>
           </div>
           {collaboration.updateRejected ? (
@@ -716,8 +718,8 @@ function GuestError({
   )
 }
 
-function formatDate(epochSeconds: number) {
-  return new Intl.DateTimeFormat(undefined, {
+function formatDate(epochSeconds: number, locale: string) {
+  return new Intl.DateTimeFormat(intlLocale(locale), {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(new Date(epochSeconds * 1_000))

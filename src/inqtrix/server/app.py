@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import IntegrityError
 
+from inqtrix import aio
 from inqtrix.auth.api_key import build_auth_provider
+from inqtrix.storage.db import resolve_process_engine
 from inqtrix.providers import create_providers
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.routes import create_router, register_routes
@@ -95,6 +97,108 @@ def _placeholder_secret_fields(settings: Settings) -> list[str]:
         if isinstance(value, str)
         and _PLACEHOLDER_SECRET_MARKER in value.upper()
     ]
+
+
+@asynccontextmanager
+async def process_loop_lifespan(settings: Settings) -> AsyncIterator[None]:
+    """Make uvicorn's loop the process loop for as long as the app serves.
+
+    Everything else in the lifespan may hand work to a lane, so this comes first
+    and ends last, whatever startup does.
+    """
+    loop = asyncio.get_running_loop()
+    aio.configure_loop(
+        loop,
+        blocking_workers=settings.queue.blocking_pool_size,
+        provider_workers=settings.queue.provider_pool_size,
+        # Threads start on demand. A queue leaves this process only the short sync
+        # services of its requests; without one it runs the job bodies too.
+        legacy_segment_workers=(
+            (settings.server.run_max_concurrent or settings.server.max_concurrent)
+            + settings.knowledge.reindex_max_concurrent
+            + settings.server.deletion_max_concurrent
+            + settings.server.upload_max_concurrent
+            + settings.queue.blocking_pool_size
+        ),
+    )
+    try:
+        yield
+    finally:
+        aio.close_loop(loop)
+
+
+def job_stores(container: Any) -> list[Any]:
+    """The stores of the four job kinds this process serves."""
+    return [
+        store
+        for store in (
+            getattr(container, "run_store", None),
+            getattr(getattr(container, "indexing_service", None), "job_store", None),
+            getattr(getattr(container, "asset_deletion_service", None), "operation_store", None),
+            getattr(getattr(container, "upload_operation_service", None), "operations", None),
+        )
+        if store is not None
+    ]
+
+
+async def start_job_stores(container: Any) -> None:
+    """Let each store settle what the previous process left behind."""
+    for store in job_stores(container):
+        start = getattr(store, "astart", None)
+        if start is not None:
+            await start()
+
+
+PERIODIC_SWEEPS = ("upload_reconciler", "indexing_auto_resumer", "run_retention_sweep")
+"""What a serving process runs on a clock: upload recovery, the resume of
+dependency pauses, and the retention that holds while nobody reads a store."""
+
+
+def start_periodic_sweeps(container: Any) -> None:
+    """Start the sweeps whatever the state of the database.
+
+    A database blip during boot must not disable them for the whole process
+    lifetime: each pass degrades to a WARNING on storage errors and succeeds on
+    its own once the database returns. Accepted trade-off: unlike the queue-mode
+    worker, which fences every claim transaction on the schema head and re-runs
+    the full database contract probe on a coalesced interval, a reconciler pass
+    may resume previously accepted uploads while the boot contract check still
+    fails against a DML-compatible schema.
+    """
+    for name in PERIODIC_SWEEPS:
+        sweep = getattr(container, name, None)
+        if sweep is not None:
+            sweep.start()
+
+
+async def close_periodic_sweeps(container: Any) -> None:
+    """Stop the sweeps, before the stores they use; a pass gets a moment to finish."""
+    for name in PERIODIC_SWEEPS:
+        sweep = getattr(container, name, None)
+        if sweep is not None:
+            await sweep.aclose()
+
+
+def _vector_write_slots(settings: Settings) -> int:
+    """Jobs that may each hold a connection across a vector write here: with no queue, this process runs them."""
+    if not settings.knowledge.enabled or settings.queue.backend == "valkey":
+        return 0
+    return settings.knowledge.reindex_max_concurrent + settings.server.deletion_max_concurrent
+
+
+async def _close_at_shutdown(what: str, closing: Awaitable[Any]) -> None:
+    """One failing close must not leave what comes after it running."""
+    try:
+        await closing
+    except Exception as exc:  # noqa: BLE001 - shutdown goes on, visibly
+        log.warning("Closing the %s failed at shutdown (error_type=%s).", what, type(exc).__name__)
+
+
+async def close_job_store(store: Any) -> None:
+    """Close one job store; an in-memory store has nothing to close."""
+    close = getattr(store, "aclose", None)
+    if close is not None:
+        await close()
 
 
 def warn_placeholder_secrets(settings: Settings) -> None:
@@ -240,6 +344,7 @@ def create_app(
     # replacement seam for a custom AuthProvider (no need to edit the
     # build_auth_provider dispatch). See how-to/writing-a-custom-auth-provider.
     auth_provider = auth_provider or build_auth_provider(settings)
+    database_engine = resolve_process_engine(auth_provider, settings.storage)
     warn_placeholder_secrets(settings)
     cors_kwargs = make_cors_middleware_kwargs(settings.server)
     api_key_active = auth_provider.mode == "apikey"
@@ -247,6 +352,11 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        async with process_loop_lifespan(settings), _application_lifespan(_app):
+            yield
+
+    @asynccontextmanager
+    async def _application_lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # Startup — log resolved provider identity, reachability and the
         # behavioural envelope so operators can confirm the deployment
         # took effect without grepping a separate log file. How the
@@ -281,6 +391,8 @@ def create_app(
             _app.state.container
         )
         _app.state.database_contract_ready = database_ready
+        if database_ready:
+            await start_job_stores(_app.state.container)
         if not database_ready:
             log.warning(
                 "Database runtime contract is not ready; business routes "
@@ -307,17 +419,7 @@ def create_app(
                     checkpointer.max_connections if checkpointer is not None else 0
                 ),
                 extra_label="agent checkpointer",
-                # Run threads drive a NullPool bundle: one connection per
-                # operation, none while a run waits on its provider. They
-                # hold nothing at rest, so no pool count sees them -- but a
-                # synchronised burst can ask for one per in-flight run, and
-                # that is the number the server has to survive.
-                transient_peak=(
-                    settings.server.run_max_concurrent
-                    or settings.server.max_concurrent
-                ),
-                transient_label="run threads, NullPool",
-                transient_knob="RUN_MAX_CONCURRENT",
+                vector_write_slots=_vector_write_slots(settings),
             )
         if (
             settings.server.run_max_concurrent_per_user is not None
@@ -396,35 +498,12 @@ def create_app(
                 log.info(
                     "Workspace-Share-Reconciliation completed without changes."
                 )
-        startup_container = getattr(_app.state, "container", None)
-        upload_reconciler = getattr(
-            startup_container, "upload_reconciler", None
-        )
-        # Deliberately NOT gated on database_ready: a database blip during
-        # boot would otherwise disable upload recovery for the whole
-        # process lifetime. Each pass degrades to a WARNING on storage
-        # errors and succeeds on its own once the database returns.
-        # Accepted trade-off: unlike the queue-mode worker, which fences
-        # every claim transaction on the schema head and re-runs the full
-        # database contract probe on a coalesced interval, a reconciler
-        # pass may resume previously accepted uploads while the boot
-        # contract check still fails against a DML-compatible schema.
-        if upload_reconciler is not None:
-            upload_reconciler.start()
-        # Same reasoning for dependency pauses: each sweep degrades to a
-        # WARNING and the next one follows.
-        indexing_auto_resumer = getattr(
-            startup_container, "indexing_auto_resumer", None
-        )
-        if indexing_auto_resumer is not None:
-            indexing_auto_resumer.start()
-        # And for the run store's retention sweep, which keeps the
-        # incognito window while nobody reads the store.
-        run_retention_sweep = getattr(
-            startup_container, "run_retention_sweep", None
-        )
-        if run_retention_sweep is not None:
-            run_retention_sweep.start()
+        start_periodic_sweeps(getattr(_app.state, "container", None))
+        from inqtrix.usage.recorder import active_usage_recorder
+
+        started_usage_recorder = active_usage_recorder()
+        if started_usage_recorder is not None:
+            started_usage_recorder.start()
         try:
             yield
         finally:
@@ -437,122 +516,36 @@ def create_app(
             # documented span-loss window of BatchSpanProcessor.
             from inqtrix.observability.otel import shutdown_tracing
 
-            shutdown_tracing()
+            await aio.run_blocking(shutdown_tracing)
             container = getattr(_app.state, "container", None)
-            # The retention sweep uses the run store: stop it before the store.
-            run_retention_sweep = getattr(container, "run_retention_sweep", None)
-            if run_retention_sweep is not None:
-                run_retention_sweep.close()
-            # Durable run stores own an engine and a background loop
-            # thread; the memory store has no close() and is skipped.
-            run_store = getattr(container, "run_store", None)
-            if run_store is not None and hasattr(run_store, "close"):
-                run_store.close()
-            # The sweep uses the indexing store: stop it before the store.
-            indexing_auto_resumer = getattr(container, "indexing_auto_resumer", None)
-            if indexing_auto_resumer is not None:
-                indexing_auto_resumer.close()
-            indexing_service = getattr(container, "indexing_service", None)
-            indexing_store = getattr(indexing_service, "job_store", None)
-            if indexing_store is not None and hasattr(indexing_store, "close"):
-                indexing_store.close()
-            deletion_service = getattr(
-                container, "asset_deletion_service", None
-            )
-            deletion_store = getattr(
-                deletion_service, "operation_store", None
-            )
-            if deletion_store is not None and hasattr(deletion_store, "close"):
-                deletion_store.close()
-            upload_reconciler = getattr(container, "upload_reconciler", None)
-            if upload_reconciler is not None:
-                upload_reconciler.close()
-            upload_service = getattr(container, "upload_operation_service", None)
-            upload_store = getattr(upload_service, "operations", None)
-            if upload_store is not None and hasattr(upload_store, "close"):
-                upload_store.close()
-            # The Postgres quota store owns a NullPool engine; dispose it
-            # on the live loop here (record_blocking's throwaway loops
-            # cannot). Memory store / disabled quota -> no-op.
-            quota_service = getattr(container, "quota_service", None)
-            if quota_service is not None:
-                await quota_service.aclose()
-            # Usage-ledger recorder: flush the remaining rows, then
-            # dispose its NullPool engine on the live loop.
-            from inqtrix.usage.recorder import (
-                active_usage_recorder,
-                set_active_usage_recorder,
-            )
+            await _close_at_shutdown("periodic sweeps", close_periodic_sweeps(container))
+            # Closing waits for the store's segments, and those need this loop to
+            # finish.
+            for store in job_stores(container):
+                await _close_at_shutdown("job store", close_job_store(store))
+            # Usage-ledger recorder: flush the remaining rows.
+            from inqtrix.usage.recorder import set_active_usage_recorder
 
             usage_recorder = active_usage_recorder()
             if usage_recorder is not None:
-                usage_recorder.close()
+                await _close_at_shutdown("usage ledger", usage_recorder.aclose())
                 set_active_usage_recorder(None)
-                aclose_store = getattr(usage_recorder.store, "aclose", None)
-                if callable(aclose_store):
-                    await aclose_store()
-            # The Postgres-canonical knowledge store owns its own NullPool
-            # engine (loop-agnostic); dispose it on the live loop here.
-            # Memory/Qdrant stores have no aclose -> guarded no-op.
-            knowledge_service = getattr(container, "knowledge_service", None)
-            knowledge = getattr(knowledge_service, "knowledge", None)
-            store = getattr(knowledge, "store", None)
-            if store is not None and hasattr(store, "aclose"):
-                await store.aclose()
-            # The Postgres chat-history store owns its own NullPool engine;
-            # dispose it on the live loop here. Memory store -> no-op.
-            chat_history_service = getattr(
-                container, "chat_history_service", None
-            )
-            chat_store = getattr(chat_history_service, "store", None)
-            if chat_store is not None and hasattr(chat_store, "aclose"):
-                await chat_store.aclose()
-            # The Postgres editor store owns its own NullPool engine too.
-            editor_service = getattr(
-                container, "editor_persistence_service", None
-            )
-            editor_store = getattr(editor_service, "store", None)
-            if editor_store is not None and hasattr(editor_store, "aclose"):
-                await editor_store.aclose()
-            # The Postgres editor-patch store owns its own NullPool engine too.
-            editor_patch_service = getattr(
-                container, "editor_patch_service", None
-            )
-            editor_patch_store = getattr(editor_patch_service, "store", None)
-            if editor_patch_store is not None and hasattr(
-                editor_patch_store, "aclose"
-            ):
-                await editor_patch_store.aclose()
-            # The Postgres asset-record store owns its own NullPool engine too.
-            asset_service = getattr(container, "asset_records_service", None)
-            asset_store = getattr(asset_service, "store", None)
-            if asset_store is not None and hasattr(asset_store, "aclose"):
-                await asset_store.aclose()
-            # The Postgres vector-index store owns its own NullPool engine too.
-            vector_index_service = getattr(container, "vector_index_service", None)
-            vector_index_store = getattr(vector_index_service, "store", None)
-            if vector_index_store is not None and hasattr(vector_index_store, "aclose"):
-                await vector_index_store.aclose()
-            # The Postgres account-preferences store owns its own NullPool engine.
-            account_prefs_service = getattr(container, "account_preferences_service", None)
-            account_prefs_store = getattr(account_prefs_service, "store", None)
-            if account_prefs_store is not None and hasattr(account_prefs_store, "aclose"):
-                await account_prefs_store.aclose()
-            # The Postgres knowledge-session store owns its own NullPool engine.
-            knowledge_sessions_service = getattr(container, "knowledge_sessions_service", None)
-            knowledge_sessions_store = getattr(knowledge_sessions_service, "store", None)
-            if knowledge_sessions_store is not None and hasattr(knowledge_sessions_store, "aclose"):
-                await knowledge_sessions_store.aclose()
             collaboration_service = getattr(
                 container, "editor_collaboration_service", None
             )
             if collaboration_service is not None:
-                await collaboration_service.aclose()
+                await _close_at_shutdown(
+                    "collaboration service", collaboration_service.aclose()
+                )
             # The auth provider releases the HTTP clients of its identity
             # provider; they reopen on use if the lifespan starts again.
             close_auth = getattr(container.auth_provider, "aclose", None)
             if close_auth is not None:
-                await close_auth()
+                await _close_at_shutdown("auth provider", close_auth())
+            # Everything that used the engine has stopped by now.
+            engine = getattr(container, "database_engine", None)
+            if engine is not None:
+                await _close_at_shutdown("database engine", engine.dispose())
             # Last: request code still unwinding above may hand work to a
             # lane, and a closed executor would reject it. Nothing here
             # depends on the lanes, so releasing them at the end is free.
@@ -560,7 +553,9 @@ def create_app(
             # engine disposal reaches.
             checkpointer = getattr(container, "agent_checkpointer", None)
             if checkpointer is not None:
-                checkpointer.close()
+                await _close_at_shutdown(
+                    "agent checkpointer", aio.run_blocking(checkpointer.close)
+                )
             lanes = getattr(container, "execution_lanes", None)
             if lanes is not None:
                 lanes.close()
@@ -572,7 +567,7 @@ def create_app(
     # leaves that surface unmounted.
     from inqtrix.usage.recorder import install_usage_recorder
 
-    install_usage_recorder(settings)
+    install_usage_recorder(settings, engine=database_engine)
 
     # Fresh router per create_app() call to avoid duplicate route handlers
     app_router = create_router()
@@ -585,6 +580,7 @@ def create_app(
         semaphore_factory=semaphore_factory,
         auth_provider=auth_provider,
         object_store_impl=object_store_impl,
+        database_engine=database_engine,
     )
 
     enable_openapi = settings.server.enable_openapi

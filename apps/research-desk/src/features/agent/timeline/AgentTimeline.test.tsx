@@ -378,6 +378,61 @@ describe('agent activity transcript', () => {
     expect(html).toContain('role="status"')
   })
 
+  it.each([
+    ['workflow_contract_changed', translations.de.agent.timeline.cancelledWorkflowChanged],
+    ['workflow_retired', translations.de.agent.timeline.cancelledWorkflowRetired],
+  ])('says why its binding ended the run and offers to start again (%s)', (reason, text) => {
+    const record = run()
+    record.status = 'cancelled'
+    record.cancelReason = reason
+    const html = renderToStaticMarkup(<AgentRunTurn actions={actions} run={record} historical />)
+    expect(html).toContain(text.replace(/"/g, '&quot;'))
+    expect(html).toContain('data-testid="agent-run-restart"')
+    expect(html).toContain(translations.de.agent.timeline.restartRun)
+  })
+
+  it('says the restart could not read the question, next to the run it concerns', () => {
+    const record = run()
+    record.status = 'cancelled'
+    record.cancelReason = 'cancelled_by_admin'
+    const failed = { ...actions, restartNotice: { kind: 'read_failed', runId: record.runId } } as AgentTimelineActions
+    const other = { ...actions, restartNotice: { kind: 'read_failed', runId: 'run_other' } } as AgentTimelineActions
+
+    const html = renderToStaticMarkup(<AgentRunTurn actions={failed} run={record} historical />)
+
+    expect(html).toContain('data-testid="agent-run-restart-failed"')
+    expect(html).toContain(translations.de.agent.timeline.restartReadFailed)
+    expect(renderToStaticMarkup(<AgentRunTurn actions={other} run={record} historical />))
+      .not.toContain('data-testid="agent-run-restart-failed"')
+  })
+
+  it('asks before the restart replaces a draft, and describes the button in words', () => {
+    const record = run()
+    record.status = 'cancelled'
+    record.cancelReason = 'cancelled_by_admin'
+    const asking = {
+      ...actions,
+      restartNotice: { kind: 'replace', question: 'Was gilt?', runId: record.runId },
+    } as AgentTimelineActions
+
+    const html = renderToStaticMarkup(<AgentRunTurn actions={asking} run={record} historical />)
+
+    expect(html).toContain(translations.de.agent.timeline.restartReplacePrompt)
+    expect(html).toContain('data-testid="agent-run-restart-replace-confirm"')
+    expect(html).toContain(translations.de.agent.timeline.restartKeepDraft)
+    expect(html).toContain(`aria-describedby="agent-run-restart-hint-${record.runId}"`)
+    expect(html).toContain(`id="agent-run-restart-hint-${record.runId}"`)
+  })
+
+  it('offers no new start for a run a person cancelled', () => {
+    const record = run()
+    record.status = 'cancelled'
+    record.cancelReason = 'client_requested_cancel'
+    const html = renderToStaticMarkup(<AgentRunTurn actions={actions} run={record} historical />)
+    expect(html).toContain('Abgebrochen')
+    expect(html).not.toContain('data-testid="agent-run-restart"')
+  })
+
   it('labels completed model todos as reported when the run was cancelled', () => {
     const record = run()
     record.status = 'cancelled'

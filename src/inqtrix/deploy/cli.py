@@ -12,7 +12,7 @@ from pathlib import Path
 from .compose import ComposeRunner, DeployConfig, DeployError
 from .maintenance import rotate_database_password, run_owner_upgrade
 from .preflight import (
-    redact_text,
+    redact_compose_config,
     require_file,
     require_private_file,
     sensitive_values,
@@ -249,7 +249,7 @@ def _dispatch(args: argparse.Namespace, config: DeployConfig) -> None:
                 "config output may contain credentials; pass --redact"
             )
         rendered = runner.capture(("config",))
-        sys.stdout.write(redact_text(rendered, sensitive_values(config)))
+        sys.stdout.write(redact_compose_config(rendered, sensitive_values(config)))
         return
     if args.command == "owner-upgrade":
         run_owner_upgrade(runner, args.confirm_project)

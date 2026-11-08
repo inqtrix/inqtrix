@@ -2,7 +2,7 @@
 
 Same gating as the run-store suite (``INQTRIX_TEST_DATABASE_URL``,
 restricted app role, RLS). The parity assertions mirror the in-memory
-:class:`~inqtrix.server.indexing.IndexingJobStore` contract — the summary
+:class:`~inqtrix.runs.indexing_memory.IndexingJobStore` contract — the summary
 wire shape, gap-free 1-based event sequences, terminal-state absorption,
 claim fencing, collection-generation serialization, immutable-revision
 submission idempotency, and the per-collection history cap.
@@ -24,9 +24,9 @@ from sqlalchemy import text
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.contextualization_circuit import ContextualizationCircuitPermit
-from inqtrix.indexing_auto_resume import AutoResumePolicy
+from inqtrix.runs.indexing_auto_resume import AutoResumePolicy
 from inqtrix.runs.indexing_postgres import PostgresIndexingJobStore
-from inqtrix.server.indexing import (
+from inqtrix.runs.indexing_records import (
     IndexingJobConflict,
     IndexingJobNotFound,
     IndexingResumeUnavailable,
@@ -103,7 +103,7 @@ async def engine():
 
 
 @pytest_asyncio.fixture()
-async def store(engine):
+async def clean_tables(engine):
     factory = build_session_factory(engine)
     async with factory() as session:
         async with session.begin():
@@ -208,6 +208,11 @@ async def store(engine):
                     "owner_user_id": USER_A,
                 },
             )
+
+
+@pytest.fixture()
+def store(clean_tables):
+    del clean_tables
     store = PostgresIndexingJobStore(
         engine=build_engine(TEST_DATABASE_URL),
         app_role=APP_ROLE,

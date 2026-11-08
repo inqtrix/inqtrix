@@ -3,7 +3,7 @@
 Registered alongside the knowledge surface (only when the knowledge
 engine is enabled). Collection-generation submission resolves and edit-checks
 the target collection, gates embedding-token quota, and queues work on the
-:class:`~inqtrix.server.indexing.IndexingJobStore`. Job authorization follows
+:class:`~inqtrix.runs.indexing_memory.IndexingJobStore`. Job authorization follows
 the parent collection: viewers may inspect its jobs and editors may cancel
 them, independent of which authorized user originally submitted the job.
 """
@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from inqtrix import aio
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import (
     Principal,
@@ -26,14 +27,14 @@ from inqtrix.auth.principal import (
 )
 from inqtrix.knowledge.stores.ports import CollectionNotFound, KnowledgeError
 from inqtrix.quota.models import QuotaDimension
-from inqtrix.server.indexing import (
+from inqtrix.runs.indexing_records import (
     TERMINAL_INDEXING_EVENTS,
     IndexingJobConflict,
     IndexingJobNotFound,
     IndexingQueueFull,
     IndexingResumeUnavailable,
-    format_sse_event,
 )
+from inqtrix.runs.shared import format_sse_event
 from inqtrix.server.routers import quota_admission
 from inqtrix.server.stream_authorization import (
     GenerationGatedFrameAuthorization,
@@ -78,7 +79,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     ) -> dict[str, Any]:
         """Resolve one job through its parent collection authority."""
         try:
-            summary = await asyncio.to_thread(job_store.get, job_id)
+            summary = await job_store.aget(job_id)
             collection = await knowledge_service.knowledge.store.get_collection(
                 str(summary["collection_id"])
             )
@@ -134,12 +135,14 @@ def build_router(container: "AppContainer") -> APIRouter:
                 visible_to,
                 minimum=SharePermission.EDIT,
             )
-            summary = await asyncio.to_thread(
-                indexing_service.submit,
-                collection=collection,
-                index_id=index_id,
-                workspace_id=workspace_id,
-                principal=principal,
+            summary = await aio.run_legacy_segment(
+                partial(
+                    indexing_service.submit,
+                    collection=collection,
+                    index_id=index_id,
+                    workspace_id=workspace_id,
+                    principal=principal,
+                )
             )
         except CollectionNotFound:
             return error_response(404, "Collection not found", "not_found")
@@ -168,18 +171,19 @@ def build_router(container: "AppContainer") -> APIRouter:
         """List visible indexing operations, newest first.
 
         Optional ``?collection_id=`` narrows to one collection's history
-        (the inline "last N" view); the resume path lists all active
-        jobs for the workspace.
+        (the inline "last N" view) and ``?operation_kind=`` to one kind of
+        job; the resume path lists the jobs of every collection the caller may
+        see, because a document's job is the only record of how its indexing
+        is going.
         """
         try:
             workspace_id_from_request(req)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         collection_id = req.query_params.get("collection_id") or None
-        operation_kind = (
-            req.query_params.get("operation_kind") or "collection_generation"
-        )
+        operation_kind = req.query_params.get("operation_kind") or None
         if operation_kind not in {
+            None,
             "collection_generation",
             "document_revision",
         }:
@@ -192,17 +196,14 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_collection_ids = {
             collection.id for collection in visible_collections
         }
-        jobs = await asyncio.to_thread(
-            job_store.list,
-            collection_id=collection_id,
-        )
+        jobs = await job_store.alist(collection_id=collection_id)
         return {
             "object": "list",
             "data": [
                 job
                 for job in jobs
                 if job.get("collection_id") in visible_collection_ids
-                and job.get("operation_kind") == operation_kind
+                and operation_kind in {None, job.get("operation_kind")}
             ],
         }
 
@@ -240,8 +241,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 visible_to=visible_to,
                 require_edit=True,
             )
-            summary = await asyncio.to_thread(
-                job_store.cancel,
+            summary = await job_store.acancel(
                 job_id,
                 actor_user_id=principal.user_id,
             )
@@ -276,10 +276,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 visible_to=visible_to,
                 require_edit=True,
             )
-            return await asyncio.to_thread(
-                indexing_service.resume,
-                job_id,
-                principal=principal,
+            return await aio.run_legacy_segment(
+                partial(indexing_service.resume, job_id, principal=principal)
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -314,11 +312,13 @@ def build_router(container: "AppContainer") -> APIRouter:
                     "Only paused indexing can be rebuilt without contextualization.",
                     "raw_rebuild_unavailable",
                 )
-            return await asyncio.to_thread(
-                indexing_service.resume,
-                job_id,
-                principal=principal,
-                raw_by_user_choice=True,
+            return await aio.run_legacy_segment(
+                partial(
+                    indexing_service.resume,
+                    job_id,
+                    principal=principal,
+                    raw_by_user_choice=True,
+                )
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -373,8 +373,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 and after_sequence
                 >= int(authorized_summary.get("last_event_sequence") or 0)
             )
-            subscription = await asyncio.to_thread(
-                job_store.subscribe,
+            subscription = await job_store.asubscribe(
                 job_id,
                 after_sequence=after_sequence,
             )

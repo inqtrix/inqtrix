@@ -20,7 +20,7 @@ from inqtrix.knowledge.source_cleanup import empty_source_cleanup_plan
 from inqtrix.knowledge.stores.ports import CollectionNotFound, DocumentNotFound
 from inqtrix.pagination import encode_cursor
 from inqtrix.project.agent_sessions_ports import AgentSessionNotFound
-from inqtrix.project.asset_lifecycle import (
+from inqtrix.storage.asset_lifecycle import (
     lock_asset_lifecycle,
     lock_group_lifecycle,
     lock_section_lifecycle,
@@ -52,10 +52,10 @@ from inqtrix.runs.deletion_operations import (
     VectorIndexDeletionContext,
     build_deletion_summary,
     new_deletion_operation_id,
-    refuse_on_event_loop,
     target_source_id,
 )
-from inqtrix.source_authority import (
+from inqtrix.runs.shared import bridge_to_loop
+from inqtrix.storage.source_authority import (
     PostgresSourceLifecycleAuthority,
     SourceLifecycleConflict,
     SourceScope,
@@ -136,7 +136,6 @@ class ClaimedDeletionOperation:
 class PostgresDeletionOperationStore(DurableJobStoreBase):
     """Fenced durable store with atomically registered asset tombstones."""
 
-    _loop_thread_name = "inqtrix-deletion-db"
     _dispatch_thread_prefix = "inqtrix-delete"
     _job_kind = "Durable deletion operation"
 
@@ -169,7 +168,7 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         self._dispatch_timeout_seconds = float(dispatch_timeout_seconds)
         self._last_expiry_check: float | None = None
 
-    def submit(
+    async def asubmit(
         self,
         *,
         target_kind: DeletionTargetKind,
@@ -196,7 +195,6 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         aggregate deletions it owns. ``operation_id`` registers under an id
         the caller already recorded elsewhere.
         """
-        refuse_on_event_loop("registration")
         # Postgres refreshes the manifest while holding the same lifecycle
         # locks that fence upload finalisation, then atomically registers the
         # operation and tombstones. The memory-tier callback is therefore not
@@ -205,22 +203,20 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         # Best-effort expiry first (bounded by grace + throttle): a lost
         # previous operation on the same target should stop answering
         # fresh DELETEs with a conflict within that window.
-        self.expire_stalled_operations()
+        await self.aexpire_stalled_operations()
         try:
-            record, created = self._call(
-                self._submit_db(
-                    target_kind=target_kind,
-                    target_id=target_id,
-                    manifest=manifest,
-                    tenant_id=tenant_id,
-                    created_by_user_id=created_by_user_id,
-                    workspace_id=workspace_id,
-                    vector_index_context=vector_index_context,
-                    knowledge_context=knowledge_context,
-                    session_context=session_context,
-                    total_items=total_items,
-                    operation_id=operation_id,
-                )
+            record, created = await self._submit_db(
+                target_kind=target_kind,
+                target_id=target_id,
+                manifest=manifest,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+                workspace_id=workspace_id,
+                vector_index_context=vector_index_context,
+                knowledge_context=knowledge_context,
+                session_context=session_context,
+                total_items=total_items,
+                operation_id=operation_id,
             )
         except SourceLifecycleConflict as exc:
             raise DeletionOperationConflict(target_id) from exc
@@ -228,7 +224,7 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             return build_deletion_summary(record)
         if self._queue is not None:
             try:
-                self._queue.enqueue(
+                await self._queue.enqueue(
                     operation_id=record.operation_id, tenant_id=tenant_id
                 )
             except Exception as exc:
@@ -242,10 +238,12 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             with self._lock:
                 self._local[record.operation_id] = _LocalJob(work=work)
                 self._pending.append(record.operation_id)
-                self._dispatch_locked()
+            await self._dispatch_now()
         return build_deletion_summary(record)
 
-    def get(
+    submit = bridge_to_loop(asubmit)
+
+    async def aget(
         self,
         operation_id: str,
         *,
@@ -254,7 +252,7 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         workspace_id: str | None,
     ) -> dict[str, Any]:
         return build_deletion_summary(
-            self.get_record(
+            await self.aget_record(
                 operation_id,
                 tenant_id=tenant_id,
                 created_by_user_id=created_by_user_id,
@@ -262,7 +260,9 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             )
         )
 
-    def get_record(
+    get = bridge_to_loop(aget)
+
+    async def aget_record(
         self,
         operation_id: str,
         *,
@@ -270,17 +270,17 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> DeletionOperationRecord:
-        self.expire_stalled_operations()
-        return self._call(
-            self._get_record_db(
-                operation_id,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-            )
+        await self.aexpire_stalled_operations()
+        return await self._get_record_db(
+            operation_id,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            workspace_id=workspace_id,
         )
 
-    def expire_stalled_operations(self) -> None:
+    get_record = bridge_to_loop(aget_record)
+
+    async def aexpire_stalled_operations(self) -> None:
         """Make terminal what no process is going to execute.
 
         Three shapes of one failure — a receipt that stays non-terminal
@@ -321,8 +321,8 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             self._last_expiry_check = now
             sweep = self._sweep_orphans
         if sweep:
-            self._fail_stalled(
-                self._call(self._restart_orphan_operations_db()),
+            await self._fail_stalled(
+                await self._restart_orphan_operations_db(),
                 message="A server restart interrupted the deletion.",
                 error_type="server_restarted",
             )
@@ -330,10 +330,10 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             # leaves the next call to retry it.
             with self._lock:
                 self._sweep_orphans = False
-        self._fail_stalled(
+        await self._fail_stalled(
             [
                 operation_id
-                for operation_id, _tenant_id in self.stale_queued_operations(
+                for operation_id, _tenant_id in await self.astale_queued_operations(
                     older_than_seconds=self._dispatch_timeout_seconds
                 )
             ],
@@ -348,17 +348,17 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             # Queue mode leaves running rows to their workers — claim
             # fencing recovers those — so this selector must never fire
             # there, unlike the mode-agnostic dispatch timeout above.
-            self._fail_stalled(
-                self._call(
-                    self._stale_running_db(_EXECUTION_LOST_GRACE_SECONDS)
-                ),
+            await self._fail_stalled(
+                await self._stale_running_db(_EXECUTION_LOST_GRACE_SECONDS),
                 message=(
                     "Execution of this deletion was lost; no process is running it."
                 ),
                 error_type="execution_lost",
             )
 
-    def _fail_stalled(
+    expire_stalled_operations = bridge_to_loop(aexpire_stalled_operations)
+
+    async def _fail_stalled(
         self,
         operation_ids: list[str],
         *,
@@ -380,7 +380,7 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
                 operation_id,
                 error_type,
             )
-            self.fail(operation_id, message, error_type=error_type)
+            await self.afail(operation_id, message, error_type=error_type)
 
     async def _restart_orphan_operations_db(self) -> list[str]:
         """Non-terminal operations left behind by a previous process."""
@@ -404,10 +404,12 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             )
             return list(rows)
 
-    def has_collection_deletion(self, collection_id: str) -> bool:
+    async def ahas_collection_deletion(self, collection_id: str) -> bool:
         """Return whether a retained aggregate tombstone fences a collection."""
 
-        return bool(self._call(self._has_collection_deletion_db(collection_id)))
+        return bool(await self._has_collection_deletion_db(collection_id))
+
+    has_collection_deletion = bridge_to_loop(ahas_collection_deletion)
 
     async def _has_collection_deletion_db(self, collection_id: str) -> bool:
         async with self._session(DEFAULT_TENANT) as session:
@@ -451,10 +453,12 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             )
             return operation_id is not None
 
-    def has_document_deletion(self, document_id: str) -> bool:
+    async def ahas_document_deletion(self, document_id: str) -> bool:
         """Return whether a retained aggregate tombstone hides a document."""
 
-        return bool(self._call(self._has_document_deletion_db(document_id)))
+        return bool(await self._has_document_deletion_db(document_id))
+
+    has_document_deletion = bridge_to_loop(ahas_document_deletion)
 
     async def _has_document_deletion_db(self, document_id: str) -> bool:
         async with self._session(DEFAULT_TENANT) as session:
@@ -484,7 +488,7 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             )
             return operation_id is not None
 
-    def list_operations(
+    async def alist_operations(
         self,
         *,
         tenant_id: str,
@@ -493,19 +497,19 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         limit: int,
         after: tuple[float, str] | None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        self.expire_stalled_operations()
-        records, next_cursor = self._call(
-            self._list_operations_db(
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-                limit=limit,
-                after=after,
-            )
+        await self.aexpire_stalled_operations()
+        records, next_cursor = await self._list_operations_db(
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            workspace_id=workspace_id,
+            limit=limit,
+            after=after,
         )
         return [build_deletion_summary(record) for record in records], next_cursor
 
-    def retry(
+    list_operations = bridge_to_loop(alist_operations)
+
+    async def aretry(
         self,
         operation_id: str,
         *,
@@ -521,7 +525,6 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         ``dispatch=False`` reopens without enqueueing, for a caller that
         claims and runs the operation itself.
         """
-        refuse_on_event_loop("retry")
         # Knowledge-document tombstones are restored inside the same database
         # transaction as the operation retry below. Volatile stores use this
         # callback to provide the equivalent pre-dispatch boundary.
@@ -529,29 +532,29 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         # Best-effort expiry first (bounded by grace + throttle): a retry
         # against a lost RUNNING receipt should find the row already in
         # ``delete_failed`` within that window.
-        self.expire_stalled_operations()
-        record = self._call(
-            self._retry_db(
-                operation_id,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-            )
+        await self.aexpire_stalled_operations()
+        record = await self._retry_db(
+            operation_id,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            workspace_id=workspace_id,
         )
         if not dispatch:
             return build_deletion_summary(record)
         if self._queue is not None:
-            self._queue.enqueue(operation_id=operation_id, tenant_id=tenant_id)
+            await self._queue.enqueue(operation_id=operation_id, tenant_id=tenant_id)
         else:
             if work is None:
                 raise DeletionOperationConflict(operation_id)
             with self._lock:
                 self._local[operation_id] = _LocalJob(work=work)
                 self._pending.append(operation_id)
-                self._dispatch_locked()
+            await self._dispatch_now()
         return build_deletion_summary(record)
 
-    def find_for_asset(
+    retry = bridge_to_loop(aretry)
+
+    async def afind_for_asset(
         self,
         asset_id: str,
         *,
@@ -559,17 +562,17 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> dict[str, Any] | None:
-        record = self._call(
-            self._find_for_asset_db(
-                asset_id,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-            )
+        record = await self._find_for_asset_db(
+            asset_id,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            workspace_id=workspace_id,
         )
         return build_deletion_summary(record) if record is not None else None
 
-    def find_for_target(
+    find_for_asset = bridge_to_loop(afind_for_asset)
+
+    async def afind_for_target(
         self,
         target_kind: DeletionTargetKind,
         target_id: str,
@@ -578,18 +581,18 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> dict[str, Any] | None:
-        record = self._call(
-            self._find_for_target_db(
-                target_kind,
-                target_id,
-                tenant_id=tenant_id,
-                created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-            )
+        record = await self._find_for_target_db(
+            target_kind,
+            target_id,
+            tenant_id=tenant_id,
+            created_by_user_id=created_by_user_id,
+            workspace_id=workspace_id,
         )
         return build_deletion_summary(record) if record is not None else None
 
-    def progress(
+    find_for_target = bridge_to_loop(afind_for_target)
+
+    async def aprogress(
         self,
         operation_id: str,
         *,
@@ -598,22 +601,22 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         total_items: int,
         fence_attempt: int | None = None,
     ) -> bool:
-        return self._call(
-            self._progress_db(
-                operation_id,
-                stage=stage,
-                completed_items=max(0, completed_items),
-                total_items=max(0, total_items),
-                fence_attempt=fence_attempt,
-            )
+        return await self._progress_db(
+            operation_id,
+            stage=stage,
+            completed_items=max(0, completed_items),
+            total_items=max(0, total_items),
+            fence_attempt=fence_attempt,
         )
 
-    def is_attempt_current(self, operation_id: str, *, fence_attempt: int) -> bool:
-        return self._call(
-            self._is_attempt_current_db(operation_id, fence_attempt=fence_attempt)
-        )
+    progress = bridge_to_loop(aprogress)
 
-    def checkpoint_source_cleanup(
+    async def ais_attempt_current(self, operation_id: str, *, fence_attempt: int) -> bool:
+        return await self._is_attempt_current_db(operation_id, fence_attempt=fence_attempt)
+
+    is_attempt_current = bridge_to_loop(ais_attempt_current)
+
+    async def acheckpoint_source_cleanup(
         self,
         operation_id: str,
         *,
@@ -621,42 +624,42 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         plan: dict[str, Any],
         fence_attempt: int | None = None,
     ) -> bool:
-        return self._call(
-            self._checkpoint_source_cleanup_db(
-                operation_id,
-                asset_id=asset_id,
-                plan=plan,
-                fence_attempt=fence_attempt,
-            )
+        return await self._checkpoint_source_cleanup_db(
+            operation_id,
+            asset_id=asset_id,
+            plan=plan,
+            fence_attempt=fence_attempt,
         )
 
-    def source_deletion_permit(
+    checkpoint_source_cleanup = bridge_to_loop(acheckpoint_source_cleanup)
+
+    async def asource_deletion_permit(
         self,
         operation_id: str,
         *,
         scope: SourceScope,
         fence_attempt: int | None = None,
     ):
-        return self._call(
-            self._source_deletion_permit_db(
-                operation_id,
-                scope=scope,
-                fence_attempt=fence_attempt,
-            )
+        return await self._source_deletion_permit_db(
+            operation_id,
+            scope=scope,
+            fence_attempt=fence_attempt,
         )
 
-    def complete(self, operation_id: str, *, fence_attempt: int | None = None) -> bool:
-        return self._call(
-            self._terminal_db(
-                operation_id,
-                status=DeletionOperationStatus.DELETED,
-                stage=DeletionStage.DELETED,
-                error=None,
-                fence_attempt=fence_attempt,
-            )
+    source_deletion_permit = bridge_to_loop(asource_deletion_permit)
+
+    async def acomplete(self, operation_id: str, *, fence_attempt: int | None = None) -> bool:
+        return await self._terminal_db(
+            operation_id,
+            status=DeletionOperationStatus.DELETED,
+            stage=DeletionStage.DELETED,
+            error=None,
+            fence_attempt=fence_attempt,
         )
 
-    def fail(
+    complete = bridge_to_loop(acomplete)
+
+    async def afail(
         self,
         operation_id: str,
         message: str,
@@ -664,34 +667,38 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         error_type: str = "server_error",
         fence_attempt: int | None = None,
     ) -> bool:
-        return self._call(
-            self._terminal_db(
-                operation_id,
-                status=DeletionOperationStatus.DELETE_FAILED,
-                stage=DeletionStage.DELETE_FAILED,
-                error={
-                    "message": sanitize_error(message),
-                    "type": error_type,
-                },
-                fence_attempt=fence_attempt,
-            )
+        return await self._terminal_db(
+            operation_id,
+            status=DeletionOperationStatus.DELETE_FAILED,
+            stage=DeletionStage.DELETE_FAILED,
+            error={
+                "message": sanitize_error(message),
+                "type": error_type,
+            },
+            fence_attempt=fence_attempt,
         )
 
-    def claim_for_execution(
+    fail = bridge_to_loop(afail)
+
+    async def aclaim_for_execution(
         self, operation_id: str, tenant_id: str, *, allow_takeover: bool
     ) -> ClaimedDeletionOperation | None:
-        return self._call(
-            self._claim_db(operation_id, tenant_id, allow_takeover=allow_takeover)
-        )
+        return await self._claim_db(operation_id, tenant_id, allow_takeover=allow_takeover)
 
-    def stale_queued_operations(
+    claim_for_execution = bridge_to_loop(aclaim_for_execution)
+
+    async def astale_queued_operations(
         self, *, older_than_seconds: float
     ) -> list[tuple[str, str]]:
-        return self._call(self._stale_queued_db(older_than_seconds))
+        return await self._stale_queued_db(older_than_seconds)
 
-    def cancel_requested_operations(self, watched: dict[str, str]) -> set[str]:
+    stale_queued_operations = bridge_to_loop(astale_queued_operations)
+
+    async def acancel_requested_operations(self, watched: dict[str, str]) -> set[str]:
         del watched
         return set()
+
+    cancel_requested_operations = bridge_to_loop(acancel_requested_operations)
 
     def _make_handle(self, operation_id: str, cancel_event) -> DeletionJobHandle:
         del cancel_event

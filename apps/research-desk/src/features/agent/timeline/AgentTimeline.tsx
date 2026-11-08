@@ -16,6 +16,7 @@ import {
   ListChecks,
   MessageSquareText,
   PenLine,
+  RotateCcw,
   Search,
   X,
 } from '@/components/icons'
@@ -29,6 +30,7 @@ import { withAiDisclosure } from '@/lib/aiDisclosure'
 import { cn } from '@/lib/utils'
 import { fetchResearchRun } from '@/api/inqtrixClient'
 import { offersFullQuestion, revealedQuestion } from '../questionReveal'
+import { bindingEndText, type AgentRestartNotice } from '../bindingEnd'
 
 /**
  * The user's own words, in full.
@@ -156,7 +158,7 @@ import {
   citationViews,
   groupCitationsByDocument,
 } from '@/features/knowledge/citations'
-import { agentRunFailureText } from '../runFailure'
+import { runFailureText } from '@/lib/runFailure'
 import { runHeadline } from '../runHeadline'
 import { decidedReportGuidance } from '../plan/reportGuidance'
 import { WebEvidenceSourceRow } from '../WebEvidenceSourceRow'
@@ -188,6 +190,15 @@ export type AgentTimelineActions = {
     decision: AgentApprovalDecisionRequest,
   ) => Promise<unknown>
   onCancelRun: (runId: string) => void
+  /** Puts the question of a run its workflow binding ended back into the
+   * composer; sending it starts the new run. */
+  onRestartRun: (run: AgentRunRecord) => void
+  /** What the last restart left to say next to its button, if anything. */
+  restartNotice: AgentRestartNotice | null
+  /** Replaces the draft with the question the restart read. */
+  onConfirmRestart: () => void
+  /** Keeps the draft and closes the restart notice. */
+  onDismissRestart: () => void
   onOpenCanvas: (descriptor: CanvasViewDescriptor) => void
   /** Revision-body fetch for the inline chip diff. Resolves the
    * artifact's CURRENT anchor internally; view-only, never store-bound. */
@@ -643,11 +654,11 @@ export function AgentRunTurn({
           <div className="min-w-0">
             <p className="break-words t-meta text-destructive/90">
               {run.status === 'cancelled'
-                ? t.agent.timeline.cancelled
+                ? bindingEndText(run, t) ?? t.agent.timeline.cancelled
                 : (run.error || run.errorCode)
                   ? t.agent.timeline.taskFailed.replace(
                     '{error}',
-                    () => agentRunFailureText(run.error ?? '', t, run.errorCode),
+                    () => runFailureText(run.error ?? '', t, run.errorCode),
                   )
                   : t.agent.timeline.failure}
             </p>
@@ -668,6 +679,61 @@ export function AgentRunTurn({
                 {lastTaskError}
               </p>
             )}
+            {bindingEndText(run, t) && (
+              <>
+                <button
+                  aria-describedby={`agent-run-restart-hint-${run.runId}`}
+                  className="mt-1 inline-flex items-center gap-1.5 t-meta text-foreground underline underline-offset-2 hover:opacity-80"
+                  data-testid="agent-run-restart"
+                  onClick={() => actions.onRestartRun(run)}
+                  title={t.agent.timeline.restartRunHint}
+                  type="button"
+                >
+                  <RotateCcw className="icon-xs" />
+                  {t.agent.timeline.restartRun}
+                </button>
+                <span className="sr-only" id={`agent-run-restart-hint-${run.runId}`}>
+                  {t.agent.timeline.restartRunHint}
+                </span>
+                {actions.restartNotice?.runId === run.runId
+                  && actions.restartNotice.kind === 'read_failed' && (
+                  <p
+                    className="mt-1 break-words t-meta text-destructive/90"
+                    data-testid="agent-run-restart-failed"
+                    role="alert"
+                  >
+                    {t.agent.timeline.restartReadFailed}
+                  </p>
+                )}
+                {actions.restartNotice?.runId === run.runId
+                  && actions.restartNotice.kind === 'replace' && (
+                  <div
+                    className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1"
+                    data-testid="agent-run-restart-replace"
+                    role="group"
+                  >
+                    <p className="t-meta text-foreground" role="status">
+                      {t.agent.timeline.restartReplacePrompt}
+                    </p>
+                    <button
+                      className="t-meta text-foreground underline underline-offset-2 hover:opacity-80"
+                      data-testid="agent-run-restart-replace-confirm"
+                      onClick={actions.onConfirmRestart}
+                      type="button"
+                    >
+                      {t.agent.timeline.restartReplace}
+                    </button>
+                    <button
+                      className="t-meta text-muted-foreground underline underline-offset-2 hover:opacity-80"
+                      onClick={actions.onDismissRestart}
+                      type="button"
+                    >
+                      {t.agent.timeline.restartKeepDraft}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
       )}
@@ -682,7 +748,7 @@ export function AgentRunTurn({
         >
           <AlertTriangle className="mt-0.5 icon-xs shrink-0" />
           <span className="min-w-0 break-words">
-            {agentRunFailureText(run.error ?? '', t, run.errorCode)}
+            {runFailureText(run.error ?? '', t, run.errorCode)}
           </span>
         </p>
       )}

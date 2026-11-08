@@ -29,6 +29,23 @@ _UMLAUT_EXPAND_MAP = str.maketrans({
 })
 
 
+def estimate_tokens(text: str) -> int:
+    """Rough token count of a text, about four characters per token.
+
+    Document ingestion embeds chunks without a per-call usage object, so
+    its embedding-token spend is approximated with this heuristic; a
+    provider attempt reports its estimated input with it before the request
+    (``AttemptInfo.estimated_input_tokens``). What an LLM call cost is
+    booked from the provider's REAL usage, never from this estimate. Embeddings estimate
+    because the ``EmbeddingProvider`` contract returns vectors only and
+    discards any provider-side usage object, not because the numbers are
+    unobtainable in principle. Quota and the usage ledger book this same
+    estimate over the same texts, so both accountings agree by construction.
+    Rounds up so non-empty text always costs at least one token.
+    """
+    return -(-len(text) // 4) if text else 0
+
+
 def tokenize(text: str) -> list[str]:
     """Simple tokenization for heuristics."""
     return re.findall(r"[a-zA-Z0-9äöüÄÖÜß]+", (text or "").lower())

@@ -216,7 +216,7 @@ def test_every_constructed_provider_passes_the_rule_decorator():
 def test_a_provider_traced_beforehand_is_not_traced_twice():
     """Two tracing layers record every call twice: spans, metrics, ledger."""
     from inqtrix.observability.content import ContentCapturePolicy
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
     from inqtrix.providers import instrument_providers
     from inqtrix.settings import Settings
 
@@ -245,7 +245,7 @@ def test_the_trace_shows_the_rule_the_model_received(monkeypatch):
         InMemorySpanExporter,
     )
 
-    import inqtrix.observability.provider_tracing as tracing
+    import inqtrix.providers.tracing as tracing
     from inqtrix.observability import semconv
     from inqtrix.observability.content import ContentCapturePolicy
     from inqtrix.providers import instrument_providers
@@ -1138,22 +1138,20 @@ def test_a_reference_document_is_fenced_and_keeps_its_marker_outside():
 
 
 def _summary_message(assignment: str, *, answers=(), question: str = "Q"):
-    from inqtrix.agents.harness import _kernel_summarization_middleware_cls
-    from inqtrix.agents.kernel.middleware import current_compaction_assignment
+    from inqtrix.agents.kernel.compaction import render_summary_message
 
-    cls = _kernel_summarization_middleware_cls()
-    run = SimpleNamespace(
-        question=question, clarified_answers=list(answers), context_trigger_tokens=0
+    return SimpleNamespace(
+        content=render_summary_message(
+            assignment=assignment,
+            question=question,
+            answers=list(answers),
+            summary=f"Earlier: {PLANTED}",
+            archive_refs=["ctx_section"],
+            archive_prefix="ctx_archive",
+            todos=None,
+            skills=[],
+        )
     )
-    stub = SimpleNamespace(
-        _deps=lambda: run,
-        _warn_if_the_assignment_crowds_the_trigger=lambda *_: None,
-    )
-    token = current_compaction_assignment.set(assignment)
-    try:
-        return cls._build_new_messages_with_path(stub, f"Earlier: {PLANTED}", None)[0]
-    finally:
-        current_compaction_assignment.reset(token)
 
 
 def test_a_summary_goes_back_fenced_and_the_assignment_verbatim_outside_it():
@@ -1164,7 +1162,6 @@ def test_a_summary_goes_back_fenced_and_the_assignment_verbatim_outside_it():
     (the run's question) is one line. So the assignment is carried
     verbatim, outside the fence, with its own inner fences intact.
     """
-    from inqtrix.agents.kernel.middleware import SUMMARY_CHARS_KEY, SUMMARY_FAILED_KEY
     from inqtrix.untrusted_content import untrusted_fence
 
     handover = (
@@ -1182,9 +1179,6 @@ def test_a_summary_goes_back_fenced_and_the_assignment_verbatim_outside_it():
     assert PLANTED in fenced and PLANTED not in before
     # The handover's own fence stays a fence, closed before the summary's.
     assert before.count(UNTRUSTED_FENCE_OPEN) == before.count(UNTRUSTED_FENCE_CLOSE) == 1
-    # The event reports the summary, not the message around it.
-    assert message.additional_kwargs[SUMMARY_CHARS_KEY] == len(f"Earlier: {PLANTED}")
-    assert message.additional_kwargs[SUMMARY_FAILED_KEY] is False
 
 
 def test_the_summary_model_reads_the_older_conversation_fenced():

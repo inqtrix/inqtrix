@@ -988,7 +988,7 @@ class PostgresUserLifecycleTransaction:
         the erasure performs walk the same plan, so the number on the
         dialog cannot drift away from what actually happens.
         """
-        from inqtrix.services.user_erasure_inventory import collect_inventory
+        from inqtrix.storage.user_erasure_inventory import collect_inventory
 
         async with self._scope(tenant_id) as db:
             return (
@@ -1023,7 +1023,7 @@ class PostgresUserLifecycleTransaction:
         exactly, also across processes); beyond it, ``LIMITED`` changes
         nothing.
         """
-        from inqtrix.services.user_erasure_inventory import erasure_blockers
+        from inqtrix.storage.user_erasure_inventory import erasure_blockers
 
         async with self._scope(tenant_id) as db:
             await lock_tenant_security(db, tenant_id)

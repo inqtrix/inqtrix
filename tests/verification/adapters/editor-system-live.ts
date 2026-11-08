@@ -16,7 +16,7 @@ export const editorSystemLiveAdapter: VerificationAdapter = {
   profiles: ['system-smoke'],
   async preflight(context) {
     const baseURL = context.environment.INQTRIX_E2E_BASE_URL
-      ?? 'http://127.0.0.1:8080'
+      ?? 'http://localhost:8080'
     let baseURLCheck
     try {
       const parsed = new URL(baseURL)
@@ -66,18 +66,13 @@ export const editorSystemLiveAdapter: VerificationAdapter = {
     ]
   },
   async execute(context, cleanupLedger) {
-    const result = await runCommand(context, cleanupLedger, {
+    // The engine reports both of its scenarios itself, the guest-link matrix
+    // as skipped with its reason where it cannot run.
+    return await runCommand(context, cleanupLedger, {
       args: ['e2e/engines/editor-system-live.mjs'],
       command: process.execPath,
       engine: ENGINE,
       productLifecycle: true,
     })
-    return {
-      ...result,
-      scenarios: [{
-        id: 'system.multiuser-live-matrix',
-        status: result.status === 'passed' ? 'passed' : 'failed',
-      }],
-    }
   },
 }

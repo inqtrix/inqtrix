@@ -4,11 +4,11 @@
 // already-running canonical stack: submit a run-prefixed question,
 // watch the live tool activity, assert the clickable-citation answer
 // experience, collect console/network hygiene, and finalize resources through
-// the shared cleanup or explicit review-retention contract. Results use the
-// sidecar file (INQTRIX_VERIFICATION_SCENARIO_RESULTS_PATH); resources
-// register through the shared product-lifecycle IPC channel.
+// the shared cleanup or explicit review-retention contract. Results go
+// through the shared scenario result writer; resources register through the
+// shared product-lifecycle IPC channel.
 
-import { access, chmod, mkdir, rename, writeFile } from 'node:fs/promises'
+import { access, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { chromium, firefox, webkit } from '@playwright/test'
@@ -17,6 +17,8 @@ import {
   assertFixture as assert,
   fetchActorJson as fetchJson,
 } from '../../tests/verification/fixtures/api.mjs'
+import { attemptCleanup } from '../../tests/verification/fixtures/cleanup-step.mjs'
+import { createScenarioBook, writeScenarioSidecar } from '../../tests/verification/fixtures/scenario-sidecar.mjs'
 import {
   requireAccountLocale,
 } from '../../tests/verification/fixtures/accounts.mjs'
@@ -31,10 +33,10 @@ import {
   VerificationLifecycleClient,
 } from '../../tests/verification/fixtures/lifecycle-client.mjs'
 import { createAgentDocumentMaterial } from '../../tests/verification/fixtures/agent-document-material.mjs'
+import { httpsErrorsIgnored } from '../../tests/verification/fixtures/https-errors.mjs'
 
-const baseURL = process.env.INQTRIX_E2E_BASE_URL ?? 'http://127.0.0.1:8080'
-const ignoreHTTPSErrors =
-  process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1'
+const baseURL = process.env.INQTRIX_E2E_BASE_URL ?? 'http://localhost:8080'
+const ignoreHTTPSErrors = httpsErrorsIgnored()
 const testerEmail = requiredEnvironment('INQTRIX_E2E_TESTER_EMAIL')
 const userPassword = requiredEnvironment('INQTRIX_E2E_USER_PASSWORD')
 const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH
@@ -67,6 +69,7 @@ const SCENARIOS = [
   'agent.answer-citations-clickable',
   'agent.console-network-clean',
   'agent.cleanup-integrity',
+  'agent.review-matches-tier',
   'agent.conversation-followups',
   'agent.conversation-history-synthesis',
   'agent.conversation-history-canvas',
@@ -78,15 +81,25 @@ const SCENARIOS = [
   'agent.conversation-file-attachment',
   'agent.conversation-review-role',
   'agent.conversation-mission-review',
+  'agent.conversation-stop-continue',
+  'agent.conversation-manual-title',
+  'agent.conversation-canvas-copy',
 ]
-// A scenario starts as NOT RUN, not as failed. Booking an unmeasured
-// scenario red makes a permanently red column that carries no
-// information: it hides whichever real failure happens next to it, and
-// it counts default values as evidence. The exit code below still
-// treats anything that is not 'passed' as a failure - it is the REPORT
-// that must tell a measurement from a default.
-const scenarioStatus = new Map(SCENARIOS.map((id) => [id, 'not_run']))
+// Every scenario starts as not measured. A measured step that fails marks
+// its own scenario failed with the reason, so a run that dies early shows one
+// red verdict where it broke, and the rest stay not run. The exit code treats
+// anything that is not passed as a failure.
+const verdicts = createScenarioBook(SCENARIOS)
+// The scenario the main flow measures right now: a failure that reaches the
+// main catch counts against it. Setup before the first question measures none.
+let measuring = null
 const networkFindings = []
+let abortedWrites = 0
+// The review a Stufe owes is judged per completed turn in a scenario of its
+// own: an unusable review stays visible as red, and it does not hide the
+// turns after it.
+const reviewMismatches = []
+let reviewedTurns = 0
 
 let browser
 let tester
@@ -98,6 +111,16 @@ let activeSession
 let activeTitle
 let documentMaterial
 let publishedTiers = []
+// Answers the stopped turn rendered before it ended; the replay counts them.
+let stoppedTurnAnswers = 0
+// A stop that did not hold may have left an answer of its own, uncounted.
+let stopTurnUncertain = false
+let stopTurnRunId = null
+
+// The reason of a failure reaches the report: credentials never do.
+function failScenario(id, reason) {
+  verdicts.fail(id, sanitize(String(reason)))
+}
 
 try {
   assert(Number.isInteger(reviewSeconds) && reviewSeconds >= 0 && reviewSeconds <= 600,
@@ -125,7 +148,12 @@ try {
   // Network hygiene on top of the shared pageerror/console collectors.
   tester.page.on('requestfailed', (request) => {
     const failure = request.failure()?.errorText ?? 'failed'
-    if (failure.includes('net::ERR_ABORTED')) return
+    if (failure.includes('net::ERR_ABORTED')) {
+      // Chromium reports a write as aborted when the app does not read its 204.
+      // Nothing here proves that the server answered, so the count stays visible.
+      if (!['GET', 'HEAD'].includes(request.method())) abortedWrites += 1
+      return
+    }
     networkFindings.push(`requestfailed:${failure}`)
   })
   tester.page.on('response', (response) => {
@@ -233,10 +261,13 @@ try {
     + 'sind für uns relevant, was ist beschlossen und was nur vorgeschlagen? Antworte zunächst im Chat mit Quellen.'
 
   progress('Kernel-Lauf einreichen')
+  measuring = 'agent.kernel-run-submits'
   runId = await submitTurn(question, 'R1', true)
   assert(typeof runId === 'string' && runId.length > 0, 'No run id returned.')
 
-  scenarioStatus.set('agent.kernel-run-submits', 'passed')
+  verdicts.pass('agent.kernel-run-submits')
+  // From here on the opening turn decides whether an answer reaches the user.
+  measuring = 'agent.answer-citations-clickable'
   progress('Lauf laeuft — Aktivitaet beobachten')
 
   // Live tool activity: at least one activity row must appear WHILE the
@@ -267,14 +298,16 @@ try {
   await captureTurn('R1', question, terminal)
   assert(
     terminal.status === 'completed',
-    `The kernel run ended ${terminal.status}: ${terminal.error ?? ''}`,
+    `The kernel run ended ${terminal.status}: ${runErrorText(terminal.error)}`,
   )
   // The run and every owned resource are terminal and registered before
   // answer presentation is inspected. A later UI assertion must not turn
   // this independently proven cleanup contract red.
-  scenarioStatus.set('agent.cleanup-integrity', 'passed')
+  verdicts.pass('agent.cleanup-integrity')
   if (activitySeen) {
-    scenarioStatus.set('agent.tool-activity-visible', 'passed')
+    verdicts.pass('agent.tool-activity-visible')
+  } else {
+    failScenario('agent.tool-activity-visible', 'no activity row with a detail appeared while the run was active')
   }
 
   progress('Antwort-Erlebnis pruefen')
@@ -308,14 +341,47 @@ try {
       .first()
       .waitFor({ state: 'visible', timeout: 10_000 })
   }
-  scenarioStatus.set('agent.answer-citations-clickable', 'passed')
+  verdicts.pass('agent.answer-citations-clickable')
+  measuring = null
+
+  // Two session paths every later turn stands on. The user renames the
+  // session by hand, and stops a running turn; the next turn (R2) then has
+  // to complete in the same session under the manual title. The new title
+  // keeps the run prefix, so the cleanup ledger still recognises the session.
+  const failedRounds = new Set()
+  try {
+    progress('Sitzung von Hand umbenennen')
+    await renameSession(`${sessionTitle} umbenannt`)
+  } catch (error) {
+    failedRounds.add('TITLE')
+    failScenario('agent.conversation-manual-title', `the rename failed: ${error?.message ?? error}`)
+    progress(`Umbenennen nicht bestanden: ${sanitize(String(error?.message ?? error))}`)
+    await tester.page.keyboard.press('Escape').catch(() => undefined)
+    await tester.page.screenshot({ fullPage: true, path: join(screenshotDirectory, 'session-rename-failure.png') })
+      .catch(() => undefined)
+  }
+  try {
+    progress('Laufenden Auftrag stoppen')
+    await stopRunningTurn()
+  } catch (error) {
+    failedRounds.add('RS')
+    stopTurnUncertain = true
+    failScenario('agent.conversation-stop-continue', `the stop failed: ${error?.message ?? error}`)
+    progress(`Stoppen nicht bestanden: ${sanitize(String(error?.message ?? error))}`)
+    await tester.page.screenshot({ fullPage: true, path: join(screenshotDirectory, 'conversation-RS-failure.png') })
+      .catch(() => undefined)
+    // The next turn goes into the same session: a turn that is still running
+    // must end first, or R2 would be judged next to it.
+    if (stopTurnRunId) await endRun(stopTurnRunId).catch(() => undefined)
+  }
 
   // One table for every follow-up turn. `web` is the native source policy,
   // `cites` expects a rendered citation in the answer, `context` the document
   // pin the turn needs (`none` clears the pins), `scenario` the verdict this
   // turn decides and `requires` the earlier turns that verdict also stands on.
   const rounds = [
-    { marker: 'R2', web: true, cites: true, prompt: 'Wie unterscheidet sich davon der aktuelle Stand der KI-Haftungsrichtlinie und der überarbeiteten Produkthaftungsrichtlinie? Recherchiere gezielt in offiziellen Quellen. Trenne beide Vorhaben und nenne den jeweiligen Stand; eine zurückgenommene Vorlage darf nicht wie geltendes Recht behandelt werden.' },
+    // R2 is the turn after the stopped one: it decides whether work goes on in the same session.
+    { marker: 'R2', web: true, cites: true, scenario: 'agent.conversation-stop-continue', requires: ['RS'], prompt: 'Wie unterscheidet sich davon der aktuelle Stand der KI-Haftungsrichtlinie und der überarbeiteten Produkthaftungsrichtlinie? Recherchiere gezielt in offiziellen Quellen. Trenne beide Vorhaben und nenne den jeweiligen Stand; eine zurückgenommene Vorlage darf nicht wie geltendes Recht behandelt werden.' },
     { marker: 'R3', web: true, cites: true, scenario: 'agent.conversation-followups', requires: ['R2'], prompt: 'Was bedeutet die Pflicht zur KI-Kompetenz konkret für die Einführung unseres beschriebenen Assistenten? Prüfe die aktuellen offiziellen Hinweise. Unterscheide belegte Anforderungen von deinen praktischen Empfehlungen. Berücksichtige unsere Rollenverteilung.' },
     { marker: 'R4', scenario: 'agent.conversation-history-synthesis', prompt: 'Eine Korrektur für unsere weitere Planung: Das Einführungsbudget beträgt jetzt 12.500 EUR statt des bisherigen Betrags. Stelle die bisherigen Erkenntnisse ausschließlich aus diesem Gespräch zusammen, ohne weitere Websuche. Nenne unsere Ausgangslage, die verschiedenen Regelwerke und deren Status, die Termine, Zuständigkeiten und offene Fragen. Lies bei Bedarf frühere Rechercheergebnisse nach; erfinde keine fehlenden Details.' },
     { marker: 'R5', scenario: 'agent.conversation-history-canvas', prompt: 'Erstelle jetzt nachträglich einen eigenständigen Managementbericht im Canvas aus den Informationen unseres gesamten Gesprächs. Keine neue Websuche. Erhalte die Quellen und die Unterscheidung zwischen geltendem Recht, Vorschlägen und Empfehlungen. Übernimm die korrigierte Planung, ergänze eine übersichtliche Tabelle mit Aufgaben, Zuständigkeiten und offenen Entscheidungen. Der Bericht soll ohne den Chat verständlich sein.' },
@@ -344,8 +410,8 @@ try {
     // call, large material by the review role; the turn says which it was.
     { marker: 'R11', context: 'knowledge', tier: 'gruendlich', engine: 'mission', autonomy: 'autonomous', scenario: 'agent.conversation-mission-review', prompt: 'Erstelle jetzt ein eigenständiges Memo als Entscheidungsvorlage zum Pilotbetrieb, ausschließlich aus der ausgewählten Wissenssammlung: Sachkostenrahmen und Freigaberegeln, Betriebszeiten, das Abnahmeergebnis mit den offenen Nacharbeiten und die Folgen für spätere Erweiterungen. Belege jede Aussage mit der Fundstelle und nenne offen, was die Unterlagen nicht hergeben. Keine Websuche und keine Änderungen an Dokumenten.' },
   ]
-  const failedRounds = new Set()
   for (const { marker, prompt, web = false, cites = false, context = null, scenario = null, requires = [], tier = null, engine = null, autonomy = null } of rounds) {
+    measuring = scenario
     if (!manualConversation && context) {
       if (context === 'none') await clearDocumentContext(tester.page)
       else await selectDocumentContext(tester.page, context)
@@ -361,7 +427,7 @@ try {
     // it must not hide the turns after it: they are judged on their own.
     try {
       await captureTurn(marker, prompt, state)
-      assert(state.status === 'completed', `${marker} ended ${state.status}: ${state.error ?? ''}`)
+      assert(state.status === 'completed', `${marker} ended ${state.status}: ${runErrorText(state.error)}`)
       // The conversation has several answers. An already visible older answer
       // cannot establish that this newly completed turn rendered correctly.
       const turn = answeredTurn(tester.page, state)
@@ -393,14 +459,27 @@ try {
         assert(/140/.test(report.content_markdown),
           'R5 report omitted the headcount from the conversation.')
       }
-      if (scenario && !requires.some((earlier) => failedRounds.has(earlier))) scenarioStatus.set(scenario, 'passed')
+      const failedEarlier = requires.filter((earlier) => failedRounds.has(earlier))
+      if (scenario && failedEarlier.length > 0) {
+        failScenario(scenario, `stands on ${failedEarlier.join(', ')}, which failed`)
+      } else if (scenario) {
+        verdicts.pass(scenario)
+      }
     } catch (error) {
       failedRounds.add(marker)
+      if (scenario) failScenario(scenario, `${marker}: ${error?.message ?? error}`)
       progress(`${marker} nicht bestanden: ${sanitize(String(error?.message ?? error))}`)
       await tester.page.screenshot({ fullPage: true, path: join(screenshotDirectory, `conversation-${marker}-failure.png`) })
         .catch(() => undefined)
     }
+    // The follow-up has ended, whatever its answer: did the manual title survive it?
+    if (marker === 'R2' && !failedRounds.has('TITLE')) await judgeManualTitle()
+    // The report exists once R5 ended, whatever its review said; copying it
+    // right away keeps that verdict from depending on the turns after it.
+    // Opening a report in the Canvas does not attach it to the next turn.
+    if (marker === 'R5') await judgeCanvasCopy()
   }
+  measuring = null
   // Each engine gets its own verdict. With chained awaits a Firefox probe
   // error would leave WebKit unmeasured, so the engine that is supposed to
   // be the independent second opinion would never reach one. Collect both,
@@ -410,6 +489,7 @@ try {
     try {
       await verifyPersistedConversation(name, browserType)
     } catch (error) {
+      failScenario(`agent.conversation-${name}`, error?.message ?? error)
       replayFailures.push(`${name}: ${error?.message ?? error}`)
     }
   }
@@ -423,6 +503,7 @@ try {
     path: join(screenshotDirectory, 'agent-failure.png'),
   }).catch(() => undefined)
   progress(`Engine-Fehler: ${sanitize(String(error?.message ?? error))}`)
+  if (measuring) failScenario(measuring, error?.message ?? error)
   exitCode = 1
 } finally {
   // Keep both successes and failures inspectable before the shared owner
@@ -437,60 +518,83 @@ try {
     for (const id of ownedRuns) {
       // Never leave a live run behind: cancel and await the terminal
       // state so the ledger's DELETE cannot race a running row.
-      const summary = await fetchJson(tester, 'GET', `/v1/runs/${id}`, { expected: [200, 404] })
-        .catch(() => null)
-      if (summary && ['queued', 'running', 'waiting_for_approval', 'waiting_for_input', 'waiting_for_children'].includes(summary.status)) {
-        await fetchJson(tester, 'POST', `/v1/runs/${id}/cancel`, {
-          expected: [200, 202, 404, 409],
-        }).catch(() => null)
-        await waitFor(
-          async () => {
-            const current = await fetchJson(tester, 'GET', `/v1/runs/${id}`)
-            return ['completed', 'failed', 'cancelled'].includes(current.status)
-              ? current
-              : null
-          },
-          120_000,
-          'terminal state after cancel',
-        ).catch(() => {
-          scenarioStatus.set('agent.cleanup-integrity', 'failed')
-        })
-      }
+      await endRun(id).catch(() => {
+        failScenario('agent.cleanup-integrity', `run ${id} did not end after its cancel`)
+      })
     }
   } catch {
-    scenarioStatus.set('agent.cleanup-integrity', 'failed')
+    failScenario('agent.cleanup-integrity', 'the owned runs could not be ended')
+  }
+  if (reviewMismatches.length > 0) {
+    failScenario('agent.review-matches-tier', reviewMismatches.join(' | '))
+  } else if (reviewedTurns > 0) {
+    verdicts.pass('agent.review-matches-tier')
   }
   if (tester) {
     const hygieneFindings = [
       ...tester.errors,
       ...networkFindings,
     ]
-    scenarioStatus.set(
-      'agent.console-network-clean',
-      hygieneFindings.length === 0 ? 'passed' : 'failed',
-    )
+    if (hygieneFindings.length === 0) verdicts.pass('agent.console-network-clean')
+    else failScenario('agent.console-network-clean', `${hygieneFindings.length} console or network findings`)
     if (hygieneFindings.length > 0) {
       progress(
         `Konsole/Netzwerk nicht sauber (${hygieneFindings.length} Befunde)`,
       )
     }
   }
-  exitCode = [...scenarioStatus.values()].every((status) => status === 'passed')
+  exitCode = verdicts.allPassed()
     ? 0
     : 1
-  await writeScenarioSidecar(
-    SCENARIOS.map((id) => ({ id, status: scenarioStatus.get(id) ?? 'not_run' })),
-  )
+  progress(`Abgebrochene Schreibanfragen ohne gelesene Antwort: ${abortedWrites}`)
+  // Every scenario with its status: a failure or a verdict that stands on a
+  // failed step with its reason, one the run never reached as not_run.
+  try {
+    await writeScenarioSidecar(verdicts.entries())
+  } catch (error) {
+    exitCode = 1
+    progress(`Ergebnisdatei nicht geschrieben: ${sanitize(String(error?.message ?? error))}`)
+  }
   await browser?.close().catch(() => null)
 }
 
 process.exit(exitCode)
+
+/** Cancel a run that is still open and wait until it has ended; an ended run is left alone. */
+async function endRun(id) {
+  let summary = null
+  await attemptCleanup('run state', async () => {
+    summary = await fetchJson(tester, 'GET', `/v1/runs/${id}`, { expected: [200, 404] })
+  })
+  if (!summary || !['queued', 'running', 'waiting_for_approval', 'waiting_for_input', 'waiting_for_children'].includes(summary.status)) return
+  await attemptCleanup('run cancel', () => fetchJson(tester, 'POST', `/v1/runs/${id}/cancel`, {
+    expected: [200, 202, 404, 409],
+  }))
+  await waitFor(
+    async () => {
+      const current = await fetchJson(tester, 'GET', `/v1/runs/${id}`)
+      return ['completed', 'failed', 'cancelled'].includes(current.status) ? current : null
+    },
+    120_000,
+    'terminal state after cancel',
+  )
+}
 
 async function submitTurn(prompt, marker, webEnabled, materialKind = null, { tier = null, engine = null, autonomy = null } = {}) {
   const web = tester.page.locator('[data-source="web"]')
   if (await web.getAttribute('aria-pressed') !== String(webEnabled)) await web.click()
   await tester.page.locator(`[data-source="web"][aria-pressed="${webEnabled}"]`)
     .waitFor({ state: 'visible' })
+  // A document chip in the input is the material of the task: the composer
+  // spells it in the reader's quotes where it stands (`composerTextFromDoc`),
+  // so the saved question names the document. Picked before typing, as the
+  // scripted path does, it stands ahead of the sentence; added through the
+  // "+" menu after typing, it stands at the end. A collection chip is a
+  // setting and stays out of the text. The run requires the German
+  // interface, hence the German quotes.
+  const expectedQuestions = materialKind === 'editor'
+    ? [`„${documentMaterial.editor_title}“ ${prompt}`, `${prompt} „${documentMaterial.editor_title}“`]
+    : [prompt]
   let submitted
   if (manualConversation) {
     await writeFile(join(reportDirectory, 'manual-conversation-turn.json'),
@@ -500,27 +604,38 @@ async function submitTurn(prompt, marker, webEnabled, materialKind = null, { tie
     submitted = await waitFor(async () => {
       const listing = await fetchJson(tester, 'GET', '/v1/runs?limit=200')
       return listing.data.find((row) => row.session_id === activeSession.id && !ownedRuns.includes(row.run_id)
-        && row.question?.startsWith(prompt.slice(0, 120)))
+        && expectedQuestions.some((expected) => row.question?.startsWith(expected.slice(0, 120))))
     }, 300_000, `${marker} in-app submission`)
   } else {
     if (tier) await selectRunSetup(tester.page, 'Tempo & Tiefe', { schnell: 'Schnell', gruendlich: 'Gründlich', tief: 'Tief' }[tier])
-    if (engine) await selectRunSetup(tester.page, 'Arbeitsweise', { mission: 'Missions-Maschine', kernel: 'Kernel' }[engine])
+    if (engine) await selectRunSetup(tester.page, 'Arbeitsweise', { mission: 'Missions-Maschine', kernel: 'Automatisch' }[engine])
     if (autonomy) await selectRunSetup(tester.page, 'Berechtigung', { strict: 'Strikt', balanced: 'Standard', autonomous: 'Auto' }[autonomy])
-    await tester.page.getByTestId('agent-composer-input').locator('[contenteditable="true"]').fill(prompt)
+    // The question is typed after what the input already holds: the editing
+    // target stands in the input as a chip, and replacing the whole text
+    // (`fill`) would delete it and with it the target.
+    await tester.page.getByTestId('agent-composer-input').locator('[contenteditable="true"]').click()
+    await tester.page.keyboard.press('Control+End')
+    await tester.page.keyboard.insertText(prompt)
     const pending = tester.page.waitForResponse((response) =>
       response.request().method() === 'POST' && new URL(response.url()).pathname === '/v1/runs')
     await tester.page.getByTestId('agent-submit').click()
     const response = await pending
     assert([200, 202].includes(response.status()), 'Conversation submission failed.')
     submitted = await response.json()
-    assert(response.request().postDataJSON()?.session_id === activeSession.id, 'The conversation turn targeted another session.')
-    assert(response.request().postDataJSON()?.source_policy?.web === (webEnabled ? 'available' : 'disabled'),
+    const body = response.request().postDataJSON()
+    assert(body?.session_id === activeSession.id, 'The conversation turn targeted another session.')
+    assert(body?.source_policy?.web === (webEnabled ? 'available' : 'disabled'),
       'The conversation turn changed the chosen web policy.')
+    // The editing target travels with exactly the turn that chose it.
+    // No target may travel as a missing field or as null.
+    const target = materialKind === 'editor' ? documentMaterial.editor_id : null
+    assert((body?.document_id ?? null) === target,
+      `${marker} was sent with editing target ${body?.document_id ?? 'none'} instead of ${target ?? 'none'}.`)
   }
   ownedRuns.push(submitted.run_id)
   await lifecycle.register({ retainForReview, credential: 'user', id: submitted.run_id, kind: 'agent_run', ownerEmail: testerEmail, sessionTitle: activeTitle })
   const durable = await fetchJson(tester, 'GET', `/v1/runs/${submitted.run_id}`)
-  assert((durable.question_full ?? durable.question) === prompt, 'The saved conversation question differs from the submitted prompt.')
+  assert(expectedQuestions.includes(durable.question_full ?? durable.question), 'The saved conversation question differs from the submitted prompt.')
   if (tier) {
     assert(durable.agent_overrides?.agent_tier === tier,
       `${marker} was submitted in tier ${durable.agent_overrides?.agent_tier ?? 'default'} instead of ${tier}.`)
@@ -602,7 +717,14 @@ async function captureTurn(marker, question, state) {
   }
   if (state.status === 'completed' && marker === 'R10') await assertReviewRole(state, events, started)
   if (state.status === 'completed' && marker === 'R11') await assertMissionReview(state, events, details)
-  if (state.status === 'completed') await assertReviewMatchesTier(marker, state, events)
+  if (state.status === 'completed') {
+    try {
+      await assertReviewMatchesTier(marker, state, events)
+      reviewedTurns += 1
+    } catch (error) {
+      reviewMismatches.push(String(error?.message ?? error))
+    }
+  }
   // The question of each document turn asks for the COMPLETE source. The
   // kernel publishes what was actually read per source version
   // (execution.source_coverage); a search excerpt alone is not that read.
@@ -654,6 +776,13 @@ async function assertReviewMatchesTier(marker, state, events) {
 /** The run's outcome record (`inqtrix.agent.outcome`): the last one sent. */
 function outcomeRecord(events) {
   return events.data.filter((item) => item.type === 'inqtrix.agent.outcome').at(-1)?.data
+}
+
+/** A run's `error` as text: the API sends an object with a `message`. */
+function runErrorText(error) {
+  if (error == null) return ''
+  if (typeof error === 'object') return String(error.message ?? JSON.stringify(error))
+  return String(error)
 }
 
 /** The level a turn owes: its Stufe's published one, else legacy depth. */
@@ -794,23 +923,177 @@ function answeredTurn(page, state) {
 }
 
 async function selectRunSetup(page, row, choice) {
-  // The run setup keeps its menu open on a choice; Escape closes it.
+  // The run setup keeps its menu open on a choice; Escape closes it. Some
+  // rows are sections whose choices stand in the menu itself (Berechtigung,
+  // Arbeitsweise); others open a submenu (Tempo & Tiefe). A choice is the one
+  // option whose label reads exactly so ("Auto" is not "Automatisch"); a row
+  // that opens a submenu shows its current value and is never the choice.
+  // The menu closes with an animation. A trigger click before it is gone is
+  // swallowed, and a lookup at that moment reads the menu that is leaving:
+  // the trigger's own expanded state says the menu opened, and each call
+  // ends only once its menu is gone.
   await page.locator('.agent-run-setup-trigger').click()
-  await page.getByRole('menuitem').filter({ hasText: row }).click()
-  await page.getByRole('menuitem').filter({ hasText: new RegExp(`^${choice}`) }).click()
+  await page.locator('.agent-run-setup-trigger[aria-expanded="true"]').waitFor({ state: 'visible' })
+  const option = page.locator('[role="menuitem"]:not([aria-haspopup])')
+    .filter({ has: page.getByText(choice, { exact: true }) })
+  if (await option.count() === 0) {
+    await page.locator('[role="menuitem"][aria-haspopup]').filter({ hasText: row }).click()
+  }
+  await option.click()
   await page.keyboard.press('Escape')
+  await page.getByRole('menu').first().waitFor({ state: 'detached', timeout: 10_000 })
+}
+
+/** Rename the open session in the session list, as a user does: double-click, type, Enter. */
+async function renameSession(title) {
+  assert(title.startsWith(`${runKey} `), 'A renamed verification session must keep its run prefix.')
+  await tester.page.locator(`[data-agent-session-id="${activeSession.id}"]`)
+    .getByText(activeTitle, { exact: true }).dblclick()
+  const input = tester.page.getByRole('textbox', { name: 'Sitzung umbenennen', exact: true })
+  await input.waitFor({ state: 'visible', timeout: 10_000 })
+  await input.fill(title)
+  // The session list saves on its own schedule; the save that counts carries the new title.
+  const saved = tester.page.waitForResponse((response) => response.request().method() === 'PUT'
+    && new URL(response.url()).pathname === `/v1/agent-sessions/${activeSession.id}`
+    && jsonBody(response.request())?.title === title, { timeout: 30_000 })
+  await input.press('Enter')
+  const response = await saved
+  assert(response.status() === 200, `Saving the new title returned HTTP ${response.status()}.`)
+  const stored = await fetchJson(tester, 'GET', `/v1/agent-sessions/${activeSession.id}`)
+  assert(stored.title === title && stored.title_source === 'manual',
+    `The rename stored ${JSON.stringify([stored.title, stored.title_source])}.`)
+  // The server holds the new title now: the replay looks the session up by it,
+  // even when the page below fails to follow.
+  activeTitle = title
+  await tester.page.getByRole('heading', { name: title, exact: true }).waitFor({ state: 'visible', timeout: 10_000 })
+}
+
+/** Judged after the follow-up: the server keeps the manual title, and the page still shows it. */
+async function judgeManualTitle() {
+  try {
+    const stored = await fetchJson(tester, 'GET', `/v1/agent-sessions/${activeSession.id}`)
+    assert(stored.title === activeTitle && stored.title_source === 'manual',
+      `After the follow-up the session is titled ${JSON.stringify([stored.title, stored.title_source])}.`)
+    await tester.page.getByRole('heading', { name: activeTitle, exact: true }).waitFor({ state: 'visible', timeout: 10_000 })
+    await tester.page.locator(`[data-agent-session-id="${activeSession.id}"]`)
+      .getByText(activeTitle, { exact: true }).waitFor({ state: 'visible', timeout: 10_000 })
+    verdicts.pass('agent.conversation-manual-title')
+  } catch (error) {
+    failScenario('agent.conversation-manual-title', error?.message ?? error)
+    progress(`Manueller Titel nicht bestanden: ${sanitize(String(error?.message ?? error))}`)
+  }
+}
+
+/** A user stops a turn that is researching, through the visible Stop control. */
+async function stopRunningTurn() {
+  const prompt = 'Recherchiere zusätzlich gründlich in offiziellen Quellen, welche Behörden in Deutschland '
+    + 'die Aufsicht nach dem AI Act übernehmen sollen und wie weit das nationale Durchführungsgesetz ist.'
+  const id = await submitTurn(prompt, 'RS', true)
+  stopTurnRunId = id
+  // Stopped only once the turn really works: a queued run would test
+  // admission, not stopping.
+  await waitFor(async () => {
+    const events = await fetchJson(tester, 'GET', `/v1/runs/${id}/events?format=json`)
+    return events.data.some((item) => item.type === 'inqtrix.agent.tool.started')
+  }, 180_000, 'a started tool in the turn to stop')
+  await tester.page.locator('.agent-composer-actions').getByRole('button', { name: 'Stoppen', exact: true }).click()
+  const state = await waitFor(async () => {
+    const current = await fetchJson(tester, 'GET', `/v1/runs/${id}`)
+    return ['completed', 'failed', 'cancelled'].includes(current.status) ? current : null
+  }, 120_000, 'the stopped turn to end')
+  // Work the turn had delegated ends with it and stays owned by this run.
+  const children = (await fetchJson(tester, 'GET', `/v1/runs/${id}/children`)).data ?? []
+  for (const child of children) {
+    if (ownedRuns.includes(child.run_id)) continue
+    ownedRuns.push(child.run_id)
+    await lifecycle.register({ retainForReview, credential: 'user', id: child.run_id, kind: 'agent_run', ownerEmail: testerEmail, sessionTitle: activeTitle })
+  }
+  const events = await fetchJson(tester, 'GET', `/v1/runs/${id}/events?format=json`)
+  await writeFile(join(reportDirectory, 'events-RS.json'), JSON.stringify(events, null, 2), { mode: 0o600 })
+  assert(state.status === 'cancelled', `The stopped turn ended ${state.status}.`)
+  const ended = await waitFor(async () => {
+    const current = (await fetchJson(tester, 'GET', `/v1/runs/${id}/children`)).data ?? []
+    return current.every((child) => ['completed', 'failed', 'cancelled'].includes(child.status)) ? current : null
+  }, 60_000, 'the delegated work of the stopped turn to end')
+  // What was still running when the Stop arrived ends cancelled with the
+  // turn; only work that had finished before keeps its own outcome.
+  const stopAt = events.data.find((item) => ['inqtrix.run.cancel_requested', 'inqtrix.run.cancelled'].includes(item.type))?.created_at
+  assert(typeof stopAt === 'number', 'The stopped turn recorded no cancel request.')
+  const wentOn = ended.filter((child) => child.status !== 'cancelled' && !(child.finished_at <= stopAt))
+  assert(wentOn.length === 0, `Delegated work went on after the Stop: ${wentOn.map((child) => `${child.run_id} ${child.status}`).join(', ')}.`)
+  // Where the turn stands it says that it was stopped, and the composer takes the next question.
+  const turn = tester.page.getByTestId('agent-timeline-panel').locator('div.space-y-2')
+    .filter({ has: tester.page.getByText(state.question, { exact: true }) }).last()
+  await turn.getByText('Abgebrochen', { exact: true }).waitFor({ state: 'visible', timeout: 15_000 })
+  await tester.page.getByTestId('agent-submit').waitFor({ state: 'visible', timeout: 15_000 })
+  stoppedTurnAnswers = await turn.getByTestId('agent-answer').count()
+  await turn.scrollIntoViewIfNeeded()
+  await tester.page.screenshot({ fullPage: true, path: join(screenshotDirectory, 'conversation-RS.png') })
+}
+
+async function judgeCanvasCopy() {
+  try {
+    progress('Canvas-Bericht als Markdown kopieren')
+    await copyCanvasReport()
+    verdicts.pass('agent.conversation-canvas-copy')
+  } catch (error) {
+    failScenario('agent.conversation-canvas-copy', error?.message ?? error)
+    progress(`Canvas-Kopie nicht bestanden: ${sanitize(String(error?.message ?? error))}`)
+    await tester.page.screenshot({ fullPage: true, path: join(screenshotDirectory, 'canvas-copy-failure.png') })
+      .catch(() => undefined)
+  }
+}
+
+/** The Canvas report leaves the desk as Markdown with the AI notice: the stored report, unchanged. */
+async function copyCanvasReport() {
+  const reportTurn = conversation.find((turn) => turn.case === 'R5')
+  assert(reportTurn, 'There is no Canvas report turn to copy from.')
+  const report = reportTurn.artifact_details.find((item) => ['memo', 'deliverable'].includes(item.kind))
+  assert(report?.content_markdown, 'The saved report has no stored text.')
+  const title = report.content_markdown.match(/^# (.+)$/m)?.[1]
+  assert(title, 'The saved report has no document heading.')
+  await tester.context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(baseURL).origin })
+  await answeredTurn(tester.page, reportTurn.state).getByTestId('agent-answer')
+    .getByRole('button').filter({ hasText: /\.md/ }).first().click()
+  const canvas = tester.page.getByTestId('agent-canvas-panel')
+  await canvas.getByRole('heading', { name: title, exact: true }).waitFor({ state: 'visible' })
+  await tester.page.evaluate(() => navigator.clipboard.writeText(''))
+  await canvas.getByRole('button', { name: 'Markdown kopieren', exact: true }).click()
+  const copied = await waitFor(async () => (await tester.page.evaluate(() => navigator.clipboard.readText())) || null,
+    10_000, 'the copied Canvas report')
+  await writeFile(join(reportDirectory, 'canvas-copy.md'), copied, { mode: 0o600 })
+  assert(copied.startsWith(report.content_markdown.trimEnd()), 'The copied Markdown differs from the stored report.')
+  assert(copied.trimEnd().endsWith('> Dieser Text wurde von einem KI-System erzeugt (Inqtrix).'),
+    'The copied Markdown does not end with the AI notice.')
+  await tester.page.screenshot({ fullPage: true, path: join(screenshotDirectory, 'canvas-copy.png') })
 }
 
 async function clearDocumentContext(page) {
   // Pinned chips stay after a submission by design; the history turn
-  // must run without any document pin so nothing invites a re-read.
-  for (const name of [/^Sammlung entfernen: /, /^Dokument-Patch: /]) {
-    const chip = page.getByRole('button', { name })
-    while (await chip.count() > 0) await chip.first().click()
+  // must run without any document pin so nothing invites a re-read. A
+  // collection chip has its own remove control. The editing target stands
+  // in the input as a chip that goes like a word: select it, Backspace.
+  const collections = page.getByRole('button', { name: /^Sammlung entfernen: / })
+  while (await collections.count() > 0) await collections.first().click()
+  const target = editingTargetChip(page)
+  for (let attempt = 0; attempt < 3 && await target.count() > 0; attempt += 1) {
+    await target.first().click()
+    await page.keyboard.press('Backspace')
   }
+  assert(await target.count() === 0, 'The editing target could not be removed from the input.')
+}
+
+function editingTargetChip(page) {
+  return page.getByTestId('agent-composer-input').getByText(documentMaterial.editor_title)
 }
 
 async function selectDocumentContext(page, kind) {
+  // A choice that already stands is not made again: the menu offers a
+  // collection only while it is not pinned, and one editing target a turn.
+  const standing = kind === 'knowledge'
+    ? page.getByRole('button', { name: `Sammlung entfernen: ${documentMaterial.collection_name}`, exact: true })
+    : editingTargetChip(page)
+  if (await standing.count() > 0) return
   await page.getByRole('button', { name: 'Kontext oder Bearbeitungsziel hinzufügen', exact: true }).click()
   await page.getByRole('menuitem').filter({ hasText: kind === 'knowledge' ? 'Sammlungen auswählen' : 'Bearbeitungsziel' }).click()
   await page.getByRole('menuitem').filter({ hasText: kind === 'knowledge' ? documentMaterial.collection_name : documentMaterial.editor_title }).click()
@@ -831,8 +1114,12 @@ async function verifyPersistedConversation(name, browserType) {
     await reader.page.locator(`[data-agent-session-id="${activeSession.id}"]`)
       .getByText(activeTitle, { exact: true }).click()
     const surface = reader.page.getByTestId('agent-timeline-panel')
-    await waitFor(async () => await surface.getByTestId('agent-answer').count() === conversation.length,
-      30_000, `${name} persisted conversation answers`)
+    // A stop that did not hold may have left one answer of its own.
+    const expected = conversation.length + stoppedTurnAnswers
+    await waitFor(async () => {
+      const count = await surface.getByTestId('agent-answer').count()
+      return count === expected || (stopTurnUncertain && count === expected + 1)
+    }, 30_000, `${name} persisted conversation answers`)
     const synthesis = answeredTurn(reader.page, conversation.find((turn) => turn.case === 'R4').state)
     assert(/12[.,\s]?500/.test(await synthesis.getByTestId('agent-answer').innerText()),
       `${name} synthesis omitted the revised budget.`)
@@ -855,13 +1142,21 @@ async function verifyPersistedConversation(name, browserType) {
     await reader.page.screenshot({ fullPage: true, path: join(screenshotDirectory, `conversation-${name}.png`) })
     assert(reader.browserObservations.responses > 0, `${name} recorded no browser traffic.`)
     assert(reader.errors.length === 0, `${name} recorded browser errors.`)
-    scenarioStatus.set(`agent.conversation-${name}`, 'passed')
+    verdicts.pass(`agent.conversation-${name}`)
   } catch (error) {
     await reader?.page.screenshot({ fullPage: true, path: join(screenshotDirectory, `conversation-${name}-failure.png`) })
       .catch(() => undefined)
     throw error
   } finally {
     try { if (reader) await fixtures.logoutActor(reader) } finally { await otherBrowser.close() }
+  }
+}
+
+function jsonBody(request) {
+  try {
+    return request.postDataJSON()
+  } catch {
+    return null
   }
 }
 
@@ -899,14 +1194,3 @@ async function waitFor(probe, timeoutMs, label) {
   )
 }
 
-/** Sidecar contract of tests/verification/scenario-results.ts:
- * atomic write, mode 0600, {schemaVersion: 1, scenarios}. */
-async function writeScenarioSidecar(scenarios) {
-  const path = process.env.INQTRIX_VERIFICATION_SCENARIO_RESULTS_PATH
-  if (!path) return
-  const temporaryPath = `${path}.tmp`
-  const payload = `${JSON.stringify({ scenarios, schemaVersion: 1 }, null, 2)}\n`
-  await writeFile(temporaryPath, payload, { encoding: 'utf8', mode: 0o600 })
-  await rename(temporaryPath, path)
-  await chmod(path, 0o600)
-}

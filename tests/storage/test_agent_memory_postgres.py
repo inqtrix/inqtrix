@@ -82,7 +82,6 @@ async def candidate_store(wiped):
         engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE
     )
     yield store
-    await store.aclose()
 
 
 @pytest_asyncio.fixture()
@@ -91,7 +90,6 @@ async def feedback_store(wiped):
         engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE
     )
     yield store
-    await store.aclose()
 
 
 @pytest.mark.asyncio

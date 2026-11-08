@@ -72,9 +72,9 @@ class ValkeyIndexingQueue(StreamJobQueue[QueuedIndexingJob]):
             client=client,
         )
 
-    def enqueue(self, *, job_id: str, tenant_id: str) -> None:
+    async def enqueue(self, *, job_id: str, tenant_id: str) -> None:
         """Append one dispatch message for *job_id*."""
-        self._enqueue(entity_id=job_id, tenant_id=tenant_id)
+        await self._enqueue(entity_id=job_id, tenant_id=tenant_id)
 
     def _make_job(
         self,

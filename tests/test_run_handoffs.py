@@ -7,6 +7,7 @@ contract.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
@@ -21,7 +22,7 @@ def _make_store() -> PostgresRunStore:
     store._local = {}
     store._swept_waiting = SimpleQueue()
     store._parents_to_wake = SimpleQueue()
-    store._failed_cascades = SimpleQueue()
+    store._cascades = SimpleQueue()
     return store
 
 
@@ -32,7 +33,7 @@ def test_parallel_parent_wake_drains_each_committed_handoff_once() -> None:
     calls_lock = threading.Lock()
 
     class DispatchQueue:
-        def enqueue(self, *, run_id: str, tenant_id: str) -> None:
+        async def enqueue(self, *, run_id: str, tenant_id: str) -> None:
             assert tenant_id == "default"
             with calls_lock:
                 calls.append(run_id)
@@ -43,6 +44,6 @@ def test_parallel_parent_wake_drains_each_committed_handoff_once() -> None:
         store._parents_to_wake.put(run_id)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(lambda _index: store._dispatch_woken_parents(), range(8)))
+        list(pool.map(lambda _index: asyncio.run(store._dispatch_woken_parents()), range(8)))
 
     assert sorted(calls) == sorted(expected)

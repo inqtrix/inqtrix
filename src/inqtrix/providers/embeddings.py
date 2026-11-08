@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.urls import sanitize_error
@@ -167,6 +168,8 @@ class LiteLLMEmbeddings(_OpenAISDKEmbeddings):
         selectable_models: Model ids offered in the UI picker; empty
             keeps the picker hidden.
         timeout: Per-call timeout in seconds.
+        default_headers: Optional headers sent with every request, for
+            example the subscription header of an API gateway.
     """
 
     def __init__(
@@ -177,6 +180,7 @@ class LiteLLMEmbeddings(_OpenAISDKEmbeddings):
         default_model: str = "text-embedding-3-small",
         selectable_models: list[str] | None = None,
         timeout: float = REASONING_TIMEOUT,
+        default_headers: Mapping[str, str] | None = None,
     ) -> None:
         from openai import OpenAI
 
@@ -189,6 +193,7 @@ class LiteLLMEmbeddings(_OpenAISDKEmbeddings):
                 base_url=base_url,
                 timeout=timeout,
                 max_retries=0,
+                default_headers=dict(default_headers or {}),
             ),
             default_model=default_model,
             selectable_models=selectable_models,
@@ -217,6 +222,8 @@ class AzureOpenAIEmbeddings(_OpenAISDKEmbeddings):
         default_model: Deployment name used when a call names none.
         selectable_models: Deployment names offered in the UI picker.
         timeout: Per-call timeout in seconds.
+        default_headers: Optional headers sent with every request, for
+            example the subscription header of an API gateway.
     """
 
     def __init__(
@@ -228,6 +235,7 @@ class AzureOpenAIEmbeddings(_OpenAISDKEmbeddings):
         default_model: str = "text-embedding-3-large",
         selectable_models: list[str] | None = None,
         timeout: float = REASONING_TIMEOUT,
+        default_headers: Mapping[str, str] | None = None,
     ) -> None:
         from openai import AzureOpenAI
 
@@ -250,6 +258,7 @@ class AzureOpenAIEmbeddings(_OpenAISDKEmbeddings):
                 api_version=api_version,
                 timeout=timeout,
                 max_retries=0,
+                default_headers=dict(default_headers or {}),
             ),
             default_model=default_model,
             selectable_models=selectable_models,

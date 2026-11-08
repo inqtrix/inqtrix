@@ -11,7 +11,7 @@ from sqlalchemy import select, text, update
 
 from inqtrix.project.agent_sessions_postgres import PostgresAgentSessionStore
 from inqtrix.project.chat_postgres import PostgresChatStore
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.project.session_titles import SessionTitleConflict, generated_title_update
 from inqtrix.storage.agent_sessions_orm import agent_sessions
 from inqtrix.storage.chat_orm import chat_threads
@@ -69,7 +69,6 @@ async def target(request):
     yield store, save, table, resource_id, factory
     async with factory() as session, session.begin():
         await session.execute(table.delete().where(table.c.id == resource_id))
-    await store.aclose()
 
 
 @pytest.mark.asyncio
@@ -206,6 +205,7 @@ async def test_title_commit_cannot_cross_owner_or_workspace(target):
 
 
 @pytest.mark.asyncio
+@pytest.mark.two_connections_on_purpose
 async def test_title_revision_is_checked_after_a_concurrent_manual_transaction_commits(
     target,
 ):

@@ -22,15 +22,18 @@ export type StatusRowTone = 'default' | 'muted' | 'success' | 'warning'
 
 /** One status line: a muted label and a tone-coded value pill. */
 export function StatusRow({
+  hint,
   label,
   tone = 'default',
   value,
 }: {
+  /** One muted line under the row, for a reason the pill cannot hold. */
+  hint?: string
   label: string
   tone?: StatusRowTone
   value: string
 }) {
-  return (
+  const row = (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1">
       <span className="truncate t-meta-sm text-muted-foreground">{label}</span>
       <span
@@ -44,6 +47,13 @@ export function StatusRow({
       >
         {value}
       </span>
+    </div>
+  )
+  if (!hint) return row
+  return (
+    <div>
+      {row}
+      <p className="px-2.5 pb-1 t-meta-sm text-muted-foreground">{hint}</p>
     </div>
   )
 }

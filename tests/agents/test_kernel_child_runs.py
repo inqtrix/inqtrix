@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -256,6 +256,7 @@ def test_mission_child_inherits_selection_without_resolved_kernel_defaults(
     class Mission:
         id = "workspace_agent"
         display_name = "Mission"
+        contract_version = 1
 
         def capabilities(self):
             return {}
@@ -331,6 +332,7 @@ def test_only_a_single_mission_child_inherits_the_result_requirement(
     class Mission:
         id = "workspace_agent"
         display_name = "Mission"
+        contract_version = 1
 
         def capabilities(self):
             return {}
@@ -1026,8 +1028,8 @@ def test_delegate_batch_two_children_plus_synthesis_completes(monkeypatch):
             "used": 25,
             "limit": 24,
             "next_limit": 48,
-            # The published operator ceiling (normal == deep: 241).
-            "ceiling": 241,
+            # The published operator ceiling (normal == deep: 240).
+            "ceiling": 240,
             "extendable": True,
             "choices": ["extend", "partial", "cancel"],
             "state": "waiting_for_input",
@@ -1642,6 +1644,7 @@ def test_mission_child_memo_is_the_deliverable_and_arms_one_advisory(
     class FakeMission:
         id = "workspace_agent"
         display_name = "Fake Mission"
+        contract_version = 1
 
         def capabilities(self) -> dict[str, Any]:
             return {}

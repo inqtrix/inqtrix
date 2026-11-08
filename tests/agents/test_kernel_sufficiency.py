@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from langchain_core.messages import HumanMessage
 

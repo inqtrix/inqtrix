@@ -23,11 +23,12 @@ from inqtrix.server.routers.audit_admin import (
 )
 from inqtrix.server.routers.auth import build_auth_router
 from inqtrix.settings import AuthSettings, Settings
+from tests._store_doubles import BothNames
 
 OWNER = ("owner@example.com", "correct-horse-battery")
 
 
-class _FakeRunStore:
+class _FakeRunStore(BothNames):
     def events_snapshot(self, run_id, *, after=0):
         if run_id != "run_1":
             return []

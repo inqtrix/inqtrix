@@ -1395,6 +1395,10 @@ async def verify_database_runtime_contract(
                 )
             )
         except SQLAlchemyError as exc:
+            # A database going away mid-probe says nothing about the contract:
+            # it reaches the caller as it is and reads as unreachable there.
+            if _is_database_runtime_unavailable(exc):
+                raise
             raise DatabaseRuntimeContractError(
                 "tenant policy execution or protected-table probe failed"
             ) from exc

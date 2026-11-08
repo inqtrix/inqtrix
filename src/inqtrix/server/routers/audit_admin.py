@@ -17,7 +17,6 @@ row BEFORE streaming for the same reason.
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import io
 import json
@@ -283,9 +282,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "Invalid after parameter", "invalid_request_error"
             )
-        events = await asyncio.to_thread(
-            run_store.events_snapshot, run_id, after=after
-        )
+        events = await run_store.aevents_snapshot(run_id, after=after)
         # Audit BEFORE answering, like the sibling trace export: this
         # returns ANOTHER user's run steps, which carry user-derived
         # content (queries, progress prose). An admin reading foreign

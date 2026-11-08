@@ -69,9 +69,13 @@ The agent is reusable across runs. A typical web server keeps a single `Research
 | Method | Purpose |
 |--------|---------|
 | `research(question, *, history="")` | Blocking run; returns a typed `ResearchResult`. |
+| `aresearch(question, *, history="")` | The same run as a coroutine; works from any event loop, a notebook's included. |
 | `stream(question, *, history="", include_progress=True)` | Generator that yields progress messages (optional) followed by answer chunks. Used for CLIs, SSE servers, and browser UIs. |
+| `astream(question, *, history="", include_progress=True)` | Async generator with the same chunks as `stream()`. |
 
-Neither method is thread-safe against the same agent instance. One `ResearchAgent` is safe to reuse across many sequential runs -- the compiled graph and the lazily created providers are cached -- but concurrent runs need one instance per worker or an external lock. `stream()` runs the graph on a single-worker `ThreadPoolExecutor` and drains the progress queue in the caller's thread; that internal split does not make the API concurrent-safe either. The HTTP server uses a semaphore for concurrency (see [Web server mode](../deployment/webserver-mode.md)).
+No method is thread-safe against the same agent instance. One `ResearchAgent` is safe to reuse across many sequential runs -- the compiled graph and the lazily created providers are cached -- but concurrent runs need one instance per worker or an external lock. The HTTP server uses a semaphore for concurrency (see [Web server mode](../deployment/webserver-mode.md)).
+
+Every run executes on the process loop. A script, a notebook or an application that never configured one gets a background loop that Inqtrix starts on first use, once per process, and announces with one `INFO` line of the `inqtrix.aio` logger; nothing has to be set up. Inside an event loop, `await agent.aresearch(...)` keeps that loop free; the blocking `research()` also works there and holds the loop while it waits, like any synchronous call. Only a call on the process loop's own thread is refused (`inqtrix.aio.CalledOnLoopThread`), because it would wait for itself. A stream runs on while nobody reads it. A stream that ends early (`close()`, `aclose()`, an error, Ctrl-C) tells the run to stop and returns once the run ended at its next checkpoint, so no run outlives its stream; a provider call already in flight finishes first.
 
 ## `AgentConfig`
 

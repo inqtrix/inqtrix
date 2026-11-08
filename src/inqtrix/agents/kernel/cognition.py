@@ -31,9 +31,6 @@ if TYPE_CHECKING:
     from inqtrix.agents.kernel.deps import KernelDeps
     from inqtrix.agents.patterns._structured import StructuredOutcome
 
-SUFFICIENCY_JUDGED_EVENT = "inqtrix.agent.sufficiency.judged"
-"""Event type of one advisory sufficiency verdict (nudge or fallback)."""
-
 
 def judge_kernel_sufficiency(deps: "KernelDeps") -> "StructuredOutcome":
     """One fast-tier coverage verdict over the segment's evidence.

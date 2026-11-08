@@ -7,7 +7,7 @@ decide/answer -> wake -> resume-from-rows):
   idempotent clarification create. Its payload is our own
   ``{"kind": "clarification", "id": ...}`` and the resume value is
   delivered as the tool-internal ``interrupt()`` return.
-* **B — deepagents HITL middleware** (``interrupt_on`` policy gates)
+* **B — the LangChain HITL middleware** (``interrupt_on`` policy gates)
   raises payloads shaped ``{"action_requests": [...], "review_configs":
   [...]}`` and resumes through ``{"decisions": [...]}`` (shape frozen by
   the harness contract tests).
@@ -25,7 +25,7 @@ CLARIFICATION_INTERRUPT = "clarification"
 """Origin A: an ``ask_user`` round backed by a clarification row."""
 
 TOOL_APPROVAL_INTERRUPT = "tool_approval"
-"""Origin B: a deepagents HITL gate backed by a ``kind="tool"``
+"""Origin B: a HITL gate backed by a ``kind="tool"``
 approval row; the policy gates map its resume."""
 
 CHILDREN_INTERRUPT = "children"
@@ -68,7 +68,7 @@ def translate_kernel_interrupt(payload: Any) -> tuple[str, dict[str, Any]]:
     ``(TOOL_APPROVAL_INTERRUPT, <full payload>)`` for origin B.
 
     Raises:
-        ValueError: The payload matches neither origin — a deepagents
+        ValueError: The payload matches neither origin — a LangChain
             upgrade changed the HITL shape (the loud upgrade tripwire;
             resuming blind would corrupt the run).
     """

@@ -41,6 +41,9 @@ export type AgentOverview = {
    * `unavailable` (the operator did not enable it). Always rendered:
    * an absent picker alone would hide that the feature exists. */
   kernel: 'active' | 'selectable' | 'unavailable'
+  /** Why the kernel is unavailable, as the server names it
+   * (`feature_status.agent_kernel.reason_code`); null otherwise. */
+  kernelReason: string | null
   durable: boolean
   /** Null when the server does not publish permission_modes (or the
    * selected mode is unknown) — the group hides. */
@@ -222,11 +225,14 @@ export function defaultEngineMode(
 export function buildAgentOverview({
   agent,
   autonomy,
+  kernelReason = null,
   kernelSelectable,
   mode,
 }: {
   agent: AgentOverviewSource | null
   autonomy: string
+  /** The server's reason while the kernel is not registered. */
+  kernelReason?: string | null
   /** True when the server registered the kernel (`features.agent_kernel`)
    * — feeds the availability row, independent of the selection. */
   kernelSelectable: boolean
@@ -264,6 +270,7 @@ export function buildAgentOverview({
   return {
     brain,
     kernel,
+    kernelReason: kernel === 'unavailable' ? kernelReason : null,
     durable: agent?.durable === true,
     approvals,
     tools,

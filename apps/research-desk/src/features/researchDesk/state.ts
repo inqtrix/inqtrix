@@ -133,6 +133,7 @@ import {
   knowledgeAnswerWithRunProgress,
 } from '@/features/knowledge/answer'
 import { applyKnowledgeRunEvent } from '@/features/knowledge/runSteps'
+import { jobMatchesFilter } from './jobFilters'
 import type { AppView, JobFilter, ResearchJob } from './types'
 
 export const stackOptions = [
@@ -584,6 +585,8 @@ export type ResearchDeskAction =
   | { indexId: string; type: 'markVectorIndexSuperseded' }
   | { completedDocuments: number; currentDocumentTitle?: string; embedded?: boolean; fileId?: string; indexId: string; runningFileIds?: string[]; totalDocuments: number; type: 'markVectorIndexProgress' }
   | { indexId: string; serverDocumentId: string; type: 'markVectorIndexDocumentEmbedded' }
+  | { indexId: string; member?: { fileId: string; serverDocumentId: string }; serverCollectionId?: string; serverCollectionModel?: string; type: 'adoptVectorIndexIdentity' }
+  | { embeddedFileIds: string[]; failureMessage: string | null; indexId: string; serverDocumentIds?: Record<string, string>; type: 'reconcileVectorIndexDocumentJobs' }
   | { embeddedFileIds: string[]; skippedFileIds: string[]; indexId: string; serverCollectionId: string; serverCollectionModel: string; serverDocumentIds: Record<string, string>; type: 'adoptVectorIndexPartialResult' }
   | { embeddedFileIds?: string[]; skippedFileIds?: string[]; indexId: string; result?: 'cancelled' | 'ok'; serverCollectionId?: string; serverCollectionModel?: string; serverDocumentIds?: Record<string, string>; type: 'completeVectorIndexReindex' }
   | { indexId: string; message: string; serverCollectionId?: string; serverCollectionModel?: string; type: 'markVectorIndexError' }
@@ -5069,6 +5072,73 @@ export function researchDeskReducer(
       },
     }
   }
+  if (action.type === 'adoptVectorIndexIdentity') {
+    // What the server holds of a run in flight, as soon as it exists: a reload
+    // finds the run's jobs through it, whether or not this page lives to the end.
+    const index = state.vectorIndexes[action.indexId]
+    if (!index || index.status !== 'indexing') return state
+    const { member: adopted } = action
+    return writeVectorIndex(state, {
+      ...index,
+      members: adopted
+        ? index.members.map((member) => (
+            member.fileId === adopted.fileId
+              ? { ...member, serverDocumentId: adopted.serverDocumentId }
+              : member
+          ))
+        : index.members,
+      serverCollectionId: action.serverCollectionId ?? index.serverCollectionId ?? null,
+      serverCollectionModel: action.serverCollectionModel ?? index.serverCollectionModel ?? null,
+      updatedAt: new Date().toISOString(),
+    })
+  }
+  if (action.type === 'reconcileVectorIndexDocumentJobs') {
+    // How the server's document jobs ended while no page watched them, or which
+    // pending members the collection's document list already holds (adopting
+    // the document of a member that never learned its id). Bound to the state of
+    // the index: a failure shows once and stays until it is settled, and listing
+    // the same jobs again changes nothing.
+    const index = state.vectorIndexes[action.indexId]
+    if (
+      !index
+      || index.status === 'indexing'
+      || index.status === 'deleting'
+      || index.status === 'delete_failed'
+    ) return state
+    const members = reconcileVectorIndexMembers(
+      index.members,
+      action.embeddedFileIds,
+      [],
+      action.serverDocumentIds ?? {},
+    )
+    const failure = action.failureMessage
+    const newFailure = failure !== null && index.status !== 'error'
+    const membersChanged = members.some(
+      (member, position) => member.state !== index.members[position].state
+        || member.serverDocumentId !== index.members[position].serverDocumentId,
+    )
+    if (!newFailure && !membersChanged) return state
+    const now = new Date().toISOString()
+    const nothingPending = members.every((member) => member.state !== 'pending')
+    const failing = failure !== null || (index.status === 'error' && !nothingPending)
+    return writeVectorIndex(state, {
+      ...index,
+      history: newFailure
+        ? appendVectorIndexHistory(index, {
+            documents: 0,
+            durationMs: 0,
+            error: failure,
+            finishedAt: now,
+            result: 'error',
+            startedAt: now,
+          })
+        : index.history,
+      lastError: failing ? (failure ?? index.lastError) : null,
+      members,
+      status: failing ? 'error' : nothingPending ? 'ready' : 'stale',
+      updatedAt: now,
+    })
+  }
   if (action.type === 'adoptVectorIndexPartialResult') {
     const index = state.vectorIndexes[action.indexId]
     if (!index || index.status !== 'indexing') return state
@@ -7170,11 +7240,7 @@ export function visibleResearchJobs(
 ) {
   return activeFilter === 'all'
     ? jobs
-    // An unavailable run's card visibly retracts its last status (calm
-    // lock), so it must not appear under -- or count toward -- that
-    // status bucket; it stays reachable under "all" until hydration
-    // prunes it.
-    : jobs.filter((job) => job.status === activeFilter && !job.unavailable)
+    : jobs.filter((job) => jobMatchesFilter(job, activeFilter))
 }
 
 export function selectedResearchJob(
@@ -7201,9 +7267,10 @@ function resolveVisibleSelection(
   activeFilter: JobFilter,
   selectedJobId: string | null,
 ) {
-  const visibleRunIds = activeFilter === 'all'
-    ? researchRunOrder
-    : researchRunOrder.filter((runId) => researchRuns[runId]?.status === activeFilter)
+  const visibleRunIds = researchRunOrder.filter((runId) => {
+    const run = researchRuns[runId]
+    return activeFilter === 'all' || (run !== undefined && jobMatchesFilter(run, activeFilter))
+  })
   const selectedJobIsVisible = visibleRunIds.some((runId) => runId === selectedJobId)
 
   return selectedJobIsVisible ? selectedJobId : visibleRunIds[0] ?? null

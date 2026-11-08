@@ -28,7 +28,7 @@ from inqtrix.server.overrides import (
     parse_overrides_payload,
 )
 from inqtrix.server.routes import create_router, register_routes
-from inqtrix.server.runs import RunStore
+from inqtrix.runs.memory_store import RunStore
 from inqtrix.settings import AgentSettings, ModelSettings, ServerSettings, Settings
 
 

@@ -24,8 +24,16 @@ export type ScenarioDefinition = {
   engine: VerificationEngine
   formFactors?: readonly ('desktop' | 'mobile')[]
   id: string
+  /** The engine may report this scenario as `skipped`, with its reason, when a
+   * prerequisite of the stack is missing. Every other scenario that reports a
+   * skip keeps its engine red: a skip is an exception the inventory names. */
+  mayBeSkipped?: true
   prerequisites: readonly string[]
   profiles: readonly VerificationProfile[]
+  /** The scenario counts for its profile only with this input configured.
+   * Without it the report keeps the scenario at `not_run`, and the run is judged
+   * by the scenarios that had what they need. */
+  requiredEnvironment?: string
   selectorTag?: `@${string}`
   testTitle?: string
   title: string
@@ -44,6 +52,7 @@ export const PROFILE_ENGINE_ORDER: Readonly<
   'load-smoke': ['collaboration-load'],
   'load-soak': ['collaboration-load'],
   'owner-setup': ['owner-setup-live'],
+  'run-load': ['run-load'],
   'system-smoke': ['collaboration-playwright', 'editor-system-live'],
   'ui-fixture': ['ui-fixture-playwright'],
 }
@@ -53,8 +62,10 @@ export const PROFILE_DESCRIPTIONS: Readonly<Record<VerificationProfile, string>>
   'agent-desk': (
     'Kernel answer experience through the visible Agent Desk against '
     + 'the live stack: run submission, tool activity, clickable '
-    + 'citations, real research follow-ups, synthesis with web disabled, '
-    + 'a Canvas report from conversation history, browser hygiene, and cleanup.'
+    + 'citations, a stopped turn and work going on in the same session, a '
+    + 'manual session title, real research follow-ups, synthesis with web '
+    + 'disabled, a Canvas report from conversation history and its Markdown '
+    + 'copy, browser hygiene, and cleanup.'
   ),
   'chat-prompt': (
     'Chat and Prompt Library browser matrix against the live stack: '
@@ -81,6 +92,12 @@ export const PROFILE_DESCRIPTIONS: Readonly<Record<VerificationProfile, string>>
     'One visible first-run local-owner session through setup, initial '
     + 'persistence, user administration, and pointer logout on a fresh stack.'
   ),
+  'run-load': (
+    'Many signed-in users driving Research, Knowledge, Agent and direct chat '
+    + 'runs against a running stack whose models are the provider stand-in: '
+    + 'stages, counters from outside the application, a comparable report and '
+    + 'a zero-residue check. No model cost, and no capacity claim by itself.'
+  ),
   'system-smoke': 'External multiuser system behavior through visible browser flows.',
   'ui-fixture': 'Deterministic browser fixtures without external product services.',
 }
@@ -98,6 +115,9 @@ export const SCENARIO_INVENTORY: readonly ScenarioDefinition[] = [
     ['conversation-file-attachment', 'The real conversation reads an uploaded PDF from its canonical server extraction, whose facts name the page without text'],
     ['conversation-review-role', 'A Deep turn hands its outputs to the review role: one bounded child run with its profile tools only, a typed result, a read basis and no answer of its own'],
     ['conversation-mission-review', 'A mission turn is reviewed through the shared review pass: a visible decision, every planned criterion settled by its number, a named transport with a role child exactly where the role reviewed, and a memo that cites only its own references'],
+    ['conversation-stop-continue', 'A researching turn stopped through the visible Stop control ends cancelled with its delegated work, shows that it was stopped, and the next turn completes in the same session'],
+    ['conversation-manual-title', 'A session renamed by hand in the session list keeps its manual title through the next turn, on the server and on the page'],
+    ['conversation-canvas-copy', 'The Canvas report copies as Markdown that is the stored report unchanged, followed by the AI notice'],
   ] as const).map(([id, title]): ScenarioDefinition => ({
     id: `agent.${id}`, title, engine: 'agent-desk-live', profiles: ['agent-desk'], destructive: true,
     prerequisites: ['Healthy canonical stack with real providers', 'Authenticated tester'],
@@ -282,6 +302,11 @@ export const SCENARIO_INVENTORY: readonly ScenarioDefinition[] = [
     'ui.brand-mark-presets',
     'Fixed brand mark in every preset and the high-contrast lock screen',
     'every preset keeps the fixed logo and high contrast overrides the lock screen',
+  ),
+  uiScenario(
+    'ui.high-contrast-error-border',
+    'High contrast draws the error border only on an invalid field',
+    'high contrast draws the error border only on a field marked invalid',
   ),
   uiScenario(
     'ui.brand-mark-small-surfaces',
@@ -766,6 +791,19 @@ export const SCENARIO_INVENTORY: readonly ScenarioDefinition[] = [
     title: 'Six-user document, permission, comment, and responsive-layout matrix',
   },
   {
+    cleanup: 'The engine deletes run-prefixed documents, closes contexts, and erases temporary users in finally.',
+    destructive: true,
+    engine: 'editor-system-live',
+    id: 'system.guest-link-matrix',
+    mayBeSkipped: true,
+    prerequisites: [
+      'External product stack over HTTPS with editor guest links enabled',
+      'Otherwise reported as skipped with its reason; INQTRIX_E2E_REQUIRE_GUEST_LINKS=1 makes it fail instead',
+    ],
+    profiles: ['system-smoke'],
+    title: 'Guest links for every permission, opened in extra guest browsers while the six account users stay active',
+  },
+  {
     cleanup: 'The run-question-bound agent session and its runs are registered on creation and deleted through owner APIs.',
     destructive: true,
     engine: 'agent-desk-live',
@@ -812,6 +850,15 @@ export const SCENARIO_INVENTORY: readonly ScenarioDefinition[] = [
     prerequisites: ['The shared agent-desk run'],
     profiles: ['agent-desk'],
     title: 'Every created agent resource is registered and terminal before exit',
+  },
+  {
+    cleanup: 'Covered by the shared agent session/run cleanup registration.',
+    destructive: false,
+    engine: 'agent-desk-live',
+    id: 'agent.review-matches-tier',
+    prerequisites: ['The shared agent-desk run'],
+    profiles: ['agent-desk'],
+    title: 'Every completed turn records the review its Stufe owes: completed where the level owes one, waived where the Stufe skips it, never unavailable',
   },
   {
     cleanup: 'The run-titled thread is registered on creation and deleted through the visible UI; the ledger pass is 404-tolerant.',
@@ -1032,6 +1079,48 @@ export const SCENARIO_INVENTORY: readonly ScenarioDefinition[] = [
     'load-capacity',
     true,
   ),
+  runLoadScenario(
+    'run-load.provisioned',
+    'The target is proven to answer from the stand-in, the samplers read, and every account, tab and collection exists',
+  ),
+  runLoadScenario(
+    'run-load.workload-completed',
+    'The closed loop of root runs finishes at a plausible success ratio',
+  ),
+  runLoadScenario(
+    'run-load.stand-in-covered',
+    'Almost every provider call was answered from a recording',
+  ),
+  runLoadScenario(
+    'run-load.events-complete',
+    'The stream of every finished run delivered each of its events exactly once',
+  ),
+  runLoadScenario(
+    'run-load.load-applied',
+    'The stage reached the stack: active roots near the target, every tab with its stream, few rejections and failed requests',
+  ),
+  runLoadScenario(
+    'run-load.report-written',
+    'A comparable report holding only counts and durations was written and read back',
+  ),
+  runLoadScenario(
+    'run-load.no-residue',
+    'No account and no row of the temporary accounts remains',
+  ),
+  runLoadScenario(
+    'run-load.connection-budget',
+    'One pool per process, no pool timeout, no process above what it may hold, and no new connections under load beyond what the samplers open',
+  ),
+  runLoadScenario(
+    'run-load.baseline-holds',
+    'Transactions per provider call, connections per container, delivery delay and event-loop lag hold against the base report',
+    'INQTRIX_RUN_LOAD_BASELINE',
+  ),
+  runLoadScenario(
+    'run-load.worker-stop',
+    'A worker stopped mid-work hands its runs to another worker through heartbeat silence, and none is lost',
+    'INQTRIX_RUN_LOAD_FAULT',
+  ),
   edgeScenario(
     'edge.static-spa-cache',
     'Static assets, hard asset 404s, and SPA cache behavior',
@@ -1051,6 +1140,10 @@ export const SCENARIO_INVENTORY: readonly ScenarioDefinition[] = [
   edgeScenario(
     'edge.request-body-limit',
     'Header-independent request-body ceiling',
+  ),
+  edgeScenario(
+    'edge.request-head-limit',
+    'Request heads up to 32 KiB pass however their bytes arrive; larger ones sent in pieces are refused',
   ),
   edgeScenario(
     'edge.websocket-contract',
@@ -1074,8 +1167,15 @@ validateScenarioInventory(SCENARIO_INVENTORY)
 
 export function scenariosForProfile(
   profile: VerificationProfile,
+  environment: NodeJS.ProcessEnv = process.env,
 ): readonly ScenarioDefinition[] {
-  return SCENARIO_INVENTORY.filter((scenario) => scenario.profiles.includes(profile))
+  return SCENARIO_INVENTORY.filter((scenario) => (
+    scenario.profiles.includes(profile)
+    && (
+      scenario.requiredEnvironment === undefined
+      || Boolean(environment[scenario.requiredEnvironment]?.trim())
+    )
+  ))
 }
 
 export function scenarioIdsForProfile(profile: VerificationProfile): string[] {
@@ -1203,6 +1303,27 @@ function loadScenario(
     id,
     prerequisites: ['Version-2 lease/session fixture'],
     profiles: [profile],
+    title,
+  }
+}
+
+function runLoadScenario(
+  id: string,
+  title: string,
+  requiredEnvironment?: string,
+): ScenarioDefinition {
+  return {
+    cleanup: 'A ledger entry registered before the first account erases exactly this run\'s accounts and what they own; the engine counts what remains.',
+    destructive: false,
+    engine: 'run-load',
+    id,
+    prerequisites: [
+      'Running stack whose models are the provider stand-in',
+      'Provisioning credentials',
+      'Explicit Podman engine',
+    ],
+    profiles: ['run-load'],
+    ...(requiredEnvironment ? { requiredEnvironment } : {}),
     title,
   }
 }

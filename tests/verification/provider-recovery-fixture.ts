@@ -61,7 +61,7 @@ export async function prepareProviderRecoveryFixture(
   activationStarted = true
   await compose([...base, '-f', overlay, 'up', '-d', '--no-deps', '--force-recreate', 'api', 'worker'],
     'provider-fixture-activate')
-  const baseURL = context.environment.INQTRIX_E2E_BASE_URL ?? 'http://127.0.0.1:8080'
+  const baseURL = context.environment.INQTRIX_E2E_BASE_URL ?? 'http://localhost:8080'
   const deadline = Date.now() + 60_000
   while (Date.now() < deadline) {
     try {
@@ -117,8 +117,12 @@ export async function verifyProviderFaultCalls(context: RunContext, validate = t
   if (new Set(transport.map((row) => row.request_sha256)).size !== 1) {
     throw new Error('Transport retry changed the model messages or tool schema.')
   }
-  if (!calls.some((row) => row.case === 'context' && row.purpose === 'agent_context_projection')) {
-    throw new Error('Context recovery never reached the real projection model.')
+  // The rejected turn is retried with its largest tool result cleared.
+  const contextCalls = calls.filter((row) => row.case === 'context')
+  const rejected = contextCalls.find((row) => row.call === 2)
+  const retried = contextCalls.find((row) => row.call === 3)
+  if (!rejected || !retried || retried.request_sha256 === rejected.request_sha256) {
+    throw new Error('Context recovery never retried the rejected turn with a cleared tool result.')
   }
   for (const [name, minimum] of Object.entries({ archive_window: 3, archive_catalogue: 4, history_seed: 4, bulk_handover: 2 })) {
     if (calls.filter((row) => row.case === name).length < minimum) {

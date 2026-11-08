@@ -27,6 +27,7 @@ from tests.agents.test_workspace_agent import (
     submit_agent,
     wait_status,
 )
+from inqtrix.harness.contracts.events import OUTCOME_EVENT
 
 _ANALYSIS_ONLY = {"WindowExtraction", "DocumentAnalysisResult"}
 
@@ -1321,7 +1322,6 @@ def test_a_replan_whose_only_task_is_dropped_takes_the_empty_delta_exit(monkeypa
     empty, the memo the review judged stands, and the decision says why.
     Turns red when a fully dropped replan fails as invalid."""
     from inqtrix.i18n import t
-    from inqtrix.runs.shared import OUTCOME_EVENT
 
     llm = _replan_llm([_analysis_task("t3")], needs_web=True)
     client = _client(monkeypatch, llm, _body(9_000, {1_000: DEADLINE}))

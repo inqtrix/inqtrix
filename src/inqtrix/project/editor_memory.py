@@ -31,7 +31,7 @@ from inqtrix.project.editor_ports import (
     SuggestionDraftNotFound,
     SuggestionDraftRevisionConflict,
 )
-from inqtrix.project.scoped_upsert import ResourceScope, require_memory_scope
+from inqtrix.storage.scoped_upsert import ResourceScope, require_memory_scope
 
 
 class MemoryEditorStore:
@@ -541,6 +541,3 @@ class MemoryEditorStore:
             comment,
             suggestion_draft=None,
         )
-
-    async def aclose(self) -> None:
-        return None

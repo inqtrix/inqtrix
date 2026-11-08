@@ -1,7 +1,7 @@
 """Durable knowledge-indexing records and events in Postgres.
 
 Same public surface as the in-memory
-:class:`~inqtrix.server.indexing.IndexingJobStore` — the indexing routers
+:class:`~inqtrix.runs.indexing_memory.IndexingJobStore` — the indexing routers
 and :class:`~inqtrix.services.indexing_service.IndexingService` cannot
 tell the backends apart. The durable twin of
 :class:`~inqtrix.runs.postgres_store.PostgresRunStore`, built from the
@@ -13,24 +13,21 @@ a per-collection history cap, and no separate share layer.
 Two execution modes (mirroring the run store):
 
 * ``queue is None`` (``INQTRIX_STORAGE_BACKEND=postgres`` alone):
-  records and events are durable; execution stays in this process with
-  the same daemon-thread dispatch as the in-memory store.
+  records and events are durable; execution stays in this process, on
+  the transition lane like the in-memory store.
 * ``queue`` set (``INQTRIX_QUEUE_BACKEND=valkey``): accepted jobs are
   persisted and dispatched to the indexing stream; ``inqtrix-worker``
   claims and executes them from canonical Postgres source revisions. The job
   row is the source of truth.
 
-The storage layer is async (asyncpg) while this surface is sync (the
-router and the job handle call it from worker threads); the store owns
-one background event loop and funnels every database operation through
-it. Sequence numbers are allocated via
+Every operation is a coroutine on the process loop (asyncpg); job bodies on
+threads reach it through its sync name. Sequence numbers are allocated via
 ``UPDATE indexing_jobs SET event_seq = event_seq + 1 RETURNING event_seq``
 — gap-free across processes, which keeps the SSE stream byte-compatible
 with the in-memory store.
 
-The schema-agnostic plumbing — the ``_call``/``close``/``_session``
-async-loop bridge, the background-loop construction, the no-queue
-in-process dispatch loop, and the DB-polling SSE subscription — lives
+The schema-agnostic plumbing — ``_call``, ``aclose``, ``_session``, the
+no-queue in-process dispatch, and the DB-polling SSE subscription — lives
 once in :class:`~inqtrix.runs.durable_store.DurableJobStoreBase` and
 :class:`~inqtrix.runs.durable_store.PollingJobSubscription`, shared with
 the run store. Only the schema-bearing bodies stay here: the SQL, the
@@ -66,7 +63,7 @@ from inqtrix.contextualization_circuit import (
     circuit_admission,
 )
 from inqtrix.execution_authority import AuthorizationRevoked
-from inqtrix.indexing_auto_resume import (
+from inqtrix.runs.indexing_auto_resume import (
     AutoResumePolicy,
     DueResume,
     is_due,
@@ -74,13 +71,14 @@ from inqtrix.indexing_auto_resume import (
     public_plan,
 )
 from inqtrix.knowledge.stores.ports import CollectionNotFound
+from inqtrix.runs.shared import bridge_to_loop
 from inqtrix.runs.durable_store import (
     DEFAULT_TENANT,
     DurableJobStoreBase,
     PollingJobSubscription,
     _LocalJob,
 )
-from inqtrix.server.indexing import (
+from inqtrix.runs.indexing_records import (
     ACTIVE_INDEXING_STATUS_VALUES,
     FencedIndexingJobHandle,
     TERMINAL_INDEXING_EVENTS,
@@ -183,10 +181,8 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     """Durable indexing registry with the in-memory store's public surface.
 
     Args:
-        engine: Async engine OWNED by this store. asyncpg pools are
-            event-loop-affine: every connection must live on the store's
-            background loop, so the engine is deliberately NOT shared
-            with the identity/file/knowledge backends.
+        engine: Async engine OWNED by this store, whose connections live on
+            the process loop.
         app_role: Restricted database role assumed per transaction
             (``SET LOCAL ROLE``) so forced RLS applies.
         queue: Indexing dispatch queue; ``None`` keeps execution in this
@@ -216,7 +212,6 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     the run store and the in-memory indexing store.
     """
 
-    _loop_thread_name = "inqtrix-index-db"
     _dispatch_thread_prefix = "inqtrix-reindex"
     _job_kind = "Durable indexing job"
 
@@ -231,10 +226,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         root traces and their log lines carry no job correlation at all.
         """
         from inqtrix.observability import semconv
-        from inqtrix.observability.context import (
-            bind_log_context,
-            reset_log_context,
-        )
+        from inqtrix.observability.context import bind_log_context
         from inqtrix.observability.otel import operation_span
 
         tenant_id = str(
@@ -253,8 +245,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 },
             )
         )
-        tokens = bind_log_context(run_id=entity_id, tenant=tenant_id)
-        stack.callback(reset_log_context, tokens)
+        bind_log_context(run_id=entity_id, tenant=tenant_id)
 
     def __init__(
         self,
@@ -274,7 +265,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         clock: Callable[[], float] = time.time,
         random_source: Callable[[], float] = random.random,
     ) -> None:
-        # The engine/session/loop/dispatch plumbing lives in
+        # The engine/session/dispatch plumbing lives in
         # DurableJobStoreBase; this store adds only its sizing and
         # retention state.
         super().__init__(
@@ -294,24 +285,30 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         self._restrict_to_workspace_members = restrict_to_workspace_members
         self._sharing_enabled = sharing_enabled
         self._cleanup_callbacks: dict[str, Any] = {}
-        # The restart sweep runs eagerly so orphans of the previous
-        # process are terminal before the first client read — including
-        # the active-collection checks the deletion services consult. A
-        # failure keeps the one-shot flag set; the lazy first-cleanup
-        # fallback remains, so startup gains no new hard dependency.
-        if self._sweep_orphans:
-            try:
-                self._call(self._startup_cleanup_db())
-            except Exception as boot_exc:  # noqa: BLE001 — lazy cleanup remains
-                log.warning(
-                    "Startup cleanup failed; it will be retried on the next database "
-                    "access (error_type=%s).",
-                    type(boot_exc).__name__,
-                )
+
+    async def astart(self) -> None:
+        """Make orphans of the previous process terminal before the first client read.
+
+        That includes the active-collection checks the deletion services
+        consult. A failure keeps the one-shot flag set; the lazy first-cleanup
+        fallback remains, so startup gains no new hard dependency.
+        """
+        if not self._sweep_orphans:
+            return
+        try:
+            await self._startup_cleanup_db()
+        except Exception as boot_exc:  # noqa: BLE001 — lazy cleanup remains
+            log.warning(
+                "Startup cleanup failed; it will be retried on the next database "
+                "access (error_type=%s).",
+                type(boot_exc).__name__,
+            )
+
+    start = bridge_to_loop(astart)
 
     # -- public surface (IndexingJobStore parity) ------------------------- #
 
-    def submit(
+    async def asubmit(
         self,
         *,
         collection_id: str,
@@ -345,27 +342,25 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         # Best-effort fence before admission (bounded by grace +
         # throttle): a lost execution should stop blocking the
         # collection or holding a slot within that window.
-        self._expire_lost_executions()
-        summary = self._call(
-            self._submit_db(
-                collection_id=collection_id,
-                collection_name=collection_name,
-                embedding_model=embedding_model,
-                index_id=index_id,
-                workspace_id=workspace_id,
-                created_by_user_id=created_by_user_id,
-                created_by_tenant_id=created_by_tenant_id,
-                generation_id=generation_id,
-                operation_kind=IndexingOperationKind(operation_kind).value,
-                document_id=document_id,
-                revision_id=revision_id,
-                checkpoint=dict(checkpoint or {}),
-            )
+        await self._expire_lost_executions()
+        summary = await self._submit_db(
+            collection_id=collection_id,
+            collection_name=collection_name,
+            embedding_model=embedding_model,
+            index_id=index_id,
+            workspace_id=workspace_id,
+            created_by_user_id=created_by_user_id,
+            created_by_tenant_id=created_by_tenant_id,
+            generation_id=generation_id,
+            operation_kind=IndexingOperationKind(operation_kind).value,
+            document_id=document_id,
+            revision_id=revision_id,
+            checkpoint=dict(checkpoint or {}),
         )
         job_id = summary["job_id"]
         if self._queue is not None:
             try:
-                self._queue.enqueue(job_id=job_id, tenant_id=DEFAULT_TENANT)
+                await self._queue.enqueue(job_id=job_id, tenant_id=DEFAULT_TENANT)
             except Exception as exc:  # noqa: BLE001 — row is committed; visible
                 log.warning(
                     "Dispatch for indexing job %s could not be sent; the "
@@ -384,10 +379,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                     if cleanup is not None:
                         self._cleanup_callbacks[job_id] = cleanup
                     self._pending.append(job_id)
-                    self._dispatch_locked()
+            await self._dispatch_now()
         return summary
 
-    def get(
+    submit = bridge_to_loop(asubmit)
+
+    async def aget(
         self,
         job_id: str,
         *,
@@ -395,15 +392,19 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> dict[str, Any]:
         """Return a public summary for *job_id*."""
-        self._expire_lost_executions()
-        return self._call(self._summary_db(job_id, workspace_id, visible_to))
+        await self._expire_lost_executions()
+        return await self._summary_db(job_id, workspace_id, visible_to)
 
-    def execution_spec(self, job_id: str) -> IndexingExecutionSpec:
+    get = bridge_to_loop(aget)
+
+    async def aexecution_spec(self, job_id: str) -> IndexingExecutionSpec:
         """Return private canonical identity for resume reconstruction."""
 
-        return self._call(self._execution_spec_db(job_id))
+        return await self._execution_spec_db(job_id)
 
-    def list(
+    execution_spec = bridge_to_loop(aexecution_spec)
+
+    async def alist(
         self,
         *,
         collection_id: str | None = None,
@@ -411,10 +412,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> list[dict[str, Any]]:
         """Return summaries for visible jobs, newest first."""
-        self._expire_lost_executions()
-        return self._call(self._list_db(collection_id, workspace_id, visible_to))
+        await self._expire_lost_executions()
+        return await self._list_db(collection_id, workspace_id, visible_to)
 
-    def has_active_job(self, collection_id: str) -> bool:
+    list = bridge_to_loop(alist)
+
+    async def ahas_active_job(self, collection_id: str) -> bool:
         """Whether *collection_id* has a queued/running/cancelling job."""
         # Best-effort fence first (bounded by grace + throttle): the
         # deletion services consult this check, and a lost execution
@@ -423,29 +426,33 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         # maintenance transaction fails, so fence errors degrade loudly
         # instead of failing the read.
         try:
-            self._expire_lost_executions()
+            await self._expire_lost_executions()
         except Exception as fence_exc:  # noqa: BLE001 — read must answer
             log.warning(
                 "Lost-execution detection before the activity check failed; the check "
                 "continues without it (error_type=%s).",
                 type(fence_exc).__name__,
             )
-        return self._call(self._has_active_job_db(collection_id))
+        return await self._has_active_job_db(collection_id)
 
-    def has_active_document_job(self, document_id: str) -> bool:
+    has_active_job = bridge_to_loop(ahas_active_job)
+
+    async def ahas_active_document_job(self, document_id: str) -> bool:
         """Whether a document-revision job can still publish this document."""
 
         try:
-            self._expire_lost_executions()
+            await self._expire_lost_executions()
         except Exception as fence_exc:  # noqa: BLE001 — read must answer
             log.warning(
                 "Lost-execution detection before the activity check failed; the check "
                 "continues without it (error_type=%s).",
                 type(fence_exc).__name__,
             )
-        return self._call(self._has_active_document_job_db(document_id))
+        return await self._has_active_document_job_db(document_id)
 
-    def cancel(
+    has_active_document_job = bridge_to_loop(ahas_active_document_job)
+
+    async def acancel(
         self,
         job_id: str,
         *,
@@ -454,9 +461,8 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         actor_user_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Request cancellation for a queued or running indexing operation."""
-        summary = self._call(
-            self._cancel_db(job_id, workspace_id, visible_to, actor_user_id)
-        )
+        summary = await self._cancel_db(job_id, workspace_id, visible_to, actor_user_id)
+        cleanup = None
         with self._lock:
             local = self._local.get(job_id)
             if local is not None:
@@ -468,11 +474,13 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                         pass
                     local.work = None
                     cleanup = self._cleanup_callbacks.pop(job_id, None)
-                    if cleanup is not None:
-                        cleanup()
+        if cleanup is not None:
+            await cleanup()
         return summary
 
-    def fence_collection_for_deletion(
+    cancel = bridge_to_loop(acancel)
+
+    async def afence_collection_for_deletion(
         self,
         collection_id: str,
         *,
@@ -480,15 +488,15 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     ) -> int:
         """Terminally fence every active attempt for an owned collection."""
 
-        job_ids = self._call(
-            self._fence_collection_for_deletion_db(
-                collection_id, actor_user_id=actor_user_id
-            )
+        job_ids = await self._fence_collection_for_deletion_db(
+            collection_id, actor_user_id=actor_user_id
         )
-        self._forget_fenced_local_jobs(job_ids)
+        await self._forget_fenced_local_jobs(job_ids)
         return len(job_ids)
 
-    def fence_document_for_deletion(
+    fence_collection_for_deletion = bridge_to_loop(afence_collection_for_deletion)
+
+    async def afence_document_for_deletion(
         self,
         collection_id: str,
         document_id: str,
@@ -497,17 +505,18 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     ) -> int:
         """Fence only revision jobs for one durable deletion target."""
 
-        job_ids = self._call(
-            self._fence_document_for_deletion_db(
-                collection_id,
-                document_id,
-                actor_user_id=actor_user_id,
-            )
+        job_ids = await self._fence_document_for_deletion_db(
+            collection_id,
+            document_id,
+            actor_user_id=actor_user_id,
         )
-        self._forget_fenced_local_jobs(job_ids)
+        await self._forget_fenced_local_jobs(job_ids)
         return len(job_ids)
 
-    def _forget_fenced_local_jobs(self, job_ids: tuple[str, ...]) -> None:
+    fence_document_for_deletion = bridge_to_loop(afence_document_for_deletion)
+
+    async def _forget_fenced_local_jobs(self, job_ids: tuple[str, ...]) -> None:
+        cleanups = []
         with self._lock:
             for job_id in job_ids:
                 local = self._local.get(job_id)
@@ -520,9 +529,11 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                     pass
                 cleanup = self._cleanup_callbacks.pop(job_id, None)
                 if cleanup is not None:
-                    cleanup()
+                    cleanups.append(cleanup)
+        for cleanup in cleanups:
+            await cleanup()
 
-    def resume(
+    async def aresume(
         self,
         job_id: str,
         *,
@@ -557,17 +568,15 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 or (local is not None and local.work is not None)
             )
         try:
-            summary = self._call(
-                self._resume_db(
-                    job_id,
-                    workspace_id,
-                    visible_to,
-                    actor_user_id,
-                    raw_by_user_choice=False,
-                    execution_available=execution_available,
-                    automatic=automatic,
-                    now=now,
-                )
+            summary = await self._resume_db(
+                job_id,
+                workspace_id,
+                visible_to,
+                actor_user_id,
+                raw_by_user_choice=False,
+                execution_available=execution_available,
+                automatic=automatic,
+                now=now,
             )
         except Exception:
             if rebound:
@@ -578,7 +587,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 self._discard_rebound_work(job_id)
             return summary
         if self._queue is not None:
-            self._queue.enqueue(job_id=job_id, tenant_id=DEFAULT_TENANT)
+            await self._queue.enqueue(job_id=job_id, tenant_id=DEFAULT_TENANT)
             return summary
         with self._lock:
             local = self._local.get(job_id)
@@ -592,17 +601,21 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             else:
                 local.parked = False
                 self._pending.append(job_id)
-                self._dispatch_locked()
+        await self._dispatch_now()
         return summary
+
+    resume = bridge_to_loop(aresume)
 
     @property
     def auto_resume_policy(self) -> AutoResumePolicy:
         """How this store's dependency pauses resume on their own."""
         return self._auto_resume
 
-    def due_auto_resumes(self, *, now: float) -> list[DueResume]:
+    async def adue_auto_resumes(self, *, now: float) -> list[DueResume]:
         """Dependency pauses whose automatic resume is due at ``now``."""
-        return self._call(self._due_auto_resumes_db(now))
+        return await self._due_auto_resumes_db(now)
+
+    due_auto_resumes = bridge_to_loop(adue_auto_resumes)
 
     async def _due_auto_resumes_db(self, now: float) -> list[DueResume]:
         async with self._session(DEFAULT_TENANT) as session:
@@ -639,10 +652,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 )
         return due
 
-    def stop_auto_resume(self, job_id: str, reason: str) -> None:
+    async def astop_auto_resume(self, job_id: str, reason: str) -> None:
         """End a job's automatic resumes visibly; it stays paused for a person."""
-        plan = self._call(self._stop_auto_resume_db(job_id, reason))
+        plan = await self._stop_auto_resume_db(job_id, reason)
         _log_auto_resume_plan(job_id, plan)
+
+    stop_auto_resume = bridge_to_loop(astop_auto_resume)
 
     async def _stop_auto_resume_db(
         self, job_id: str, reason: str
@@ -697,7 +712,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 )
             return plan
 
-    def resume_raw_by_user_choice(
+    async def aresume_raw_by_user_choice(
         self,
         job_id: str,
         *,
@@ -726,15 +741,13 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 or (local is not None and local.work is not None)
             )
         try:
-            summary = self._call(
-                self._resume_db(
-                    job_id,
-                    workspace_id,
-                    visible_to,
-                    actor_user_id,
-                    raw_by_user_choice=True,
-                    execution_available=execution_available,
-                )
+            summary = await self._resume_db(
+                job_id,
+                workspace_id,
+                visible_to,
+                actor_user_id,
+                raw_by_user_choice=True,
+                execution_available=execution_available,
             )
         except Exception:
             if rebound:
@@ -745,7 +758,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 self._discard_rebound_work(job_id)
             return summary
         if self._queue is not None:
-            self._queue.enqueue(job_id=job_id, tenant_id=DEFAULT_TENANT)
+            await self._queue.enqueue(job_id=job_id, tenant_id=DEFAULT_TENANT)
             return summary
         with self._lock:
             local = self._local.get(job_id)
@@ -759,8 +772,10 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             else:
                 local.parked = False
                 self._pending.append(job_id)
-            self._dispatch_locked()
+        await self._dispatch_now()
         return summary
+
+    resume_raw_by_user_choice = bridge_to_loop(aresume_raw_by_user_choice)
 
     def _discard_rebound_work(self, job_id: str) -> None:
         """Undo a local rebind when the durable paused-to-queued CAS fails."""
@@ -769,11 +784,13 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             self._local.pop(job_id, None)
             self._cleanup_callbacks.pop(job_id, None)
 
-    def raw_by_user_choice(self, job_id: str) -> bool:
-        checkpoint = self._call(self._checkpoint_db(job_id))
+    async def araw_by_user_choice(self, job_id: str) -> bool:
+        checkpoint = await self._checkpoint_db(job_id)
         return checkpoint.get("raw_by_user_choice") is True
 
-    def subscribe(
+    raw_by_user_choice = bridge_to_loop(araw_by_user_choice)
+
+    async def asubscribe(
         self,
         job_id: str,
         *,
@@ -782,14 +799,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> PollingJobSubscription:
         """Subscribe after a durable cursor, then tail new events."""
-        self._expire_lost_executions()
-        tenant_id, replay = self._call(
-            self._replay_db(
-                job_id,
-                workspace_id,
-                visible_to,
-                after_sequence=max(0, int(after_sequence)),
-            )
+        await self._expire_lost_executions()
+        tenant_id, replay = await self._replay_db(
+            job_id,
+            workspace_id,
+            visible_to,
+            after_sequence=max(0, int(after_sequence)),
         )
         return PollingJobSubscription(
             self,
@@ -801,22 +816,24 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             thread_label="inqtrix-index-events",
         )
 
+    subscribe = bridge_to_loop(asubscribe)
+
     def unsubscribe(self, job_id: str, queue: Queue) -> None:
         """Parity no-op: polling subscriptions detach via ``close()``."""
 
-    def set_total(
+    async def aset_total(
         self, job_id: str, total_documents: int, *, fence_attempt: int | None = None
     ) -> None:
         """Record the job's total document count and emit a progress step."""
-        self._call(
-            self._progress_db(
-                job_id,
-                total_documents=max(0, int(total_documents)),
-                fence_attempt=fence_attempt,
-            )
+        await self._progress_db(
+            job_id,
+            total_documents=max(0, int(total_documents)),
+            fence_attempt=fence_attempt,
         )
 
-    def progress(
+    set_total = bridge_to_loop(aset_total)
+
+    async def aprogress(
         self,
         job_id: str,
         *,
@@ -825,38 +842,44 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         fence_attempt: int | None = None,
     ) -> None:
         """Update completed-document progress and emit a progress event."""
-        self._call(
-            self._progress_db(
-                job_id,
-                completed_documents=max(0, int(completed_documents)),
-                current_document_title=current_document_title,
-                fence_attempt=fence_attempt,
-            )
+        await self._progress_db(
+            job_id,
+            completed_documents=max(0, int(completed_documents)),
+            current_document_title=current_document_title,
+            fence_attempt=fence_attempt,
         )
 
-    def completed_document_ids(self, job_id: str) -> frozenset[str]:
-        row = self._call(self._checkpoint_db(job_id))
+    progress = bridge_to_loop(aprogress)
+
+    async def acompleted_document_ids(self, job_id: str) -> frozenset[str]:
+        row = await self._checkpoint_db(job_id)
         return frozenset(str(value) for value in row.get("completed_document_ids", []))
 
-    def embedding_receipt(self, job_id: str, document_id: str) -> dict[str, Any] | None:
-        checkpoint = self._call(self._checkpoint_db(job_id))
+    completed_document_ids = bridge_to_loop(acompleted_document_ids)
+
+    async def aembedding_receipt(self, job_id: str, document_id: str) -> dict[str, Any] | None:
+        checkpoint = await self._checkpoint_db(job_id)
         receipts = checkpoint.get("embedding_receipts")
         if not isinstance(receipts, dict):
             return None
         receipt = receipts.get(document_id)
         return dict(receipt) if isinstance(receipt, dict) else None
 
-    def context_batch_checkpoints(
+    embedding_receipt = bridge_to_loop(aembedding_receipt)
+
+    async def acontext_batch_checkpoints(
         self, job_id: str, document_id: str
     ) -> list[dict[str, Any]]:
-        checkpoint = self._call(self._checkpoint_db(job_id))
+        checkpoint = await self._checkpoint_db(job_id)
         current = _contextualization_documents(checkpoint).get(document_id)
         if current is None:
             return []
         batches = current.get("batches", [])
         return [dict(item) for item in batches if isinstance(item, dict)]
 
-    def checkpoint_context_batch(
+    context_batch_checkpoints = bridge_to_loop(acontext_batch_checkpoints)
+
+    async def acheckpoint_context_batch(
         self,
         job_id: str,
         document_id: str,
@@ -864,16 +887,16 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         *,
         fence_attempt: int | None = None,
     ) -> None:
-        self._call(
-            self._checkpoint_context_batch_db(
-                job_id,
-                document_id,
-                checkpoint,
-                fence_attempt=fence_attempt,
-            )
+        await self._checkpoint_context_batch_db(
+            job_id,
+            document_id,
+            checkpoint,
+            fence_attempt=fence_attempt,
         )
 
-    def set_phase(
+    checkpoint_context_batch = bridge_to_loop(acheckpoint_context_batch)
+
+    async def aset_phase(
         self,
         job_id: str,
         phase: str,
@@ -882,17 +905,17 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         total_batches: int = 0,
         fence_attempt: int | None = None,
     ) -> None:
-        self._call(
-            self._progress_db(
-                job_id,
-                phase=str(phase),
-                current_batch=max(0, int(current_batch)),
-                total_batches=max(0, int(total_batches)),
-                fence_attempt=fence_attempt,
-            )
+        await self._progress_db(
+            job_id,
+            phase=str(phase),
+            current_batch=max(0, int(current_batch)),
+            total_batches=max(0, int(total_batches)),
+            fence_attempt=fence_attempt,
         )
 
-    def checkpoint_document(
+    set_phase = bridge_to_loop(aset_phase)
+
+    async def acheckpoint_document(
         self,
         job_id: str,
         document_id: str,
@@ -900,16 +923,16 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         embedding_receipt: dict[str, Any] | None = None,
         fence_attempt: int | None = None,
     ) -> None:
-        self._call(
-            self._checkpoint_document_db(
-                job_id,
-                document_id,
-                embedding_receipt=embedding_receipt,
-                fence_attempt=fence_attempt,
-            )
+        await self._checkpoint_document_db(
+            job_id,
+            document_id,
+            embedding_receipt=embedding_receipt,
+            fence_attempt=fence_attempt,
         )
 
-    def pause(
+    checkpoint_document = bridge_to_loop(acheckpoint_document)
+
+    async def apause(
         self,
         job_id: str,
         status: IndexingJobStatus,
@@ -918,14 +941,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         error_type: str,
         fence_attempt: int | None = None,
     ) -> bool:
-        landed = self._call(
-            self._pause_db(
-                job_id,
-                status,
-                message,
-                error_type=error_type,
-                fence_attempt=fence_attempt,
-            )
+        landed = await self._pause_db(
+            job_id,
+            status,
+            message,
+            error_type=error_type,
+            fence_attempt=fence_attempt,
         )
         if landed:
             with self._lock:
@@ -935,7 +956,9 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                     local.park_in_flight = True
         return landed
 
-    def complete(self, job_id: str, *, fence_attempt: int | None = None) -> bool:
+    pause = bridge_to_loop(apause)
+
+    async def acomplete(self, job_id: str, *, fence_attempt: int | None = None) -> bool:
         """Mark the job completed.
 
         Returns:
@@ -943,43 +966,43 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             absorbed (already terminal or fenced out) — the worker must
             NOT ack the dispatch message in that case.
         """
-        landed = self._call(
-            self._terminal_db(
-                job_id,
-                IndexingJobStatus.COMPLETED,
-                fence_attempt=fence_attempt,
-                clear_title=True,
-                event_type="inqtrix.index.completed",
-                extra={"status": "completed"},
-            )
+        landed = await self._terminal_db(
+            job_id,
+            IndexingJobStatus.COMPLETED,
+            fence_attempt=fence_attempt,
+            clear_title=True,
+            event_type="inqtrix.index.completed",
+            extra={"status": "completed"},
         )
         if landed:
             with self._lock:
                 self._cleanup_callbacks.pop(job_id, None)
         return landed
 
-    def complete_raw_by_user_choice(
+    complete = bridge_to_loop(acomplete)
+
+    async def acomplete_raw_by_user_choice(
         self,
         job_id: str,
         *,
         fence_attempt: int | None = None,
     ) -> bool:
-        landed = self._call(
-            self._terminal_db(
-                job_id,
-                IndexingJobStatus.READY_RAW_BY_USER_CHOICE,
-                fence_attempt=fence_attempt,
-                clear_title=True,
-                event_type="inqtrix.index.ready_raw_by_user_choice",
-                extra={"status": "ready_raw_by_user_choice"},
-            )
+        landed = await self._terminal_db(
+            job_id,
+            IndexingJobStatus.READY_RAW_BY_USER_CHOICE,
+            fence_attempt=fence_attempt,
+            clear_title=True,
+            event_type="inqtrix.index.ready_raw_by_user_choice",
+            extra={"status": "ready_raw_by_user_choice"},
         )
         if landed:
             with self._lock:
                 self._cleanup_callbacks.pop(job_id, None)
         return landed
 
-    def fail(
+    complete_raw_by_user_choice = bridge_to_loop(acomplete_raw_by_user_choice)
+
+    async def afail(
         self,
         job_id: str,
         message: str,
@@ -989,21 +1012,21 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     ) -> bool:
         """Mark the job failed with a sanitized error payload."""
         error = {"message": sanitize_error(message), "type": error_type}
-        landed = self._call(
-            self._terminal_db(
-                job_id,
-                IndexingJobStatus.FAILED,
-                fence_attempt=fence_attempt,
-                error=error,
-                event_type="inqtrix.index.failed",
-                extra={"status": "failed", "error": error},
-            )
+        landed = await self._terminal_db(
+            job_id,
+            IndexingJobStatus.FAILED,
+            fence_attempt=fence_attempt,
+            error=error,
+            event_type="inqtrix.index.failed",
+            extra={"status": "failed", "error": error},
         )
         if landed:
-            self._run_local_cleanup(job_id)
+            await self._run_local_cleanup(job_id)
         return landed
 
-    def supersede(
+    fail = bridge_to_loop(afail)
+
+    async def asupersede(
         self,
         job_id: str,
         *,
@@ -1011,41 +1034,41 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         fence_attempt: int | None = None,
     ) -> bool:
         """Terminalize a stale document revision under the worker fence."""
-        return self._call(
-            self._terminal_db(
-                job_id,
-                IndexingJobStatus.SUPERSEDED,
-                fence_attempt=fence_attempt,
-                clear_title=True,
-                event_type="inqtrix.index.superseded",
-                extra={"status": "superseded", "reason": reason},
-            )
+        return await self._terminal_db(
+            job_id,
+            IndexingJobStatus.SUPERSEDED,
+            fence_attempt=fence_attempt,
+            clear_title=True,
+            event_type="inqtrix.index.superseded",
+            extra={"status": "superseded", "reason": reason},
         )
 
-    def mark_cancelled(
+    supersede = bridge_to_loop(asupersede)
+
+    async def amark_cancelled(
         self, job_id: str, *, reason: str, fence_attempt: int | None = None
     ) -> bool:
         """Mark a running job cancelled after its worker observed it."""
-        landed = self._call(
-            self._terminal_db(
-                job_id,
-                IndexingJobStatus.CANCELLED,
-                fence_attempt=fence_attempt,
-                event_type="inqtrix.index.cancelled",
-                extra={"status": "cancelled", "reason": reason},
-            )
+        landed = await self._terminal_db(
+            job_id,
+            IndexingJobStatus.CANCELLED,
+            fence_attempt=fence_attempt,
+            event_type="inqtrix.index.cancelled",
+            extra={"status": "cancelled", "reason": reason},
         )
         if landed:
-            self._run_local_cleanup(job_id)
+            await self._run_local_cleanup(job_id)
         return landed
 
-    def _run_local_cleanup(self, job_id: str) -> None:
+    mark_cancelled = bridge_to_loop(amark_cancelled)
+
+    async def _run_local_cleanup(self, job_id: str) -> None:
         with self._lock:
             cleanup = self._cleanup_callbacks.pop(job_id, None)
         if cleanup is None:
             return
         try:
-            cleanup()
+            await cleanup()
         except Exception as exc:  # noqa: BLE001 - terminal state remains authoritative
             log.error(
                 "Indexing cleanup for %s failed (error_type=%s)",
@@ -1053,20 +1076,20 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 type(exc).__name__,
             )
 
-    def document_started(
+    async def adocument_started(
         self, job_id: str, document_id: str, *, fence_attempt: int | None = None
     ) -> None:
         """Emit the stable id of one document entering active processing."""
-        self._call(
-            self._document_event_db(
-                job_id,
-                document_id,
-                event_type="inqtrix.index.document_started",
-                fence_attempt=fence_attempt,
-            )
+        await self._document_event_db(
+            job_id,
+            document_id,
+            event_type="inqtrix.index.document_started",
+            fence_attempt=fence_attempt,
         )
 
-    def document_progress(
+    document_started = bridge_to_loop(adocument_started)
+
+    async def adocument_progress(
         self,
         job_id: str,
         document_id: str,
@@ -1077,18 +1100,18 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         fence_attempt: int | None = None,
     ) -> None:
         """Persist and emit phase progress for one exact document."""
-        self._call(
-            self._document_progress_db(
-                job_id,
-                document_id,
-                phase,
-                current_batch=current_batch,
-                total_batches=total_batches,
-                fence_attempt=fence_attempt,
-            )
+        await self._document_progress_db(
+            job_id,
+            document_id,
+            phase,
+            current_batch=current_batch,
+            total_batches=total_batches,
+            fence_attempt=fence_attempt,
         )
 
-    def document_completed(
+    document_progress = bridge_to_loop(adocument_progress)
+
+    async def adocument_completed(
         self,
         job_id: str,
         document_id: str,
@@ -1097,32 +1120,34 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         context_omitted_chunks: int = 0,
     ) -> None:
         """Emit a per-document completion event (one document finished embedding)."""
-        self._call(
-            self._document_event_db(
-                job_id,
-                document_id,
-                event_type="inqtrix.index.document_completed",
-                fence_attempt=fence_attempt,
-                outcome="embedded",
-                context_omitted_chunks=context_omitted_chunks,
-            )
+        await self._document_event_db(
+            job_id,
+            document_id,
+            event_type="inqtrix.index.document_completed",
+            fence_attempt=fence_attempt,
+            outcome="embedded",
+            context_omitted_chunks=context_omitted_chunks,
         )
+
+    document_completed = bridge_to_loop(adocument_completed)
 
     # -- worker surface --------------------------------------------------- #
 
-    def claim_for_execution(
+    async def aclaim_for_execution(
         self, job_id: str, tenant_id: str, *, allow_takeover: bool
     ) -> ClaimedIndexingJob | None:
         """Atomically claim one indexing operation for execution."""
-        return self._call(
-            self._claim_db(job_id, tenant_id, allow_takeover=allow_takeover)
-        )
+        return await self._claim_db(job_id, tenant_id, allow_takeover=allow_takeover)
 
-    def cancel_requested_jobs(self, job_ids: dict[str, str]) -> set[str]:
+    claim_for_execution = bridge_to_loop(aclaim_for_execution)
+
+    async def acancel_requested_jobs(self, job_ids: dict[str, str]) -> set[str]:
         """Subset of ``job_ids`` (id -> tenant) with a pending cancel."""
-        return self._call(self._cancel_requested_db(job_ids))
+        return await self._cancel_requested_db(job_ids)
 
-    def attempt_cancel_requested(
+    cancel_requested_jobs = bridge_to_loop(acancel_requested_jobs)
+
+    async def aattempt_cancel_requested(
         self,
         job_id: str,
         *,
@@ -1130,16 +1155,18 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     ) -> bool:
         """Whether this exact claimed attempt has a durable cancel request."""
 
-        return self._call(
-            self._attempt_cancel_requested_db(
-                job_id,
-                fence_attempt=fence_attempt,
-            )
+        return await self._attempt_cancel_requested_db(
+            job_id,
+            fence_attempt=fence_attempt,
         )
 
-    def stale_queued_jobs(self, *, older_than_seconds: float) -> list[tuple[str, str]]:
+    attempt_cancel_requested = bridge_to_loop(aattempt_cancel_requested)
+
+    async def astale_queued_jobs(self, *, older_than_seconds: float) -> list[tuple[str, str]]:
         """Queued ``(job_id, tenant_id)`` pairs older than the threshold."""
-        return self._call(self._stale_queued_db(older_than_seconds))
+        return await self._stale_queued_db(older_than_seconds)
+
+    stale_queued_jobs = bridge_to_loop(astale_queued_jobs)
 
     @property
     def contextualization_circuit(self) -> "PostgresIndexingJobStore":
@@ -1147,7 +1174,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
 
         return self
 
-    def acquire_contextualization_circuit(
+    async def aacquire_contextualization_circuit(
         self,
         *,
         provider_key: str,
@@ -1157,24 +1184,26 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     ) -> ContextualizationCircuitPermit | None:
         """Atomically grant a normal call or the sole half-open probe."""
 
-        return self._call(
-            self._acquire_contextualization_circuit_db(
-                provider_key=provider_key,
-                model=model,
-                cooldown_seconds=cooldown_seconds,
-                probe_lease_seconds=probe_lease_seconds,
-            )
+        return await self._acquire_contextualization_circuit_db(
+            provider_key=provider_key,
+            model=model,
+            cooldown_seconds=cooldown_seconds,
+            probe_lease_seconds=probe_lease_seconds,
         )
 
-    def record_contextualization_circuit_success(
+    acquire_contextualization_circuit = bridge_to_loop(aacquire_contextualization_circuit)
+
+    async def arecord_contextualization_circuit_success(
         self,
         permit: ContextualizationCircuitPermit,
     ) -> None:
         """Close a half-open circuit only for its current probe token."""
 
-        self._call(self._record_contextualization_circuit_success_db(permit))
+        await self._record_contextualization_circuit_success_db(permit)
 
-    def record_contextualization_circuit_failure(
+    record_contextualization_circuit_success = bridge_to_loop(arecord_contextualization_circuit_success)
+
+    async def arecord_contextualization_circuit_failure(
         self,
         permit: ContextualizationCircuitPermit,
         *,
@@ -1182,14 +1211,14 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     ) -> None:
         """Open the shared circuit after one transient provider failure."""
 
-        self._call(
-            self._record_contextualization_circuit_failure_db(
-                permit,
-                error_type=error_type,
-            )
+        await self._record_contextualization_circuit_failure_db(
+            permit,
+            error_type=error_type,
         )
 
-    def contextualization_circuit_view(
+    record_contextualization_circuit_failure = bridge_to_loop(arecord_contextualization_circuit_failure)
+
+    async def acontextualization_circuit_view(
         self,
         *,
         provider_key: str,
@@ -1197,11 +1226,11 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     ) -> ContextualizationCircuitView | None:
         """Read one shared circuit without changing it."""
 
-        return self._call(
-            self._contextualization_circuit_view_db(
-                provider_key=provider_key, model=model
-            )
+        return await self._contextualization_circuit_view_db(
+            provider_key=provider_key, model=model
         )
+
+    contextualization_circuit_view = bridge_to_loop(acontextualization_circuit_view)
 
     async def _contextualization_circuit_view_db(
         self,
@@ -1279,10 +1308,15 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     def _events_after(
         self, job_id: str, tenant_id: str, after_sequence: int
     ) -> list[dict[str, Any]]:
+        return self._call(self._poll_events_db(job_id, tenant_id, after_sequence))
+
+    async def _poll_events_db(
+        self, job_id: str, tenant_id: str, after_sequence: int
+    ) -> list[dict[str, Any]]:
         # Fence on the poll path: an already attached stream terminalizes
         # a lost job on its next poll and receives the terminal event.
-        self._expire_lost_executions()
-        return self._call(self._events_after_db(job_id, tenant_id, after_sequence))
+        await self._expire_lost_executions()
+        return await self._events_after_db(job_id, tenant_id, after_sequence)
 
     # -- lost-execution fence (no-queue mode) ----------------------------- #
 

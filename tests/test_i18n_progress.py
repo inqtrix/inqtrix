@@ -1,7 +1,7 @@
 """Tests for progress wording that surfaces evidence quality correctly."""
 
-from typing import Any
 
+from inqtrix.providers.attempts import report_retry
 from inqtrix.i18n import t
 from inqtrix.nodes import _provider_retry_progress_context
 from inqtrix.state import emit_progress, initial_state
@@ -148,31 +148,20 @@ def test_provider_retry_context_emits_warning_progress():
         run_event_sink=lambda event_type, payload: events.append((event_type, payload)),
     )
 
-    class RetryProvider:
-        def observe_retries(self, callback: Any) -> Any:
-            class _Context:
-                def __enter__(self_inner: Any) -> Any:
-                    callback({
-                        "provider": "TestProvider",
-                        "model": "test-model",
-                        "attempt": 1,
-                        "max_attempts": 5,
-                        "delay_seconds": 1.25,
-                        "error_code": "HTTP 503",
-                    })
-                    return self_inner
-
-                def __exit__(self_inner: Any, exc_type: Any, exc: Any, tb: Any) -> bool:
-                    return False
-
-            return _Context()
-
     with _provider_retry_progress_context(
-        RetryProvider(),
+        object(),
         state,
+        kind="model",
         operation_label="Antwort-Synthese",
     ):
-        pass
+        report_retry("model", {
+            "provider": "TestProvider",
+            "model": "test-model",
+            "attempt": 1,
+            "max_attempts": 5,
+            "delay_seconds": 1.25,
+            "error_code": "HTTP 503",
+        })
 
     assert events[0][0] == "inqtrix.progress.message"
     assert events[0][1]["severity"] == "warning"

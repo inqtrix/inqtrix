@@ -15,6 +15,7 @@ from typing import Any
 
 import uvicorn
 
+from inqtrix.aio import freeze_startup_heap
 from inqtrix.logging_config import configure_logging, log_status_line
 from inqtrix.server import create_app
 from inqtrix.settings import Settings, check_retired_settings
@@ -36,6 +37,7 @@ def main() -> None:
     log_status_line(resolved, retired=retired)
     settings = Settings()
     app = create_app(settings=settings)
+    freeze_startup_heap()
     uvicorn_kwargs: dict[str, Any] = dict(
         host=os.getenv("INQTRIX_SERVER_HOST", "0.0.0.0"),
         port=_server_port(),

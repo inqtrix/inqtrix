@@ -587,7 +587,8 @@ describe('a parked run is not a limited connection', () => {
 
   it('still rejects loudly when the poll of a parked run fails', async () => {
     // The outage while parked: nothing may swallow it because the run is
-    // parked. The caller turns this rejection into a visible run error.
+    // parked. The caller turns this rejection into a visible run error; while
+    // the channel rides the outage out, the polling hint shows it.
     const transports: RunEventTransport[] = []
     await expect(subscribeRunEventsWithFallback({
       onEvent: () => undefined,
@@ -600,7 +601,102 @@ describe('a parked run is not a limited connection', () => {
       sleep: instantSleep,
       streamSse: async () => ({ sawTerminal: true }),
     })).rejects.toThrow('HTTP 500')
-    expect(transports).toEqual(['parked'])
+    expect(transports).toEqual(['parked', 'polling'])
+  })
+})
+
+describe('a brief outage is ridden out, a lasting one is reported', () => {
+  const networkCut = () => new TypeError('Load failed')
+
+  it('keeps following a running run through a few failed polls', async () => {
+    // A few seconds without network must not end the subscription of a
+    // running run: its row would show an error until a reload although the
+    // run goes on.
+    let polls = 0
+    const waits: number[] = []
+    const received: number[] = []
+    const transports: RunEventTransport[] = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await subscribeRunEventsWithFallback({
+      streamSse: async () => ({ sawTerminal: false }),
+      pollOnce: async () => {
+        polls += 1
+        if (polls <= 2) throw networkCut()
+        return { events: [event(4, 'inqtrix.run.completed')], terminal: true }
+      },
+      onEvent: (delivered) => received.push(delivered.sequence ?? -1),
+      onHistory: (events) => received.push(...events.map((item) => item.sequence ?? -1)),
+      onTransportChange: (transport) => transports.push(transport),
+      signal: new AbortController().signal,
+      pollIntervalMs: 3_000,
+      sleep: async (ms) => { waits.push(ms) },
+    })
+    warn.mockRestore()
+    expect(received).toEqual([4])
+    expect(polls).toBe(3)
+    expect(waits).toEqual([3_000, 6_000])
+    expect(transports).toEqual(['polling'])
+  })
+
+  it('starts the budget and the wait afresh after a poll that answers', async () => {
+    // Two short outages are two outages, not one long one: the second must
+    // not inherit the failures and the longer wait of the first.
+    const answers = ['cut', 'cut', 'ok', 'cut', 'cut', 'done']
+    let polls = 0
+    const waits: number[] = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await subscribeRunEventsWithFallback({
+      streamSse: async () => ({ sawTerminal: false }),
+      pollOnce: async () => {
+        const answer = answers[polls]
+        polls += 1
+        if (answer === 'cut') throw networkCut()
+        return answer === 'done'
+          ? { events: [event(5, 'inqtrix.run.completed')], terminal: true }
+          : { events: [event(4, 'inqtrix.progress.message')], terminal: false }
+      },
+      onEvent: () => undefined,
+      signal: new AbortController().signal,
+      maxOutagePolls: 2,
+      pollIntervalMs: 3_000,
+      sleep: async (ms) => { waits.push(ms) },
+    })
+    warn.mockRestore()
+    expect(polls).toBe(6)
+    expect(waits).toEqual([3_000, 6_000, 3_000, 3_000, 6_000])
+  })
+
+  it('reports an outage that outlasts the budget loudly', async () => {
+    let polls = 0
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await expect(subscribeRunEventsWithFallback({
+      streamSse: async () => ({ sawTerminal: false }),
+      pollOnce: async () => {
+        polls += 1
+        throw networkCut()
+      },
+      onEvent: () => undefined,
+      signal: new AbortController().signal,
+      maxOutagePolls: 3,
+      sleep: instantSleep,
+    })).rejects.toThrow('Load failed')
+    warn.mockRestore()
+    expect(polls).toBe(4)
+  })
+
+  it('does not ask again where no retry can change the answer', async () => {
+    let polls = 0
+    await expect(subscribeRunEventsWithFallback({
+      streamSse: async () => ({ sawTerminal: false }),
+      pollOnce: async () => {
+        polls += 1
+        throw Object.assign(new Error('HTTP 400'), { status: 400 })
+      },
+      onEvent: () => undefined,
+      signal: new AbortController().signal,
+      sleep: instantSleep,
+    })).rejects.toThrow('HTTP 400')
+    expect(polls).toBe(1)
   })
 })
 

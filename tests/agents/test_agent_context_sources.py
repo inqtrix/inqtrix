@@ -19,7 +19,9 @@ from inqtrix.capabilities import CapabilityContext, CapabilityError
 from inqtrix.project.agent_sessions_memory import MemoryAgentSessionStore
 from inqtrix.services.agent_sessions_service import AgentSessionsService
 from inqtrix.services.agent_source_service import AgentSourceService
-from inqtrix.server.runs import RunNotFound, RunRecord, RunStatus, RunStore
+from inqtrix.exceptions import RunNotFound
+from inqtrix.runs.memory_store import RunStore
+from inqtrix.runs.records import RunRecord, RunStatus
 
 
 OWNER = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -41,6 +43,7 @@ def sources():
     context = CapabilityContext(principal=scope.principal, visible_to=scope, workspace_id="desk", run_id="current")
     for index, run_id in enumerate(("old", "current")):
         runs._records[run_id] = RunRecord(
+            workflow_contract=1,
             run_id=run_id, question="Current task", stack_name="fixture", workspace_id="desk",
             created_at=index, work=None, created_by_user_id=OWNER, created_by_tenant_id="default",
             request_payload={"body": {}}, kind="agent", mode="agent_kernel", session_id="conversation",
@@ -239,7 +242,7 @@ async def test_source_metadata_cannot_expose_credentials_from_an_original_title(
 @pytest.mark.asyncio
 async def test_checkpoint_cleanup_is_after_owner_and_terminal_checks(sources):
     from inqtrix.exceptions import RunCleanupFailed
-    from inqtrix.server.runs import RunActive
+    from inqtrix.runs.records import RunActive
 
     s = await saved(sources)
     calls = []
@@ -372,7 +375,7 @@ async def test_catalogue_continuation_is_directly_callable(sources):
 
 @pytest.mark.parametrize("incomplete", [True, False])
 def test_context_tool_explains_partial_search_before_source_data(incomplete):
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.context_sources import ContextSearchOutput
     from inqtrix.agents.kernel.deps import KernelDeps, set_kernel_deps
     from inqtrix.agents.kernel.tools import build_kernel_tools

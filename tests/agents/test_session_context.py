@@ -575,7 +575,7 @@ def test_follow_up_reads_prior_chat_evidence_and_rechecks_origin_access():
 
     from inqtrix.agents.kernel.deps import KernelDeps
     from inqtrix.agents.kernel.evidence_read import read_registered_evidence
-    from inqtrix.server.runs import RunNotFound
+    from inqtrix.exceptions import RunNotFound
 
     principal = object()
     source_run = "run_prior_search"

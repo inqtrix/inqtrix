@@ -112,6 +112,8 @@ def make_world() -> ShareWorld:
         )
     )
     owned_run_id = container.run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="meine Recherche",
         stack_name="default",
         work=lambda handle: handle.complete({"answer": "ok"}),
@@ -119,6 +121,8 @@ def make_world() -> ShareWorld:
         created_by_tenant_id="default",
     )["run_id"]
     foreign_run_id = container.run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="fremde Recherche",
         stack_name="default",
         work=lambda handle: handle.complete({"answer": "ok"}),

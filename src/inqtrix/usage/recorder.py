@@ -8,29 +8,31 @@ fail-safe: a ledger problem must never touch the provider call it
 books — but never fail-SILENT either (WARNING on every degradation
 class, once per streak/process).
 
-The recorder buffers rows in memory and a daemon thread flushes them in
-batches through the store's own throwaway event loop (NullPool engines
-only — the quota ``record_blocking`` precedent). ``close()`` flushes
-the remainder; the worker's ``os._exit`` paths may still drop the last
-seconds of rows, which is acceptable for consumption history and
-mirrors the span-batch contract.
+The recorder buffers rows in memory and a task on the process loop flushes
+them in batches. Its owner starts it once the loop runs (app lifespan, worker
+main); until then rows only collect. ``aclose()`` flushes the remainder; the
+worker's ``os._exit`` paths may still drop the last seconds of rows, which is
+acceptable for consumption history and mirrors the span-batch contract.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
 from collections import deque
 from typing import Any
 
-from inqtrix.sync_bridge import run_coro_sync
+from inqtrix import aio
+from inqtrix.providers.tracing import install_usage_sink
 from inqtrix.usage.models import UsageRow
 
 log = logging.getLogger(__name__)
 
 _FLUSH_INTERVAL_SECONDS = 5.0
 _MAX_BUFFERED_ROWS = 10_000
+_CLOSE_WAIT_SECONDS = 5.0
 _MAX_FLUSH_RETRIES = 20
 """Retries before a permanently unwritable batch is dropped loudly.
 
@@ -54,16 +56,20 @@ class UsageRecorder:
         self._max_rows = int(max_buffered_rows)
         self._buffer: deque[UsageRow] = deque()
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        self._stop: asyncio.Event | None = None
+        self._flusher: asyncio.Task[None] | None = None
         self._overflow_warned = False
         self._failure_streak = False
         self._consecutive_failures = 0
-        self._thread = threading.Thread(
-            target=self._run,
-            name="inqtrix-usage-ledger",
-            daemon=True,
+
+    def start(self) -> None:
+        """Start the flusher on the running loop, once."""
+        if self._flusher is not None and not self._flusher.done():
+            return
+        self._stop = asyncio.Event()
+        self._flusher = asyncio.create_task(
+            self._run(self._stop), name="inqtrix-usage-ledger"
         )
-        self._thread.start()
 
     def record(self, row: UsageRow) -> None:
         """Enqueue one row; overflow drops the NEW row with a WARNING."""
@@ -103,7 +109,7 @@ class UsageRecorder:
                 dropped,
             )
 
-    def _flush_once(self) -> None:
+    async def _flush_once(self) -> None:
         batch = self._drain()
         if not batch:
             return
@@ -117,7 +123,7 @@ class UsageRecorder:
         failure: BaseException | None = None
         for rows in groups.values():
             try:
-                run_coro_sync(self._store.insert_rows(rows))
+                await self._store.insert_rows(rows)
             except Exception as exc:  # noqa: BLE001 — never crash the host
                 failure = exc
                 failed.extend(rows)
@@ -162,19 +168,24 @@ class UsageRecorder:
         with self._lock:
             self._overflow_warned = False
 
-    def _run(self) -> None:
-        while not self._stop.wait(self._interval):
-            self._flush_once()
+    async def _run(self, stop: asyncio.Event) -> None:
+        while not await aio.wait_for_event(stop, self._interval):
+            await self._flush_once()
 
-    def close(self) -> None:
-        """Stop the flusher and write the remaining buffer."""
-        self._stop.set()
-        self._thread.join(timeout=5.0)
-        self._flush_once()
+    async def aclose(self) -> None:
+        """Stop the flusher and write the remaining buffer.
+
+        The flusher is asked to stop, never cancelled: a batch leaves the buffer
+        before its insert, so a cancel in between would lose it.
+        """
+        if self._stop is not None and self._flusher is not None:
+            self._stop.set()
+            await asyncio.wait({self._flusher}, timeout=_CLOSE_WAIT_SECONDS)
+        await self._flush_once()
 
     @property
     def store(self) -> Any:
-        """The backing ledger store (retention thread, shutdown aclose)."""
+        """The backing ledger store (retention)."""
         return self._store
 
 
@@ -192,22 +203,21 @@ def active_usage_recorder() -> UsageRecorder | None:
     return _active
 
 
-def install_usage_recorder(settings: Any) -> UsageRecorder:
+def install_usage_recorder(settings: Any, *, engine: Any = None) -> UsageRecorder:
     """Build and publish the process recorder (idempotent per app).
 
-    Postgres deployments get the durable ledger; the memory backend gets
-    the RAM twin (same behaviour, process lifetime — the quota-store
-    parity). A previously installed recorder is closed first so repeated
-    ``create_app`` in tests never leaks flusher threads.
+    Postgres deployments get the durable ledger on the process's *engine*; the
+    memory backend gets the RAM twin (same behaviour, process lifetime — the quota-store
+    parity). Replacing a recorder happens only with repeated ``create_app``
+    in tests: its owner's lifespan stops whatever it started, and rows of a
+    recorder nobody started again stay unwritten.
     """
-    previous = _active
-    if previous is not None:
-        previous.close()
     if getattr(settings.storage, "backend", "") == "postgres":
+        from inqtrix.storage.db import build_session_factory
         from inqtrix.storage.usage_postgres import PostgresUsageStore
 
         store: Any = PostgresUsageStore(
-            database_url=settings.storage.database_url,
+            session_factory=build_session_factory(engine),
             app_role=settings.storage.app_role,
         )
     else:
@@ -277,3 +287,8 @@ def record_provider_call(
                 "Usage ledger row could not be recorded; usage history is incomplete.",
                 exc_info=True,
             )
+
+
+# Provider calls are booked here from the moment this module is loaded; without
+# an active recorder or a bound subject each booking is a no-op.
+install_usage_sink(record_provider_call)

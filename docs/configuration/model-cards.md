@@ -18,9 +18,15 @@ model, regardless of how many providers serve it. The card carries the
 UI-facing facts plus a flat `aliases` list of every provider-specific identifier
 string that should resolve to it, so the same logical model resolves to one card
 whether called via the Anthropic API (`claude-opus-4-8`), Amazon Bedrock
-(`anthropic.claude-opus-4-8`, optionally region-prefixed `eu.`/`us.`/`apac.`/`ap.`
-and version-suffixed `-v1`/`-v2` with an optional `:0` revision), or an Azure
-deployment.
+(`anthropic.claude-opus-4-8`, optionally prefixed with a cross-region inference
+profile, geographic `eu.`/`us.`/`us-gov.`/`apac.`/`ap.`/`ca.`/`au.`/`jp.` or
+`global.`, and version-suffixed `-v1`/`-v2` with an optional `:0` revision, also
+inside an inference-profile ARN), or an Azure deployment. Matching ignores case
+and a gateway prefix such as `azure/` or `openai/`. The name an OpenAI or Azure
+answer reports carries its dated snapshot (`gpt-5.4-2026-03-05` for a call to
+`gpt-5.4`); the date is stripped before matching, so the usage ledger, which
+books the reported name, prices it from the same card. An exact alias wins over
+a normalised one, so a card for a snapshot with its own price stays reachable.
 
 | Field | Behaviour |
 |---|---|
@@ -28,12 +34,14 @@ deployment.
 | `category` (`high`/`mid`/`fast`) | Display grouping in the picker. Independent of latency and of node-tier routing. |
 | `speed` | TEMPO tile label (`langsam`/`mittel`/`schnell`); decoupled from `category`. |
 | `description` | Required one-line, user-facing summary of what the model is good for. Rendered under the name and in the hover-card. |
-| `context_window_tokens`, `max_output_tokens` | Capacity. Drive the token meter (usable input ≈ window − reserved output − safety) and two server-side budgets: the Agent Desk kernel's compaction threshold is `context_window_tokens × INQTRIX_AGENT_KERNEL_CONTEXT_TRIGGER_FRACTION` (default `0.75`), floored at 128 000 tokens — a model with no card gets the bare floor — and knowledge contextualisation sizes its batches from the card's window and `max_output_tokens` before falling back to the provider values. |
+| `context_window_tokens`, `max_output_tokens` | Capacity. Drive the token meter (usable input ≈ window − reserved output − safety) and two server-side budgets: the Agent Desk kernel's compaction threshold is `context_window_tokens × INQTRIX_AGENT_KERNEL_CONTEXT_TRIGGER_FRACTION` (default `0.75`), floored at 128 000 tokens — a model with no card gets the bare floor — and never above the card's input budget (`context_window_tokens − max_output_tokens − max(1 024, window ÷ 50)`; a higher value is capped with a WARNING, see [settings](settings-and-env.md)), and knowledge contextualisation sizes its batches from the card's window and `max_output_tokens` before falling back to the provider values. |
+| `max_input_tokens` | Input limit the provider sets on its own, whatever output a call asks for: 922 000 for the 1 050 000-token GPT-6, GPT-5.6 and GPT-5.5 windows. Empty when only the window limits input plus output (Claude). The editor review and the kernel's input budget hold to it; never sent to the UI. |
 | `reasoning_levels` | Effort tokens the model accepts (incl. `none` only if reasoning can be disabled). Empty ⇒ no effort control (e.g. Haiku), so the picker hides the reasoning selector. |
+| `claude`, `openai` | Request rules of the vendor's models, read by the adapters and never sent to the UI. `openai.api` names the OpenAI API that carries the model: `chat_completions` (the proven path, no `max`) or `responses` for models that refuse function tools while they reason over Chat Completions or offer no Chat Completions at all (GPT-6, GPT-5.6, the Pro models); the Azure and LiteLLM adapters then send every call of the model through the Responses API with `store=false`. `none` goes out explicitly where the card lists it; a model that reasons but has no `none` runs "off" at its weakest level, with a warning. |
 | `capabilities` | Chips in the hover-card (`reasoning`/`code`/`tool_use`/`vision`). |
 | `input_modalities` | Accepted input modalities (e.g. `text`, `image`). Defaults to `["text"]`. |
 | `pricing` | List $/MTok. The picker derives a `$`..`$$$$` tier + exact value, and the usage ledger prices every `chat`/`text_completion` call from it: `input_tokens/1e6 * input_per_mtok + output_tokens/1e6 * output_per_mtok`. |
-| `aliases` | Every identifier that resolves to this card (matched after Bedrock region/version normalisation). |
+| `aliases` | Every identifier that resolves to this card (matched after the region, version and snapshot-date normalisation above). |
 | `knowledge_cutoff` | Coarse `YYYY-MM` knowledge cutoff, or `None`. Shown for context; never used as a default. |
 | `source_url`, `last_verified` | Provenance — facts are curated, not guessed. |
 
@@ -141,7 +149,9 @@ same two keys one level down, per stack, at `stacks[].models.models_catalog` and
 `stacks[].models.context_window_tokens`. The React picker
 renders models grouped by `category` with an `i` hover-card (KONTEXT/TEMPO/KOSTEN
 tiles + capability chips) and a model-dependent reasoning selector derived from
-the card's `reasoning_levels`: one option per supported level, labelled
+the card's `reasoning_levels` as the provider can send them (the catalogue entry carries
+`LLMProvider.reasoning_levels(model)` where the provider limits them, for example no `max`
+on OpenAI Chat Completions): one option per supported level, labelled
 `Off`/`Min`/`Low`/`Med`/`High`/`XHigh`/`Max` for the effort tokens
 `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`. The first four levels render
 as an inline segmented control and any remaining ones collapse into a `⋯`
@@ -172,7 +182,7 @@ reports `is_complete = False` instead of being folded into the cost figure. A
 selectable model without a card therefore drops out of the cost report until the
 card exists.
 
-The fix is one entry in `MODEL_CARDS` — no code change.
+The fix is one entry in `MODEL_CARDS` plus its two desk descriptions (see below).
 
 ## Adding a model
 
@@ -182,9 +192,17 @@ fields are required: `id`, `display_name`, `vendor`, `category`, `speed`,
 leaving out `description` or `speed` is a construction-time `ValidationError`,
 not a cosmetic gap. The optional rest: `aliases` (include every provider id),
 `reasoning_levels`, `capabilities`, `input_modalities` (defaults to `["text"]`),
-`knowledge_cutoff`, and `source_url`/`last_verified`. No other code changes are
-needed. Claude facts come from the Anthropic models overview; OpenAI/Google from
-the respective provider docs.
+`knowledge_cutoff`, and `source_url`/`last_verified`. Two vendors need their
+request rules on the card: every OpenAI model `openai=OpenAIRules(...)` with the
+API it needs (`api="responses"` for a model that refuses function tools while it
+reasons over Chat Completions, otherwise the default), and every Claude model
+`claude=ClaudeRules(...)`; without them the adapters fall back to defaults that
+can fail on that model. Then add a one-line description for the card's `id` to
+both language tables of the desk (`chat.modelDescriptions` in
+`apps/research-desk/src/i18n/translations.ts`); otherwise English readers see the
+German server text. Tests check both: every OpenAI card names its API, and the
+desk tables name exactly the cards. Claude facts come from the Anthropic models
+overview; OpenAI/Google from the respective provider docs.
 
 ## Related docs
 

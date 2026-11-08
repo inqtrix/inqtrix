@@ -10,9 +10,6 @@ Editor specifics:
   ``content_markdown`` body); ``get_document`` SELECTs the full row with the
   body (load-on-open).
 * Comments are a diffed collection (upsert + delete + list), not append-only.
-
-The engine is its own NullPool engine (loop-agnostic), awaited from the
-HTTP loop — the same rule the chat/knowledge stores document.
 """
 
 from __future__ import annotations
@@ -64,7 +61,7 @@ from inqtrix.project.editor_ports import (
     suggestion_draft_from_payload,
     suggestion_draft_payload,
 )
-from inqtrix.project.scoped_upsert import (
+from inqtrix.storage.scoped_upsert import (
     ResourceScope,
     delete_scoped_postgres,
     require_scoped_parent,
@@ -130,7 +127,7 @@ _DOC_FACT_COLUMNS = (
 class PostgresEditorStore(BaseSessionStore):
     """Durable :class:`~inqtrix.project.editor_ports.EditorStore` over Postgres.
 
-    Inherits the dedicated engine + tenant-scoped session lifecycle from
+    Inherits the tenant-scoped session lifecycle from
     :class:`~inqtrix.project.base_session_store.BaseSessionStore`.
     """
 

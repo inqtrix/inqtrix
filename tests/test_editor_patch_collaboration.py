@@ -196,9 +196,6 @@ class _PatchStore:
             raise PatchAlreadyDecided(patch)
         return patch
 
-    async def aclose(self) -> None:
-        """Release no resources; included for port parity."""
-
 
 class _Documents:
     """Permission-aware document facade that rejects Markdown body writes."""

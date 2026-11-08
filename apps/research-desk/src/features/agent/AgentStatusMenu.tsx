@@ -49,6 +49,14 @@ function approvalValue(
   return { tone: 'muted', value: o.stateFree }
 }
 
+/** The kernel gate reason in words; an unknown code stays unnamed rather than raw. */
+function kernelReasonText(
+  reasons: Record<string, string>,
+  reason: string | null,
+): string | undefined {
+  return reason ? reasons[reason] : undefined
+}
+
 export function AgentStatusMenu({
   autonomyHint,
   autonomyLabel,
@@ -231,9 +239,9 @@ export function AgentStatusMenu({
             />
             {/* Feature transparency: the engine is listed even when the
                deployment does not offer it — an absent picker alone would
-               hide that it exists. Since the kernel ships as the default,
-               "unavailable" here means a registration gate was missed;
-               the reason travels in feature_status.agent_kernel. */}
+               hide that it exists. "Unavailable" means the operator turned
+               the kernel off or a registration gate was missed; the reason
+               travels in feature_status.agent_kernel. */}
             <StatusRow
               label={o.brainKernel}
               {...(overview.kernel === 'active'
@@ -241,6 +249,7 @@ export function AgentStatusMenu({
                 : overview.kernel === 'selectable'
                   ? { tone: 'muted' as const, value: o.stateSelectable }
                   : { tone: 'muted' as const, value: o.stateUnavailable })}
+              hint={kernelReasonText(o.kernelReasons, overview.kernelReason)}
             />
             <StatusRow label={t.agent.composer.responseForm} value={effectiveResponseForm} />
             {effectiveModel && (

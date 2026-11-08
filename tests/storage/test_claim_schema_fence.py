@@ -128,8 +128,12 @@ def _stores():
 
 
 def _claim(store, domain: str, entity_id: str):
-    del domain  # all four claims share the takeover-flag signature
-    return store.claim_for_execution(entity_id, TENANT, allow_takeover=False)
+    # All four claims share the takeover flag; a run claim also names the
+    # contracts the worker carries.
+    extra = {"workflow_contracts": {"research": 1}} if domain == "runs" else {}
+    return store.claim_for_execution(
+        entity_id, TENANT, allow_takeover=False, **extra
+    )
 
 
 @pytest.mark.parametrize("domain", ["runs", "indexing", "deletion", "upload"])
@@ -174,13 +178,11 @@ def test_mid_batch_head_flip_stops_the_next_claim(version_control) -> None:
     try:
         first = f"fence-batch-{uuid.uuid4().hex[:8]}"
         second = f"fence-batch-{uuid.uuid4().hex[:8]}"
-        assert store.claim_for_execution(
-            first, TENANT, allow_takeover=False
-        ) is None
+        assert _claim(store, "runs", first) is None
 
         version_control("9999_fake_future_head")
         with pytest.raises(SchemaHeadMismatch):
-            store.claim_for_execution(second, TENANT, allow_takeover=False)
+            _claim(store, "runs", second)
     finally:
         for s in stores.values():
             s.close()

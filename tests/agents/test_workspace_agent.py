@@ -11,15 +11,15 @@ from __future__ import annotations
 import json
 import re
 import time
-from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import inqtrix.research.web_research as web_research_module
+from inqtrix.providers.attempts import report_retry
 from inqtrix.providers.base import StructuredLLMResponse
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
 from inqtrix.server.routes import create_router, register_routes
@@ -294,24 +294,11 @@ class ScriptedLLM:
 
 
 class RetryNotifyingLLM(ScriptedLLM):
-    """Scripted provider that exposes one transient retry observation."""
+    """Scripted provider that reports one transient retry where providers report them."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._retry_callback: Callable[[dict[str, Any]], None] | None = None
         self._retry_emitted = False
-
-    @contextmanager
-    def observe_retries(
-        self,
-        callback: Callable[[dict[str, Any]], None],
-    ) -> Any:
-        previous = self._retry_callback
-        self._retry_callback = callback
-        try:
-            yield self
-        finally:
-            self._retry_callback = previous
 
     def complete_structured(
         self, prompt: str, *, schema_name: str, **kwargs: Any
@@ -319,10 +306,9 @@ class RetryNotifyingLLM(ScriptedLLM):
         if (
             schema_name == "AssignmentProfile"
             and not self._retry_emitted
-            and self._retry_callback is not None
         ):
             self._retry_emitted = True
-            self._retry_callback({
+            report_retry("model", {
                 "attempt": 1,
                 "max_attempts": 3,
                 "delay_seconds": 0.25,
@@ -336,9 +322,9 @@ class RetryNotifyingLLM(ScriptedLLM):
         )
 
     def complete(self, prompt: str, **kwargs: Any) -> Any:
-        if not self._retry_emitted and self._retry_callback is not None:
+        if not self._retry_emitted:
             self._retry_emitted = True
-            self._retry_callback({
+            report_retry("model", {
                 "attempt": 1,
                 "max_attempts": 3,
                 "delay_seconds": 0.25,
@@ -370,29 +356,16 @@ class FakeSearch:
 
 
 class RetryNotifyingSearch(FakeSearch):
-    """Search stub that exposes one provider retry to its active observer."""
+    """Search stub that reports one provider retry where providers report them."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._retry_callback: Callable[[dict[str, Any]], None] | None = None
         self._retry_emitted = False
 
-    @contextmanager
-    def observe_retries(
-        self,
-        callback: Callable[[dict[str, Any]], None],
-    ) -> Any:
-        previous = self._retry_callback
-        self._retry_callback = callback
-        try:
-            yield self
-        finally:
-            self._retry_callback = previous
-
     def search(self, query: str, **kwargs: Any) -> GroundedSearchResult:
-        if not self._retry_emitted and self._retry_callback is not None:
+        if not self._retry_emitted:
             self._retry_emitted = True
-            self._retry_callback({
+            report_retry("search", {
                 "attempt": 1,
                 "max_attempts": 3,
                 "delay_seconds": 0.2,
@@ -633,8 +606,8 @@ def test_a_document_window_call_surfaces_its_provider_retry():
 
     class WindowRetryLLM(RetryNotifyingLLM):
         def complete_structured(self, prompt: str, *, schema_name: str, **kwargs: Any):
-            if schema_name == "WindowExtraction" and self._retry_callback is not None:
-                self._retry_callback({
+            if schema_name == "WindowExtraction":
+                report_retry("model", {
                     "attempt": 1, "max_attempts": 3, "delay_seconds": 0.25,
                     "error_code": "provider_timeout", "operation": "complete_structured",
                 })
@@ -3541,6 +3514,7 @@ def test_rag_query_task_completes_with_memo_k_references(monkeypatch):
     class _FakeKnowledgeAlgorithm:
         id = "knowledge"
         display_name = "Knowledge (test stub)"
+        contract_version = 1
 
         def capabilities(self) -> dict:
             return {}
@@ -3646,6 +3620,7 @@ def test_rag_answer_without_references_is_insufficient_evidence(monkeypatch):
     class _UnreferencedKnowledgeAlgorithm:
         id = "knowledge"
         display_name = "Knowledge without evidence (test stub)"
+        contract_version = 1
 
         def capabilities(self) -> dict:
             return {}
@@ -3715,6 +3690,7 @@ def test_rag_grounding_rejection_fails_task_and_reaches_mission_audit(
     class _RejectedKnowledgeAlgorithm:
         id = "knowledge"
         display_name = "Knowledge grounding rejection (test stub)"
+        contract_version = 1
 
         def capabilities(self) -> dict:
             return {}
@@ -4529,6 +4505,7 @@ def test_a_rejected_subquery_keeps_the_verified_siblings(monkeypatch):
     class _OneBadOneGoodKnowledge:
         id = "knowledge"
         display_name = "Knowledge partial rejection (test stub)"
+        contract_version = 1
 
         def __init__(self) -> None:
             self.calls = 0

@@ -130,11 +130,13 @@ describe('buildAgentOverview', () => {
     const balanced = buildAgentOverview({
       agent: source(),
       autonomy: 'balanced',
+      kernelReason: 'tool_calls_required',
       kernelSelectable: true,
       mode: 'workspace_agent',
     })
     expect(balanced.brain).toBe('workspace_agent')
     expect(balanced.kernel).toBe('selectable')
+    expect(balanced.kernelReason).toBeNull()
     expect(balanced.limits).toBe(LIMITS)
     expect(balanced.approvals).toEqual([
       { id: 'plan', state: 'asks' },
@@ -145,10 +147,12 @@ describe('buildAgentOverview', () => {
     const auto = buildAgentOverview({
       agent: source(),
       autonomy: 'autonomous',
+      kernelReason: 'tool_calls_required',
       kernelSelectable: false,
       mode: 'workspace_agent',
     })
     expect(auto.kernel).toBe('unavailable')
+    expect(auto.kernelReason).toBe('tool_calls_required')
     expect(auto.approvals).toEqual([
       { id: 'plan', state: 'free' },
       { id: 'web_search', state: 'free' },

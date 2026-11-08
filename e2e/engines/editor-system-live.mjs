@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { chromium } from '@playwright/test'
 import * as Y from 'yjs'
 
+import { createScenarioBook, writeScenarioSidecar } from '../../tests/verification/fixtures/scenario-sidecar.mjs'
 import {
   eraseTemporaryUser,
   ensureTemporaryUsers,
@@ -15,6 +16,7 @@ import {
   assertFixture as assert,
   fetchActorJson as fetchJson,
 } from '../../tests/verification/fixtures/api.mjs'
+import { attemptCleanup } from '../../tests/verification/fixtures/cleanup-step.mjs'
 import {
   createCollaborationDocument,
   deleteCollaborationDocument,
@@ -43,11 +45,11 @@ import {
   VerificationLifecycleClient,
 } from '../../tests/verification/fixtures/lifecycle-client.mjs'
 import { guestLinkGateReason } from '../config.ts'
+import { httpsErrorsIgnored } from '../../tests/verification/fixtures/https-errors.mjs'
 
-const baseURL = process.env.INQTRIX_E2E_BASE_URL ?? 'http://127.0.0.1:8080'
+const baseURL = process.env.INQTRIX_E2E_BASE_URL ?? 'http://localhost:8080'
 const publicOrigin = new URL(baseURL).origin
-const ignoreHTTPSErrors =
-  process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1'
+const ignoreHTTPSErrors = httpsErrorsIgnored()
 const adminEmail = requiredEnvironment('INQTRIX_E2E_ADMIN_EMAIL')
 const testerEmail = requiredEnvironment('INQTRIX_E2E_TESTER_EMAIL')
 const adminPassword = requiredEnvironment('INQTRIX_E2E_ADMIN_PASSWORD')
@@ -121,6 +123,22 @@ let temporaryUsers = []
 let actors = []
 let documents = []
 let sessionFixtures
+// What this engine measured, for the orchestrator: the six-user matrix, and
+// the guest-link matrix, which runs only over HTTPS and is otherwise skipped
+// with its reason. A failure counts against the scenario being measured.
+const verdicts = createScenarioBook(['system.multiuser-live-matrix', 'system.guest-link-matrix'])
+let measuring = 'system.multiuser-live-matrix'
+
+// The six account browsers belong to whichever matrix ran while they
+// reported: their errors count against the scenario being measured.
+function assertAccountBrowsersClean() {
+  for (const actor of actors) {
+    assert(
+      actor.errors.length === 0,
+      `${actor.label} browser reported errors: ${actor.errors.join(' | ')}`,
+    )
+  }
+}
 
 try {
   progress('Browser starten')
@@ -457,6 +475,9 @@ try {
   // whole six-user matrix had already passed — taking every green scenario
   // down with it. The section is skipped with its reason stated, never
   // counted as covered.
+  assertAccountBrowsersClean()
+  verdicts.pass('system.multiuser-live-matrix')
+  measuring = 'system.guest-link-matrix'
   const guestGateSkipReason = guestLinkGateReason(
     baseURL,
     capabilities.features?.editor_guest_links === true,
@@ -470,6 +491,7 @@ try {
     }
     progress(`Gastlinkmatrix übersprungen: ${guestGateSkipReason}`)
     report.guestGate = { reason: guestGateSkipReason, status: 'skipped' }
+    verdicts.skip('system.guest-link-matrix', guestGateSkipReason)
   } else {
     progress('HTTPS-Gastlinkmatrix mit zusätzlichen Gastbrowsern prüfen')
     report.guestGate = await exerciseGuestLinkGate({
@@ -480,20 +502,28 @@ try {
       protocolVersion: capabilities.collaboration.protocol_version,
       schemaVersion: capabilities.collaboration.schema_version,
     })
-  }
-
-  for (const actor of actors) {
-    assert(
-      actor.errors.length === 0,
-      `${actor.label} browser reported errors: ${actor.errors.join(' | ')}`,
-    )
+    // Errors the account browsers report from here on came during the
+    // guest-link matrix, which needs them active.
+    assertAccountBrowsersClean()
+    verdicts.pass('system.guest-link-matrix')
   }
 
   progress('System-Szenarien bestanden')
   process.stdout.write(
     `${JSON.stringify(sanitizeSystemReport({ status: 'passed', ...report }), null, 2)}\n`,
   )
+} catch (error) {
+  verdicts.fail(measuring, sanitizeSystemReport(String(error?.message ?? error)))
+  throw error
 } finally {
+  // Before the cleanup, and never in its way: a refused result file is a
+  // red run, not a reason to leave documents and accounts behind.
+  try {
+    await writeScenarioSidecar(verdicts.entries())
+  } catch (error) {
+    process.exitCode = 1
+    progress(`Ergebnisdatei nicht geschrieben: ${error instanceof Error ? error.message : String(error)}`)
+  }
   const pages = new Set(
     [admin, tester, ...actors]
       .map((actor) => actor?.page)
@@ -508,21 +538,20 @@ try {
     for (const document of [...documents].reverse()) {
       const owner = actors.find((actor) => actor.user.id === document.ownerId)
       if (!owner) continue
-      await deleteCollaborationDocument({
+      await attemptCleanup('document', () => deleteCollaborationDocument({
         document,
         lifecycle,
         owner,
-      }).catch(() => undefined)
+      }))
     }
     for (const user of temporaryUsers) {
-      await eraseTemporaryUser(admin, user, lifecycle)
-        .catch(() => undefined)
+      await attemptCleanup('temporary account', () => eraseTemporaryUser(admin, user, lifecycle))
     }
   }
   if (sessionFixtures) {
     const accountActors = new Set([admin, tester, ...actors].filter(Boolean))
     for (const actor of accountActors) {
-      await sessionFixtures.logoutActor(actor).catch(() => undefined)
+      await attemptCleanup('logout', () => sessionFixtures.logoutActor(actor))
     }
   }
   const contexts = new Set(
@@ -1055,14 +1084,14 @@ async function exerciseGuestLinkGate({
     }
     for (const [key, link] of [...links.entries()].reverse()) {
       if (link.revoked_at !== null) continue
-      await revokeGuestLink({
-        document,
-        lifecycle,
-        link,
-        owner: adminActor,
+      await attemptCleanup('guest link', async () => {
+        links.set(key, await revokeGuestLink({
+          document,
+          lifecycle,
+          link,
+          owner: adminActor,
+        }))
       })
-        .then((revoked) => links.set(key, revoked))
-        .catch(() => undefined)
     }
   }
 }
@@ -2159,16 +2188,29 @@ async function replyComment(actor, document, {
 }
 
 async function openComments(page) {
-  let tab = page.getByRole('tab', { name: /^(Kommentare|Comments)/ }).first()
-  if (!await tab.isVisible().catch(() => false)) {
-    const show = page.getByRole('button', {
-      name: /^(Inspector einblenden|Show inspector)$/,
-    }).first()
-    if (await show.isVisible().catch(() => false)) await show.click()
-    tab = page.getByRole('tab', { name: /^(Kommentare|Comments)/ }).first()
+  const tab = page.getByRole('tab', { name: /^(Kommentare|Comments)/ }).first()
+  const show = page.getByRole('button', {
+    name: /^(Inspector einblenden|Show inspector)$/,
+  }).first()
+  // Right after a viewport change the outgoing layout can still show the
+  // tab for a moment: a decision on it clicks a tab that is gone with the
+  // next render, and the drawer of the new layout stays closed. Each attempt
+  // decides again on the layout it sees and holds only once the tab it
+  // clicked is the selected one; a few attempts at most.
+  let lastError = null
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await tab.or(show).first().waitFor({ state: 'visible' })
+      if (!await tab.isVisible()) await show.click({ timeout: 5_000 })
+      await tab.click({ timeout: 5_000 })
+      await page.getByRole('tab', { name: /^(Kommentare|Comments)/, selected: true })
+        .first().waitFor({ state: 'visible', timeout: 5_000 })
+      return
+    } catch (error) {
+      lastError = error
+    }
   }
-  await tab.waitFor({ state: 'visible' })
-  await tab.click()
+  throw lastError
 }
 
 async function measureCommentApi(actor, documentId) {

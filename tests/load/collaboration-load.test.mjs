@@ -80,6 +80,7 @@ import {
   evaluateGates,
   loadFixture,
   measureApiProbe,
+  tlsFailureHint,
   observeCollaborationInstance,
   parseArguments,
   parseInstanceProbePayload,
@@ -745,6 +746,33 @@ describe('capacity fixture preflight', () => {
         () => now,
       ),
       /lease expired after the session reissue response/,
+    )
+  })
+
+  test('a probe that fails on the certificate names the cause and the way out', async () => {
+    // Over HTTPS with a throwaway certificate the latency probe fails; it must
+    // say why and how to trust the certificate.
+    const untrusted = Object.assign(new TypeError('fetch failed'), {
+      cause: { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' },
+    })
+    await assert.rejects(
+      () => measureApiProbe(apiProbe(), async () => { throw untrusted }),
+      /\(DEPTH_ZERO_SELF_SIGNED_CERT\)\. The certificate is not trusted: set NODE_EXTRA_CA_CERTS/,
+    )
+    // A leaf signed by a local CA and served without its chain (the default
+    // of local certificate tools) is the same case under another code.
+    assert.match(tlsFailureHint('UNABLE_TO_VERIFY_LEAF_SIGNATURE'), /NODE_EXTRA_CA_CERTS/)
+    // Where trusting the certificate cannot help, the hint says what can.
+    assert.match(tlsFailureHint('ERR_TLS_CERT_ALTNAME_INVALID'), /does not name this host/)
+    assert.match(tlsFailureHint('CERT_HAS_EXPIRED'), /validity period/)
+    assert.match(tlsFailureHint('ERR_SSL_WRONG_VERSION_NUMBER'), /does not speak TLS/)
+    for (const code of ['ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'ERR_SSL_WRONG_VERSION_NUMBER']) {
+      assert.doesNotMatch(tlsFailureHint(code), /NODE_EXTRA_CA_CERTS/)
+    }
+    assert.equal(tlsFailureHint('ECONNREFUSED'), '')
+    await assert.rejects(
+      () => measureApiProbe(apiProbe(), async () => { throw new TypeError('fetch failed') }),
+      /^Error: API probe request 1\/\d+ failed before receiving a response\.$/,
     )
   })
 

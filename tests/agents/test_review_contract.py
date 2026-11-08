@@ -609,7 +609,7 @@ def test_resumed_critic_route_cannot_research_without_an_information_gap(monkeyp
 
 @pytest.mark.parametrize("initial_revision,concurrent_edit", [(1, False), (4, False), (4, True)])
 def test_deep_revision_uses_the_reviewed_version_and_preserves_concurrent_user_work(initial_revision, concurrent_edit, monkeypatch):
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.control_memory import MemoryAgentControlStore
     from inqtrix.agents.kernel import algorithm as kernel_algorithm
     from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm

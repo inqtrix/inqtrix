@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.project.session_titles import TitleSource
 
 
@@ -269,8 +269,4 @@ class ChatStore(Protocol):
         self, group_id: str, *, scope: ResourceScope
     ) -> None:
         """Delete a group; its threads orphan to ungrouped (SET NULL)."""
-        ...
-
-    async def aclose(self) -> None:
-        """Release backing resources at application shutdown."""
         ...

@@ -13,8 +13,13 @@ import asyncio
 from typing import Any
 
 import pytest
+from inqtrix.harness.contracts.events import (
+    ANSWER_DRAFT_EVENT,
+    CHILD_PROGRESS_EVENT,
+    OUTCOME_EVENT,
+)
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from inqtrix.agents.control_memory import MemoryAgentControlStore
 from inqtrix.agents.control_ports import ArtifactRevisionConflict
@@ -22,7 +27,6 @@ from inqtrix.agents.kernel import algorithm as kernel_algorithm
 from inqtrix.agents.kernel import review_pass
 from inqtrix.exceptions import AgentCancelled
 from inqtrix.i18n import t
-from inqtrix.runs.shared import ANSWER_DRAFT_EVENT, CHILD_PROGRESS_EVENT, OUTCOME_EVENT
 
 from tests.agents.test_kernel_deep_mode import (
     CanvasReviewLLM,

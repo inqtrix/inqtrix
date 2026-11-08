@@ -1111,6 +1111,7 @@ export class CollaborationSidecar {
       this.metrics.increment('inqtrix_collaboration_policy_resets_total')
       this.logger.warn('policy_feed_reset_required', { cursor: page.cursor })
       this.requestAllConnectionRevalidations()
+      this.announceCommentChangesEverywhere()
       this.policyCursor = page.cursor
       this.metrics.set('inqtrix_collaboration_policy_cursor', page.cursor)
       return
@@ -1175,6 +1176,24 @@ export class CollaborationSidecar {
     }
     this.policyCursor = page.cursor
     this.metrics.set('inqtrix_collaboration_policy_cursor', page.cursor)
+  }
+
+  /** The events a reset skips may have changed the comments of any open
+   * document, so every room hears it and its clients load their comments
+   * anew. Mentions are not sent again: the skipped events named their
+   * recipients. */
+  private announceCommentChangesEverywhere(): void {
+    for (const document of this.hocuspocus.documents.values()) {
+      const parsed = parseEditorCollaborationRoom(document.name)
+      if (!parsed) continue
+      const payload = JSON.stringify({
+        document_id: parsed.documentId,
+        type: 'collaboration_comment_changed',
+      })
+      for (const connection of document.getConnections()) {
+        connection.sendStateless(payload)
+      }
+    }
   }
 
   private broadcastCommentEvent(

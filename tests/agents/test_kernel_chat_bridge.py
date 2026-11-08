@@ -226,3 +226,62 @@ def test_an_unknown_tool_choice_is_refused_before_the_provider_call():
     with pytest.raises(ValueError, match="tool_choice"):
         bound_model.invoke([HumanMessage(content="Hi")])
     assert provider.calls == []
+
+
+def test_a_turn_counts_the_input_it_read_anew_and_keeps_the_whole_size():
+    from types import SimpleNamespace
+
+    from inqtrix.agents.kernel.chat_bridge import (
+        counted_usage_of_message,
+        turn_usage_metadata,
+    )
+
+    turn = SimpleNamespace(prompt_tokens=1000, completion_tokens=10, cache_read_tokens=950)
+
+    usage = turn_usage_metadata(turn)
+
+    # Compaction reads the size of what was sent; the limits read what was new.
+    assert usage["input_tokens"] == 1000
+    assert usage["total_tokens"] == 1010
+    assert counted_usage_of_message(SimpleNamespace(usage_metadata=usage)) == (50, 10)
+
+
+def test_a_message_without_cache_details_counts_in_full():
+    from types import SimpleNamespace
+
+    from inqtrix.agents.kernel.chat_bridge import (
+        counted_usage_of_message,
+        turn_usage_metadata,
+    )
+
+    turn = SimpleNamespace(prompt_tokens=40, completion_tokens=5, cache_read_tokens=None)
+
+    usage = turn_usage_metadata(turn)
+
+    assert "input_token_details" not in usage
+    assert counted_usage_of_message(SimpleNamespace(usage_metadata=usage)) == (40, 5)
+    assert counted_usage_of_message(SimpleNamespace(usage_metadata=None)) == (0, 0)
+
+
+def test_a_resumed_run_recovers_its_count_from_the_messages_without_cache_reads():
+    from types import SimpleNamespace
+
+    from inqtrix.agents.kernel.algorithm import _checkpointed_usage
+    from inqtrix.agents.kernel.chat_bridge import turn_usage_metadata
+
+    turn = SimpleNamespace(prompt_tokens=1000, completion_tokens=10, cache_read_tokens=950)
+    message = SimpleNamespace(usage_metadata=turn_usage_metadata(turn))
+
+    usage = _checkpointed_usage(SimpleNamespace(values={"messages": [message, message]}))
+
+    assert usage == {"prompt_tokens": 100, "completion_tokens": 20}
+
+
+def test_a_structured_response_counts_the_input_read_anew():
+    from types import SimpleNamespace
+
+    from inqtrix.agents.patterns._structured import _usage
+
+    response = SimpleNamespace(prompt_tokens=1000, completion_tokens=10, cache_read_tokens=950)
+
+    assert _usage(response) == {"prompt_tokens": 50, "completion_tokens": 10}

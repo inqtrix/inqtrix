@@ -34,6 +34,7 @@ import {
   reloadAcceptingLeaveQuestion,
 } from '../leave-question'
 import { parseCollaborationProtocolSession } from '../protocol-session'
+import { httpsErrorsIgnored } from '../../tests/verification/fixtures/https-errors.mjs'
 
 const labels = {
   de: {
@@ -1904,6 +1905,9 @@ test.describe('two-user editor collaboration', () => {
       }
       const detachedContext = await browser.newContext({
         baseURL: endpoint.baseURL!,
+        // The same switch as the owner and collaborator contexts: over HTTPS
+        // with a throwaway certificate this third context fails without it.
+        ignoreHTTPSErrors: httpsErrorsIgnored(),
         storageState: endpoint.collaboratorStorageState,
         viewport: ownerPage.viewportSize() ?? undefined,
       })
@@ -2618,9 +2622,11 @@ function editor(page: Page): Locator {
 
 async function ensureInspector(page: Page, locale: 'de' | 'en'): Promise<void> {
   const changes = page.getByRole('tab', { name: new RegExp(`^${labels[locale].changes}`) })
-  if (!await changes.isVisible().catch(() => false)) {
-    await page.getByRole('button', { name: labels[locale].showInspector }).click()
-  }
+  const show = page.getByRole('button', { name: labels[locale].showInspector })
+  // Decide only once the layout settled on one of the two: a single glance
+  // right after a navigation or resize can see neither, then waits in vain.
+  await expect(changes.or(show).first()).toBeVisible()
+  if (!await changes.isVisible()) await show.click()
   await expect(changes).toBeVisible()
 }
 

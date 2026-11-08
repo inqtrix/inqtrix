@@ -17,7 +17,7 @@ from inqtrix.project.asset_records_ports import (
     GroupNotFound,
     SectionNotFound,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.services.asset_records_service import (
     AssetRecordsService,
     AssetValidationError,
@@ -679,7 +679,7 @@ async def test_an_unknown_insert_intent_is_rejected_at_runtime(service) -> None:
     the ports module, derived from the Literal, and both backends call it
     before the INSERT.
     """
-    from inqtrix.source_authority import MemorySourceLifecycleAuthority
+    from inqtrix.storage.source_authority import MemorySourceLifecycleAuthority
 
     authority = MemorySourceLifecycleAuthority()
     service._store.bind_source_lifecycle_authority(authority)

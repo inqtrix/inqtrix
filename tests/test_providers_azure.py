@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from inqtrix.providers.attempts import observe_retries
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AzureOpenAIAPIError
+from tests._sdk_doubles import async_sdk
 
 
 # ---------------------------------------------------------------------------
@@ -45,26 +49,36 @@ def _chat_completion_response(
 
 @pytest.fixture()
 def mock_azure_client():
-    """Patch OpenAI so AzureOpenAILLM can be instantiated without real credentials."""
+    """Serve the adapter's SDK calls from a sync mock; no credentials, no network."""
     mock_client = MagicMock()
 
-    with patch("inqtrix.providers.azure.OpenAI") as mock_cls:
-        mock_cls.return_value = mock_client
+    with patch("inqtrix.providers.azure.AsyncOpenAI") as mock_cls:
+        mock_cls.return_value = async_sdk(mock_client.chat.completions.create)
         from inqtrix.providers.azure import AzureOpenAILLM
         yield AzureOpenAILLM, mock_client
+
+
+def _built_client_kwargs(llm) -> dict:
+    """The keyword arguments the adapter builds its SDK client with, at first use."""
+
+    async def first_use() -> None:
+        llm._async_client()
+
+    with patch("inqtrix.providers.azure.AsyncOpenAI") as mock_cls:
+        asyncio.run(first_use())
+    return mock_cls.call_args.kwargs
 
 
 def test_client_uses_v1_base_url_from_endpoint(mock_azure_client):
     AzureOpenAILLM, _ = mock_azure_client
 
-    with patch("inqtrix.providers.azure.OpenAI") as mock_cls:
-        mock_cls.return_value = MagicMock()
+    call_kwargs = _built_client_kwargs(
         AzureOpenAILLM(
             azure_endpoint="https://test.openai.azure.com/",
             api_key="test-key",
         )
+    )
 
-    call_kwargs = mock_cls.call_args.kwargs
     assert call_kwargs["base_url"] == "https://test.openai.azure.com/openai/v1/"
     assert call_kwargs["api_key"] == "test-key"
     assert call_kwargs["max_retries"] == 0
@@ -73,14 +87,13 @@ def test_client_uses_v1_base_url_from_endpoint(mock_azure_client):
 def test_client_accepts_explicit_base_url(mock_azure_client):
     AzureOpenAILLM, _ = mock_azure_client
 
-    with patch("inqtrix.providers.azure.OpenAI") as mock_cls:
-        mock_cls.return_value = MagicMock()
+    call_kwargs = _built_client_kwargs(
         AzureOpenAILLM(
             base_url="https://test.openai.azure.com/openai/v1/",
             api_key="test-key",
         )
+    )
 
-    call_kwargs = mock_cls.call_args.kwargs
     assert call_kwargs["base_url"] == "https://test.openai.azure.com/openai/v1/"
 
 
@@ -445,8 +458,8 @@ def test_transient_api_status_retries_with_visible_notice(mock_azure_client):
     )
     observed = []
 
-    with patch("inqtrix.providers.base._sleep_before_retry") as sleep:
-        with llm.observe_retries(lambda notice: observed.append(notice)):
+    with patch("inqtrix.providers.attempts._sleep_before_retry") as sleep:
+        with observe_retries("model", lambda notice: observed.append(notice)):
             response = llm.complete_with_metadata("test")
 
     assert response.content == "ok"
@@ -501,23 +514,15 @@ def test_deadline_raises_agent_timeout(mock_azure_client):
 # ---------------------------------------------------------------------------
 
 
-def test_api_key_and_token_provider_raises(mock_azure_client):
+@pytest.mark.parametrize("api_key", [None, "", "   "])
+def test_a_missing_or_blank_key_is_refused(mock_azure_client, api_key):
+    """Azure is reached with the resource's key only; without one nothing is built."""
     AzureOpenAILLM, _ = mock_azure_client
 
-    with pytest.raises(ValueError, match="mutually exclusive"):
+    with pytest.raises(ValueError, match="non-empty api_key"):
         AzureOpenAILLM(
             azure_endpoint="https://test.openai.azure.com/",
-            api_key="test-key",
-            azure_ad_token_provider=lambda: "token",
-        )
-
-
-def test_no_auth_raises(mock_azure_client):
-    AzureOpenAILLM, _ = mock_azure_client
-
-    with pytest.raises(ValueError, match="must be provided"):
-        AzureOpenAILLM(
-            azure_endpoint="https://test.openai.azure.com/",
+            api_key=api_key,
         )
 
 
@@ -532,131 +537,6 @@ def test_endpoint_and_base_url_together_raises(mock_azure_client):
         )
 
 
-def test_token_provider_auth(mock_azure_client):
-    AzureOpenAILLM, mock_client = mock_azure_client
-    mock_client.chat.completions.create.return_value = _chat_completion_response("ok")
-
-    llm = AzureOpenAILLM(
-        azure_endpoint="https://test.openai.azure.com/",
-        azure_ad_token_provider=lambda: "token",
-    )
-    result = llm.complete("test")
-    assert result == "ok"
-
-
-def test_service_principal_auth_builds_token_provider(mock_azure_client):
-    """tenant_id+client_id+client_secret build an internal token provider."""
-    AzureOpenAILLM, _ = mock_azure_client
-    fake_token_provider = MagicMock(return_value="bearer-token")
-
-    with (
-        patch("inqtrix.providers.azure.OpenAI") as mock_openai,
-        patch(
-            "inqtrix.providers.azure.build_azure_openai_token_provider",
-            return_value=fake_token_provider,
-        ) as mock_build,
-    ):
-        mock_openai.return_value = MagicMock()
-        AzureOpenAILLM(
-            azure_endpoint="https://test.openai.azure.com/",
-            tenant_id="tenant-123",
-            client_id="client-456",
-            client_secret="secret-789",
-        )
-
-    mock_build.assert_called_once_with(
-        credential=None,
-        tenant_id="tenant-123",
-        client_id="client-456",
-        client_secret="secret-789",
-        scope="https://cognitiveservices.azure.com/.default",
-    )
-    call_kwargs = mock_openai.call_args.kwargs
-    assert call_kwargs["api_key"] is fake_token_provider
-
-
-def test_explicit_credential_builds_token_provider(mock_azure_client):
-    """A pre-built `credential` is passed through to the helper."""
-    AzureOpenAILLM, _ = mock_azure_client
-    custom_credential = MagicMock(name="custom-credential")
-    fake_token_provider = MagicMock(return_value="bearer-token")
-
-    with (
-        patch("inqtrix.providers.azure.OpenAI") as mock_openai,
-        patch(
-            "inqtrix.providers.azure.build_azure_openai_token_provider",
-            return_value=fake_token_provider,
-        ) as mock_build,
-    ):
-        mock_openai.return_value = MagicMock()
-        AzureOpenAILLM(
-            azure_endpoint="https://test.openai.azure.com/",
-            credential=custom_credential,
-        )
-
-    assert mock_build.call_args.kwargs["credential"] is custom_credential
-    call_kwargs = mock_openai.call_args.kwargs
-    assert call_kwargs["api_key"] is fake_token_provider
-
-
-def test_partial_service_principal_fields_raise(mock_azure_client):
-    """Two of three SP fields must raise so we never silently fall back."""
-    AzureOpenAILLM, _ = mock_azure_client
-
-    with pytest.raises(ValueError, match="must all be provided together"):
-        AzureOpenAILLM(
-            azure_endpoint="https://test.openai.azure.com/",
-            tenant_id="tenant-123",
-            client_id="client-456",
-        )
-
-
-def test_api_key_and_service_principal_mutually_exclusive(mock_azure_client):
-    """api_key + SP fields trigger the mutual-exclusion error."""
-    AzureOpenAILLM, _ = mock_azure_client
-
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        AzureOpenAILLM(
-            azure_endpoint="https://test.openai.azure.com/",
-            api_key="static-key",
-            tenant_id="t",
-            client_id="c",
-            client_secret="s",
-        )
-
-
-def test_credential_and_token_provider_mutually_exclusive(mock_azure_client):
-    AzureOpenAILLM, _ = mock_azure_client
-
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        AzureOpenAILLM(
-            azure_endpoint="https://test.openai.azure.com/",
-            credential=MagicMock(),
-            azure_ad_token_provider=lambda: "tok",
-        )
-
-
-def test_custom_token_scope_propagates(mock_azure_client):
-    """`token_scope` overrides the default Cognitive Services scope."""
-    AzureOpenAILLM, _ = mock_azure_client
-
-    with (
-        patch("inqtrix.providers.azure.OpenAI") as mock_openai,
-        patch(
-            "inqtrix.providers.azure.build_azure_openai_token_provider",
-            return_value=MagicMock(),
-        ) as mock_build,
-    ):
-        mock_openai.return_value = MagicMock()
-        AzureOpenAILLM(
-            azure_endpoint="https://test.openai.azure.com/",
-            credential=MagicMock(),
-            token_scope="https://custom.scope/.default",
-        )
-
-    assert mock_build.call_args.kwargs["scope"] == "https://custom.scope/.default"
-
-
 # ---------------------------------------------------------------------------
 # Proxy
 # ---------------------------------------------------------------------------
@@ -665,20 +545,16 @@ def test_custom_token_scope_propagates(mock_azure_client):
 def test_proxy_creates_http_client(mock_azure_client):
     AzureOpenAILLM, _ = mock_azure_client
 
-    with patch("inqtrix.providers.azure.DefaultHttpxClient") as mock_httpx_cls, \
-            patch("inqtrix.providers.azure.OpenAI") as mock_openai_cls:
-        mock_httpx_cls.return_value = MagicMock()
-        mock_openai_cls.return_value = MagicMock()
+    llm = AzureOpenAILLM(
+        azure_endpoint="https://test.openai.azure.com/",
+        api_key="test-key",
+        proxy_url="http://proxy.corp.local:8080",
+    )
+    with patch("inqtrix.providers.azure.DefaultAsyncHttpxClient") as mock_httpx_cls:
+        call_kwargs = _built_client_kwargs(llm)
 
-        AzureOpenAILLM(
-            azure_endpoint="https://test.openai.azure.com/",
-            api_key="test-key",
-            proxy_url="http://proxy.corp.local:8080",
-        )
-
-    call_kwargs = mock_openai_cls.call_args.kwargs
-    assert "http_client" in call_kwargs
-    assert call_kwargs["http_client"] is not None
+    assert call_kwargs["http_client"] is mock_httpx_cls.return_value
+    assert mock_httpx_cls.call_args.kwargs["proxy"] == "http://proxy.corp.local:8080"
 
 
 # ---------------------------------------------------------------------------

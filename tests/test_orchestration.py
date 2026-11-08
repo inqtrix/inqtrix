@@ -11,8 +11,14 @@ import dataclasses
 import re
 import pytest
 
+from inqtrix.providers.attempts import report_retry
 from inqtrix.evidence import STANDING_TEXT
-from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError
+from inqtrix.exceptions import (
+    AgentModelCapacityError,
+    AgentRateLimited,
+    AgentTimeout,
+    AnthropicAPIError,
+)
 from inqtrix.graph import default_graph_config, run, run_test
 from inqtrix.nodes import (
     _join_rendered_sections,
@@ -34,7 +40,7 @@ from inqtrix.nodes import (
     search,
 )
 from inqtrix.providers.base import LLMResponse, ProviderContext
-from inqtrix.search_result import GroundedSearchResult, GroundedSource
+from inqtrix.search_result import GroundedSearchResult, GroundedSource, ProviderNotice
 from inqtrix.report_profiles import ReportProfile
 from inqtrix.settings import AgentSettings
 from inqtrix.state import initial_state, track_tokens
@@ -647,27 +653,18 @@ def test_evaluate_emits_completion_when_stop_criteria_already_finished():
 
 def test_search_emits_fallback_progress_messages():
     class _SearchWithNotice:
-        def __init__(self) -> None:
-            self._notice = None
-
         def search(self, *a, **kw):
-            self._notice = "search fallback"
             return GroundedSearchResult(
                 answer="Gefundener Text",
                 sources=[GroundedSource(url="https://example.com/report", rank=1)],
+                notices=(ProviderNotice("search fallback"),),
             )
-
-        def consume_nonfatal_notice(self):
-            notice = self._notice
-            self._notice = None
-            return notice
 
         def is_available(self):
             return True
 
     class _ClaimExtractLLM:
         def __init__(self) -> None:
-            self._notice = None
             self.models = SimpleNamespace(
                 reasoning_model="reasoning-model",
                 effective_claim_extract_model="claim-extract-model",
@@ -675,11 +672,6 @@ def test_search_emits_fallback_progress_messages():
 
         def complete(self, *a, **kw):
             return ""
-
-        def consume_nonfatal_notice(self):
-            notice = self._notice
-            self._notice = None
-            return notice
 
         def is_available(self):
             return True
@@ -725,6 +717,76 @@ def test_search_emits_fallback_progress_messages():
     assert any("Suchanfragen fehlgeschlagen" in msg for msg in messages)
     assert any("Claim-Extraktionen fehlgeschlagen" in msg for msg in messages)
     assert not any("Zusammenfassungen" in msg for msg in messages)
+
+
+def test_a_claim_extraction_retry_is_reported_under_its_own_operation():
+    """The worker's own retry log takes the model retry of its extraction."""
+
+    class _SearchWithSource:
+        def search(self, *a, **kw):
+            return GroundedSearchResult(
+                answer="Foo berichtet etwas.",
+                sources=[GroundedSource(url="https://a.example/r", title="A", snippet="s", rank=1)],
+            )
+
+        def is_available(self):
+            return True
+
+    class _RetryingClaimExtraction:
+        def extract(self, *a, **kw):
+            report_retry("model", {
+                "provider": "FakeLLM",
+                "model": "claim-extract-model",
+                "attempt": 1,
+                "max_attempts": 3,
+                "delay_seconds": 0.0,
+                "error_code": "HTTP 503",
+            })
+            return ([], 0, 0)
+
+        def consume_nonfatal_notice(self):
+            return None
+
+    class _LLM:
+        def __init__(self):
+            self.models = SimpleNamespace(
+                reasoning_model="reasoning-model",
+                effective_claim_extract_model="claim-extract-model",
+            )
+
+        def complete(self, *a, **kw):
+            return ""
+
+        def is_available(self):
+            return True
+
+    settings = AgentSettings(first_round_queries=1, max_rounds=4)
+    llm = _LLM()
+    defaults = create_default_strategies(settings, llm=llm, claim_extract_model="claim-extract-model")
+    strategies = StrategyContext(
+        source_tiering=defaults.source_tiering,
+        claim_extraction=_RetryingClaimExtraction(),
+        claim_consolidation=defaults.claim_consolidation,
+        risk_scoring=defaults.risk_scoring,
+        stop_criteria=defaults.stop_criteria,
+    )
+    progress_queue = Queue()
+    state = initial_state("Was ist passiert?", progress_queue=progress_queue, max_total_seconds=30)
+    state["queries"] = ["q1"]
+
+    search(
+        state,
+        providers=ProviderContext(llm=llm, search=_SearchWithSource()),
+        strategies=strategies,
+        settings=settings,
+    )
+
+    messages = []
+    while not progress_queue.empty():
+        messages.append(progress_queue.get()[1])
+    retries = [msg for msg in messages if "FakeLLM-Retry 1/3" in msg]
+    assert len(retries) == 1
+    assert "Claim" in retries[0]
 
 
 def test_search_emits_claim_binding_issues_only_when_claims_are_unbound():
@@ -1096,6 +1158,60 @@ def test_answer_catches_anthropic_api_error_and_falls_back():
     ), f"Progress queue must surface the answer fallback: {progress_messages}"
 
 
+def test_both_answer_models_failing_is_reported_in_the_run_language():
+    """The warning header names both failures in the run's language, never in fixed German."""
+
+    class _FailingLLM:
+        def __init__(self):
+            self.models = SimpleNamespace(
+                reasoning_model="primary-model",
+                evaluate_model="fallback-model",
+            )
+
+        def complete(self, *a, **kw):
+            raise AnthropicAPIError(
+                model="primary-model",
+                status_code=529,
+                error_type="overloaded_error",
+                message="Overloaded",
+            )
+
+        def is_available(self):
+            return True
+
+    settings = AgentSettings(
+        report_profile=ReportProfile.COMPACT,
+        observability_profile="summary",
+        testing_mode=True,
+    )
+    defaults = create_default_strategies(settings)
+    state = initial_state("What happened?", progress_queue=Queue(), max_total_seconds=30)
+    state["language"] = "en"
+    state["context"] = ["Research context: key facts"]
+    state["all_citations"] = ["https://example.com/report"]
+    state["consolidated_claims"] = []
+
+    answer(
+        state,
+        providers=ProviderContext(llm=_FailingLLM(), search=_SearchStub()),
+        strategies=StrategyContext(
+            source_tiering=defaults.source_tiering,
+            claim_extraction=defaults.claim_extraction,
+            claim_consolidation=defaults.claim_consolidation,
+            risk_scoring=defaults.risk_scoring,
+            stop_criteria=defaults.stop_criteria,
+        ),
+        settings=settings,
+    )
+
+    answer_log = next(
+        entry for entry in reversed(state["iteration_logs"]) if entry.get("node") == "answer"
+    )
+    assert answer_log["_answer_fallback_kind"] == "fallback_model_failed"
+    assert "the fallback model `fallback-model` failed as well" in state["answer"]
+    assert "fehlgeschlagen" not in state["answer"]
+
+
 def test_answer_node_escapes_currency_dollars_like_the_agent_answers():
     """Unescaped, a research answer with "$5" in prose renders as inline
     math in the report panel; the composed answer passes the same currency
@@ -1301,6 +1417,146 @@ def test_answer_records_algorithm_failure_when_evidence_overview_renders_no_reco
     assert failures[-1]["blocking"] is True
     assert state["rendered_evidence_record_count"] == 0
     assert state["answer_finish_reason"] == "algorithm_failure"
+
+
+class _WindowLLM:
+    """A provider with a known window; ``rejections`` answer its calls in turn."""
+
+    def __init__(self, window, rejections: tuple[Exception, ...] = ()) -> None:
+        self.context_window_tokens = window
+        self.rejections = list(rejections)
+        self.calls = 0
+        self.models = SimpleNamespace(
+            reasoning_model="reasoning-model",
+            evaluate_model="evaluate-model",
+            effective_evaluate_model="evaluate-model",
+        )
+
+    def complete_with_metadata(self, *a, **kw):
+        self.calls += 1
+        if not self.rejections:
+            raise AssertionError("the check must stop this call")
+        raise self.rejections.pop(0)
+
+    def complete(self, *a, **kw):
+        raise AssertionError("answer() should use section-wise metadata completions")
+
+    def is_available(self):
+        return True
+
+
+def _answer_with(llm: _WindowLLM, settings: AgentSettings) -> dict:
+    defaults = create_default_strategies(settings)
+    state = initial_state("Was ist passiert?", max_total_seconds=30)
+    state["round"] = 1
+    state["queries"] = ["q1"]
+    urls = [f"https://source{i}.example/report" for i in range(1, 7)]
+    state["evidence_ledger"] = [
+        _ledger_record(f"ev_{i}", url, title=f"Source {i}")
+        for i, url in enumerate(urls, start=1)
+    ]
+    state["all_citations"] = list(urls)
+    answer(
+        state,
+        providers=ProviderContext(llm=llm, search=_SearchStub()),
+        strategies=StrategyContext(
+            source_tiering=defaults.source_tiering,
+            claim_extraction=defaults.claim_extraction,
+            claim_consolidation=defaults.claim_consolidation,
+            risk_scoring=defaults.risk_scoring,
+            stop_criteria=defaults.stop_criteria,
+        ),
+        settings=settings,
+    )
+    return state
+
+
+def test_a_too_small_context_window_is_recorded_once(caplog):
+    settings = AgentSettings(
+        report_profile=ReportProfile.COMPACT,
+        observability_profile="forensic",
+        testing_mode=True,
+    )
+    llm = _WindowLLM(window=1_000)
+
+    with caplog.at_level("WARNING", logger="inqtrix"):
+        state = _answer_with(llm, settings)
+
+    assert llm.calls == 0
+    failures = state["algorithm_failures"]
+    assert len(failures) == 1
+    assert failures[0]["phase"].startswith("answer_section:")
+    assert failures[0]["reason"] == "below_required_floor"
+    assert failures[0]["context_window_tokens"] == 1_000
+    assert state["answer_finish_reason"] == "model_capacity"
+    assert state["answer"].count(failures[0]["message"]) == 1
+    assert sum("ALGO-FAIL" in record.getMessage() for record in caplog.records) == 1
+    forensic = [
+        entry for entry in state["iteration_logs"] if entry.get("event") == "algorithm_failure"
+    ]
+    assert len(forensic) == 1
+
+
+def test_a_capacity_rejection_by_the_provider_is_recorded_once():
+    settings = AgentSettings(
+        report_profile=ReportProfile.COMPACT,
+        observability_profile="summary",
+        testing_mode=True,
+    )
+    rejection = AgentModelCapacityError("reasoning-model", "answer", "output limit reached")
+    llm = _WindowLLM(window=1_000_000, rejections=(rejection,))
+
+    state = _answer_with(llm, settings)
+
+    assert llm.calls == 1
+    failures = state["algorithm_failures"]
+    assert [failure["phase"] for failure in failures] == ["model_capacity"]
+    assert failures[0]["model"] == "reasoning-model"
+    assert state["answer_finish_reason"] == "model_capacity"
+    assert state["answer"].count("output limit reached") == 1
+
+
+def _rate_limited() -> AgentRateLimited:
+    return AgentRateLimited("reasoning-model", RuntimeError("slow down"))
+
+
+def test_a_capacity_rejection_of_the_fallback_model_is_reported_once():
+    settings = AgentSettings(
+        report_profile=ReportProfile.COMPACT,
+        observability_profile="summary",
+        testing_mode=True,
+    )
+    rejection = AgentModelCapacityError("evaluate-model", "answer", "output limit reached")
+    llm = _WindowLLM(window=1_000_000, rejections=(_rate_limited(), rejection))
+
+    state = _answer_with(llm, settings)
+
+    assert llm.calls == 2
+    failures = state["algorithm_failures"]
+    assert [failure["phase"] for failure in failures] == ["model_capacity"]
+    assert failures[0]["model"] == "evaluate-model"
+    assert state["answer_finish_reason"] == "model_capacity"
+    assert state["answer"].count("output limit reached") == 1
+    assert state["iteration_logs"][-1]["blocking_algorithm_failure_count"] == 1
+
+
+def test_a_too_small_window_for_the_fallback_model_is_reported_once():
+    settings = AgentSettings(
+        report_profile=ReportProfile.COMPACT,
+        observability_profile="summary",
+        testing_mode=True,
+    )
+    windows = iter((1_000_000,))
+    llm = _WindowLLM(window=lambda: next(windows, 1_000), rejections=(_rate_limited(),))
+
+    state = _answer_with(llm, settings)
+
+    assert llm.calls == 1
+    failures = state["algorithm_failures"]
+    assert len(failures) == 1
+    assert failures[0]["reason"] == "below_required_floor"
+    assert state["answer_finish_reason"] == "model_capacity"
+    assert state["answer"].count(failures[0]["message"]) == 1
 
 
 def test_answer_composes_sections_with_full_body_citation_pool():
@@ -1700,6 +1956,7 @@ def test_bare_evidence_labels_expand_to_markdown_links():
     }
 
     expanded, count = _expand_bare_evidence_label_links(
+        {},
         "Aussage [E1], Kontext [E2], bereits verlinkt [E1](https://example.com/source).",
         label_urls,
     )
@@ -1718,6 +1975,7 @@ def test_adjacent_evidence_labels_expand_with_spacing():
     }
 
     expanded, count = _expand_bare_evidence_label_links(
+        {},
         "Aussage [E1][E23].",
         label_urls,
     )
@@ -1726,11 +1984,21 @@ def test_adjacent_evidence_labels_expand_with_spacing():
     assert "[E1](https://example.com/source-a) [E23](https://example.com/source-b)" in expanded
 
 
-def test_unmapped_bare_evidence_labels_are_visible():
-    expanded, count = _expand_bare_evidence_label_links("Aussage [E99].", {})
+@pytest.mark.parametrize(
+    ("language", "marker"),
+    [
+        ("de", "[E99: nicht zugeordnet]"),
+        ("en", "[E99: not assigned]"),
+        ("fr", "[E99: not assigned]"),
+    ],
+)
+def test_unmapped_bare_evidence_labels_are_visible(language, marker):
+    expanded, count = _expand_bare_evidence_label_links(
+        {"language": language}, "Claim [E99].", {}
+    )
 
     assert count == 0
-    assert "[E99: nicht zugeordnet]" in expanded
+    assert expanded == f"Claim {marker}."
 
 
 def test_answer_allows_only_canonical_prompt_evidence_citations_in_body():

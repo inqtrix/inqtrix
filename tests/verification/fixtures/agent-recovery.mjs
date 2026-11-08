@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import { chromium, firefox, webkit } from '@playwright/test'
 
 import { assertFixture as assert, fetchActorJson as fetchJson } from './api.mjs'
+import { attemptCleanup } from './cleanup-step.mjs'
 import { createSessionFixtures } from './sessions.mjs'
 
 const CASES = [
@@ -23,6 +24,46 @@ const CASES = [
   { id: 'bulk-handover', marker: 'MARKE15', status: 'completed', text: '93' },
   { id: 'normal-memo', marker: 'MARKE10', status: 'completed', text: 'abnahmememo' },
 ]
+
+const OPEN_STATUSES = new Set([
+  'queued', 'running', 'waiting_for_approval', 'waiting_for_input', 'waiting_for_children',
+])
+
+/**
+ * Stop the runs a campaign started and wait until each has ended.
+ *
+ * Every step is a cleanup step: a read, cancel or wait that fails is logged
+ * and the next run is still handled, so the caller always reaches its own
+ * remaining cleanup (the results file, closing the browser).
+ */
+export async function cancelOwnedRuns(runIds, { cancel, read, terminal }, attempt = attemptCleanup) {
+  for (const id of runIds) {
+    let summary = null
+    await attempt('run state', async () => {
+      summary = await read(id)
+    })
+    if (!summary || !OPEN_STATUSES.has(summary.status)) continue
+    await attempt('run cancel', async () => {
+      await cancel(id)
+      await terminal(id)
+    })
+  }
+}
+
+/** End a recovery run: cancel the runs it still owns, hand over what it
+ * measured, close the browser. Each step runs even when an earlier one
+ * fails, so a failed cancel never costs the measured results. */
+export async function finishRecoveryRun({ actor, browser, ownedRuns, results }, { cancelRuns, writeScenarioSidecar }) {
+  try {
+    try {
+      if (actor) await cancelRuns(ownedRuns)
+    } finally {
+      await writeScenarioSidecar(results.filter((item) => item.status !== null))
+    }
+  } finally {
+    await browser?.close()
+  }
+}
 
 export async function runAgentRecovery(options) {
   const { baseURL, ignoreHTTPSErrors, executablePath, lifecycle, reportDirectory,
@@ -256,17 +297,14 @@ export async function runAgentRecovery(options) {
     console.error(`[agent-recovery] ${String(error?.message ?? error).slice(0, 500)}`)
     await visualReviewHold()
   } finally {
-    if (actor) {
-      for (const id of ownedRuns) {
-        const summary = await fetchJson(actor, 'GET', `/v1/runs/${id}`, { expected: [200, 404] }).catch(() => null)
-        if (summary && ['queued', 'running', 'waiting_for_approval', 'waiting_for_input', 'waiting_for_children'].includes(summary.status)) {
-          await fetchJson(actor, 'POST', `/v1/runs/${id}/cancel`, { expected: [200, 202, 404, 409] })
-          await terminal(id)
-        }
-      }
-    }
-    await writeScenarioSidecar(results.filter((item) => item.status !== null))
-    await browser?.close()
+    await finishRecoveryRun({ actor, browser, ownedRuns, results }, {
+      cancelRuns: (ids) => cancelOwnedRuns(ids, {
+        cancel: (id) => fetchJson(actor, 'POST', `/v1/runs/${id}/cancel`, { expected: [200, 202, 404, 409] }),
+        read: (id) => fetchJson(actor, 'GET', `/v1/runs/${id}`, { expected: [200, 404] }),
+        terminal,
+      }),
+      writeScenarioSidecar,
+    })
   }
   return completed && results.every((item) => item.status === 'passed') ? 0 : 1
 

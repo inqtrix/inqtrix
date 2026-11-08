@@ -1,6 +1,6 @@
 """Tool-calling bridge from ``LLMProvider.chat`` to LangChain.
 
-The kernel loop (deepagents) drives a LangChain ``BaseChatModel`` that
+The kernel loop (LangChain's agent loop) drives a ``BaseChatModel`` that
 must EMIT ``AIMessage.tool_calls``. This bridge translates LangChain
 messages to the OpenAI chat shape, calls the provider's native
 :meth:`~inqtrix.providers.base.LLMProvider.chat`, and maps the returned
@@ -24,8 +24,14 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Callable
 
 from inqtrix.constants import REASONING_TIMEOUT
-from inqtrix.exceptions import AgentModelCapacityError, AgentStructuredOutputError, AgentToolArgumentsError, ModelCapacityReason
-from inqtrix.providers.base import provider_attempt_timeout
+from inqtrix.exceptions import (
+    AgentModelCapacityError,
+    AgentRequiredToolCallMissing,
+    AgentStructuredOutputError,
+    AgentToolArgumentsError,
+    ModelCapacityReason,
+)
+from inqtrix.providers.base import PROVIDER_STATE_FIELD, counted_input_tokens, provider_attempt_timeout
 if TYPE_CHECKING:
     from inqtrix.providers.base import LLMProvider
 
@@ -33,18 +39,8 @@ _IMPORT_HINT = (
     "Der Agent-Kernel braucht das 'agent'-Extra (uv sync --extra agent)."
 )
 
-KERNEL_MODEL_PROVIDER = "inqtrix"
-"""``ls_provider`` the bridge model reports to deepagents."""
-
 KERNEL_MODEL_IDENTIFIER = "kernel"
-"""Model identifier the bridge model reports to deepagents.
-
-Together with :data:`KERNEL_MODEL_PROVIDER` this forms the exact
-``provider:model`` key the harness registers its kernel profile under
-(``inqtrix:kernel``). deepagents otherwise derives the profile key from
-the CLASS NAME of a pre-built model — renaming the bridge class would
-silently drop the profile (its documented "my profile isn't applying"
-failure mode), so the identity is declared explicitly instead."""
+"""Model name in error reports when neither the call nor the provider names one."""
 
 UsageHook = Callable[[int, int], None]
 """Receives ``(prompt_tokens, completion_tokens)`` after every
@@ -52,6 +48,11 @@ generation — the kernel's per-segment usage accumulator."""
 
 REJECTED_TOOL_ARGUMENTS_FLAG = "inqtrix_rejected_tool_arguments"
 """Server-authored reply metadata: this is model feedback, not a tool execution."""
+
+PROVIDER_STATE_KWARG = "inqtrix_provider_state"
+"""Where an assistant message keeps the provider's state for the next turn
+(``ChatTurn.provider_state``): in ``additional_kwargs``, so ``content`` stays text
+for every reader, and out of every transcript and archive (``public_message_dump``)."""
 
 KERNEL_USAGE_STATE = "kernel_usage"
 _MODEL_USAGE: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
@@ -70,11 +71,40 @@ def collect_model_usage():
         _MODEL_USAGE.reset(token)
 
 
-def _record_model_usage(turn):
+def _book_turn(turn, usage_hook: UsageHook | None) -> None:
+    """Count one generated turn where a run counts its spend."""
+    input_tokens = counted_input_tokens(turn)
     totals = _MODEL_USAGE.get()
     if totals is not None:
-        totals["prompt_tokens"] += turn.prompt_tokens
+        totals["prompt_tokens"] += input_tokens
         totals["completion_tokens"] += turn.completion_tokens
+    if usage_hook is not None:
+        usage_hook(input_tokens, turn.completion_tokens)
+
+
+def turn_usage_metadata(turn: Any) -> dict[str, Any]:
+    """The usage a checkpointed message keeps: the whole input, as a framework reads it.
+
+    Context compaction needs the full size of what was sent. What a run counts
+    against its limits comes from :func:`counted_usage_of_message`.
+    """
+    usage: dict[str, Any] = {
+        "input_tokens": turn.prompt_tokens,
+        "output_tokens": turn.completion_tokens,
+        "total_tokens": turn.prompt_tokens + turn.completion_tokens,
+    }
+    if turn.cache_read_tokens:
+        usage["input_token_details"] = {"cache_read": turn.cache_read_tokens}
+    return usage
+
+
+def counted_usage_of_message(message: Any) -> tuple[int, int]:
+    """Input and output a checkpointed message counts against the limits of its run."""
+    meta = getattr(message, "usage_metadata", None) or {}
+    details = meta.get("input_token_details") or {}
+    input_tokens = int(meta.get("input_tokens", 0) or 0)
+    cache_read_tokens = int(details.get("cache_read", 0) or 0)
+    return max(0, input_tokens - cache_read_tokens), int(meta.get("output_tokens", 0) or 0)
 
 
 _FORCED_TOOL_CHOICES = frozenset({"any", "required"})
@@ -87,19 +117,22 @@ def provider_tool_choice(bound: Any) -> str | None:
 
     A typed role result (``ToolStrategy``) binds ``"any"`` so the role
     cannot end with prose instead of its result call; the OpenAI-compatible
-    wire names the same obligation ``"required"``. No binding sends none,
-    so the conversational kernel's turns stay free to answer in text. Any
-    other value is refused before the call, never dropped: a dropped
-    obligation is exactly how a role could end with its result as text.
+    wire names the same obligation ``"required"``. ``"none"`` asks for an
+    answer without a tool call. No binding sends none, so the
+    conversational kernel's turns stay free to answer in text. Any other
+    value is refused before the call, never dropped: a dropped obligation
+    is exactly how a role could end with its result as text.
 
     Raises:
-        ValueError: The binding is neither absent nor the obligation to
-            call a tool.
+        ValueError: The binding is neither absent, nor the obligation to
+            call a tool, nor ``"none"``.
     """
     if bound is None:
         return None
     if isinstance(bound, str) and bound in _FORCED_TOOL_CHOICES:
         return "required"
+    if bound == "none":
+        return "none"
     raise ValueError(f"The kernel bridge cannot send tool_choice={bound!r}.")
 
 
@@ -153,6 +186,9 @@ def messages_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
                     }
                     for call in invalid_calls
                 )
+            state = (getattr(message, "additional_kwargs", None) or {}).get(PROVIDER_STATE_KWARG)
+            if state:
+                entry[PROVIDER_STATE_FIELD] = state
             payload.append(entry)
         elif role == "tool":
             payload.append(
@@ -167,6 +203,47 @@ def messages_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
         else:
             payload.append({"role": "user", "content": text})
     return payload
+
+
+# The key under which a kernel model turn hands the bridge the tool-call ids of
+# the whole thread (``request.model_settings``); the model's view may hold fewer.
+THREAD_CALL_IDS = "inqtrix_thread_call_ids"
+
+
+def used_call_ids(messages: list[Any]) -> set[str]:
+    """The tool-call ids the given messages carry."""
+    used: set[str] = set()
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or []:
+            used.add(str(call.get("id") or ""))
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if tool_call_id:
+            used.add(str(tool_call_id))
+    used.discard("")
+    return used
+
+
+def unique_call_ids(ids: list[str], *, used: set[str]) -> list[str]:
+    """The ids of one turn's tool calls, each one new to the run's thread.
+
+    Derived ids (questions to the user, canvas writes, interrupts) key on the
+    tool-call id, so a provider that repeats an id (``call_0`` in two turns)
+    would make the second call answer as the first. A repeated id gets the
+    first free numeric suffix; a new id stays as the provider wrote it.
+    *used* must hold the ids of the whole thread, also those a compaction
+    moved out of the model's view.
+    """
+    taken = set(used)
+    result: list[str] = []
+    for call_id in ids:
+        candidate = call_id
+        suffix = 1
+        while candidate in taken:
+            candidate = f"{call_id}_{suffix}"
+            suffix += 1
+        taken.add(candidate)
+        result.append(candidate)
+    return result
 
 
 def _message_text(message: Any) -> str:
@@ -223,17 +300,6 @@ def build_tool_chat_model(
         def _llm_type(self) -> str:
             return "inqtrix-kernel-tool-bridge"
 
-        @property
-        def model_name(self) -> str:
-            # deepagents reads this attribute as the model identifier
-            # for harness-profile resolution (see KERNEL_MODEL_IDENTIFIER).
-            return KERNEL_MODEL_IDENTIFIER
-
-        def _get_ls_params(self, stop: Any = None, **kwargs: Any) -> Any:
-            params = super()._get_ls_params(stop=stop, **kwargs)
-            params["ls_provider"] = KERNEL_MODEL_PROVIDER
-            return params
-
         def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
             formatted = [convert_to_openai_tool(tool) for tool in tools]
             return self.bind(tools=formatted, **kwargs)
@@ -255,10 +321,8 @@ def build_tool_chat_model(
                     timeout=provider_attempt_timeout(timeout),
                     **({"tool_choice": tool_choice} if tool_choice else {}),
                 )
-            except AgentToolArgumentsError as exc:
-                _record_model_usage(exc.turn)
-                if usage_hook is not None:
-                    usage_hook(exc.turn.prompt_tokens, exc.turn.completion_tokens)
+            except (AgentToolArgumentsError, AgentRequiredToolCallMissing) as exc:
+                _book_turn(exc.turn, usage_hook)
                 raise
             except ContextOverflowError as exc:
                 raise AgentModelCapacityError(
@@ -268,25 +332,27 @@ def build_tool_chat_model(
                     reason=ModelCapacityReason.CONTEXT_WINDOW,
                     original=exc,
                 ) from exc
-            _record_model_usage(turn)
-            if usage_hook is not None:
-                usage_hook(turn.prompt_tokens, turn.completion_tokens)
+            _book_turn(turn, usage_hook)
             if not turn.text.strip() and not turn.tool_calls:
                 raise AgentStructuredOutputError(
                     turn.model or model or KERNEL_MODEL_IDENTIFIER,
                     "chat_turn",
                     "Provider returned neither text nor tool calls.",
                 )
+            call_ids = unique_call_ids(
+                [call.id for call in turn.tool_calls],
+                used=used_call_ids(messages) | frozenset(kwargs.get(THREAD_CALL_IDS) or ()),
+            )
             message = AIMessage(
                 content=turn.text,
                 tool_calls=[
                     {
-                        "id": call.id,
+                        "id": call_id,
                         "name": call.name,
                         "args": dict(call.arguments),
                         "type": "tool_call",
                     }
-                    for call in turn.tool_calls
+                    for call_id, call in zip(call_ids, turn.tool_calls)
                 ],
                 response_metadata={
                     "finish_reason": turn.finish_reason,
@@ -295,12 +361,10 @@ def build_tool_chat_model(
                 # Checkpointed with the message: later segments recover
                 # the run-cumulative spend for the token-budget check
                 # without a second bookkeeping channel.
-                usage_metadata={
-                    "input_tokens": turn.prompt_tokens,
-                    "output_tokens": turn.completion_tokens,
-                    "total_tokens": turn.prompt_tokens
-                    + turn.completion_tokens,
-                },
+                usage_metadata=turn_usage_metadata(turn),
+                additional_kwargs=(
+                    {PROVIDER_STATE_KWARG: turn.provider_state} if turn.provider_state else {}
+                ),
             )
             return ChatResult(
                 generations=[ChatGeneration(message=message)]

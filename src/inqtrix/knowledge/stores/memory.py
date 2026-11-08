@@ -10,8 +10,7 @@ The port is async (uniform with the Postgres-backed store), but this
 store does no I/O: its public coroutines wrap synchronous,
 lock-guarded work over in-process dicts. The work never awaits while
 holding the lock, so a ``threading.RLock`` still gives correct
-cross-thread safety (the synchronous research graph and the reindex
-worker reach it via ``asyncio.run`` on their own threads).
+cross-thread safety.
 
 Retrieval is exact cosine similarity over all candidate chunks. That
 is O(chunks) per query, which is the honest and correct choice at the
@@ -31,10 +30,11 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from inqtrix import aio
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.shares import ShareFacts
 from inqtrix.knowledge.chunk_identity import deterministic_chunk_id
-from inqtrix.knowledge.evidence import source_excerpt_is_verified
+from inqtrix.knowledge.evidence import CanonicalBodies
 from inqtrix.knowledge.source_cleanup import (
     SourceCleanupPlan,
     SourceCleanupTarget,
@@ -60,7 +60,7 @@ from inqtrix.knowledge.stores.ports import (
     SourceDeletionConflict,
 )
 from inqtrix.pagination import keyset_page
-from inqtrix.source_authority import (
+from inqtrix.storage.source_authority import (
     MemorySourceLifecycleAuthority,
     SourceDeletionPermit,
     SourceLifecycleConflict,
@@ -82,6 +82,54 @@ def _cosine(a: tuple[float, ...], b: list[float]) -> float:
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
+def _ranked_candidates(
+    rows: list[tuple[DocumentChunk, KnowledgeDocument]],
+    query_embedding: list[float],
+    top_k: int,
+) -> list[RetrievalCandidate]:
+    """Score, order and collapse: pure Python over every chunk, so never on the loop."""
+    candidates: list[RetrievalCandidate] = []
+    bodies = CanonicalBodies()
+    for chunk, document in rows:
+        verified_chunk = replace(
+            chunk,
+            source_verified=bodies.excerpt_is_verified(
+                body_key=(chunk.document_id, chunk.revision_id),
+                canonical_text=document.text,
+                source_text=chunk.source_text,
+                source_start=chunk.source_start,
+                source_end=chunk.source_end,
+                document_content_hash=chunk.document_content_hash,
+            ),
+        )
+        if not verified_chunk.source_verified:
+            continue
+        candidates.append(
+            RetrievalCandidate(
+                chunk=verified_chunk,
+                score=_cosine(chunk.embedding, query_embedding),
+                document_title=document.title,
+            )
+        )
+    candidates.sort(key=lambda item: item.score, reverse=True)
+    # One document per content hash, mirroring the Postgres store.
+    # Collapsed AFTER the sort, so the strongest hit wins here too.
+    # Document-level on purpose: two DIFFERENT documents quoting the
+    # same clause both stay visible.
+    seen_content_hashes: dict[str, str] = {}
+    collapsed: list[RetrievalCandidate] = []
+    for candidate in candidates:
+        content_hash = candidate.chunk.document_content_hash
+        if content_hash:
+            first = seen_content_hashes.get(content_hash)
+            if first is None:
+                seen_content_hashes[content_hash] = candidate.chunk.document_id
+            elif first != candidate.chunk.document_id:
+                continue
+        collapsed.append(candidate)
+    return collapsed[: max(0, top_k)]
 
 
 def _document_matches_source(document: KnowledgeDocument, source_id: str) -> bool:
@@ -1084,11 +1132,13 @@ class MemoryKnowledgeStore:
                 ),
                 key=lambda chunk: chunk.chunk_index,
             )
+            bodies = CanonicalBodies()
             return [
                 replace(
                     chunk,
                     embedding=(),
-                    source_verified=source_excerpt_is_verified(
+                    source_verified=bodies.excerpt_is_verified(
+                        body_key=document.id,
                         canonical_text=document.text,
                         source_text=chunk.source_text,
                         source_start=chunk.source_start,
@@ -2108,7 +2158,7 @@ class MemoryKnowledgeStore:
                     scoped.append(collection)
             scoped_ids = {collection.id for collection in scoped}
 
-            candidates: list[RetrievalCandidate] = []
+            rows: list[tuple[DocumentChunk, KnowledgeDocument]] = []
             for document_id, chunks in self._chunks.items():
                 document = self._documents.get(document_id)
                 if (
@@ -2136,39 +2186,5 @@ class MemoryKnowledgeStore:
                         )
                     ):
                         continue
-                    verified_chunk = replace(
-                        chunk,
-                        source_verified=source_excerpt_is_verified(
-                            canonical_text=document.text,
-                            source_text=chunk.source_text,
-                            source_start=chunk.source_start,
-                            source_end=chunk.source_end,
-                            document_content_hash=chunk.document_content_hash,
-                        ),
-                    )
-                    if not verified_chunk.source_verified:
-                        continue
-                    candidates.append(
-                        RetrievalCandidate(
-                            chunk=verified_chunk,
-                            score=_cosine(chunk.embedding, query_embedding),
-                            document_title=document.title,
-                        )
-                    )
-            candidates.sort(key=lambda item: item.score, reverse=True)
-            # One document per content hash, mirroring the Postgres store.
-            # Collapsed AFTER the sort, so the strongest hit wins here too.
-            # Document-level on purpose: two DIFFERENT documents quoting the
-            # same clause both stay visible.
-            seen_content_hashes: dict[str, str] = {}
-            collapsed: list[RetrievalCandidate] = []
-            for candidate in candidates:
-                content_hash = candidate.chunk.document_content_hash
-                if content_hash:
-                    first = seen_content_hashes.get(content_hash)
-                    if first is None:
-                        seen_content_hashes[content_hash] = candidate.chunk.document_id
-                    elif first != candidate.chunk.document_id:
-                        continue
-                collapsed.append(candidate)
-            return collapsed[: max(0, top_k)]
+                    rows.append((chunk, document))
+        return await aio.run_blocking(_ranked_candidates, rows, query_embedding, top_k)

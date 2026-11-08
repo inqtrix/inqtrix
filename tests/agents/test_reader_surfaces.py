@@ -16,7 +16,6 @@ import pytest
 
 from inqtrix.agents.artifact_names import NAMED_ARTIFACT_KINDS
 from inqtrix.agents.control_ports import ARTIFACT_KINDS
-from inqtrix.agents.narration import NARRATION_EVENT
 from inqtrix.agents.reader_surfaces import (
     MACHINERY_ARTIFACT_KINDS,
     MODEL_TEXT_GUARDED,
@@ -28,6 +27,7 @@ from inqtrix.agents.reader_surfaces import (
     reader_surface_key,
 )
 from inqtrix.i18n import MESSAGES
+from inqtrix.harness.contracts.events import NARRATION_EVENT
 
 RUNTIME = pathlib.Path("src/inqtrix")
 

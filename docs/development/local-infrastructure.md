@@ -138,7 +138,8 @@ INQTRIX_STORAGE_BACKEND=postgres python -m inqtrix
 
 The migrations create the restricted `inqtrix_app` role
 (NOLOGIN/NOSUPERUSER/NOBYPASSRLS); every application transaction
-switches to it via `SET LOCAL ROLE`, so row-level security applies
+switches to it with `set_config('role', ..., true)`, the function form of
+`SET LOCAL ROLE`, so row-level security applies
 even though the dev connection user owns the tables. Tenant context is
 transaction-local (`set_config('inqtrix.tenant_id', ..., true)`); a
 query without it fails loudly in `inqtrix_current_tenant_id()`.

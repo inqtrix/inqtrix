@@ -46,6 +46,3 @@ class MemoryAccountPreferencesStore:
         )
         self._rows[user_id] = prefs
         return prefs
-
-    async def aclose(self) -> None:
-        return None

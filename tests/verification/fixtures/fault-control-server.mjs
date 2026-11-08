@@ -60,6 +60,38 @@ export async function resolveFaultControlContainers({
   }
 }
 
+/**
+ * The containers of the named services in the canonical stack, stopped ones too:
+ * a service that crashed during a run still has logs to read.
+ */
+export async function listServiceContainers({
+  engine,
+  repositoryRoot,
+  services,
+}) {
+  const canonicalCompose = resolve(
+    repositoryRoot,
+    'deploy/compose/compose.stack.yaml',
+  )
+  const rows = (await listContainers(engine, repositoryRoot)).filter((row) => {
+    const labels = normalizedLabels(row)
+    return services.includes(labels[COMPOSE_SERVICE])
+      && String(labels[COMPOSE_FILES] ?? '')
+        .split(',')
+        .map((value) => resolve(value.trim()))
+        .includes(canonicalCompose)
+  })
+  const projects = new Set(rows.map((row) => normalizedLabels(row)[COMPOSE_PROJECT]))
+  if (projects.size > 1) {
+    throw new Error('Log inspection: several Compose projects use the canonical stack file.')
+  }
+  return rows.map((row) => ({
+    id: requiredContainerId(row),
+    running: isRunning(row),
+    service: normalizedLabels(row)[COMPOSE_SERVICE],
+  }))
+}
+
 export class ContainerFaultDriver {
   #collaboration
   #engine

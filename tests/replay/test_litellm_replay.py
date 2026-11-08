@@ -42,23 +42,17 @@ def vcr_cassette_dir() -> str:
     )
 
 
-def _build_provider(*, max_retries: int | None = None) -> LiteLLM:
+def _build_provider() -> LiteLLM:
     """Construct a LiteLLM provider wired against the local-proxy URL.
 
-    When *max_retries* is provided, it is set on the underlying OpenAI
-    SDK client AFTER construction. The OpenAI SDK retries 408/409/429/
-    5xx by default; for cassette-based tests we want exactly one
-    interaction, so the rate-limit and api-error tests pass
-    ``max_retries=0`` to disable the SDK's retry loop.
+    Its SDK clients never retry on their own (``max_retries=0``), so a
+    cassette sees exactly the requests of the adapter's own retry loop.
     """
-    provider = LiteLLM(
+    return LiteLLM(
         api_key="test-key",
         base_url=_BASE_URL,
         default_model=_DEFAULT_MODEL,
     )
-    if max_retries is not None:
-        provider._client = provider._client.with_options(max_retries=max_retries)
-    return provider
 
 
 @pytest.mark.vcr
@@ -90,7 +84,7 @@ def test_rate_limit_replay(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "inqtrix.providers.base._SDK_RATE_LIMIT_MAX_RETRIES", 0
     )
-    provider = _build_provider(max_retries=0)
+    provider = _build_provider()
 
     with pytest.raises(AgentRateLimited):
         provider.complete("Was loest den Rate-Limit aus?")
@@ -99,7 +93,7 @@ def test_rate_limit_replay(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.vcr
 def test_api_error_replay() -> None:
     """A non-429 5xx cassette propagates as the SDK's error type."""
-    provider = _build_provider(max_retries=0)
+    provider = _build_provider()
 
     from openai import OpenAIError
 

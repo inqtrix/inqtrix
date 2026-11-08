@@ -471,7 +471,7 @@ class _Deletions:
         self.retry_actors.append(actor)
         return {"operation_id": operation_id, "status": "queued"}
 
-    def get(self, operation_id, *, principal, workspace_id):
+    async def get(self, operation_id, *, principal, workspace_id):
         # Like the store: an operation answers only to its creator, and an
         # erasure provisioning started has none.
         if self._owner != "provisioning" or principal.user_id is not None:

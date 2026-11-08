@@ -504,3 +504,27 @@ def test_instance_probe_uses_the_same_public_fastapi_proxy_path() -> None:
     assert vite_match is not None
     assert "target: apiProxyTarget" in vite_match.group("body")
     assert "ws: true" in vite_match.group("body")
+
+
+def test_the_nginx_access_line_names_no_client_address() -> None:
+    template = (_ROOT / "deploy" / "nginx" / "inqtrix.conf.template").read_text(
+        encoding="utf-8"
+    )
+    log_format = template[template.index("log_format inqtrix_safe") :]
+    log_format = log_format[: log_format.index(";")]
+
+    assert "$time_iso8601" in log_format
+    assert "$remote_addr" not in log_format
+    assert "$http_x_forwarded_for" not in log_format
+    assert "$realip_remote_addr" not in log_format
+
+
+def test_desktop_clutter_never_enters_an_image() -> None:
+    """An image built from a folder the macOS Finder has opened would carry
+    ``src/.DS_Store`` and ``src/inqtrix/.DS_Store``; the rule must match at
+    any depth."""
+    rules = {
+        line.strip()
+        for line in (_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    }
+    assert "**/.DS_Store" in rules

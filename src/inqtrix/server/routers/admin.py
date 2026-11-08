@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from inqtrix import aio
 from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.auth.lifecycle import (
     AdminActor,
@@ -310,7 +311,7 @@ def build_admin_router(
         if target is None or target.erasure_operation_id is None:
             return error_response(404, "No erasure of this user", "not_found")
         try:
-            return deletions.get(
+            return await deletions.get(
                 target.erasure_operation_id,
                 principal=operation_principal(TENANT, None),
                 workspace_id=None,
@@ -460,7 +461,7 @@ def build_admin_router(
                 user_id=uuid.uuid4(),
                 subject=new_subject(),
                 email=email,
-                password_hash=hash_password(password),
+                password_hash=await aio.run_blocking(hash_password, password),
                 display_name=display_name,
                 created_at=time.time(),
             )
@@ -522,7 +523,7 @@ def build_admin_router(
                 changed = await lifecycle.reset_local_password(
                     tenant_id=TENANT,
                     user_id=user_id,
-                    password_hash=hash_password(password),
+                    password_hash=await aio.run_blocking(hash_password, password),
                     actor_user_id=principal.user_id,
                 )
             except AdminAuthorizationError:

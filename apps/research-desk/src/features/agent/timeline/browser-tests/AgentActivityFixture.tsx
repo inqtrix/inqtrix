@@ -125,7 +125,7 @@ function Fixture() {
     setRun((current) => ({ ...current, status, finishedAt: new Date().toISOString(), elapsedSeconds: 98 }))
   }
   const actions: AgentTimelineActions = {
-    onCancelRun: () => settle('cancelled'), onOpenCanvas: () => setNotice('Detailansicht angefordert'),
+    onCancelRun: () => settle('cancelled'), onRestartRun: () => undefined, restartNotice: null, onConfirmRestart: () => undefined, onDismissRestart: () => undefined, onOpenCanvas: () => setNotice('Detailansicht angefordert'),
     answerClarification: async () => undefined, decideApproval: async () => undefined,
     answerChildClarification: async () => undefined, decideChildApproval: async () => undefined,
     loadArtifactRevision: async () => ({ content_markdown: '' }),

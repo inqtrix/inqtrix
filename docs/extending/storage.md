@@ -72,10 +72,14 @@ app = create_app(object_store_impl=MyObjectStore())
 ## Run / queue store
 
 A custom run store (and, with it, your own queue/worker dispatch) implements the
-run-store port and is injected at `register_routes`/`build_container` via
-`run_store=`. The built-in memory and durable (Postgres + Valkey) stores are the
-reference; a durable store owns an engine and a background loop and exposes
-`close()`, which the app's lifespan calls on shutdown.
+run-store port (`inqtrix.runs.ports.RunStorePort`) and is injected at
+`register_routes`/`build_container` via `run_store=`. Each operation has two names:
+`aget` for a coroutine on the process loop, `get` for a synchronous job body on a
+thread. `inqtrix.runs.shared` builds the second name from the first (`bridge_to_loop`,
+`inline_on_loop`). The built-in memory and durable (Postgres + Valkey) stores are the
+reference; a durable store exposes `aclose()`, which the app's lifespan awaits on
+shutdown. It stops the store's own work and leaves the engine alone: the engine
+belongs to whoever composed the process.
 
 ```python
 from inqtrix.server.routes import create_router, register_routes
@@ -107,9 +111,8 @@ present, while quota is gated on a cookie-session mode alone.
 
 - Injected instance **wins** over env dispatch — but if you inject nothing, the
   env enum still applies (no silent fallback to a different backend).
-- A store that owns resources (engine, sockets, threads) should expose
-  `close()`/`aclose()`; the app lifespan disposes the run store and quota store
-  on shutdown.
+- A store that owns resources (sockets, threads) should expose `aclose()`; the app
+  lifespan awaits it for the job stores on shutdown.
 - Keep configuration in constructor arguments (Constructor-First); your
   composition root or an `examples/` script reads the environment.
 

@@ -12,12 +12,14 @@ import {
 } from '@/api/inqtrixClient'
 import type {
   AutoResumePlan,
+  CollectionDocuments,
   IndexingJobEvent,
   IndexingJobSnapshot,
   IndexingJobSummary,
 } from './indexingTypes'
 import type { ServerDeletionOperation } from '@/api/inqtrixClient'
 import type { FileAssetRecord, VectorIndexRecord } from '@/features/project/types'
+import type { KnowledgeDocumentInfo } from '@/features/researchRuns/types'
 import { carriedErrorText, readerTexts } from '@/api/requestErrorText'
 
 /** How many immutable revisions may be reserved concurrently. The POSTs are
@@ -469,6 +471,10 @@ export type MemberJobProgress = (
 ) => void
 
 export type IngestProgress = {
+  /** The collection of a first build exists from here on. */
+  onCollectionCreated?: (event: { collectionId: string; model: string }) => void
+  /** A member's durable job started; its document is known from here on. */
+  onMemberDocument?: (event: { documentId: string; fileId: string }) => void
   onMemberDone?: MemberProgress
   onMemberFailed?: MemberFailed
   onMemberJobProgress?: MemberJobProgress
@@ -545,6 +551,9 @@ async function ingestMembersIntoCollection(
       : paused.mode === 'raw'
         ? await resumeIndexingJobWithoutContext(paused.jobId, jobOptions)
         : await resumeIndexingJob(paused.jobId, jobOptions)
+    if (started.document_id) {
+      progress?.onMemberDocument?.({ documentId: started.document_id, fileId: asset.id })
+    }
     const outcome = await waitForDocumentRevision(
       started,
       options,
@@ -640,26 +649,38 @@ async function ingestMembersIntoCollection(
   return partial
 }
 
-/** Map the collection's already-ingested documents by their local asset id.
- * A failed listing FAILS the run: without this map a resumed run re-ingests
- * documents the collection already holds, and the duplicate carries the same
- * `metadata.fileId` while only the newer id is tracked — the older copy then
- * stays searchable forever and cannot be removed from the UI. */
-async function existingDocumentIdsByFileId(
+/** Every document of a collection, page by page: the one listing behind the
+ * server collection view, a run's adoption and a reloaded view's reconcile. */
+export async function listAllCollectionDocuments(
   collectionId: string,
   options: KnowledgeSyncOptions,
-): Promise<Map<string, string>> {
-  const byFileId = new Map<string, string>()
+): Promise<KnowledgeDocumentInfo[]> {
+  const documents: KnowledgeDocumentInfo[] = []
   let cursor: string | undefined
   do {
     const page = await listKnowledgeDocuments(collectionId, { ...options, cursor, limit: 100 })
-    for (const document of page.data) {
-      const fileId = document.metadata?.fileId
-      if (typeof fileId === 'string' && !byFileId.has(fileId)) byFileId.set(fileId, document.id)
-    }
+    documents.push(...page.data)
     cursor = page.next_cursor ?? undefined
   } while (cursor)
-  return byFileId
+  return documents
+}
+
+/** The documents the collection holds as ids, and the first document per
+ * local asset id. A run reads it to adopt what the server already embedded
+ * instead of paying for it twice; a reloaded view reads it to see which pending
+ * members are embedded after the job list forgot them. */
+export async function listCollectionDocuments(
+  collectionId: string,
+  options: KnowledgeSyncOptions,
+): Promise<CollectionDocuments> {
+  const byFileId = new Map<string, string>()
+  const ids = new Set<string>()
+  for (const document of await listAllCollectionDocuments(collectionId, options)) {
+    ids.add(document.id)
+    const fileId = document.metadata?.fileId
+    if (typeof fileId === 'string' && !byFileId.has(fileId)) byFileId.set(fileId, document.id)
+  }
+  return { byFileId, ids }
 }
 
 /** Create the server collection for a not-yet-built local vector index.
@@ -684,6 +705,7 @@ export async function createVectorIndexCollectionOnServer(
     { embeddingModel: index.model, name: index.title },
     options,
   )
+  progress?.onCollectionCreated?.({ collectionId: collection.id, model: index.model })
 
   let ingest: KnowledgeAssetIngestResult
   try {
@@ -783,8 +805,12 @@ export async function ingestNewVectorIndexMembers(
   }
   // Adopt what the collection already holds instead of embedding it twice.
   // A cancelled run can leave a document the server finished after the client
-  // stopped listening, and a resumed run must not pay for it again.
-  const existing = await existingDocumentIdsByFileId(index.serverCollectionId, options)
+  // stopped listening, and a resumed run must not pay for it again. A failed
+  // listing FAILS the run: without it a resumed run re-ingests documents the
+  // collection already holds, and the duplicate carries the same
+  // `metadata.fileId` while only the newer id is tracked — the older copy then
+  // stays searchable forever and cannot be removed from the UI.
+  const existing = (await listCollectionDocuments(index.serverCollectionId, options)).byFileId
   let ingest: KnowledgeAssetIngestResult
   try {
     ingest = await ingestMembersIntoCollection(

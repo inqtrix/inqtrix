@@ -1078,6 +1078,93 @@ services:
 @pytest.mark.parametrize(
     "name",
     [
+        "INQTRIX_LLM_EXTRA_HEADERS",
+        "INQTRIX_SEARCH_EXTRA_HEADERS",
+        "INQTRIX_EMBEDDING_EXTRA_HEADERS",
+        "INQTRIX_RERANKER_EXTRA_HEADERS",
+    ],
+)
+def test_config_redacts_the_extra_provider_headers(
+    name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The JSON object may carry the subscription key of an API gateway.
+    root, stack_env, secrets_env, _ = _project(tmp_path)
+    _install_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "FAKE_CONFIG_OUTPUT",
+        f"""
+services:
+  api:
+    environment:
+      {name}: '{{"Ocp-Apim-Subscription-Key": "SyntheticGatewayKey"}}'
+""",
+    )
+
+    assert main([*_arguments(root, stack_env, secrets_env), "config", "--redact"]) == 0
+    captured = capsys.readouterr()
+    assert "SyntheticGatewayKey" not in captured.out
+    assert f'{name}: "***REDACTED***"' in captured.out
+
+
+def test_config_redacts_a_value_the_compose_provider_folded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """podman-compose folds a long value over several lines of its output.
+
+    Redacted line by line, only the first line lost its value: the
+    continuation lines kept the rest of the headers, and the folded value no
+    longer matched as one string either.
+    """
+    root, stack_env, secrets_env, _ = _project(tmp_path)
+    _install_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "FAKE_CONFIG_OUTPUT",
+        """
+services:
+  api:
+    environment:
+      INQTRIX_LLM_EXTRA_HEADERS: '{"Ocp-Apim-Subscription-Key": "SyntheticFoldedPart1",
+        "X-Gateway-Tenant": "SyntheticFoldedPart2", "X-Other": "fake
+        fake SyntheticFoldedPart3"}'
+      INQTRIX_LOG_LEVEL: INFO
+""",
+    )
+
+    assert main([*_arguments(root, stack_env, secrets_env), "config", "--redact"]) == 0
+    captured = capsys.readouterr()
+    for part in ("SyntheticFoldedPart1", "SyntheticFoldedPart2", "SyntheticFoldedPart3"):
+        assert part not in captured.out
+    assert 'INQTRIX_LLM_EXTRA_HEADERS: "***REDACTED***"' in captured.out
+    assert "INQTRIX_LOG_LEVEL: INFO" in captured.out
+
+
+def test_config_prints_nothing_when_its_output_is_not_yaml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Output that cannot be read cannot be redacted; nothing of it is printed."""
+    root, stack_env, secrets_env, _ = _project(tmp_path)
+    _install_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "FAKE_CONFIG_OUTPUT",
+        "services: [unclosed\n  INQTRIX_SESSION_SECRET: SyntheticUnreadableSecret\n",
+    )
+
+    assert main([*_arguments(root, stack_env, secrets_env), "config", "--redact"]) == 2
+    captured = capsys.readouterr()
+    assert "SyntheticUnreadableSecret" not in captured.out
+    assert "SyntheticUnreadableSecret" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
         "INQTRIX_SESSION_SECRET",
         "INQTRIX_PAT_PEPPER",
         "INQTRIX_PSEUDONYM_PEPPER",
@@ -1129,6 +1216,38 @@ def test_key_seed_is_forbidden_in_non_secret_config(
     error = capsys.readouterr().err
     assert "INQTRIX_EXAMPLE_KEY_SEED" in error
     assert key_seed not in error
+    assert _trace(trace) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "INQTRIX_LLM_EXTRA_HEADERS",
+        "INQTRIX_SEARCH_EXTRA_HEADERS",
+        "INQTRIX_EMBEDDING_EXTRA_HEADERS",
+        "INQTRIX_RERANKER_EXTRA_HEADERS",
+    ],
+)
+def test_extra_provider_headers_are_forbidden_in_non_secret_config(
+    name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The headers may carry a gateway key, so they belong in the secrets file.
+    root, stack_env, secrets_env, _ = _project(tmp_path)
+    trace = _install_fake_docker(tmp_path, monkeypatch)
+    gateway_key = "SyntheticGatewayKeyMustRemainPrivate"
+    stack_env.write_text(
+        stack_env.read_text(encoding="utf-8")
+        + f"{name}='{{\"Ocp-Apim-Subscription-Key\": \"{gateway_key}\"}}'\n",
+        encoding="utf-8",
+    )
+
+    assert main([*_arguments(root, stack_env, secrets_env), "status"]) == 2
+    error = capsys.readouterr().err
+    assert name in error
+    assert gateway_key not in error
     assert _trace(trace) == []
 
 
@@ -1520,3 +1639,40 @@ def test_secret_files_with_broad_permissions_are_rejected_before_compose(
 
     assert main([*_arguments(root, stack_env, secrets_env), "status"]) == 2
     assert _trace(trace) == []
+
+
+def test_config_redacts_the_bedrock_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The secret word sits inside the name, not at its end.
+    root, stack_env, secrets_env, _ = _project(tmp_path)
+    _install_fake_docker(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "FAKE_CONFIG_OUTPUT",
+        """
+services:
+  api:
+    environment:
+      AWS_BEARER_TOKEN_BEDROCK: 'SyntheticBedrockKey'
+""",
+    )
+
+    assert main([*_arguments(root, stack_env, secrets_env), "config", "--redact"]) == 0
+    captured = capsys.readouterr()
+    assert "SyntheticBedrockKey" not in captured.out
+    assert 'AWS_BEARER_TOKEN_BEDROCK: "***REDACTED***"' in captured.out
+
+
+def test_every_name_of_the_secrets_template_is_redacted() -> None:
+    """What belongs in the secrets file never shows in a redacted output."""
+    import re
+
+    from inqtrix.deploy.preflight import _SENSITIVE_NAME_RE
+
+    template = (Path(__file__).resolve().parents[1] / "deploy" / ".env.stack.secrets.example").read_text(encoding="utf-8")
+    names = sorted(set(re.findall(r"^#?\s*([A-Z][A-Z0-9_]+)=", template, re.M)))
+
+    assert len(names) > 30
+    assert [name for name in names if not _SENSITIVE_NAME_RE.search(name)] == []

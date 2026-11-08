@@ -9,26 +9,42 @@ functions, so the contract has exactly one implementation.
 
 from __future__ import annotations
 
+import functools
+import json
 import time
-from typing import Any, Mapping, Protocol
+from collections.abc import Callable, Coroutine
+from typing import Any, Mapping, Protocol, TypeVar
 
+from inqtrix import aio
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.runtime_logging import sanitize_event_payload
 from inqtrix.text import LOG_CUT_MARKER, shorten_visibly
+from inqtrix.harness.contracts.events import (
+    ACTIVITY_EVENT,
+    CHILD_PROGRESS_EVENT,
+    NARRATION_EVENT,
+    OUTCOME_EVENT,
+    PHASE_CHANGED_EVENT,
+    RUN_CANCELLED_EVENT,
+    RUN_CANCEL_REQUESTED_EVENT,
+    RUN_COMPLETED_EVENT,
+    RUN_FAILED_EVENT,
+    RUN_QUEUED_EVENT,
+    RUN_RESUMED_EVENT,
+    RUN_STARTED_EVENT,
+    RUN_WAITING_EVENT,
+    SNAPSHOT_EVENT,
+    TASK_FAILED_EVENT,
+    TASK_FINISHED_EVENT,
+    TASK_STARTED_EVENT,
+    TOOL_FINISHED_EVENT,
+)
 
-SNAPSHOT_EVENT = "inqtrix.run.snapshot"
-CHILD_PROGRESS_EVENT = "inqtrix.agent.child.progress"
-OUTCOME_EVENT = "inqtrix.agent.outcome"
-"""An agent run's outcome record: how its review ended and what stayed open;
-only a delegated mission's crosses to its parent, as numbers and its bounded
-summary sentence."""
-ANSWER_DRAFT_EVENT = "inqtrix.answer.draft"
-"""The answer a reviewed run shows while its review runs: the draft after its
-citation check, whole, once before the review starts. The published answer
-replaces it when it is ready; the draft keeps its own text."""
+
+_T = TypeVar("_T")
 
 # String form of the terminal lifecycle statuses. Single source of truth:
-# ``inqtrix.server.runs.TERMINAL_RUN_STATUSES`` derives its enum set from
+# ``inqtrix.runs.records.TERMINAL_RUN_STATUSES`` derives its enum set from
 # this value set (this module must stay import-free of the server layer).
 TERMINAL_RUN_STATUS_VALUES = frozenset({"completed", "failed", "cancelled"})
 
@@ -79,10 +95,6 @@ sequence of calls: a review reads up to its ceiling of calls, and each
 crossing locks and appends to the parent's record. The line moves in
 steps, never per call."""
 
-_CHILD_TOOL_FINISHED = "inqtrix.agent.tool.finished"
-"""A kernel tool call that settled — the one tool event that carries the
-server's call counter (its snapshot) and the call's own position."""
-
 
 def _call_ordinal(payload: Mapping[str, Any]) -> int | None:
     """The settled call's position in the child's sequence of calls, or
@@ -109,15 +121,15 @@ def _tool_calls_used(payload: Mapping[str, Any]) -> int | None:
 
 _CHILD_PROJECTED_EVENTS = frozenset(
     {
-        "inqtrix.run.queued",
-        "inqtrix.run.started",
-        "inqtrix.run.resumed",
-        "inqtrix.run.snapshot",
-        "inqtrix.run.cancel_requested",
-        "inqtrix.run.waiting",
-        "inqtrix.run.completed",
-        "inqtrix.run.failed",
-        "inqtrix.run.cancelled",
+        RUN_QUEUED_EVENT,
+        RUN_STARTED_EVENT,
+        RUN_RESUMED_EVENT,
+        SNAPSHOT_EVENT,
+        RUN_CANCEL_REQUESTED_EVENT,
+        RUN_WAITING_EVENT,
+        RUN_COMPLETED_EVENT,
+        RUN_FAILED_EVENT,
+        RUN_CANCELLED_EVENT,
         "inqtrix.node.started",
         "inqtrix.node.finished",
         "inqtrix.node.failed",
@@ -131,13 +143,13 @@ _CHILD_PROJECTED_EVENTS = frozenset(
         # parent saw ONLY lifecycle transitions — eleven events while a
         # whole mission with five research children ran beneath it, and
         # nothing at all about what was being worked on.
-        "inqtrix.agent.phase.changed",
-        "inqtrix.agent.task.started",
-        "inqtrix.agent.task.finished",
+        PHASE_CHANGED_EVENT,
+        TASK_STARTED_EVENT,
+        TASK_FINISHED_EVENT,
         # A failed task settles too. Without it the parent's line kept
         # the failed tasks "open" and read "2 Aufgaben parallel" while
         # the mission was already planning its next round.
-        "inqtrix.agent.task.failed",
+        TASK_FAILED_EVENT,
         # How the mission ended, as numbers and its bounded summary: its
         # reading lines and codes stay in the child's own record.
         OUTCOME_EVENT,
@@ -180,9 +192,9 @@ _CHILD_DECISION_DETAIL_CAP = 240
 #: Mission task events whose bounded identifiers cross to the parent.
 _CHILD_TASK_EVENTS = frozenset(
     {
-        "inqtrix.agent.task.started",
-        "inqtrix.agent.task.finished",
-        "inqtrix.agent.task.failed",
+        TASK_STARTED_EVENT,
+        TASK_FINISHED_EVENT,
+        TASK_FAILED_EVENT,
     }
 )
 
@@ -272,17 +284,6 @@ def access_permits_edit(access: Mapping[str, Any] | None) -> bool:
 
 
 QUESTION_COLUMN_LIMIT = 500
-
-
-def incognito_request(request_payload: Mapping[str, Any] | None) -> bool:
-    """Whether a persisted run request is an incognito knowledge ask.
-
-    The run service marks it in the replay body. Both run stores index the
-    mark for their retention sweep, and the execution span withholds the
-    run's content by it, in whichever process executes the run.
-    """
-    body = (request_payload or {}).get("body")
-    return isinstance(body, Mapping) and body.get("incognito") is True
 
 
 def clipped_question(question: str) -> str:
@@ -430,6 +431,45 @@ def build_run_summary(
     }
 
 
+ADMIN_CANCEL_REASON = "cancelled_by_admin"
+"""The reason a run's cancel carries when an instance admin ended it because
+this server cannot run its binding; its active children say
+``parent_cancelled``."""
+
+BINDING_ASKED_STATUS = "cancel_requested"
+"""How the operator list of run bindings counts a running run whose cancel is
+already requested: apart from the runs an admin cancel still ends, so it is not
+offered, asked or audited a second time."""
+
+
+def binding_overview_payload(
+    counts: Mapping[tuple[str, str, int], int],
+    listed: list[tuple[str, str, str, int]],
+    *,
+    total: int,
+) -> dict[str, Any]:
+    """The operator list of run bindings in the shape both stores return.
+
+    Args:
+        counts: Open runs per ``(mode, status, workflow_contract)``.
+        listed: The named runs as ``(run_id, mode, status, workflow_contract)``,
+            already ordered and cut to the limit.
+        total: How many runs matched before the cut.
+    """
+    return {
+        "counts": [
+            {"mode": mode, "status": status, "workflow_contract": contract, "runs": runs}
+            for (mode, status, contract), runs in sorted(counts.items())
+        ],
+        "runs": [
+            {"run_id": run_id, "mode": mode, "status": status, "workflow_contract": contract}
+            for run_id, mode, status, contract in listed
+        ],
+        "runs_total": total,
+        "truncated": total > len(listed),
+    }
+
+
 def run_elapsed_seconds(
     record: RunRecordView,
     *,
@@ -551,13 +591,13 @@ def build_child_progress_payload(
                 projected[key] = clean[key]
         if clean.get("task_id"):
             projected["child_task_id"] = str(clean["task_id"])
-    if event_type == _CHILD_TOOL_FINISHED:
+    if event_type == TOOL_FINISHED_EVENT:
         # A kernel role child's step: the tool's name and the server's
         # counter, nothing else — its arguments and its result name the
         # material the role reads, and stay with the child.
         projected["tool"] = str(clean.get("tool") or "")
         projected["tool_calls"] = _tool_calls_used(clean)
-    if event_type == "inqtrix.agent.activity":
+    if event_type == ACTIVITY_EVENT:
         # The search a mission task runs right now: operation, bracket
         # status, the query (text-capped under its own key), and the
         # counter. `purpose`/`detail` duplicate the query or the task
@@ -601,7 +641,7 @@ def build_child_progress_payload(
                 }
                 for group in ("by_code", "by_kind")
             }
-    if event_type == "inqtrix.agent.narration":
+    if event_type == NARRATION_EVENT:
         # Already excerpt-capped by the narration schema on entry.
         for key in ("narration_id", "kind", "text"):
             if clean.get(key) is not None:
@@ -703,14 +743,14 @@ def should_project_child_event(
     bracket carries ``scope="run"`` and stays; ``agent.narration``
     crosses only for the derived synthesis lines, never for model prose.
     """
-    if event_type == _CHILD_TOOL_FINISHED:
+    if event_type == TOOL_FINISHED_EVENT:
         if not work_profile or payload is None or payload.get("result_call"):
             return False
         ordinal = _call_ordinal(payload)
         return ordinal is not None and (
             ordinal == 1 or ordinal % CHILD_TOOL_PROGRESS_EVERY == 0
         )
-    if event_type == "inqtrix.agent.activity":
+    if event_type == ACTIVITY_EVENT:
         if payload is None:
             return False
         if payload.get("kind") in _CHILD_DECISION_KINDS:
@@ -719,7 +759,7 @@ def should_project_child_event(
             payload.get("scope") == "task"
             and payload.get("operation") in _CHILD_ACTIVITY_OPERATIONS
         )
-    if event_type == "inqtrix.agent.narration":
+    if event_type == NARRATION_EVENT:
         return payload is not None and payload.get("kind") in _CHILD_NARRATION_KINDS
     return event_type in _CHILD_PROJECTED_EVENTS
 
@@ -766,3 +806,70 @@ def expand_run_event(
             )
     events.append((event_type, clean_payload))
     return new_snapshot, events
+
+
+def format_sse_event(event: dict[str, Any]) -> str:
+    """Render one run event as a Server-Sent Event frame."""
+    event_type = str(event.get("type") or "message")
+    data = json.dumps(event, ensure_ascii=False, default=str)
+    return f"event: {event_type}\ndata: {data}\n\n"
+
+
+def bridge_to_loop(method: Callable[..., Coroutine[Any, Any, _T]]) -> Callable[..., _T]:
+    """The name sync code on a thread uses for an async store operation."""
+
+    name = method.__name__
+
+    @functools.wraps(method)
+    def bridged(self: Any, *args: Any, **kwargs: Any) -> _T:
+        return self._call(getattr(self, name)(*args, **kwargs))
+
+    return bridged
+
+
+def inline_on_loop(method: Callable[..., _T]) -> Callable[..., Coroutine[Any, Any, _T]]:
+    """The name code on the loop uses for an operation of an in-memory store.
+
+    Such a store has no I/O of its own to wait for, so the operation simply runs here,
+    under its lock. Whoever holds that lock holds this loop too, so nothing holds it
+    across work that takes long.
+    """
+
+    name = method.__name__
+
+    @functools.wraps(method)
+    async def inline(self: Any, *args: Any, **kwargs: Any) -> _T:
+        return getattr(self, name)(*args, **kwargs)
+
+    return inline
+
+
+def on_transition_lane(method: Callable[..., _T]) -> Callable[..., Coroutine[Any, Any, _T]]:
+    """The name code on the loop uses for a memory operation that runs its caller's callback."""
+
+    name = method.__name__
+
+    @functools.wraps(method)
+    async def on_lane(self: Any, *args: Any, **kwargs: Any) -> _T:
+        return await aio.run_legacy_segment(
+            functools.partial(getattr(self, name), *args, **kwargs)
+        )
+
+    return on_lane
+
+
+def finish_inline(coro: Coroutine[Any, Any, _T]) -> _T:
+    """Run a coroutine of an in-memory store to its end right here, without a loop.
+
+    It has nothing to wait for, so it never suspends. It stays on this thread and under
+    this thread's lock; a hop to the loop would have to wait for that same lock.
+
+    Raises:
+        RuntimeError: The coroutine suspended after all, which only a loop could serve.
+    """
+    try:
+        coro.send(None)
+    except StopIteration as finished:
+        return finished.value
+    coro.close()
+    raise RuntimeError("a coroutine of an in-memory store suspended; only a loop can serve that")

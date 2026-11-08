@@ -11,7 +11,7 @@ import {
   collaborationE2EConfiguration,
   type CollaborationTransport,
 } from './config.ts'
-import { writeScenarioResultFile } from './scenario-result-file.ts'
+import { writeScenarioSidecar } from '../tests/verification/fixtures/scenario-sidecar.mjs'
 import {
   COLLABORATION_BROWSER_TARGETS,
   collaborationScenarioForTags,
@@ -123,7 +123,7 @@ export default class CollaborationScenarioReporter implements Reporter {
     const scenarios = evaluations
       .filter((scenario) => scenario.attempted)
       .map(({ attempted: _attempted, ...scenario }) => scenario)
-    await writeScenarioResultFile(scenarios, this.environment)
+    await writeScenarioSidecar(scenarios, this.environment)
     if (
       failures.length === 0
       && evaluations.every((scenario) => scenario.status === 'passed')

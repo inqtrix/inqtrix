@@ -151,5 +151,12 @@ export async function eraseTemporaryUser(
       await sleep(ERASURE_POLL_MS)
     }
   }
+  // Neither a 404 nor a finished operation proves that the account is gone.
+  const listing = await fetchActorJson(adminActor, 'GET', '/v1/admin/users')
+  assertFixture(
+    Array.isArray(listing?.users)
+      && !listing.users.some((candidate) => candidate.id === user.id),
+    'Temporary account is still listed after its erasure.',
+  )
   await lifecycle.complete(user.cleanupHandle)
 }

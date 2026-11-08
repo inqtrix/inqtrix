@@ -111,7 +111,7 @@ def build_session_context(
         run_store: The run store port (sync surface).
         control: The agent control store (async surface).
         run_async: Bridge that executes a coroutine from this sync worker
-            thread (the algorithm passes its ``_run_async``).
+            thread (the algorithm passes ``aio.call_from_thread``).
         visible_to: The owner's resolved visibility — the context
             can only ever contain what the OWNER may see.
         current_run_id: Excluded (the turn being answered).

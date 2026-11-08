@@ -26,8 +26,9 @@ therefore stays untracked operator data that each operator regenerates from
 their own runs.
 
 Plain-text and structured captures retain the response format and size the
-pipeline parses. Tool-calling operations are reported as non-replayable: a
-terminal acknowledgement cannot stand in for the preceding tool work. Search
+pipeline parses. A tool-calling operation also keeps its conversations: the
+model turns of one run and purpose in order, tool calls included, so a replay
+does the tool work the recorded run did instead of acknowledging it. Search
 result sets remain synthetic; their metadata and provenance differ across
 providers. These profiles measure resource use, not answer correctness.
 
@@ -48,7 +49,7 @@ from collections import defaultdict
 from typing import Any
 
 from inqtrix.observability import semconv
-from prompt_routing import ROUTING_VERSION, signature, system_prompt
+from prompt_routing import ROUTING_VERSION, assignment_of, signature, system_prompt, tier_of
 
 # Observation names that are structural rather than a provider call: the run
 # root and the HTTP entry span both wrap everything below them.
@@ -93,6 +94,32 @@ def _tool_response(output: Any) -> bool:
     return any(isinstance(entry, dict) and entry.get("tool_calls") for entry in entries)
 
 
+def _tool_calls(output: Any) -> list[dict]:
+    """Return the recorded tool calls as name and decoded arguments."""
+    calls: list[dict] = []
+    for entry in output if isinstance(output, list) else [output]:
+        if not isinstance(entry, dict):
+            continue
+        for call in entry.get("tool_calls") or []:
+            function = call.get("function") or {}
+            arguments = call.get("arguments", function.get("arguments"))
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {}
+            calls.append({"name": str(call.get("name") or function.get("name") or ""), "arguments": arguments or {}})
+    return calls
+
+
+def _first_user_text(payload: Any) -> str:
+    if isinstance(payload, list):
+        for message in payload:
+            if isinstance(message, dict) and message.get("role") == "user":
+                return str(message.get("content") or "")
+    return ""
+
+
 def _response_text(output: Any) -> str:
     """Return the assistant text carried by a captured observation output.
 
@@ -126,25 +153,28 @@ def _quantile(values: list[float], fraction: float) -> float:
 
 def collect(
     trace_dir: str,
-) -> tuple[dict[str, dict], dict[str, Any], dict[str, list[dict]], dict[str, list[str]]]:
+) -> tuple[dict[str, dict], dict[str, Any], dict[str, list[dict]], dict[str, list[str]], dict[str, list[dict]]]:
     """Aggregate provider-call samples per operation from every trace file.
 
-    Returns four artifacts: the operation table and a provenance record
+    Returns five artifacts: the operation table and a provenance record
     naming how many traces and samples it rests on, so a profile can never
     be mistaken for an authored guess; the captured responses keyed by the
-    same operation; and the routing signatures that map an incoming request
-    back to its operation.
+    same operation; the routing signatures that map an incoming request
+    back to its operation; and the recorded conversations of tool-calling
+    operations.
 
-    Only the first two are safe to keep under version control. Responses are
-    verbatim provider answers, and a signature is the opening of a system
-    instruction, which for agent work restates the user's own task.
+    Only the first two are safe to keep under version control. Responses and
+    conversations are verbatim provider answers, and a signature is the
+    opening of a system instruction, which for agent work restates the
+    user's own task.
     """
     samples: dict[str, list[tuple[float, int, int]]] = defaultdict(list)
     per_run_calls: dict[str, list[int]] = defaultdict(list)
     models: dict[str, set[str]] = defaultdict(set)
     responses: dict[str, list[dict]] = defaultdict(list)
     signatures: dict[str, set[str]] = defaultdict(set)
-    non_replayable: set[str] = set()
+    turns: dict[str, dict[str, list[tuple[str, dict]]]] = defaultdict(lambda: defaultdict(list))
+    tool_operations: set[str] = set()
     traces_read = 0
 
     for path in sorted(glob.glob(os.path.join(trace_dir, "*.json"))):
@@ -159,6 +189,13 @@ def collect(
             # The trace name carries the mode as ``run:<mode>``.
             mode = str(payload.get("name") or "run:unknown").split(":", 1)[-1]
         by_id = {o["id"]: o for o in observations if o.get("id")}
+        # One trace can hold several modes: a research child runs under its
+        # kernel parent's trace, and its calls are research calls.
+        run_modes = {
+            str(attributes.get(semconv.INQTRIX_RUN_ID)): str(attributes.get(semconv.INQTRIX_MODE))
+            for attributes in ((o.get("metadata") or {}).get("attributes") or {} for o in observations)
+            if attributes.get(semconv.INQTRIX_RUN_ID) and attributes.get(semconv.INQTRIX_MODE)
+        }
 
         counts: dict[str, int] = defaultdict(int)
         for observation in observations:
@@ -180,7 +217,8 @@ def collect(
             schema_name = str(attributes.get(semconv.INQTRIX_SCHEMA_NAME) or "")
             if channel == "llm" and schema_name:
                 node = f"{node}.{schema_name}"
-            key = f"{mode}.{node}.{channel}"
+            run_id = str(attributes.get(semconv.INQTRIX_RUN_ID) or "")
+            key = f"{run_modes.get(run_id, mode)}.{node}.{channel}"
             samples[key].append(
                 (
                     float(latency),
@@ -193,15 +231,29 @@ def collect(
             counts[key] += 1
             if channel == "llm":
                 fingerprint = signature(
-                    system_prompt(observation.get("input")), schema_name=schema_name
+                    system_prompt(observation.get("input"), schema_name=schema_name), schema_name=schema_name
                 )
                 if fingerprint:
                     signatures[key].add(fingerprint)
                 output = observation.get("output")
+                calls = _tool_calls(output)
                 if _tool_response(output):
-                    non_replayable.add(key)
-                    continue
+                    tool_operations.add(key)
                 text = _response_text(output)
+                turns[key][run_id or str(payload.get("id") or path)].append(
+                    (
+                        str(observation.get("startTime") or ""),
+                        {
+                            "user": _first_user_text(observation.get("input")),
+                            "content": text,
+                            "tool_calls": calls,
+                            "prompt_tokens": int(observation.get("promptTokens") or 0),
+                            "completion_tokens": int(observation.get("completionTokens") or 0),
+                        },
+                    )
+                )
+                if calls:
+                    continue
                 if text:
                     responses[key].append(
                         {
@@ -242,18 +294,54 @@ def collect(
         "traces_read": traces_read,
         "operations": len(operations),
         "provider_call_samples": total_samples,
-        "non_replayable_operations": sorted(non_replayable),
         "derived_from": (
-            "run trace export (GET /v1/admin/runs/{run_id}/trace/export)"
+            "run trace exports (GET /v1/admin/runs/{run_id}/trace/export) and, because "
+            "direct chats have no run, their traces in the same form"
         ),
     }
-    routing = {key: sorted(value) for key, value in sorted(signatures.items())}
-    for key in non_replayable:
-        # A pool with only the final acknowledgement would silently erase
-        # the preceding tool work. Retain its timings, but never route to it.
-        routing.pop(key, None)
-        responses.pop(key, None)
-    return operations, provenance, responses, routing
+    conversations: dict[str, list[dict]] = {}
+    for key in tool_operations:
+        conversations[key] = []
+        for _, rows in sorted(turns[key].items()):
+            ordered = [turn for _, turn in sorted(rows, key=lambda row: row[0])]
+            conversations[key].append({
+                "assignment": assignment_of(ordered[0]["user"])[:200],
+                "tier": tier_of(ordered[0]["user"]),
+                "turns": [{k: v for k, v in turn.items() if k != "user"} for turn in ordered],
+            })
+    # One identity under several keys is one response contract when a schema
+    # names it, when only the mode differs (a mission's review and a kernel's
+    # review ask the same question) or when all are tool conversations, which a
+    # replay tells apart by the tools a request offers. Left apart they would be
+    # ambiguous and stay unmatched. Anything else stays ambiguous and is reported.
+    owners: dict[str, list[str]] = defaultdict(list)
+    for key, values in signatures.items():
+        for value in values:
+            owners[value].append(key)
+    merged = 0
+    for value, keys in sorted(owners.items()):
+        if len(keys) < 2:
+            continue
+        same_contract = (
+            bool(json.loads(value)[0])
+            or len({key.split(".", 1)[1] for key in keys}) == 1
+            or all(key in conversations for key in keys)
+        )
+        if not same_contract:
+            continue
+        keep = max(sorted(keys), key=lambda key: len(samples[key]))
+        for key in keys:
+            if key == keep:
+                continue
+            merged += 1
+            signatures[key].discard(value)
+            responses[keep].extend(responses.pop(key, []))
+            if key in conversations:
+                conversations.setdefault(keep, []).extend(conversations.pop(key))
+    provenance["merged_signatures"] = merged
+    provenance["conversation_operations"] = sorted(conversations)
+    routing = {key: sorted(value) for key, value in sorted(signatures.items()) if value}
+    return operations, provenance, dict(responses), routing, conversations
 
 
 def main() -> int:
@@ -275,7 +363,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    operations, provenance, responses, routing = collect(args.trace_dir)
+    operations, provenance, responses, routing, conversations = collect(args.trace_dir)
     if not operations:
         print(f"No provider calls found in {args.trace_dir!r}.")
         return 1
@@ -310,6 +398,13 @@ def main() -> int:
             json.dump(entries, handle, ensure_ascii=False)
         manifest[key] = len(entries)
         corpus_bytes += os.path.getsize(path)
+    conversation_counts: dict[str, int] = {}
+    for key, entries in sorted(conversations.items()):
+        path = os.path.join(args.corpus, f"{key}.conversations.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(entries, handle, ensure_ascii=False)
+        conversation_counts[key] = len(entries)
+        corpus_bytes += os.path.getsize(path)
     with open(
         os.path.join(args.corpus, "manifest.json"), "w", encoding="utf-8"
     ) as handle:
@@ -318,6 +413,7 @@ def main() -> int:
                 "routing_version": ROUTING_VERSION,
                 "provenance": provenance,
                 "responses_per_operation": manifest,
+                "conversations_per_operation": conversation_counts,
                 "routing_signatures": routing,
             },
             handle,
@@ -333,7 +429,8 @@ def main() -> int:
         for key in missing:
             print(f"  {key}")
     print(
-        f"{sum(manifest.values())} captured responses "
+        f"{sum(manifest.values())} captured responses and "
+        f"{sum(conversation_counts.values())} conversations "
         f"({corpus_bytes / 1024:.0f} KiB) -> {args.corpus}"
     )
     return 0

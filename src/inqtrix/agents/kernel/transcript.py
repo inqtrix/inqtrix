@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import logging
 
+from typing import Any
+
 from inqtrix.agents.context_archive import text_hash
+from inqtrix.agents.kernel.chat_bridge import PROVIDER_STATE_KWARG
 from inqtrix.agents.kernel.deps import run_coro
 from inqtrix.exceptions import AgentContextArchiveError
 
@@ -14,6 +17,22 @@ from inqtrix.agents.context_sources import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def public_message_dump(message: Any) -> dict[str, Any]:
+    """One message as JSON for a transcript or an archive, without the provider's state.
+
+    The provider's state (Claude's thinking blocks) belongs to the next model call
+    only; a transcript or an archive that kept it would hand it to readers and
+    summaries.
+    """
+    data = message.model_dump(mode="json")
+    kwargs = data.get("additional_kwargs")
+    if isinstance(kwargs, dict) and PROVIDER_STATE_KWARG in kwargs:
+        data["additional_kwargs"] = {
+            key: value for key, value in kwargs.items() if key != PROVIDER_STATE_KWARG
+        }
+    return data
 
 MATERIAL_TOOLS = frozenset({
     "read_project_document", "search_project_knowledge", "cite_document_passages",
@@ -88,7 +107,7 @@ def archive_checkpoint(deps, state, request, *, required: bool = True) -> str:
         if not messages:
             return ""
         encoded = [
-            message.model_dump(mode="json") if hasattr(message, "model_dump")
+            public_message_dump(message) if hasattr(message, "model_dump")
             else dict(message) if isinstance(message, dict)
             else (_ for _ in ()).throw(TypeError("Unsupported checkpoint message."))
             for message in messages
@@ -99,7 +118,6 @@ def archive_checkpoint(deps, state, request, *, required: bool = True) -> str:
             "coverage": "checkpoint_messages",
             "messages": encoded,
             "todos": values.get("todos") or [],
-            "context_projections": values.get("kernel_context_projections") or {},
             "usage": values.get("kernel_usage") or {},
         }, ensure_ascii=False, sort_keys=True)
         descriptor = transcript_descriptor(deps, encoded, body, "checkpoint_json", checkpoint_id)

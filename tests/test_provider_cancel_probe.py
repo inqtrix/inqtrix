@@ -9,17 +9,15 @@ bound probe behave exactly as before (library-mode backwards compatibility).
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
 
 from inqtrix.exceptions import AgentCancelled
 from inqtrix.providers import base as provider_base
-from inqtrix.providers.base import (
-    _call_openai_chat_completion_with_retries,
-    _sleep_before_retry,
-    provider_cancel_scope,
-)
+from inqtrix.providers.attempts import _sleep_before_retry, call_with_retries, observe_retries
+from inqtrix.providers.base import provider_cancel_scope
 
 
 class _RetryableError(Exception):
@@ -29,14 +27,26 @@ class _RetryableError(Exception):
 
 
 def _call_with_retries(create, notices):
-    return _call_openai_chat_completion_with_retries(
-        provider_label="TestProvider",
-        model="test-model",
-        operation="test-operation",
-        deadline=time.monotonic() + 30,
-        create=create,
-        append_retry_notice=notices.append,
-    )
+    """One logical call through the one retry loop; its retries land in *notices*."""
+
+    async def send():
+        return create()
+
+    with observe_retries("model") as retries:
+        try:
+            return asyncio.run(
+                call_with_retries(
+                    send,
+                    provider_label="TestProvider",
+                    model="test-model",
+                    operation="test-operation",
+                    deadline=time.monotonic() + 30,
+                    outer_deadline=None,
+                    timeout_label="Test call",
+                )
+            )
+        finally:
+            notices.extend(retries.notices())
 
 
 def test_cancel_after_first_failure_skips_backoff():
@@ -98,7 +108,7 @@ def test_without_probe_retries_proceed_to_success(monkeypatch):
 def test_sleep_without_probe_clamps_to_deadline():
     """The sliced sleep keeps the exact deadline-clamp contract."""
     started = time.monotonic()
-    _sleep_before_retry(5.0, deadline=time.monotonic() + 0.2)
+    asyncio.run(_sleep_before_retry(5.0, time.monotonic() + 0.2))
     elapsed = time.monotonic() - started
 
     assert 0.1 <= elapsed < 1.0
@@ -116,7 +126,7 @@ def test_cancel_interrupts_backoff_sleep_promptly():
     started = time.monotonic()
     with provider_cancel_scope(probe):
         with pytest.raises(AgentCancelled):
-            _sleep_before_retry(10.0, deadline=time.monotonic() + 30)
+            asyncio.run(_sleep_before_retry(10.0, time.monotonic() + 30))
     elapsed = time.monotonic() - started
 
     # One 0.5s slice plus scheduling jitter, far below the 10s delay.

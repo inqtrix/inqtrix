@@ -11,23 +11,8 @@ from fastapi.responses import JSONResponse
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import InvalidCursor, decode_cursor
-from inqtrix.project.editor_collaboration_ports import (
-    CollaborationConflict,
-    CollaborationDocumentNotFound,
-    CollaborationInstanceFenced,
-    CollaborationLeaseInvalid,
-    CollaborationRateLimited,
-)
-from inqtrix.project.editor_ports import DocumentNotFound
-from inqtrix.services.collaboration_client import (
-    CollaborationNodeConflict,
-    CollaborationServiceUnavailable,
-)
-from inqtrix.services.editor_collaboration_service import (
-    CollaborationAuthenticationRequired,
-    CollaborationDocumentTooLarge,
-    CollaborationProtocolConflict,
-)
+from inqtrix.project.editor_collaboration_ports import CollaborationConflict
+from inqtrix.server.routers._collaboration_errors import collaboration_error_view
 from inqtrix.services.request_parsing import error_response
 
 if TYPE_CHECKING:
@@ -851,84 +836,8 @@ def _comment_anchor(value: Any) -> dict[str, Any]:
 
 
 def _public_error(exc: Exception):
-    if isinstance(exc, (DocumentNotFound, CollaborationDocumentNotFound)):
-        return error_response(404, "Document not found", "not_found")
-    if isinstance(exc, CollaborationAuthenticationRequired):
-        return error_response(
-            403,
-            "Live collaboration requires an active browser session.",
-            "forbidden",
-            reason="cookie_session_required",
-        )
-    if isinstance(exc, CollaborationDocumentTooLarge):
-        return error_response(
-            413,
-            "The document is too large for live collaboration.",
-            "invalid_request_error",
-            reason="document_too_large",
-        )
-    if isinstance(exc, CollaborationRateLimited):
-        return error_response(
-            429,
-            "Too many collaboration sessions or session requests.",
-            "rate_limit_error",
-            reason=exc.reason,
-        )
-    if isinstance(exc, CollaborationServiceUnavailable):
-        return error_response(
-            503,
-            "Live collaboration is currently unavailable.",
-            "service_unavailable",
-            reason="collaboration_unavailable",
-        )
-    if isinstance(
-        exc,
-        (
-            CollaborationConflict,
-            CollaborationProtocolConflict,
-            CollaborationNodeConflict,
-        ),
-    ):
-        reason = getattr(exc, "reason", str(exc))
-        current_sequence = getattr(exc, "current_sequence", None)
-        # Nur wo der Server einen konkreten Stand nennen kann, ist die
-        # Aussage "nicht mehr aktuell" wahr. Fuer jeden anderen Konflikt
-        # benennt die Meldung den Vorgang, ohne eine Ursache zu erfinden:
-        # eine falsche Begruendung schickt den Nutzer in eine Wiederholung,
-        # die nie gelingen kann, und verdeckt den echten Grund.
-        message = (
-            "The collaboration state is no longer current."
-            if current_sequence is not None
-            else f'The change was rejected (reason: {reason}).'
-        )
-        return error_response(
-            409,
-            message,
-            "conflict",
-            reason=reason,
-            current_sequence=current_sequence,
-        )
-    if isinstance(exc, CollaborationLeaseInvalid):
-        if exc.reason in {"access_revoked", "permission_denied"}:
-            return error_response(
-                403,
-                "Collaboration access was revoked.",
-                "forbidden",
-                reason=exc.reason,
-            )
-        return error_response(
-            401,
-            "The collaboration session is no longer valid.",
-            "authentication_error",
-            reason=exc.reason,
-        )
-    if isinstance(exc, CollaborationInstanceFenced):
-        return error_response(
-            503,
-            "Live collaboration is not ready.",
-            "service_unavailable",
-            reason=str(exc),
-        )
-    if isinstance(exc, ValueError):
-        return error_response(400, str(exc), "invalid_request_error")
-    return None
+    """Render the shared collaboration answer in the signed-in envelope."""
+    view = collaboration_error_view(exc)
+    if view is None:
+        return None
+    return error_response(view.status, view.message, view.error_type, **view.extra)

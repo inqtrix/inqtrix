@@ -8,7 +8,6 @@ membership, knowledge revisions, blob/quota state, and project metadata.
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import hashlib
 import logging
@@ -16,6 +15,7 @@ import uuid
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from inqtrix import aio
 from inqtrix.auth.lifecycle import AdminActor
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.content.ports import FileNotFound
@@ -29,10 +29,11 @@ from inqtrix.project.asset_records_ports import (
     AssetNotFound,
     AssetRecord,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.project.vector_index_ports import VectorIndexNotFound
 from inqtrix.quota.models import QuotaDimension, QuotaSubject, file_stock_key
 from inqtrix.runs.deletion_execution import operation_principal
+from inqtrix.runs.shared import finish_inline
 from inqtrix.runs.deletion_operations import (
     DeletionAttemptSuperseded,
     DeletionJobHandle,
@@ -44,8 +45,7 @@ from inqtrix.runs.deletion_operations import (
     SessionDeletionContext,
     VectorIndexDeletionContext,
 )
-from inqtrix.source_authority import SourceDeletionPermit, SourceScope
-from inqtrix.sync_bridge import run_coro_sync
+from inqtrix.storage.source_authority import SourceDeletionPermit, SourceScope
 from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
@@ -91,10 +91,9 @@ def _erasure_owner(actor: "LifecycleActor") -> uuid.UUID | None:
 class AssetDeletionService:
     """Start, inspect, retry, and execute aggregate file deletions.
 
-    Every async start and the async retry hand their registration to a
-    worker thread: registering can wait for locks other requests on the
-    same event loop hold, and the deletion store refuses a write on a
-    thread that runs a loop (``refuse_on_event_loop``).
+    Starting and retrying await the store on the loop: registering can wait for
+    locks other requests hold, and their transactions need the loop to commit.
+    The attempt itself stays synchronous on the transition lane.
     """
 
     def __init__(
@@ -129,7 +128,7 @@ class AssetDeletionService:
         return self._operation_store
 
     def bind_quota_service(self, quota: "QuotaService | None") -> None:
-        """Attach the worker-owned loop-agnostic quota recorder."""
+        """Attach the worker-owned quota recorder."""
 
         self._quota = quota
 
@@ -196,8 +195,7 @@ class AssetDeletionService:
                 workspace_id=None,
             )
 
-        return await asyncio.to_thread(
-            self._operation_store.submit,
+        return await self._operation_store.asubmit(
             target_kind=DeletionTargetKind.USER,
             target_id=str(user_id),
             manifest=(),
@@ -223,7 +221,7 @@ class AssetDeletionService:
             workspace_id=None,
         )
 
-    def assert_upload_allowed(
+    async def assert_upload_allowed(
         self,
         asset_id: str,
         *,
@@ -233,7 +231,7 @@ class AssetDeletionService:
     ) -> None:
         """Reject resurrection of an id retained by a deletion receipt."""
 
-        operation = self._operation_store.find_for_asset(
+        operation = await self._operation_store.afind_for_asset(
             asset_id,
             tenant_id=principal.tenant_id,
             created_by_user_id=principal.user_id,
@@ -242,14 +240,14 @@ class AssetDeletionService:
         if operation is not None:
             raise DeletionOperationConflict(operation["operation_id"])
         if section_id is not None:
-            self.assert_target_allowed(
+            await self.assert_target_allowed(
                 DeletionTargetKind.SECTION,
                 section_id,
                 principal=principal,
                 workspace_id=workspace_id,
             )
 
-    def assert_target_allowed(
+    async def assert_target_allowed(
         self,
         target_kind: DeletionTargetKind,
         target_id: str,
@@ -259,7 +257,7 @@ class AssetDeletionService:
     ) -> None:
         """Reject recreation/mutation of a retained destructive target."""
 
-        operation = self._operation_store.find_for_target(
+        operation = await self._operation_store.afind_for_target(
             target_kind,
             target_id,
             tenant_id=principal.tenant_id,
@@ -286,8 +284,7 @@ class AssetDeletionService:
             # same stable source id.  Keep absence and invisibility
             # non-disclosing and do not create a receipt or tombstone.
             raise AssetNotFound(asset_id) from None
-        return await asyncio.to_thread(
-            self._start,
+        return await self._start(
             assets=(asset,),
             target_kind=DeletionTargetKind.ASSET,
             target_id=asset_id,
@@ -330,8 +327,7 @@ class AssetDeletionService:
                 if asset_id not in found_ids
             )
             raise AssetNotFound(missing_id)
-        return await asyncio.to_thread(
-            self._start,
+        return await self._start(
             assets=records,
             target_kind=DeletionTargetKind.BULK,
             target_id=(
@@ -356,8 +352,7 @@ class AssetDeletionService:
         records = tuple(
             await self._assets.assets_for_section(section_id, visible_to=visible_to)
         )
-        return await asyncio.to_thread(
-            self._start,
+        return await self._start(
             assets=records,
             target_kind=DeletionTargetKind.SECTION,
             target_id=section_id,
@@ -376,7 +371,7 @@ class AssetDeletionService:
     ) -> dict[str, Any]:
         """Delete only group metadata; member assets remain active and ungrouped."""
 
-        retained = self._operation_store.find_for_target(
+        retained = await self._operation_store.afind_for_target(
             DeletionTargetKind.GROUP,
             group_id,
             tenant_id=principal.tenant_id,
@@ -393,7 +388,7 @@ class AssetDeletionService:
         scope = ResourceScope.from_record(group)
 
         def _set_registered(_operation_id: str) -> None:
-            run_coro_sync(
+            aio.call_from_thread(
                 self._assets.store.tombstone_group_id(group_id, scope=scope)
             )
 
@@ -415,10 +410,9 @@ class AssetDeletionService:
             )
 
         def _delete_memory_group_at_terminal_commit() -> None:
-            run_coro_sync(self._assets.store.delete_group(group_id, scope=scope))
+            finish_inline(self._assets.store.delete_group(group_id, scope=scope))
 
-        return await asyncio.to_thread(
-            self._operation_store.submit,
+        return await self._operation_store.asubmit(
             target_kind=DeletionTargetKind.GROUP,
             target_id=group.id,
             manifest=(),
@@ -449,7 +443,7 @@ class AssetDeletionService:
         succeeds; a persisted binding always wins.
         """
 
-        retained = self._operation_store.find_for_target(
+        retained = await self._operation_store.afind_for_target(
             DeletionTargetKind.VECTOR_INDEX,
             index_id,
             tenant_id=principal.tenant_id,
@@ -492,7 +486,7 @@ class AssetDeletionService:
         scope = ResourceScope.from_record(index)
 
         def _set_registered(_operation_id: str) -> None:
-            run_coro_sync(
+            aio.call_from_thread(
                 self._vector_indexes.set_deletion_state(index.id, scope=scope)
             )
 
@@ -516,8 +510,7 @@ class AssetDeletionService:
                 session_context=record.session_context,
             )
 
-        return await asyncio.to_thread(
-            self._operation_store.submit,
+        return await self._operation_store.asubmit(
             target_kind=DeletionTargetKind.VECTOR_INDEX,
             target_id=index.id,
             manifest=(),
@@ -539,7 +532,7 @@ class AssetDeletionService:
     ) -> dict[str, Any]:
         """Start one owner-only collection deletion through the shared ledger."""
 
-        retained = self._operation_store.find_for_target(
+        retained = await self._operation_store.afind_for_target(
             DeletionTargetKind.KNOWLEDGE_COLLECTION,
             collection_id,
             tenant_id=principal.tenant_id,
@@ -559,8 +552,7 @@ class AssetDeletionService:
             collection_id=collection.id,
             embedding_model=collection.embedding_model,
         )
-        return await asyncio.to_thread(
-            self._start_knowledge,
+        return await self._start_knowledge(
             context=context,
             principal=principal,
             visible_to=visible_to,
@@ -575,7 +567,7 @@ class AssetDeletionService:
     ) -> dict[str, Any]:
         """Start one edit-authorized document deletion through the shared ledger."""
 
-        retained = self._operation_store.find_for_target(
+        retained = await self._operation_store.afind_for_target(
             DeletionTargetKind.KNOWLEDGE_DOCUMENT,
             document_id,
             tenant_id=principal.tenant_id,
@@ -596,8 +588,7 @@ class AssetDeletionService:
             document_id=document.id,
             embedding_model=collection.embedding_model,
         )
-        return await asyncio.to_thread(
-            self._start_knowledge,
+        return await self._start_knowledge(
             context=context,
             principal=principal,
             visible_to=visible_to,
@@ -615,7 +606,7 @@ class AssetDeletionService:
 
         if self._agent_sessions is None:
             raise RuntimeError("agent-session deletion is not wired")
-        retained = self._operation_store.find_for_target(
+        retained = await self._operation_store.afind_for_target(
             DeletionTargetKind.AGENT_SESSION,
             session_id,
             tenant_id=principal.tenant_id,
@@ -629,8 +620,7 @@ class AssetDeletionService:
             visible_to=visible_to,
             request_workspace_id=workspace_id,
         )
-        return await asyncio.to_thread(
-            self._start_session,
+        return await self._start_session(
             context=SessionDeletionContext(
                 target_kind=DeletionTargetKind.AGENT_SESSION,
                 session_id=session.id,
@@ -652,7 +642,7 @@ class AssetDeletionService:
 
         if self._knowledge_sessions is None:
             raise RuntimeError("knowledge-session deletion is not wired")
-        retained = self._operation_store.find_for_target(
+        retained = await self._operation_store.afind_for_target(
             DeletionTargetKind.KNOWLEDGE_SESSION,
             session_id,
             tenant_id=principal.tenant_id,
@@ -666,8 +656,7 @@ class AssetDeletionService:
             visible_to=visible_to,
             request_workspace_id=workspace_id,
         )
-        return await asyncio.to_thread(
-            self._start_session,
+        return await self._start_session(
             context=SessionDeletionContext(
                 target_kind=DeletionTargetKind.KNOWLEDGE_SESSION,
                 session_id=session.id,
@@ -706,8 +695,7 @@ class AssetDeletionService:
                 workspace_id=workspace_id,
             )
 
-        return await asyncio.to_thread(
-            self._operation_store.submit,
+        return await self._operation_store.asubmit(
             target_kind=DeletionTargetKind.SOURCE,
             target_id=source_id,
             manifest=(),
@@ -718,7 +706,7 @@ class AssetDeletionService:
             total_items=2,
         )
 
-    def _start_session(
+    async def _start_session(
         self,
         *,
         context: SessionDeletionContext,
@@ -736,7 +724,7 @@ class AssetDeletionService:
             raise RuntimeError("session deletion service is not wired")
 
         def _set_registered(operation_id: str) -> None:
-            run_coro_sync(
+            aio.call_from_thread(
                 session_service.mark_deletion_state(
                     session,
                     lifecycle_status="deleting",
@@ -766,7 +754,7 @@ class AssetDeletionService:
                 session_context=record.session_context,
             )
 
-        return self._operation_store.submit(
+        return await self._operation_store.asubmit(
             target_kind=context.target_kind,
             target_id=context.session_id,
             manifest=(),
@@ -779,7 +767,7 @@ class AssetDeletionService:
             total_items=2,
         )
 
-    def _start_knowledge(
+    async def _start_knowledge(
         self,
         *,
         context: KnowledgeDeletionContext,
@@ -792,7 +780,7 @@ class AssetDeletionService:
 
         def _set_registered(_operation_id: str) -> None:
             if context.document_id and self._knowledge is not None:
-                run_coro_sync(
+                aio.call_from_thread(
                     self._knowledge.mark_document_deleting_for_aggregate(
                         context.document_id
                     )
@@ -817,7 +805,7 @@ class AssetDeletionService:
                 knowledge_context=record.knowledge_context,
             )
 
-        return self._operation_store.submit(
+        return await self._operation_store.asubmit(
             target_kind=context.target_kind,
             target_id=target_id,
             manifest=(),
@@ -830,21 +818,21 @@ class AssetDeletionService:
             total_items=3,
         )
 
-    def get(
+    async def get(
         self,
         operation_id: str,
         *,
         principal: Principal,
         workspace_id: str | None,
     ) -> dict[str, Any]:
-        return self._operation_store.get(
+        return await self._operation_store.aget(
             operation_id,
             tenant_id=principal.tenant_id,
             created_by_user_id=principal.user_id,
             workspace_id=workspace_id,
         )
 
-    def list_operations(
+    async def list_operations(
         self,
         *,
         principal: Principal,
@@ -852,7 +840,7 @@ class AssetDeletionService:
         limit: int,
         after: tuple[float, str] | None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        return self._operation_store.list_operations(
+        return await self._operation_store.alist_operations(
             tenant_id=principal.tenant_id,
             created_by_user_id=principal.user_id,
             workspace_id=workspace_id,
@@ -867,22 +855,8 @@ class AssetDeletionService:
         principal: Principal,
         workspace_id: str | None,
     ) -> dict[str, Any]:
-        """Reopen a failed deletion; the reopening runs on a worker thread."""
-        return await asyncio.to_thread(
-            self._retry,
-            operation_id,
-            principal=principal,
-            workspace_id=workspace_id,
-        )
-
-    def _retry(
-        self,
-        operation_id: str,
-        *,
-        principal: Principal,
-        workspace_id: str | None,
-    ) -> dict[str, Any]:
-        record = self._operation_store.get_record(
+        """Reopen a failed deletion."""
+        record = await self._operation_store.aget_record(
             operation_id,
             tenant_id=principal.tenant_id,
             created_by_user_id=principal.user_id,
@@ -919,13 +893,13 @@ class AssetDeletionService:
                 and context.document_id is not None
                 and self._knowledge is not None
             ):
-                run_coro_sync(
+                aio.call_from_thread(
                     self._knowledge.mark_document_deleting_for_aggregate(
                         context.document_id
                     )
                 )
 
-        return self._operation_store.retry(
+        return await self._operation_store.aretry(
             operation_id,
             tenant_id=principal.tenant_id,
             created_by_user_id=principal.user_id,
@@ -934,7 +908,7 @@ class AssetDeletionService:
             before_dispatch=_restore_document_tombstone,
         )
 
-    def _start(
+    async def _start(
         self,
         *,
         assets: tuple[AssetRecord, ...],
@@ -949,7 +923,7 @@ class AssetDeletionService:
                 raise AssetNotFound(asset.id)
             if asset.lifecycle_status in {"deleting", "delete_failed"}:
                 if len(assets) == 1 and asset.deletion_operation_id:
-                    return self.get(
+                    return await self.get(
                         asset.deletion_operation_id,
                         principal=principal,
                         workspace_id=workspace_id,
@@ -967,7 +941,7 @@ class AssetDeletionService:
             )
             for asset in assets
         )
-        return self._start_manifest(
+        return await self._start_manifest(
             manifest=manifest,
             target_kind=target_kind,
             target_id=target_id,
@@ -976,7 +950,7 @@ class AssetDeletionService:
             workspace_id=workspace_id,
         )
 
-    def _start_manifest(
+    async def _start_manifest(
         self,
         *,
         manifest: tuple[DeletionManifestItem, ...],
@@ -999,7 +973,7 @@ class AssetDeletionService:
             refreshed: list[DeletionManifestItem] = []
             for item in manifest:
                 try:
-                    asset = run_coro_sync(
+                    asset = finish_inline(
                         self._assets.get_asset(
                             item.asset_id,
                             visible_to=visible_to,
@@ -1063,7 +1037,7 @@ class AssetDeletionService:
 
         def _set_registered(operation_id: str) -> None:
             if target_kind == DeletionTargetKind.SECTION:
-                run_coro_sync(
+                aio.call_from_thread(
                     self._assets.store.tombstone_section_id(
                         target_id,
                         scope=scope,
@@ -1071,7 +1045,7 @@ class AssetDeletionService:
                 )
             for item in effective_manifest:
                 try:
-                    run_coro_sync(
+                    aio.call_from_thread(
                         self._assets.store.set_asset_deletion_state(
                             item.asset_id,
                             scope=scope,
@@ -1082,7 +1056,7 @@ class AssetDeletionService:
                         )
                     )
                 except AssetNotFound:
-                    run_coro_sync(
+                    aio.call_from_thread(
                         self._assets.store.tombstone_asset_id(
                             item.asset_id,
                             scope=scope,
@@ -1123,7 +1097,7 @@ class AssetDeletionService:
                 knowledge_context=record.knowledge_context,
             )
 
-        return self._operation_store.submit(
+        return await self._operation_store.asubmit(
             target_kind=target_kind,
             target_id=target_id,
             manifest=manifest,
@@ -1296,7 +1270,7 @@ class AssetDeletionService:
             if self._vector_indexes is not None:
                 for item in manifest:
                     handle.assert_current()
-                    run_coro_sync(
+                    aio.call_from_thread(
                         self._vector_indexes.remove_asset_memberships(
                             item.asset_id, scope=scope
                         )
@@ -1343,7 +1317,7 @@ class AssetDeletionService:
             # blob so a bad historical binding cannot produce partial damage.
             manifest_ids = {item.asset_id for item in manifest}
             for server_file_id in file_groups:
-                references = run_coro_sync(
+                references = aio.call_from_thread(
                     self._assets.list_assets_by_server_file_id(server_file_id)
                 )
                 unexpected = [
@@ -1374,7 +1348,7 @@ class AssetDeletionService:
                 for item in items:
                     handle.assert_current()
                     try:
-                        run_coro_sync(
+                        aio.call_from_thread(
                             self._assets.store.detach_server_file_for_deletion(
                                 item.asset_id,
                                 scope=scope,
@@ -1387,7 +1361,7 @@ class AssetDeletionService:
                         # external residuals were already clear. The immutable
                         # manifest remains sufficient to finish idempotently.
                         pass
-                remaining_references = run_coro_sync(
+                remaining_references = aio.call_from_thread(
                     self._assets.list_assets_by_server_file_id(server_file_id)
                 )
                 if remaining_references:
@@ -1397,11 +1371,11 @@ class AssetDeletionService:
                     )
                 handle.assert_current()
                 try:
-                    deleted = run_coro_sync(
+                    deleted = aio.call_from_thread(
                         self._files.delete(server_file_id, principal=principal)
                     )
                 except FileNotFound:
-                    deleted = run_coro_sync(
+                    deleted = aio.call_from_thread(
                         self._files.discard_file_lifecycle(
                             server_file_id,
                             tenant_id=principal.tenant_id,
@@ -1464,7 +1438,7 @@ class AssetDeletionService:
             for item in manifest:
                 handle.assert_current()
                 try:
-                    run_coro_sync(
+                    aio.call_from_thread(
                         self._assets.store.delete_asset(item.asset_id, scope=scope)
                     )
                 except AssetNotFound:
@@ -1472,7 +1446,7 @@ class AssetDeletionService:
             if target_kind == DeletionTargetKind.SECTION:
                 handle.assert_current()
                 try:
-                    run_coro_sync(
+                    aio.call_from_thread(
                         self._assets.store.delete_section(target_id, scope=scope)
                     )
                 except Exception as exc:
@@ -1617,7 +1591,7 @@ class AssetDeletionService:
                 total_items=2,
             )
             handle.assert_current()
-            residuals = run_coro_sync(
+            residuals = aio.call_from_thread(
                 self._agent_sessions.deletion_residuals(
                     context.session_id,
                     tenant_id=principal.tenant_id,
@@ -1648,7 +1622,7 @@ class AssetDeletionService:
                 total_items=2,
             )
             handle.assert_current()
-            residuals = run_coro_sync(
+            residuals = aio.call_from_thread(
                 self._knowledge_sessions.deletion_residuals(
                     context.session_id,
                     tenant_id=principal.tenant_id,
@@ -1695,7 +1669,7 @@ class AssetDeletionService:
         backing_collection_exists = bool(context.server_collection_id)
         if context.server_collection_id and self._knowledge is not None:
             try:
-                run_coro_sync(
+                aio.call_from_thread(
                     self._knowledge.knowledge.store.get_collection(
                         context.server_collection_id
                     )
@@ -1705,7 +1679,7 @@ class AssetDeletionService:
         try:
             handle.assert_current()
             try:
-                run_coro_sync(
+                aio.call_from_thread(
                     self._vector_indexes.set_deletion_state(
                         context.index_id,
                         scope=scope,
@@ -1742,13 +1716,13 @@ class AssetDeletionService:
 
             handle.assert_current()
             if context.server_collection_id and self._knowledge is not None:
-                run_coro_sync(
+                aio.call_from_thread(
                     self._knowledge.delete_collection_for_aggregate(
                         context.server_collection_id,
                         visible_to=visible_to,
                     )
                 )
-                residuals = run_coro_sync(
+                residuals = aio.call_from_thread(
                     self._knowledge.collection_residuals(
                         context.server_collection_id,
                         embedding_model=context.embedding_model,
@@ -1765,7 +1739,7 @@ class AssetDeletionService:
             )
 
             handle.assert_current()
-            run_coro_sync(
+            aio.call_from_thread(
                 self._vector_indexes.delete_index_idempotent(
                     context.index_id,
                     scope=scope,
@@ -1776,7 +1750,7 @@ class AssetDeletionService:
                 completed_items=4,
                 total_items=4,
             )
-            if run_coro_sync(
+            if aio.call_from_thread(
                 self._vector_indexes.count_index(context.index_id, scope=scope)
             ):
                 raise RuntimeError("vector-index record remained after deletion")
@@ -1797,7 +1771,7 @@ class AssetDeletionService:
         except Exception as exc:
             message = sanitize_error(exc)
             try:
-                run_coro_sync(
+                aio.call_from_thread(
                     self._vector_indexes.set_deletion_state(
                         context.index_id,
                         scope=scope,
@@ -1837,7 +1811,7 @@ class AssetDeletionService:
             handle.assert_current()
             if record.completed_items == 0:
                 try:
-                    run_coro_sync(
+                    aio.call_from_thread(
                         self._knowledge.authorize_knowledge_deletion(
                             context,
                             visible_to=visible_to,
@@ -1848,7 +1822,7 @@ class AssetDeletionService:
                     # no longer authorize the first destructive step, restore
                     # that preflight-only tombstone before publishing failure.
                     if context.document_id:
-                        run_coro_sync(
+                        aio.call_from_thread(
                             self._knowledge.restore_document_after_deletion_preflight(
                                 context.document_id
                             )
@@ -1895,13 +1869,13 @@ class AssetDeletionService:
 
             handle.assert_current()
             if context.target_kind == DeletionTargetKind.KNOWLEDGE_COLLECTION:
-                run_coro_sync(
+                aio.call_from_thread(
                     self._knowledge.delete_collection_for_aggregate(
                         context.collection_id,
                         visible_to=visible_to,
                     )
                 )
-                residuals = run_coro_sync(
+                residuals = aio.call_from_thread(
                     self._knowledge.collection_residuals(
                         context.collection_id,
                         embedding_model=context.embedding_model,
@@ -1910,13 +1884,13 @@ class AssetDeletionService:
             else:
                 if context.document_id is None:
                     raise RuntimeError("knowledge-document deletion has no document id")
-                run_coro_sync(
+                aio.call_from_thread(
                     self._knowledge.delete_document_for_aggregate(
                         context.document_id,
                         visible_to=visible_to,
                     )
                 )
-                residuals = run_coro_sync(
+                residuals = aio.call_from_thread(
                     self._knowledge.document_residuals(
                         context.document_id,
                         embedding_model=context.embedding_model,
@@ -1976,7 +1950,7 @@ class AssetDeletionService:
             return
         for item in manifest:
             try:
-                run_coro_sync(
+                aio.call_from_thread(
                     self._assets.store.set_asset_deletion_state(
                         item.asset_id,
                         scope=scope,
@@ -2001,7 +1975,7 @@ class AssetDeletionService:
     ) -> None:
         for item in manifest:
             try:
-                run_coro_sync(
+                aio.call_from_thread(
                     self._assets.store.set_asset_deletion_state(
                         item.asset_id,
                         scope=scope,
@@ -2024,7 +1998,7 @@ class AssetDeletionService:
     ) -> None:
         if self._knowledge is None:
             return
-        run_coro_sync(
+        aio.call_from_thread(
             self._knowledge.mark_source_deleting(
                 source_id,
                 visible_to=visible_to,
@@ -2041,7 +2015,7 @@ class AssetDeletionService:
     ) -> SourceCleanupPlan:
         if self._knowledge is None:
             raise KnowledgeDeletionDependencyUnavailable()
-        return run_coro_sync(
+        return aio.call_from_thread(
             self._knowledge.prepare_source_cleanup(
                 source_id,
                 deletion_permit=deletion_permit,
@@ -2060,7 +2034,7 @@ class AssetDeletionService:
         if self._knowledge is None:
             self._require_knowledge_cleanup_dependency(cleanup_plan)
             return
-        run_coro_sync(
+        aio.call_from_thread(
             self._knowledge.delete_source(
                 source_id,
                 visible_to=visible_to,
@@ -2082,7 +2056,7 @@ class AssetDeletionService:
             self._require_knowledge_cleanup_dependency(cleanup_plan)
             return 0
         return int(
-            run_coro_sync(
+            aio.call_from_thread(
                 self._knowledge.count_source_residuals(
                     source_id,
                     principal=(visible_to.principal if visible_to else None),
@@ -2137,7 +2111,7 @@ class AssetDeletionService:
         if self._knowledge is not None or self._vector_indexes is None:
             return False
         return not bool(
-            run_coro_sync(
+            aio.call_from_thread(
                 self._vector_indexes.count_asset_memberships(
                     asset_id,
                     scope=scope,
@@ -2157,7 +2131,7 @@ class AssetDeletionService:
         residuals: list[str] = []
         for item in manifest:
             if self._vector_indexes is not None:
-                count = run_coro_sync(
+                count = aio.call_from_thread(
                     self._vector_indexes.count_asset_memberships(
                         item.asset_id, scope=scope
                     )
@@ -2174,7 +2148,7 @@ class AssetDeletionService:
             if knowledge_count:
                 residuals.append(f"{item.asset_id}:knowledge_records={knowledge_count}")
             if item.server_file_id and self._files is not None:
-                registry_exists, object_exists = run_coro_sync(
+                registry_exists, object_exists = aio.call_from_thread(
                     self._files.file_lifecycle_residuals(
                         item.server_file_id,
                         tenant_id=principal.tenant_id,
@@ -2212,7 +2186,7 @@ class AssetDeletionService:
         residuals: list[str] = []
         for item in manifest:
             try:
-                run_coro_sync(self._assets.store.get_asset(item.asset_id))
+                aio.call_from_thread(self._assets.store.get_asset(item.asset_id))
             except AssetNotFound:
                 continue
             residuals.append(item.asset_id)

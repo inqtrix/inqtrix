@@ -19,6 +19,9 @@ type DialogProps = {
   footer?: ReactNode
   onClose: () => void
   open: boolean
+  /** Where the focus goes when the dialog closes; by default the element
+   * focused when it opened. Name one when that element may be gone by then. */
+  returnFocusTarget?: HTMLElement | null
   title: ReactNode
 }
 
@@ -41,11 +44,12 @@ export function Dialog({
   footer,
   onClose,
   open,
+  returnFocusTarget,
   title,
 }: DialogProps) {
   const panelRef = React.useRef<HTMLDivElement>(null)
   const titleId = React.useId()
-  useModalFocusTrap({ dismissable, onClose, open, panelRef })
+  useModalFocusTrap({ dismissable, onClose, open, panelRef, returnFocusTarget })
 
   if (!open) return null
   return createPortal((

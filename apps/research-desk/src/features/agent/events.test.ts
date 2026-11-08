@@ -42,6 +42,21 @@ function event(
 }
 
 describe('applyAgentRunEvent', () => {
+  it('keeps the reason a cancelled run ended with', () => {
+    const ended = applyAgentRunEvent(
+      agentRunFromSummary(summary({ mode: 'agent_kernel' })),
+      event(1, 'inqtrix.run.cancelled', {
+        status: 'cancelled',
+        reason: 'workflow_contract_changed',
+        bound_contract: 1,
+        worker_contract: 2,
+      }),
+    )
+
+    expect(ended.status).toBe('cancelled')
+    expect(ended.cancelReason).toBe('workflow_contract_changed')
+  })
+
   it('retains the same typed model failure through SSE and stored run loading', () => {
     const error = { type: 'model_tool_arguments', message: 'Invalid provider arguments.' }
     const streamed = applyAgentRunEvent(

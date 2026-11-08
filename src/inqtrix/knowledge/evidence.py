@@ -20,37 +20,55 @@ class UnverifiedKnowledgeEvidence(ValueError):
     """A retrieval hit has no separately stored source evidence."""
 
 
-def source_excerpt_is_verified(
-    *,
-    canonical_text: str,
-    source_text: str,
-    source_start: int | None,
-    source_end: int | None,
-    document_content_hash: str | None,
-) -> bool:
-    """Verify an excerpt against the immutable canonical document bytes.
+class CanonicalBodies:
+    """Document bodies encoded and hashed once for every excerpt checked against them.
 
     Character offsets are insufficient here because chunk provenance is stored
-    as UTF-8 byte offsets.  The hash prevents a valid span from a previous
-    revision being accepted against a later document body; the exact byte
-    slice prevents repeated boilerplate from being attributed to the wrong
-    occurrence.
+    as UTF-8 byte offsets. The hash prevents a valid span from a previous
+    revision being accepted against a later document body; the exact byte slice
+    prevents repeated boilerplate from being attributed to the wrong occurrence.
+
+    The check needs the bytes of the whole body and their hash. Computed per
+    excerpt, a document with hundreds of chunks was encoded and hashed hundreds
+    of times: about half a second for 1.5 MB, on the event loop for one
+    citation. One instance serves one batch of excerpts; ``body_key`` names the
+    body (a document and its revision) whose text the caller passes.
     """
-    if (
-        not source_text
-        or source_start is None
-        or source_end is None
-        or source_start < 0
-        or source_end < source_start
-        or not document_content_hash
-    ):
-        return False
-    canonical_bytes = canonical_text.encode("utf-8")
-    if hashlib.sha256(canonical_bytes).hexdigest() != document_content_hash:
-        return False
-    if source_end > len(canonical_bytes):
-        return False
-    return canonical_bytes[source_start:source_end] == source_text.encode("utf-8")
+
+    def __init__(self) -> None:
+        self._bodies: dict[object, tuple[bytes, str]] = {}
+
+    def excerpt_is_verified(
+        self,
+        *,
+        body_key: object,
+        canonical_text: str,
+        source_text: str,
+        source_start: int | None,
+        source_end: int | None,
+        document_content_hash: str | None,
+    ) -> bool:
+        """Whether the excerpt is the exact byte slice of the body it names."""
+        if (
+            not canonical_text
+            or not source_text
+            or source_start is None
+            or source_end is None
+            or source_start < 0
+            or source_end < source_start
+            or not document_content_hash
+        ):
+            return False
+        body = self._bodies.get(body_key)
+        if body is None:
+            encoded = canonical_text.encode("utf-8")
+            body = self._bodies[body_key] = (encoded, hashlib.sha256(encoded).hexdigest())
+        canonical_bytes, digest = body
+        if digest != document_content_hash:
+            return False
+        if source_end > len(canonical_bytes):
+            return False
+        return canonical_bytes[source_start:source_end] == source_text.encode("utf-8")
 
 
 @dataclass(frozen=True)

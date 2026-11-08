@@ -20,15 +20,17 @@ from inqtrix.runs.deletion_operations import (
     DeletionTargetKind,
 )
 from inqtrix.runs.deletion_postgres import ClaimedDeletionOperation
-from inqtrix.server.runs import RunActive, RunNotFound
+from inqtrix.exceptions import RunNotFound
+from inqtrix.runs.records import RunActive
 from inqtrix.services.user_erasure_aggregates import DeletionMachineAggregates
 from inqtrix.services.user_erasure_executor import AggregateRef
+from tests._store_doubles import BothNames
 
 TENANT = "default"
 USER = uuid.uuid4()
 
 
-class _Store:
+class _Store(BothNames):
     """The deletion store, recording registrations, claims and terminals."""
 
     def __init__(self, *, status="queued", existing=None):
@@ -107,16 +109,16 @@ class _Service:
         return clone
 
     async def start_agent_session(self, target_id, **kwargs):
-        return self._store.submit(target_kind="agent_session", target_id=target_id)
+        return await self._store.asubmit(target_kind="agent_session", target_id=target_id)
 
     async def start_orphaned_source(self, source_id, **kwargs):
-        return self._store.submit(target_kind="source", target_id=source_id)
+        return await self._store.asubmit(target_kind="source", target_id=source_id)
 
     async def start_section(self, section_id, **kwargs):
         if self._file_in_deletion is not None:
             # The service names the file that is already in deletion.
             raise DeletionOperationConflict(self._file_in_deletion)
-        return self._store.submit(target_kind="section", target_id=section_id)
+        return await self._store.asubmit(target_kind="section", target_id=section_id)
 
     def execute(self, handle, **kwargs):
         self.executed.append(handle.operation_id)

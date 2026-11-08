@@ -23,6 +23,8 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from inqtrix import aio
+
 from inqtrix.agents.control_ports import (
     ApprovalRecord,
     ArtifactBatchRevision,
@@ -47,7 +49,8 @@ from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.runs.postgres_store import PostgresRunStore
-from inqtrix.server.runs import RunActive, RunNotFound
+from inqtrix.exceptions import RunNotFound
+from inqtrix.runs.records import RunActive
 from inqtrix.services.agent_control_service import (
     AgentControlService,
     AgentControlValidationError,
@@ -115,8 +118,8 @@ async def wiped():
     yield
 
 
-@pytest.fixture()
-def run_store(wiped):
+@pytest_asyncio.fixture()
+async def run_store(wiped):
     store = PostgresRunStore(
         engine=build_engine(TEST_DATABASE_URL),
         app_role=APP_ROLE,
@@ -127,7 +130,7 @@ def run_store(wiped):
         worker_id="pytest-agent-control",
     )
     yield store
-    store.close()
+    await store.aclose()
 
 
 @pytest_asyncio.fixture()
@@ -136,7 +139,6 @@ async def control_store(wiped):
         engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE
     )
     yield store
-    await store.aclose()
 
 
 @pytest.fixture()
@@ -150,16 +152,27 @@ def service(control_store, run_store):
     )
 
 
-def _wait_until(predicate: Callable[[], bool], *, timeout: float = 10.0) -> None:
+async def _wait_for_status(
+    run_store: PostgresRunStore, expected: str, run_id: str, **scope: Any
+) -> None:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if (await run_store.aget(run_id, **scope))["status"] == expected:
+            return
+        await asyncio.sleep(0.05)
+    pytest.fail("condition was not reached before timeout")
+
+
+async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 10.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if predicate():
             return
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
     pytest.fail("condition was not reached before timeout")
 
 
-def _parked_agent_run(
+async def _parked_agent_run(
     run_store: PostgresRunStore,
     *,
     resumed_release: threading.Event | None = None,
@@ -196,9 +209,11 @@ def _parked_agent_run(
                 .on_conflict_do_nothing(index_elements=(agent_sessions.c.id,))
             )
 
-    run_store._call(_seed_session())
+    await _seed_session()
 
-    summary = run_store.submit(
+    summary = await run_store.asubmit(
+        mode="research",
+        workflow_contract=1,
         question="Agentenauftrag",
         stack_name="default",
         work=segmented,
@@ -210,14 +225,11 @@ def _parked_agent_run(
     )
     run_id = summary["run_id"]
     visible_to = _scoped(owner_user_id) if owner_user_id is not None else None
-    _wait_until(
-        lambda: run_store.get(run_id, visible_to=visible_to)["status"]
-        == "waiting_for_approval"
-    )
+    await _wait_for_status(run_store, "waiting_for_approval", run_id, visible_to=visible_to)
     return run_id
 
 
-def _completed_agent_child(
+async def _completed_agent_child(
     run_store: PostgresRunStore,
     *,
     parent_run_id: str,
@@ -228,7 +240,9 @@ def _completed_agent_child(
     def work(handle: Any) -> None:
         handle.complete({"answer": f"child attempt {attempt}"})
 
-    summary = run_store.submit(
+    summary = await run_store.asubmit(
+        mode="research",
+        workflow_contract=1,
         question=f"Child research attempt {attempt}",
         stack_name="default",
         work=work,
@@ -248,10 +262,7 @@ def _completed_agent_child(
     )
     child_run_id = summary["run_id"]
     visible_to = _scoped(owner_user_id)
-    _wait_until(
-        lambda: run_store.get(child_run_id, visible_to=visible_to)["status"]
-        == "completed"
-    )
+    await _wait_for_status(run_store, "completed", child_run_id, visible_to=visible_to)
     return child_run_id
 
 
@@ -266,15 +277,14 @@ def _scoped(user_id: uuid.UUID) -> UserContext:
     )
 
 
-def _grant_edit_share(
+async def _grant_edit_share(
     run_store: PostgresRunStore, run_id: str
 ) -> str:
     identity = PostgresIdentityBackend(
         session_factory=run_store._session_factory,
         app_role=APP_ROLE,
     )
-    (pending,) = run_store._call(
-        identity.create_shares(
+    (pending,) = await (identity.create_shares(
             tenant_id="default",
             resource_type="run",
             resource_id=run_id,
@@ -283,8 +293,7 @@ def _grant_edit_share(
             invitees=((EDITOR_USER_ID, SharePermission.EDIT),),
         )
     )
-    accepted = run_store._call(
-        identity.accept_share_by_id(
+    accepted = await (identity.accept_share_by_id(
             tenant_id="default",
             share_id=pending.id,
             recipient_user_id=EDITOR_USER_ID,
@@ -304,7 +313,7 @@ def _approval(run_id: str, *, kind: str = "plan") -> ApprovalRecord:
 @pytest.mark.asyncio
 async def test_decision_and_resume_commit_together(service, run_store):
     resumed_release = threading.Event()
-    run_id = _parked_agent_run(
+    run_id = await _parked_agent_run(
         run_store, resumed_release=resumed_release
     )
     approval = await service.store.create_approval(_approval(run_id))
@@ -324,9 +333,9 @@ async def test_decision_and_resume_commit_together(service, run_store):
     assert not replayed
     assert decided.status == "approved"
     assert summary["status"] in {"queued", "running", "completed"}
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    await _wait_for_status(run_store, "completed", run_id)
 
-    events = run_store.subscribe(run_id)
+    events = await run_store.asubscribe(run_id)
     try:
         decision_event = next(
             event
@@ -349,8 +358,8 @@ async def test_decision_and_resume_commit_together(service, run_store):
 async def test_plan_approval_rejects_subject_from_another_run(
     service, run_store
 ):
-    run_a = _parked_agent_run(run_store, session_id="sess-pg-a")
-    run_b = _parked_agent_run(run_store, session_id="sess-pg-b")
+    run_a = await _parked_agent_run(run_store, session_id="sess-pg-a")
+    run_b = await _parked_agent_run(run_store, session_id="sess-pg-b")
     await service.store.save_plan(
         run_id=run_a,
         plan=PlanRecord(
@@ -386,7 +395,7 @@ async def test_plan_approval_rejects_subject_from_another_run(
 async def test_plan_decision_updates_plan_status_in_resume_transaction(
     service, run_store
 ):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     await service.store.save_plan(
         run_id=run_id,
         plan=PlanRecord(
@@ -424,7 +433,7 @@ async def test_plan_decision_updates_plan_status_in_resume_transaction(
 
 @pytest.mark.asyncio
 async def test_edited_plan_discards_planner_model_tier_before_persistence(service, run_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     await service.store.save_plan(
         run_id=run_id,
         plan=PlanRecord(
@@ -466,7 +475,7 @@ async def test_edited_plan_discards_planner_model_tier_before_persistence(servic
 async def test_migration_backfills_legacy_decided_plan_subject(
     service, run_store
 ):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     await service.store.save_plan(
         run_id=run_id,
         plan=PlanRecord(
@@ -522,15 +531,15 @@ async def test_migration_backfills_legacy_decided_plan_subject(
 async def test_task_transition_retry_and_terminal_contract_postgres(
     service, run_store
 ):
-    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
-    child_1 = _completed_agent_child(
+    run_id = await _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    child_1 = await _completed_agent_child(
         run_store,
         parent_run_id=run_id,
         parent_task_id="task-pg",
         attempt=1,
         owner_user_id=OWNER_USER_ID,
     )
-    child_2 = _completed_agent_child(
+    child_2 = await _completed_agent_child(
         run_store,
         parent_run_id=run_id,
         parent_task_id="task-pg",
@@ -600,7 +609,7 @@ async def test_task_transition_retry_and_terminal_contract_postgres(
 
 @pytest.mark.asyncio
 async def test_task_cancellation_state_machine_postgres(service, run_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     plan = PlanRecord(
         plan_id="plan-task-cancel-pg",
         run_id=run_id,
@@ -667,8 +676,8 @@ async def test_task_cancellation_state_machine_postgres(service, run_store):
 async def test_shared_editor_task_cancel_reaches_child_postgres(
     service, run_store
 ) -> None:
-    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
-    _grant_edit_share(run_store, run_id)
+    run_id = await _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    await _grant_edit_share(run_store, run_id)
     child_started = threading.Event()
     child_release = threading.Event()
 
@@ -680,7 +689,9 @@ async def test_shared_editor_task_cancel_reaches_child_postgres(
         else:
             handle.complete({"answer": "late"})
 
-    child = run_store.submit(
+    child = await run_store.asubmit(
+        mode="research",
+        workflow_contract=1,
         question="Child research",
         stack_name="default",
         work=child_work,
@@ -733,12 +744,7 @@ async def test_shared_editor_task_cancel_reaches_child_postgres(
         )
         assert task.status == "cancel_requested"
         child_release.set()
-        _wait_until(
-            lambda: run_store.get(
-                child["run_id"], visible_to=_scoped(OWNER_USER_ID)
-            )["status"]
-            == "cancelled"
-        )
+        await _wait_for_status(run_store, "cancelled", child["run_id"], visible_to=_scoped(OWNER_USER_ID))
     finally:
         child_release.set()
 
@@ -747,8 +753,8 @@ async def test_shared_editor_task_cancel_reaches_child_postgres(
 async def test_deleting_child_run_clears_task_reference_without_deleting_task(
     control_store, run_store
 ) -> None:
-    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
-    child_run_id = _completed_agent_child(
+    run_id = await _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    child_run_id = await _completed_agent_child(
         run_store,
         parent_run_id=run_id,
         parent_task_id="research",
@@ -778,10 +784,10 @@ async def test_deleting_child_run_clears_task_reference_without_deleting_task(
         tasks=[task],
     )
 
-    run_store.delete(child_run_id, requester_user_id=OWNER_USER_ID)
+    await run_store.adelete(child_run_id, requester_user_id=OWNER_USER_ID)
 
     with pytest.raises(RunNotFound):
-        run_store.get(child_run_id, visible_to=_scoped(OWNER_USER_ID))
+        await run_store.aget(child_run_id, visible_to=_scoped(OWNER_USER_ID))
     stored_plan, stored_tasks = await control_store.get_plan(run_id)
     assert stored_plan == saved_plan
     assert stored_tasks == [replace(task, child_run_id=None)]
@@ -791,10 +797,10 @@ async def test_deleting_child_run_clears_task_reference_without_deleting_task(
 async def test_decision_rolls_back_when_run_is_not_waiting(service, run_store):
     """The decision CAS lives inside the resume transaction — a run
     that is no longer waiting leaves the approval untouched."""
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     approval = await service.store.create_approval(_approval(run_id))
-    run_store.cancel(run_id)
-    _wait_until(lambda: run_store.get(run_id)["status"] == "cancelled")
+    await run_store.acancel(run_id)
+    await _wait_for_status(run_store, "cancelled", run_id)
 
     with pytest.raises(RunActive):
         await service.decide_approval(
@@ -808,7 +814,7 @@ async def test_decision_rolls_back_when_run_is_not_waiting(service, run_store):
 
     stored = await service.store.get_approval(run_id, approval.approval_id)
     assert stored.status == "pending"
-    events = run_store.subscribe(run_id)
+    events = await run_store.asubscribe(run_id)
     try:
         assert "inqtrix.agent.approval.decided" not in {
             event["type"] for event in events.replay
@@ -821,7 +827,7 @@ async def test_decision_rolls_back_when_run_is_not_waiting(service, run_store):
 async def test_edit_decision_writes_plan_in_the_same_transaction(
     service, run_store
 ):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     await service.store.save_plan(
         run_id=run_id,
         plan=PlanRecord(
@@ -878,12 +884,12 @@ async def test_edit_decision_writes_plan_in_the_same_transaction(
         (2, "approved"),
         (1, "superseded"),
     ]
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    await _wait_for_status(run_store, "completed", run_id)
 
 
 @pytest.mark.asyncio
 async def test_invalid_edit_leaves_everything_pending(service, run_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     approval = await service.store.create_approval(_approval(run_id))
 
     with pytest.raises(AgentControlValidationError):
@@ -898,14 +904,14 @@ async def test_invalid_edit_leaves_everything_pending(service, run_store):
 
     stored = await service.store.get_approval(run_id, approval.approval_id)
     assert stored.status == "pending"
-    assert run_store.get(run_id)["status"] == "waiting_for_approval"
+    assert (await run_store.aget(run_id))["status"] == "waiting_for_approval"
     with pytest.raises(PlanNotFound):
         await service.store.get_plan(run_id)
 
 
 @pytest.mark.asyncio
 async def test_clarification_answer_resumes(service, run_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     clarification = await service.store.create_clarification(
         ClarificationRecord(
             clarification_id=f"clr_{uuid.uuid4().hex[:8]}",
@@ -926,7 +932,7 @@ async def test_clarification_answer_resumes(service, run_store):
     assert not replayed
     assert answered.status == "answered"
     assert answered.answer == "Das erste Quartal"
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    await _wait_for_status(run_store, "completed", run_id)
 
     # Replay of the same answer is idempotent, a different one conflicts.
     _answered, _summary2, replayed = await service.answer_clarification(
@@ -941,7 +947,7 @@ async def test_clarification_answer_resumes(service, run_store):
 
 @pytest.mark.asyncio
 async def test_artifact_matrix_and_revisions(service, run_store, control_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     await control_store.upsert_artifact(
         run_id=run_id,
         kind="memo",
@@ -1028,7 +1034,7 @@ async def test_line_delta_and_rename_lockstep_postgres(
     """The line delta on the REAL SQL paths: the upsert returns the write's
     line delta (reads stay None), the batch CAS counts per row, and the
     rename is metadata-only (no revision, no revision row)."""
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     created = await control_store.upsert_artifact(
         run_id=run_id,
         kind="deliverable",
@@ -1097,21 +1103,21 @@ async def test_line_delta_and_rename_lockstep_postgres(
 async def test_late_user_artifact_changes_preserve_durable_terminal_log(
     service, run_store, control_store, monkeypatch, caplog,
 ):
-    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    run_id = await _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
     caller = _scoped(OWNER_USER_ID)
     await control_store.upsert_artifact(
         run_id=run_id, kind="deliverable", session_id="sess-pg", title="Original",
         status="ready", content_markdown="Original body", payload={}, refs=[],
         updated_by="agent", artifact_id="late-user-artifact",
     )
-    run_store.complete(run_id, {"answer": "Finished"})
-    before = run_store.subscribe(run_id, visible_to=caller, stream=False).replay
+    await run_store.acomplete(run_id, {"answer": "Finished"})
+    before = (await run_store.asubscribe(run_id, visible_to=caller, stream=False)).replay
     emitted = []
-    original_emit = run_store.emit
-    def emit(*args, **kwargs):
+    original_aemit = run_store.aemit
+    async def aemit(*args, **kwargs):
         emitted.append(args)
-        return original_emit(*args, **kwargs)
-    monkeypatch.setattr(run_store, "emit", emit)
+        return await original_aemit(*args, **kwargs)
+    monkeypatch.setattr(run_store, "aemit", aemit)
     caplog.clear()
     edited = await service.user_update_artifact(
         run_id=run_id, artifact_id="late-user-artifact", content_markdown="Edited body",
@@ -1126,7 +1132,7 @@ async def test_late_user_artifact_changes_preserve_durable_terminal_log(
     assert (stored.title, stored.content_markdown) == ("Renamed", "Edited body")
     assert len(revisions) == 2
     assert emitted == []
-    assert run_store.subscribe(run_id, visible_to=caller, stream=False).replay == before
+    assert (await run_store.asubscribe(run_id, visible_to=caller, stream=False)).replay == before
     assert not [r for r in caplog.records if r.levelname in {"WARNING", "ERROR"}]
 
 
@@ -1134,8 +1140,8 @@ async def test_late_user_artifact_changes_preserve_durable_terminal_log(
 async def test_revoked_editor_cannot_update_artifact_postgres(
     service, run_store, control_store
 ) -> None:
-    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
-    share_id = _grant_edit_share(run_store, run_id)
+    run_id = await _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    share_id = await _grant_edit_share(run_store, run_id)
     await control_store.upsert_artifact(
         run_id=run_id,
         kind="memo",
@@ -1162,8 +1168,7 @@ async def test_revoked_editor_cannot_update_artifact_postgres(
         session_factory=run_store._session_factory,
         app_role=APP_ROLE,
     )
-    revoked = run_store._call(
-        identity.revoke_share_by_id(
+    revoked = await (identity.revoke_share_by_id(
             tenant_id="default",
             share_id=share_id,
             revoked_by_user_id=OWNER_USER_ID,
@@ -1194,30 +1199,26 @@ async def test_revoked_effective_actor_cannot_persist_runtime_artifact_postgres(
 ) -> None:
     """Agent writes lock the same live run/share boundary as user edits."""
     release = threading.Event()
-    run_id = _parked_agent_run(
+    run_id = await _parked_agent_run(
         run_store,
         resumed_release=release,
         owner_user_id=OWNER_USER_ID,
         session_id="sess-runtime-revoke-pg",
     )
-    share_id = _grant_edit_share(run_store, run_id)
+    share_id = await _grant_edit_share(run_store, run_id)
     editor = _scoped(EDITOR_USER_ID)
     try:
-        run_store.resume_run(
+        await run_store.aresume_run(
             run_id,
             actor_user_id=EDITOR_USER_ID,
             execution_scopes=frozenset({"agent:write"}),
         )
-        _wait_until(
-            lambda: run_store.get(run_id, visible_to=editor)["status"]
-            == "running"
-        )
+        await _wait_for_status(run_store, "running", run_id, visible_to=editor)
         identity = PostgresIdentityBackend(
             session_factory=run_store._session_factory,
             app_role=APP_ROLE,
         )
-        revoked = run_store._call(
-            identity.revoke_share_by_id(
+        revoked = await (identity.revoke_share_by_id(
                 tenant_id="default",
                 share_id=share_id,
                 revoked_by_user_id=OWNER_USER_ID,
@@ -1245,12 +1246,7 @@ async def test_revoked_effective_actor_cannot_persist_runtime_artifact_postgres(
             )
     finally:
         release.set()
-        _wait_until(
-            lambda: run_store.get(
-                run_id, visible_to=_scoped(OWNER_USER_ID)
-            )["status"]
-            == "failed"
-        )
+        await _wait_for_status(run_store, "failed", run_id, visible_to=_scoped(OWNER_USER_ID))
 
 
 @pytest.mark.asyncio
@@ -1271,7 +1267,7 @@ async def test_concurrent_first_memo_insert_surfaces_conflict_not_integrityerror
     raw error) must hold every round.
     """
     for round_index in range(6):
-        run_id = _parked_agent_run(
+        run_id = await _parked_agent_run(
             run_store,
             session_id=f"sess-race-run-{round_index}",
         )
@@ -1315,7 +1311,7 @@ async def test_session_memo_lineage_and_agent_cas_on_postgres(
     service, run_store, control_store
 ):
     """Postgres lockstep for the cross-run memo read + agent-side CAS."""
-    run1 = _parked_agent_run(run_store, session_id="sess-pg-lin")
+    run1 = await _parked_agent_run(run_store, session_id="sess-pg-lin")
     await control_store.upsert_artifact(
         run_id=run1,
         kind="memo",
@@ -1342,9 +1338,9 @@ async def test_session_memo_lineage_and_agent_cas_on_postgres(
     assert prior.revision == 2
     assert prior.content_markdown == "# Turn 1 + Nutzer"
 
-    run_store.cancel(run1)
-    _wait_until(lambda: run_store.get(run1)["status"] == "cancelled")
-    run2 = _parked_agent_run(run_store, session_id="sess-pg-lin")
+    await run_store.acancel(run1)
+    await _wait_for_status(run_store, "cancelled", run1)
+    run2 = await _parked_agent_run(run_store, session_id="sess-pg-lin")
     with pytest.raises(ArtifactRevisionConflict) as conflict:
         await control_store.upsert_artifact(
             run_id=run2,
@@ -1400,7 +1396,7 @@ async def test_kernel_kinds_pass_the_db_checks(service, run_store, control_store
     Postgres proves migration 0040 widened ``ck_run_approvals_kind`` and
     ``ck_run_artifacts_kind`` to match the constants.
     """
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     approval = await service.store.create_approval(
         ApprovalRecord(
             approval_id="apr_tool_pg",
@@ -1435,7 +1431,7 @@ async def test_kernel_kinds_pass_the_db_checks(service, run_store, control_store
 
 @pytest.mark.asyncio
 async def test_multi_deliverable_and_atomic_batch_cas(run_store, control_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     first = await control_store.upsert_artifact(
         run_id=run_id,
         kind="deliverable",
@@ -1481,7 +1477,7 @@ async def test_multi_deliverable_and_atomic_batch_cas(run_store, control_store):
 
 @pytest.mark.asyncio
 async def test_multiple_sessionless_deliverables(run_store, control_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     first = await control_store.upsert_artifact(
         run_id=run_id,
         kind="deliverable",
@@ -1519,7 +1515,7 @@ async def test_multiple_sessionless_deliverables(run_store, control_store):
 
 @pytest.mark.asyncio
 async def test_control_rows_cascade_with_their_run(service, run_store, control_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     approval = await service.store.create_approval(_approval(run_id))
     await control_store.upsert_artifact(
         run_id=run_id,
@@ -1533,9 +1529,9 @@ async def test_control_rows_cascade_with_their_run(service, run_store, control_s
         updated_by="agent",
         artifact_id="art_critic",
     )
-    run_store.cancel(run_id)
-    _wait_until(lambda: run_store.get(run_id)["status"] == "cancelled")
-    run_store.delete(run_id)
+    await run_store.acancel(run_id)
+    await _wait_for_status(run_store, "cancelled", run_id)
+    await run_store.adelete(run_id)
 
     engine = build_engine(TEST_DATABASE_URL)
     try:
@@ -1558,7 +1554,7 @@ async def test_terminal_run_settles_control_rows_postgres(
     service, run_store, control_store
 ):
     """Postgres twin: writing→ready, pending approval→rejected, idempotent."""
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     await control_store.upsert_artifact(
         run_id=run_id,
         kind="memo",
@@ -1572,7 +1568,7 @@ async def test_terminal_run_settles_control_rows_postgres(
         artifact_id="art_settle_pg",
     )
     approval = await control_store.create_approval(_approval(run_id))
-    assert run_store.cancel(run_id)["status"] == "cancelled"
+    assert (await run_store.acancel(run_id))["status"] == "cancelled"
 
     assert await service.reconcile_terminal_tasks(run_id) is True
 
@@ -1621,43 +1617,47 @@ async def test_retained_evidence_reads_use_the_real_run_visibility(run_store, ma
             {"web_search_ledger": ledger} if material_location == "result" else {}
         )})
 
-    origin = run_store.submit(
+    origin = (await run_store.asubmit(
+        workflow_contract=1,
         question="Retained evidence", stack_name="default", work=seed,
         mode="research", kind="standard", created_by_user_id=OWNER_USER_ID,
         created_by_tenant_id="default",
-    )["run_id"]
-    _wait_until(lambda: run_store.get(origin, visible_to=_scoped(OWNER_USER_ID))["status"] == "completed")
+    ))["run_id"]
+    await _wait_for_status(run_store, "completed", origin, visible_to=_scoped(OWNER_USER_ID))
 
-    def read_as(principal):
-        reader = run_store.submit(
+    async def read_as(principal):
+        reader = (await run_store.asubmit(
+            workflow_contract=1,
             question="Read retained evidence", stack_name="default",
             work=lambda handle: handle.complete({"answer": "Reader ready."}),
             mode="agent_kernel", kind="agent", created_by_user_id=principal.principal.user_id,
             created_by_tenant_id="default",
-        )["run_id"]
-        _wait_until(lambda: run_store.get(reader, visible_to=principal)["status"] == "completed")
+        ))["run_id"]
+        await _wait_for_status(run_store, "completed", reader, visible_to=principal)
         deps = KernelDeps(
             run_id=reader, control=control,
             platform=None, llm=None, model=None, reasoning_effort=None, timeout=1,
             run_service=SimpleNamespace(run_store=run_store),
             capability_context=SimpleNamespace(visible_to=principal),
         )
-        ref, = deps.register_references([{"url": "https://example.org/owned", "source_run_ids": [origin]}])
-        return read_registered_evidence(deps, reference_id=ref["reference_id"])
 
-    try:
-        owned = await asyncio.to_thread(read_as, _scoped(OWNER_USER_ID))
-        assert owned["searches"]["query_owned"]["provider_answer"] == "Only the owner can read this answer."
-        foreign = await asyncio.to_thread(read_as, _scoped(EDITOR_USER_ID))
-        assert foreign["searches"] == {}
-        assert foreign["unavailable_origins"][0]["status"] == "unavailable"
-    finally:
-        await control.aclose()
+        def read():
+            ref, = deps.register_references([{"url": "https://example.org/owned", "source_run_ids": [origin]}])
+            return read_registered_evidence(deps, reference_id=ref["reference_id"])
+
+        # Kernel code runs on the transition lane, where it may reach the loop.
+        return await aio.run_legacy_segment(read)
+
+    owned = await read_as(_scoped(OWNER_USER_ID))
+    assert owned["searches"]["query_owned"]["provider_answer"] == "Only the owner can read this answer."
+    foreign = await read_as(_scoped(EDITOR_USER_ID))
+    assert foreign["searches"] == {}
+    assert foreign["unavailable_origins"][0]["status"] == "unavailable"
 
 
 @pytest.mark.asyncio
 async def test_archive_replay_is_atomic_and_does_not_duplicate_revision_bodies(run_store, control_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     body = " \r\n" + "ä🙂e\u0301\n" * 10_000 + "\t "
     first, replay = await asyncio.gather(*(
         control_store.put_context_archive(run_id=run_id, title="Original", text=body)
@@ -1682,7 +1682,7 @@ async def test_archive_replay_is_atomic_and_does_not_duplicate_revision_bodies(r
 
 @pytest.mark.asyncio
 async def test_archive_collision_rolls_back_every_new_part(run_store, control_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     body = "x" * 50_001
     parts = prepare_archive(run_id, "Original", body)
     collision = await control_store.upsert_artifact(
@@ -1702,7 +1702,7 @@ async def test_archive_collision_rolls_back_every_new_part(run_store, control_st
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["upsert", "user_update", "rename", "batch"])
 async def test_archive_rejects_mutation_in_postgres(operation, run_store, control_store, service):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     row, = await control_store.put_context_archive(run_id=run_id, title="Original", text="preserve")
     with pytest.raises(ContextArchiveImmutable):
         if operation == "upsert":
@@ -1733,7 +1733,7 @@ async def test_archive_rejects_mutation_in_postgres(operation, run_store, contro
 async def test_postgres_archive_reads_selected_text_and_refuses_corrupted_parts(run_store, control_store):
     from sqlalchemy import event
 
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     body = "a" * 19_999 + "🙂\r\n" + "b" * 40_000 + "END"
     rows = await control_store.put_context_archive(run_id=run_id, title="Original", text=body)
     fingerprint = hashlib.sha256(body.encode()).hexdigest()
@@ -1742,13 +1742,14 @@ async def test_postgres_archive_reads_selected_text_and_refuses_corrupted_parts(
     def record_statement(_conn, _cursor, statement, parameters, _context, _many):
         statements.append((statement, parameters))
 
-    event.listen(control_store._engine.sync_engine, "before_cursor_execute", record_statement)
+    engine = control_store._session_factory.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", record_statement)
     try:
         window = await control_store.read_context_archive(
             run_id, rows[0].artifact_id, offset=19_990, max_chars=40, content_hash=fingerprint,
         )
     finally:
-        event.remove(control_store._engine.sync_engine, "before_cursor_execute", record_statement)
+        event.remove(engine, "before_cursor_execute", record_statement)
     assert window.text == body[19_990:20_030]
     assert window.offset == 19_990 and window.end == 20_030
     body_reads = [(sql, args) for sql, args in statements if "content_markdown" in sql]
@@ -1771,7 +1772,7 @@ async def test_postgres_archive_reads_selected_text_and_refuses_corrupted_parts(
 
 @pytest.mark.asyncio
 async def test_postgres_catalogue_continuations_bind_complete_snapshot_including_legacy(run_store, control_store):
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     for index in range(4):
         await control_store.put_context_archive(
             run_id=run_id, title=f"Original {index}", text=str(index) * 25_000,
@@ -1795,8 +1796,8 @@ async def test_postgres_catalogue_continuations_bind_complete_snapshot_including
 
 @pytest.mark.asyncio
 async def test_sessionless_archive_and_batch_revision_cannot_cross_runs(run_store, control_store):
-    run_id = _parked_agent_run(run_store)
-    foreign_run = _parked_agent_run(run_store, session_id="other-session")
+    run_id = await _parked_agent_run(run_store)
+    foreign_run = await _parked_agent_run(run_store, session_id="other-session")
     row, = await control_store.put_context_archive(run_id=run_id, title="Original", text="private")
     with pytest.raises(ArtifactNotFound):
         await control_store.read_context_archive(foreign_run, row.artifact_id)
@@ -1824,7 +1825,7 @@ async def test_private_checkpoint_originals_use_owner_reader_and_hide_product_ro
     from inqtrix.services.agent_sessions_service import AgentSessionsService
     from inqtrix.services.agent_source_service import AgentSourceService
 
-    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    run_id = await _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
     body = " \r\nPrivate checkpoint ä🙂e\u0301\t " * 1000
     rows = await control_store.put_context_archive(run_id=run_id, title="Transcript", text=body,
         transcript={"schema": 1, "checkpoint_id": "checkpoint-version", "format": "checkpoint_json"})
@@ -1836,49 +1837,49 @@ async def test_private_checkpoint_originals_use_owner_reader_and_hide_product_ro
     metadata = await control_store.list_source_artifacts([run_id])
     assert len(metadata) == len(rows) and all(row.content_markdown == "" for row in metadata)
     sessions = PostgresAgentSessionStore(engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE)
-    try:
-        source = AgentSourceService(sessions=AgentSessionsService(store=sessions, run_store=run_store),
-                                   run_store=run_store, control=control_store)
-        owner = _scoped(OWNER_USER_ID)
-        context = CapabilityContext(principal=owner.principal, visible_to=owner, run_id=run_id)
-        metadata = run_store.source_run_catalogue("sess-pg", visible_to=owner)
-        assert len(metadata) == 1 and set(metadata[0]) == {"run_id", "question", "kind", "mode", "status", "created_at"}
-        assert run_store.source_run_catalogue("sess-pg", visible_to=_scoped(EDITOR_USER_ID)) == []
-        ref = encode_source("transcript", run_id, rows[0].artifact_id, text_hash(body))
-        first = await source.read(ContextReadInput(source_id=ref), context)
-        assert first.text == body[:20_000] and first.next_read
-        second = await source.read(ContextReadInput(**first.next_read), context)
-        assert first.text + second.text == body
-        reader = _scoped(EDITOR_USER_ID)
-        with pytest.raises(CapabilityError):
-            await source.read(ContextReadInput(source_id=ref), replace(context, principal=reader.principal, visible_to=reader))
-    finally:
-        await sessions.aclose()
+    source = AgentSourceService(sessions=AgentSessionsService(store=sessions, run_store=run_store),
+                               run_store=run_store, control=control_store)
+    owner = _scoped(OWNER_USER_ID)
+    context = CapabilityContext(principal=owner.principal, visible_to=owner, run_id=run_id)
+    metadata = await run_store.asource_run_catalogue("sess-pg", visible_to=owner)
+    assert len(metadata) == 1 and set(metadata[0]) == {"run_id", "question", "kind", "mode", "status", "created_at"}
+    assert await run_store.asource_run_catalogue("sess-pg", visible_to=_scoped(EDITOR_USER_ID)) == []
+    ref = encode_source("transcript", run_id, rows[0].artifact_id, text_hash(body))
+    first = await source.read(ContextReadInput(source_id=ref), context)
+    assert first.text == body[:20_000] and first.next_read
+    second = await source.read(ContextReadInput(**first.next_read), context)
+    assert first.text + second.text == body
+    reader = _scoped(EDITOR_USER_ID)
+    with pytest.raises(CapabilityError):
+        await source.read(ContextReadInput(source_id=ref), replace(context, principal=reader.principal, visible_to=reader))
 
 
-def test_a_role_run_is_no_conversation_source_and_names_its_profile(run_store):
+@pytest.mark.asyncio
+async def test_a_role_run_is_no_conversation_source_and_names_its_profile(run_store):
     """An internal role child holds nothing but material its parent already read."""
-    parent = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    parent = await _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
     owner = _scoped(OWNER_USER_ID)
 
-    def submit_child(body: dict) -> str:
-        summary = run_store.submit(
+    async def submit_child(body: dict) -> str:
+        summary = await run_store.asubmit(
+            mode="research",
+            workflow_contract=1,
             question="Review the outputs.", stack_name="default",
             work=lambda handle: handle.complete({"answer": ""}),
             request_payload={"question": "Review the outputs.", "body": {"mode": "agent_kernel", **body}},
             kind="agent_child", parent_run_id=parent, root_run_id=parent,
             created_by_user_id=OWNER_USER_ID, created_by_tenant_id="default",
         )
-        _wait_until(lambda: run_store.get(summary["run_id"], visible_to=owner)["status"] == "completed")
+        await _wait_for_status(run_store, "completed", summary["run_id"], visible_to=owner)
         return summary["run_id"]
 
-    role = submit_child({"work_profile": "review", "origin_key": "role-review"})
-    delegated = submit_child({"origin_key": "call_research"})
-    listed = {row["run_id"] for row in run_store.source_run_catalogue("sess-pg", visible_to=owner)}
+    role = await submit_child({"work_profile": "review", "origin_key": "role-review"})
+    delegated = await submit_child({"origin_key": "call_research"})
+    listed = {row["run_id"] for row in await run_store.asource_run_catalogue("sess-pg", visible_to=owner)}
     assert {parent, delegated} <= listed
     assert role not in listed
-    assert run_store.get(role, visible_to=owner)["work_profile"] == "review"
-    assert "work_profile" not in run_store.get(delegated, visible_to=owner)
+    assert (await run_store.aget(role, visible_to=owner))["work_profile"] == "review"
+    assert "work_profile" not in await run_store.aget(delegated, visible_to=owner)
 
 
 @pytest.mark.asyncio
@@ -1886,29 +1887,29 @@ async def test_saved_conversation_retains_originals_and_aggregate_delete_removes
     from sqlalchemy import update
     from inqtrix.storage.runs_orm import runs
 
-    run_id = _parked_agent_run(run_store)
+    run_id = await _parked_agent_run(run_store)
     await control_store.put_context_archive(run_id=run_id, title="Transcript", text="Keep original",
         transcript={"schema": 1, "checkpoint_id": "checkpoint-version", "format": "checkpoint_json"})
-    run_store.cancel(run_id)
-    ordinary = run_store.submit(question="Ordinary", stack_name="fixture", work=lambda h: h.complete({"answer": "Done"}))
-    _wait_until(lambda: run_store.get(ordinary["run_id"])["status"] == "completed")
+    await run_store.acancel(run_id)
+    ordinary = await run_store.asubmit(mode="research", workflow_contract=1, question="Ordinary", stack_name="fixture", work=lambda h: h.complete({"answer": "Done"}))
+    await _wait_for_status(run_store, "completed", ordinary["run_id"])
     async def backdate():
         async with run_store._session("default") as session:
             await session.execute(update(runs).where(runs.c.run_id.in_([run_id, ordinary["run_id"]]))
                                   .values(finished_at=time.time() - 400))
-    run_store._call(backdate())
-    assert run_store.get(run_id)["run_id"] == run_id
+    await backdate()
+    assert (await run_store.aget(run_id))["run_id"] == run_id
     with pytest.raises(RunNotFound):
-        run_store.get(ordinary["run_id"])
+        await run_store.aget(ordinary["run_id"])
     assert len(await control_store.list_context_archive_sources(run_id, include_private=True)) == 1
     async def tombstone():
         async with run_store._session("default") as session:
             await session.execute(agent_sessions.update().where(agent_sessions.c.id == "sess-pg")
                 .values(lifecycle_status="deleting", deletion_operation_id="del_saved_original", deletion_stage="queued"))
-    run_store._call(tombstone())
-    assert run_store.get(run_id)["run_id"] == run_id
+    await tombstone()
+    assert (await run_store.aget(run_id))["run_id"] == run_id
     arguments = dict(tenant_id="default", requester_user_id=None, workspace_id=None, run_ids=(run_id,))
-    run_store.prepare_agent_session_aggregate_deletion("sess-pg", **arguments)
-    run_store.delete_agent_session_aggregate("sess-pg", **arguments)
+    await run_store.aprepare_agent_session_aggregate_deletion("sess-pg", **arguments)
+    await run_store.adelete_agent_session_aggregate("sess-pg", **arguments)
     assert await control_store.list_source_artifacts([run_id]) == []
-    assert not any(run_store.agent_session_residuals("sess-pg", **arguments).values())
+    assert not any((await run_store.aagent_session_residuals("sess-pg", **arguments)).values())

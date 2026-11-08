@@ -17,42 +17,55 @@ from langchain.agents.middleware.types import (
     ModelResponse,
     PrivateStateAttr,
 )
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.types import Command
 from pydantic import BaseModel
 
-from inqtrix.agents.kernel.chat_bridge import REJECTED_TOOL_ARGUMENTS_FLAG
+from inqtrix.agents.kernel.chat_bridge import (
+    PROVIDER_STATE_KWARG,
+    REJECTED_TOOL_ARGUMENTS_FLAG,
+    THREAD_CALL_IDS,
+    turn_usage_metadata,
+    unique_call_ids,
+    used_call_ids,
+)
+from inqtrix.agents.kernel.compaction import (
+    CLEAR_KEEP,
+    CLEARED_RESULT_FLAG,
+    NEVER_CLEARED_TOOLS,
+    RereadScope,
+    archive_reread,
+    placeholder_for,
+    rereadable_original,
+    tool_calls_by_id,
+    tool_names,
+    unwritten_section,
+    view_counter,
+)
 from inqtrix.agents.kernel.deps import kernel_deps
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.exceptions import (
     AgentContextArchiveError,
     AgentModelCapacityError,
-    AgentStructuredOutputError,
+    AgentRequiredToolCallMissing,
     AgentToolArgumentsError,
     ModelCapacityReason,
 )
 from inqtrix.agents.narration import emit_narration
 from inqtrix.i18n import t
-from inqtrix.observability.context import bind_purpose
 from inqtrix.prompt_language import resolve_answer_language
 from inqtrix.providers.base import (
     ProviderAttemptBudget,
     current_provider_attempt_budget,
     provider_attempt_scope,
 )
-from inqtrix.untrusted_content import untrusted_fence
 
 from inqtrix.agents.context_sources import SOURCE_RECEIPT
-
-MODEL_RECOVERY_EVENT = "inqtrix.agent.model.recovery"
-
-CONTEXT_PROJECTIONS = "kernel_context_projections"
-CONTEXT_PROJECTED_FLAG = "inqtrix_context_projection"
+from inqtrix.harness.contracts.events import MODEL_RECOVERY_EVENT
 
 
 class ModelRecoveryState(AgentState):
-    kernel_context_projections: NotRequired[Annotated[dict[str, str], PrivateStateAttr]]
     context_source_authorization: NotRequired[Annotated[dict[str, Any], PrivateStateAttr]]
 
 
@@ -63,41 +76,9 @@ def _deps():
         return None
 
 
-def _tool_content_key(message: ToolMessage) -> str:
-    value = json.dumps(
-        [message.id, message.tool_call_id, message.content],
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def project_recovered_messages(messages, projections):
-    """Project only the active window; ordinary turns never hash tool bodies."""
-    if not projections:
-        return list(messages)
-    projected = []
-    for message in messages:
-        if isinstance(message, ToolMessage) and not message.additional_kwargs.get(
-            CONTEXT_PROJECTED_FLAG
-        ):
-            key = _tool_content_key(message)
-            if key in projections:
-                message = message.model_copy(
-                    update={
-                        "content": projections[key],
-                        "additional_kwargs": {
-                            **message.additional_kwargs,
-                            CONTEXT_PROJECTED_FLAG: True,
-                        },
-                    }
-                )
-        projected.append(message)
-    return projected
-
-
 RecoverableModelError = (
     AgentModelCapacityError,
+    AgentRequiredToolCallMissing,
     AgentToolArgumentsError,
     StructuredOutputValidationError,
 )
@@ -119,12 +100,7 @@ def _rejected_batch(error: AgentToolArgumentsError | StructuredOutputValidationE
             for call in error.raw_tool_calls
         ]
         problem = " ".join(dict.fromkeys(error.validation_errors))
-        usage = {
-            "input_tokens": turn.prompt_tokens,
-            "output_tokens": turn.completion_tokens,
-            "total_tokens": turn.prompt_tokens + turn.completion_tokens,
-        }
-        return turn.text, calls, problem, usage
+        return turn.text, calls, problem, turn_usage_metadata(turn)
     message = error.ai_message
     calls = [
         (str(call.get("id") or ""), str(call.get("name") or ""), json.dumps(call.get("args") or {}, ensure_ascii=False))
@@ -134,8 +110,40 @@ def _rejected_batch(error: AgentToolArgumentsError | StructuredOutputValidationE
     return text, calls, f"{error.tool_name}: {error.source}", message.usage_metadata
 
 
-def _rejected_messages(error: AgentToolArgumentsError | StructuredOutputValidationError):
+def _missing_call_messages(error: AgentRequiredToolCallMissing):
+    """The text answer and the obligation it missed, for a bounded correction."""
+    turn = error.turn
+    names = ", ".join(error.tool_names) or "the available tools"
+    return [
+        AIMessage(
+            content=turn.text,
+            usage_metadata=turn_usage_metadata(turn),
+            additional_kwargs={PROVIDER_STATE_KWARG: turn.provider_state} if turn.provider_state else {},
+        ),
+        HumanMessage(
+            content=(
+                f"Error: this step must end with a call to one of these tools: {names}. "
+                "Call one of them now with your result instead of answering in text."
+            )
+        ),
+    ]
+
+
+def _rejected_state(error: AgentToolArgumentsError | StructuredOutputValidationError):
+    """The provider's state of the rejected generation, which goes back with it."""
+    if isinstance(error, AgentToolArgumentsError):
+        return error.turn.provider_state
+    return (error.ai_message.additional_kwargs or {}).get(PROVIDER_STATE_KWARG)
+
+
+def _rejected_messages(
+    error: AgentToolArgumentsError | StructuredOutputValidationError, *, used: set[str] | frozenset[str]
+):
+    """The rejected generation and one error result per call, under ids new to the thread."""
     text, calls, problem, usage = _rejected_batch(error)
+    call_ids = unique_call_ids([call_id for call_id, _, _ in calls], used=set(used))
+    calls = [(call_id, name, arguments) for call_id, (_, name, arguments) in zip(call_ids, calls)]
+    state = _rejected_state(error)
     feedback = (
         "Error: Tool arguments were rejected before execution. "
         + problem
@@ -149,6 +157,7 @@ def _rejected_messages(error: AgentToolArgumentsError | StructuredOutputValidati
             for call_id, name, arguments in calls
         ],
         usage_metadata=usage,
+        additional_kwargs={PROVIDER_STATE_KWARG: state} if state else {},
     )
     return [
         rejected,
@@ -175,10 +184,8 @@ class _RecoveryCall:
         self.budget = current_provider_attempt_budget() or ProviderAttemptBudget(
             deadline=time.monotonic() + timeout
         )
-        self.projections = dict(request.state.get(CONTEXT_PROJECTIONS) or {})
-        self.messages = project_recovered_messages(request.messages, self.projections)
+        self.messages = list(request.messages)
         self.rejected: list[Any] = []
-        self.projections_changed = False
         last = request.messages[-1] if request.messages else None
         self.identity = hashlib.sha256(
             str(
@@ -198,64 +205,135 @@ class _RecoveryCall:
         ):
             return False
         self.check()
+        if isinstance(error, AgentRequiredToolCallMissing):
+            correction = _missing_call_messages(error)
+            self.rejected.extend(correction)
+            self.messages = [*self.messages, *correction]
+            self.notify("required_tool", 0)
+            return True
         if isinstance(error, (AgentToolArgumentsError, StructuredOutputValidationError)):
-            correction = _rejected_messages(error)
+            correction = _rejected_messages(
+                error,
+                used=used_call_ids(self.messages)
+                | frozenset(self.request.model_settings.get(THREAD_CALL_IDS) or ()),
+            )
             self.rejected.extend(correction)
             self.messages = [*self.messages, *correction]
             self.notify("tool_arguments", 0)
             return True
-        return self.reduce_context()
+        archives = self.reduce_context()
+        if archives is None:
+            return False
+        self.notify("context_window", archives)
+        return True
 
     def prepare(self):
         """Plan the assembled input; preserve complete messages when it fits."""
         limit = self.deps.context_input_budget if self.deps is not None else 0
         if not limit:
             return
-        from langchain_core.utils.function_calling import convert_to_openai_tool
-
-        schemas = [convert_to_openai_tool(tool) for tool in self.request.tools or []]
-        overhead = count_tokens_approximately(
-            [SystemMessage(content=json.dumps(schemas, ensure_ascii=False))]
-            + ([self.request.system_message] if self.request.system_message else [])
-        )
-        while overhead + count_tokens_approximately(self.messages) > limit:
+        # The compaction trigger counts the same way, so the two never
+        # disagree near the budget.
+        count = view_counter(self.request.system_message, self.request.tools)
+        cleared = archives = 0
+        while count(self.messages) > limit:
             self.check()
-            if not self.reduce_context(preflight=True):
+            written = self.reduce_context()
+            if written is None:
                 raise AgentModelCapacityError(
                     self.deps.model or "kernel", "context_preflight",
                     "The complete input does not fit the model budget; original content was retained.",
                     reason=ModelCapacityReason.CONTEXT_WINDOW,
                 )
+            cleared += 1
+            archives += written
+        if cleared:
+            self.notify("context_budget", archives)
 
-    def reduce_context(self, *, preflight=False):
-        # Recovery must never manufacture a pointer the current tool profile
-        # cannot read. Authorization failures retain their original semantics.
-        if self.deps is None or self.budget.remaining < 2:
-            return False
-        names = {
-            tool.get("name", tool.get("function", {}).get("name"))
-            if isinstance(tool, dict)
-            else tool.name
-            for tool in self.request.tools or []
-        }
-        if "read_canvas" not in names:
-            return False
+    def reduce_context(self):
+        """Clear one tool result of this call, in the order stage one protects them.
+
+        First a result the model has answered outside the newest three, then
+        one of the newest three it has answered, last one it has not seen yet,
+        whose placeholder then names no evidence; the largest first in each.
+        A result with no reader in this call, or one a placeholder would not
+        shrink, is passed over. The placeholder names how to read the result
+        again; a result that cannot be read again goes to the run archive
+        first. Nothing goes into the graph state and no model is called: the
+        next call meets the same results and clears them the same way, unless
+        stage one has cleared them by then; the archive writes such a result
+        as a second section when the run-wide data of its transcript
+        descriptor changed in between. Without state a result hidden here
+        counts as answered once the model has replied after it, so a later call
+        gives it the answered form.
+
+        Returns:
+            The archive parts written (0 or 1), or ``None`` when no result
+            can be cleared.
+        """
+        if self.deps is None:
+            return None
+        scope = RereadScope(self.deps.context_archive_prefix, tool_names(self.request.tools))
+        calls = tool_calls_by_id(self.messages)
+        for message, seen in self._candidates():
+            reread = rereadable_original(message, calls, scope)
+            if reread is not None and not self.readable(reread.tool):
+                reread = None
+            if reread is None:
+                # Recovery must never manufacture a pointer the current tool
+                # profile cannot read. Authorization failures retain their
+                # original semantics.
+                if "read_canvas" not in scope.tools or not self.readable("read_canvas"):
+                    continue
+                sized = archive_reread(unwritten_section(scope.archive_prefix))
+            else:
+                sized = reread
+            cleared = placeholder_for(message, sized.hint, seen=seen)
+            if count_tokens_approximately([cleared]) >= count_tokens_approximately([message]):
+                continue
+            archives = 0
+            if reread is None:
+                cleared = placeholder_for(message, archive_reread(self.archive(message)).hint, seen=seen)
+                archives = 1
+            self.messages = [cleared if item is message else item for item in self.messages]
+            return archives
+        return None
+
+    def _candidates(self):
+        """The results that may give way, each with whether the model has seen it, in order."""
+        answered = max(
+            (index for index, message in enumerate(self.messages) if isinstance(message, AIMessage)),
+            default=-1,
+        )
+        results = [
+            index
+            for index, message in enumerate(self.messages)
+            if isinstance(message, ToolMessage)
+            and message.name not in NEVER_CLEARED_TOOLS
+            and not message.additional_kwargs.get(CLEARED_RESULT_FLAG)
+        ]
+        newest = set(results[-CLEAR_KEEP:])
+
+        def order(index):
+            rank = 2 if index > answered else 1 if index in newest else 0
+            return rank, -count_tokens_approximately([self.messages[index]])
+
+        for index in sorted(results, key=order):
+            message = self.messages[index]
+            if not message.additional_kwargs.get(REJECTED_TOOL_ARGUMENTS_FLAG):
+                yield message, index < answered
+
+    def readable(self, tool_name):
         try:
-            self.deps.require_tool_allowed("read_canvas")
+            self.deps.require_tool_allowed(tool_name)
         except PermissionError:
             return False
-        candidates = [
-            message
-            for message in self.messages
-            if isinstance(message, ToolMessage)
-            and not message.additional_kwargs.get(REJECTED_TOOL_ARGUMENTS_FLAG)
-            and not message.additional_kwargs.get(CONTEXT_PROJECTED_FLAG)
-        ]
-        candidates.sort(key=lambda m: count_tokens_approximately([m]), reverse=True)
-        if not candidates:
-            return False
-        message = candidates[0]
-        original = json.dumps(message.model_dump(mode="json"), ensure_ascii=False)
+        return True
+
+    def archive(self, message):
+        from inqtrix.agents.kernel.transcript import public_message_dump
+
+        original = json.dumps(public_message_dump(message), ensure_ascii=False)
         try:
             if self.deps.context_sources_available:
                 archive_ids = [self.deps.append_private_context_archive(
@@ -271,87 +349,16 @@ class _RecoveryCall:
             raise AgentContextArchiveError(
                 "Context archive returned no readable reference."
             )
-        pointer = "; ".join(
-            f"read_canvas(artifact_id='{item}')" for item in archive_ids
-        )
-        projection_input = [
-            SystemMessage(content=(
-                "Create a compact task-specific projection of the complete tool result. "
-                "Preserve material findings, exceptions, status, dates, quantities and "
-                "citation identifiers needed for the task. Do not select only the beginning. "
-                "Return text only; do not call tools or invent missing evidence."
-            )),
-            HumanMessage(content=(
-                resolve_answer_language(self.deps.question).directive
-                + "\nTask:\n" + self.deps.question
-                + "\n\nComplete tool result (JSON data):\n"
-                + untrusted_fence(original, "tool-result")
-            )),
-        ]
-        if self.deps.context_input_budget and count_tokens_approximately(projection_input) > self.deps.context_input_budget:
-            # The original is durable. A projection that itself cannot fit is
-            # not an attempted model call and must not burn the retry budget.
-            return False
-        failed_attempt = self.budget.used
-        self.notify("context_budget" if preflight else "context_window", len(archive_ids), failed_attempt=failed_attempt)
-        self.check()
-        used = self.budget.used
-        try:
-            with bind_purpose("agent_context_projection"):
-                projection_message = self.request.model.invoke(projection_input)
-        finally:
-            if self.budget.used == used:
-                self.budget.used += 1
-        if (
-            not isinstance(projection_message.content, str)
-            or not projection_message.content.strip()
-            or projection_message.tool_calls
-            or projection_message.invalid_tool_calls
-        ):
-            raise AgentStructuredOutputError(
-                self.deps.model or "kernel",
-                "context_projection",
-                "Context projection did not return usable text.",
-            )
-        projection = (
-            "Task-specific projection of the complete tool result:\n"
-            + untrusted_fence(
-                projection_message.content.strip(), "context_projection"
-            )
-            + "\n\n"
-            + f"Full original: {pointer}. Read relevant original sections for "
-            "detail or before asserting that requested evidence is missing."
-        )
-        candidate = message.model_copy(
-            update={
-                "content": projection,
-                "additional_kwargs": {
-                    **message.additional_kwargs,
-                    CONTEXT_PROJECTED_FLAG: True,
-                },
-            }
-        )
-        if count_tokens_approximately([candidate]) >= count_tokens_approximately(
-            [message]
-        ):
-            return False
-        self.projections[_tool_content_key(message)] = projection
-        self.projections_changed = True
-        self.messages = [
-            candidate if item is message else item for item in self.messages
-        ]
-        return True
+        return archive_ids[0]
 
-    def notify(self, reason, archives, *, failed_attempt=None):
+    def notify(self, reason, archives):
         if self.deps is None:
             return
         self.deps.emit(
             MODEL_RECOVERY_EVENT,
             {
                 "reason": reason,
-                "failed_attempt": self.budget.used
-                if failed_attempt is None
-                else failed_attempt,
+                "failed_attempt": self.budget.used,
                 "max_attempts": self.budget.max_attempts,
                 "archive_count": archives,
             },
@@ -387,8 +394,6 @@ class _RecoveryCall:
                 response, structured_response=structured.model_dump(mode="json")
             )
         update = {}
-        if self.projections_changed:
-            update[CONTEXT_PROJECTIONS] = self.projections
         receipt = self.deps.source_receipt() if self.deps is not None else {}
         if receipt and receipt != self.request.state.get(SOURCE_RECEIPT):
             update[SOURCE_RECEIPT] = receipt

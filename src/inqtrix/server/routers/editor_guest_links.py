@@ -21,10 +21,10 @@ from inqtrix.project.editor_guest_links import (
     EditorGuestLinkRateLimited,
     EditorGuestLinkUnavailable,
 )
-from inqtrix.project.editor_collaboration_ports import CollaborationConflict
 from inqtrix.services.editor_collaboration_service import (
     CollaborationAuthenticationRequired,
 )
+from inqtrix.server.routers._collaboration_errors import collaboration_error_view
 from inqtrix.services.request_parsing import error_response
 
 if TYPE_CHECKING:
@@ -483,14 +483,21 @@ def build_router(container: "AppContainer") -> APIRouter:
                     else None
                 ),
             )
-        except ValueError as exc:
-            return _guest_error(400, str(exc))
         except CollaborationAuthenticationRequired:
             return _guest_error(401, "Guest session is no longer valid.")
         except EditorGuestLinkUnavailable:
             return _guest_link_unavailable()
         except (EditorGuestLinkNotFound, EditorGuestLinkExpired):
             return _guest_error(401, "Guest session has expired.")
+        except Exception as exc:
+            # Malformed input, a consumed, expired or revoked lease, a rate
+            # limit, a document too large or an unavailable service: the same
+            # answer as for a signed-in editor, so the browser's lease
+            # recovery decides on the same status.
+            failure = _guest_collaboration_failure(exc)
+            if failure is None:
+                raise
+            return failure
         return _guest_json(result)
 
     @router.get("/v1/editor/guest/collaboration/comments")
@@ -733,14 +740,33 @@ def _guest_collaboration_error(exc: Exception) -> JSONResponse | None:
         return _guest_error(401, "Guest session has expired.")
     if isinstance(exc, CollaborationAuthenticationRequired):
         return _guest_error(403, str(exc))
-    if isinstance(exc, CollaborationConflict):
-        return _guest_error(
-            409,
-            str(exc) or "The comment state has changed.",
-        )
-    if isinstance(exc, (ValueError, TypeError)):
+    failure = _guest_collaboration_failure(exc)
+    if failure is not None:
+        return failure
+    if isinstance(exc, TypeError):
         return _guest_error(400, str(exc))
     return None
+
+
+def _guest_collaboration_failure(exc: Exception) -> JSONResponse | None:
+    """Render the shared collaboration answer in the guest envelope.
+
+    Guest-link failures keep their own answers in front of this; every other
+    collaboration failure answers a guest as it answers a signed-in editor.
+    """
+    view = collaboration_error_view(exc)
+    if view is None:
+        return None
+    return _guest_json(
+        {
+            "error": {
+                "message": view.message,
+                "type": view.error_type,
+                **view.extra,
+            }
+        },
+        status_code=view.status,
+    )
 
 
 async def _mutate_guest_comment_message(

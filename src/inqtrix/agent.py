@@ -39,13 +39,19 @@ Custom configuration (Baukasten)::
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
+import threading
 import time
+from collections.abc import AsyncIterator, Iterator
+from concurrent.futures import wait as wait_for_futures
 from queue import Empty, Queue
-from typing import Iterator
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from inqtrix import aio
 from inqtrix.constants import (
     ANSWER_PROMPT_CITATIONS_MAX,
     CLAIM_EXTRACT_TIMEOUT,
@@ -447,6 +453,23 @@ class AgentConfig(BaseModel):
     """Control protected audit detail and its content-minimized log projection."""
 
 
+def _remaining_progress(progress_queue: Queue | None) -> Iterator[str]:
+    """The progress lines still queued once a streamed run ended."""
+    while progress_queue is not None and not progress_queue.empty():
+        try:
+            kind, msg = progress_queue.get_nowait()
+        except Empty:
+            break
+        except Exception as exc:
+            log.warning(
+                "Remaining progress messages could not be read (error_code=%s)",
+                type(exc).__name__,
+            )
+            break
+        if kind == "progress" and msg != "done":
+            yield f"> {msg}\n"
+
+
 # ------------------------------------------------------------------ #
 # ResearchAgent — the Baukasten entry point
 # ------------------------------------------------------------------ #
@@ -466,9 +489,14 @@ class ResearchAgent:
     compiled graph and lazy-created providers are cached). It is **not
     thread-safe** for concurrent runs against the same instance —
     create one instance per worker, or wrap calls in a lock if you must
-    share. Streaming via :meth:`stream` uses an internal background
-    thread to drain progress; that does not make the rest of the API
-    concurrent-safe.
+    share.
+
+    Every run executes on the process loop. A script, a notebook or an
+    application that never configured one gets a background loop that
+    Inqtrix starts on first use, once per process; nothing has to be
+    set up. :meth:`aresearch` and :meth:`astream` work from any event
+    loop, :meth:`research` and :meth:`stream` from any thread except
+    the process loop's own.
 
     Attributes:
         config: The bound :class:`AgentConfig`. Read-only after
@@ -548,6 +576,9 @@ class ResearchAgent:
                 retry could not absorb.
             ValueError: For malformed input (empty question, oversize
                 question).
+            inqtrix.aio.CalledOnLoopThread: When called on the thread of
+                the process loop itself, which would wait for itself;
+                ``await agent.aresearch(...)`` there.
 
         Example:
             >>> agent = ResearchAgent()
@@ -555,17 +586,47 @@ class ResearchAgent:
             >>> result.metrics.confidence
             8
         """
-        from inqtrix.graph import run
+        self._ensure_initialised()
+        return aio.call_from_thread(self.aresearch(question, history=history))
 
+    async def aresearch(
+        self,
+        question: str,
+        *,
+        history: str = "",
+    ) -> ResearchResult:
+        """Run the full iterative research loop without blocking the caller's loop.
+
+        The async twin of :meth:`research`: same arguments, result and
+        errors. It works from any event loop, a notebook's included; the
+        run itself executes on the process loop. Cancelling the awaiting
+        task tells the run to stop at its next checkpoint.
+
+        Args:
+            question: See :meth:`research`.
+            history: See :meth:`research`.
+
+        Returns:
+            The same :class:`~inqtrix.result.ResearchResult` as
+            :meth:`research`.
+
+        Raises:
+            inqtrix.exceptions.AgentTimeout: See :meth:`research`.
+            inqtrix.exceptions.AgentRateLimited: See :meth:`research`.
+
+        Example:
+            >>> result = await ResearchAgent().aresearch("Was ist Quantencomputing?")
+        """
         providers, strategies, settings = self._ensure_initialised()
-
         t0 = time.monotonic()
-        raw = run(
-            question,
-            history=history,
-            providers=providers,
-            strategies=strategies,
-            settings=settings,
+        raw = await aio.on_process_loop(
+            self._run(
+                question,
+                history=history,
+                progress_queue=None,
+                cancel_event=threading.Event(),
+                components=(providers, strategies, settings),
+            )
         )
         elapsed = time.monotonic() - t0
 
@@ -582,10 +643,13 @@ class ResearchAgent:
     ) -> Iterator[str]:
         """Run research and stream progress + answer chunks incrementally.
 
-        Internally runs the same graph as :meth:`research` in a
-        background thread and drains progress events from a queue.
-        When the run completes, the final answer is yielded as
-        word-aligned chunks for smooth UI rendering.
+        Runs the same graph as :meth:`research` on the process loop and
+        drains its progress events from a queue. The run goes on while
+        nobody reads. When it completes, the final answer is yielded as
+        word-aligned chunks for smooth UI rendering. A stream that ends
+        early (``close()``, an error, an interrupted read) tells the run
+        to stop and returns only once the run ended at its next
+        checkpoint, so no run outlives its stream.
 
         Args:
             question: See :meth:`research`.
@@ -604,34 +668,32 @@ class ResearchAgent:
 
         Raises:
             inqtrix.exceptions.AgentTimeout: Same conditions as
-                :meth:`research` — propagated from the background
-                thread when ``future.result()`` is awaited.
+                :meth:`research`, raised when the run ends.
             inqtrix.exceptions.AgentRateLimited: Same conditions as
                 :meth:`research`.
+            inqtrix.aio.CalledOnLoopThread: When called on the thread of
+                the process loop itself; use :meth:`astream` there.
 
         Example:
             >>> agent = ResearchAgent()
             >>> for chunk in agent.stream("Meine Frage"):
             ...     print(chunk, end="", flush=True)
         """
-        from inqtrix.graph import run
         from inqtrix.text import iter_word_chunks
 
-        providers, strategies, settings = self._ensure_initialised()
+        components = self._ensure_initialised()
         progress_queue: Queue | None = Queue() if include_progress else None
-
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                run,
+        cancel_event = threading.Event()
+        future = aio.submit_from_thread(
+            self._run(
                 question,
                 history=history,
                 progress_queue=progress_queue,
-                providers=providers,
-                strategies=strategies,
-                settings=settings,
+                cancel_event=cancel_event,
+                components=components,
             )
-
+        )
+        try:
             # Yield progress updates while agent runs
             while include_progress and progress_queue is not None and not future.done():
                 try:
@@ -649,25 +711,121 @@ class ResearchAgent:
                     break
 
             # Drain remaining progress
-            while include_progress and progress_queue is not None and not progress_queue.empty():
-                try:
-                    kind, msg = progress_queue.get_nowait()
-                    if kind == "progress" and msg != "done":
-                        yield f"> {msg}\n"
-                except Empty:
-                    break
-                except Exception as exc:
-                    log.warning(
-                        "Remaining progress messages could not be read (error_code=%s)",
-                        type(exc).__name__,
-                    )
-                    break
+            for line in _remaining_progress(progress_queue):
+                yield line
 
             raw = future.result()
-            if include_progress:
-                yield "---\n"
-            for chunk in iter_word_chunks(raw.get("answer", "")):
-                yield chunk
+        finally:
+            if not future.done():
+                cancel_event.set()
+                wait_for_futures((future,))
+        if include_progress:
+            yield "---\n"
+        for chunk in iter_word_chunks(raw.get("answer", "")):
+            yield chunk
+
+    async def astream(
+        self,
+        question: str,
+        *,
+        history: str = "",
+        include_progress: bool = True,
+    ) -> AsyncIterator[str]:
+        """Stream progress and answer chunks without blocking the caller's loop.
+
+        The async twin of :meth:`stream`, with the same chunks and the
+        same end: an early ``aclose()`` or a cancelled read tells the run
+        to stop and waits until it ended. It works from any event loop.
+
+        Args:
+            question: See :meth:`research`.
+            history: See :meth:`research`.
+            include_progress: See :meth:`stream`.
+
+        Yields:
+            The chunks of :meth:`stream`.
+
+        Raises:
+            inqtrix.exceptions.AgentTimeout: See :meth:`stream`.
+            inqtrix.exceptions.AgentRateLimited: See :meth:`stream`.
+
+        Example:
+            >>> async for chunk in ResearchAgent().astream("Meine Frage"):
+            ...     print(chunk, end="", flush=True)
+        """
+        from inqtrix.text import iter_word_chunks
+
+        components = self._ensure_initialised()
+        progress_queue: Queue | None = Queue() if include_progress else None
+        cancel_event = threading.Event()
+        run = asyncio.ensure_future(
+            aio.on_process_loop(
+                self._run(
+                    question,
+                    history=history,
+                    progress_queue=progress_queue,
+                    cancel_event=cancel_event,
+                    components=components,
+                )
+            )
+        )
+        try:
+            while progress_queue is not None and not run.done():
+                try:
+                    kind, msg = await aio.on_process_loop(
+                        aio.run_blocking(progress_queue.get, True, 0.3)
+                    )
+                except Empty:
+                    continue
+                if kind == "progress" and msg != "done":
+                    yield f"> {msg}\n"
+            for line in _remaining_progress(progress_queue):
+                yield line
+            # Shielded: a cancelled read must not cancel the run itself, or
+            # the run would end before it stopped and nobody would wait.
+            raw = await asyncio.shield(run)
+        finally:
+            if not run.done():
+                cancel_event.set()
+                await asyncio.wait((run,))
+        if include_progress:
+            yield "---\n"
+        for chunk in iter_word_chunks(raw.get("answer", "")):
+            yield chunk
+
+    async def _run(
+        self,
+        question: str,
+        *,
+        history: str,
+        progress_queue: Queue | None,
+        cancel_event: threading.Event,
+        components: tuple[Any, Any, Any],
+    ) -> dict[str, Any]:
+        """One run of the sync research graph on the transition lane.
+
+        A cancelled caller sets the run's cancel probe, so the graph stops at
+        its next checkpoint instead of running on for nobody.
+        """
+        from inqtrix.graph import run
+
+        providers, strategies, settings = components
+        try:
+            return await aio.run_legacy_segment(
+                functools.partial(
+                    run,
+                    question,
+                    history=history,
+                    progress_queue=progress_queue,
+                    providers=providers,
+                    strategies=strategies,
+                    settings=settings,
+                    cancel_event=cancel_event,
+                )
+            )
+        except asyncio.CancelledError:
+            cancel_event.set()
+            raise
 
     # -- Properties ------------------------------------------------ #
 

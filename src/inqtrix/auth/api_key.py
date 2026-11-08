@@ -19,7 +19,7 @@ import logging
 import hmac
 import inspect
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from fastapi import HTTPException, Request, status
 from fastapi.concurrency import run_in_threadpool
@@ -323,6 +323,11 @@ def build_auth_provider(settings: "Settings") -> AuthProvider:
     )
 
 
+def engine_of_session_factory(session_factory: Any) -> Any:
+    """The engine a provider's stores sit on, for the process that composes it."""
+    return session_factory.kw["bind"] if session_factory is not None else None
+
+
 def build_session_backends(
     settings: "Settings", *, source_issuer: str | None = None
 ):
@@ -341,17 +346,12 @@ def build_session_backends(
     from inqtrix.auth.sessions import MemoryFlowStore, MemorySessionStore
 
     if settings.storage.backend == "postgres":
-        if not settings.storage.database_url.strip():
-            raise RuntimeError(
-                "INQTRIX_STORAGE_BACKEND=postgres requires "
-                "INQTRIX_DATABASE_URL to be set."
-            )
         from inqtrix.storage.auth_postgres import (
             PostgresFlowStore,
             PostgresSessionStore,
             PostgresUserDirectory,
         )
-        from inqtrix.storage.db import build_engine, build_session_factory
+        from inqtrix.storage.db import build_process_engine, build_session_factory
         from inqtrix.storage.invitations_postgres import (
             PostgresInvitationRepository,
         )
@@ -360,12 +360,7 @@ def build_session_backends(
             PostgresUserLifecycleTransaction,
         )
 
-        session_factory = build_session_factory(
-            build_engine(
-                settings.storage.database_url,
-                **settings.storage.pool_kwargs(),
-            )
-        )
+        session_factory = build_session_factory(build_process_engine(settings.storage))
         app_role = settings.storage.app_role
         return (
             PostgresSessionStore(
@@ -499,7 +494,7 @@ def build_local_provider(settings: "Settings") -> AuthProvider:
         pat_service=pat_service,
         transaction=lifecycle_transaction,
     )
-    return LocalAuthProvider(
+    provider = LocalAuthProvider(
         authenticator=authenticator,
         credentials=credentials,
         registration=auth.local_registration,
@@ -517,6 +512,8 @@ def build_local_provider(settings: "Settings") -> AuthProvider:
         trusted_proxy_hops=auth.trusted_proxy_hops,
         lifecycle=lifecycle,
     )
+    provider.database_engine = engine_of_session_factory(session_factory)
+    return provider
 
 
 def build_oidc_provider(settings: "Settings") -> AuthProvider:
@@ -525,8 +522,7 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
     Session/flow/user stores follow the storage backend: memory for
     the zero-infrastructure default (single process), Postgres when
     ``INQTRIX_STORAGE_BACKEND=postgres`` so logins survive restarts
-    and replica switches. The Postgres stores get their own session
-    factory, used exclusively on the HTTP loop.
+    and replica switches.
     """
     from inqtrix.auth.invitations import RegistrationGate
     from inqtrix.auth.jwks import fetched_without_tls
@@ -579,7 +575,7 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
         users,
         pat_store,
         invitation_repo,
-        _session_factory,
+        session_factory,
         lifecycle_transaction,
     ) = (
         build_session_backends(settings)
@@ -612,7 +608,7 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
         pat_service=pat_service,
         transaction=lifecycle_transaction,
     )
-    return OidcAuthProvider(
+    provider = OidcAuthProvider(
         client=client,
         sessions=sessions,
         flows=flows,
@@ -630,3 +626,5 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
         invitations=invitation_repo,
         lifecycle=lifecycle,
     )
+    provider.database_engine = engine_of_session_factory(session_factory)
+    return provider

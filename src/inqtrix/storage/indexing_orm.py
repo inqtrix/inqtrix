@@ -1,7 +1,7 @@
 """SQLAlchemy Core definitions of the durable reindex-job schema.
 
 The durable twin of the in-memory
-:class:`~inqtrix.server.indexing.IndexingJobStore`: it makes a
+:class:`~inqtrix.runs.indexing_memory.IndexingJobStore`: it makes a
 background re-embed survive not just closing the browser (the in-memory
 store already does that) but closing the *server* — the job row is the
 source of truth and an :mod:`inqtrix.worker` process executes it.
@@ -26,7 +26,7 @@ differences from runs are the reindex domain itself:
 
 ``status`` is text + a CHECK constraint added in the migration; the
 lifecycle ordering authority stays
-:class:`~inqtrix.server.indexing.IndexingJobStatus` (no native PG enum).
+:class:`~inqtrix.runs.indexing_records.IndexingJobStatus` (no native PG enum).
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ indexing_jobs = Table(
 """Durable reindex-job records — the source of truth once
 ``INQTRIX_STORAGE_BACKEND=postgres`` is active. The status CHECK
 constraint is added in migration 0011 (values from
-:class:`~inqtrix.server.indexing.IndexingJobStatus`); the progress
+:class:`~inqtrix.runs.indexing_records.IndexingJobStatus`); the progress
 snapshot is derived from the count columns, not stored, so it cannot
 drift from the wire shape."""
 

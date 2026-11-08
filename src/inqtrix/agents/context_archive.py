@@ -47,6 +47,33 @@ def archive_prefix(run_id: str) -> str:
     return f"art_{run_id[-12:]}_ctx"
 
 
+_ARCHIVED_RESULT_HEAD = "The complete tool result is above. Retained original: "
+
+
+def archived_result_pointer(artifact_id: str) -> str:
+    """The last line of a tool result the run archive keeps in full.
+
+    The tool writes it after the result, outside every fence, so a quoted
+    source cannot supply it; :func:`archived_result_id` reads it back.
+    """
+    return f"{_ARCHIVED_RESULT_HEAD}read_canvas(artifact_id='{artifact_id}')."
+
+
+def archived_result_id(text: str, prefix: str) -> str | None:
+    """The archive part a tool result names in its own last line, if it is in *prefix*."""
+    line = text.rstrip().rpartition("\n")[2]
+    if not line.startswith(_ARCHIVED_RESULT_HEAD):
+        return None
+    pointer = line[len(_ARCHIVED_RESULT_HEAD):]
+    opening, closing = "read_canvas(artifact_id='", "')."
+    if not (pointer.startswith(opening) and pointer.endswith(closing)):
+        return None
+    artifact_id = pointer[len(opening):-len(closing)]
+    if "'" in artifact_id or not artifact_id.startswith(f"{prefix}_"):
+        return None
+    return artifact_id
+
+
 def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

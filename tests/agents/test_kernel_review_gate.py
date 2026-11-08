@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from inqtrix.agents.phase_models import DeepReviewVerdict
 

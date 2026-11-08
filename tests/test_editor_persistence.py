@@ -24,7 +24,7 @@ from inqtrix.project.editor_ports import (
     FolderNotFound,
     SuggestionDraftRevisionConflict,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.services.collaboration_client import CollaborationProjection
 from inqtrix.services.editor_persistence_service import (
     CollaborationProjectionUnavailable,

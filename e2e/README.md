@@ -124,6 +124,31 @@ automatic selection or fallback. It is mandatory for generated
 requires Podman for namespace-scoped shaping. Playwright grep, project, reporter, worker,
 and file overrides are intentionally not accepted by this entrypoint.
 
+## Log inspection
+
+A run started with `--container-engine` ends by reading the logs of the `api`,
+`worker`, `web` and `collaboration` containers of the canonical stack in the time
+window of the run, stopped containers included. The binding to the run is that
+window: other activity on the stack during the run counts as well. The result
+stands under `logInspection` in `report.json`: lines, levels, lines that are not
+JSON, missing required fields, and masked message templates of warnings and
+errors. It never stores a log line.
+
+`system-smoke`, `load-smoke`, `agent-desk` and `chat-prompt` fail on a line at
+`ERROR` or above, on a broken log contract and on a service that stopped during
+the run. `fault-injection`, `load-soak`, `load-ramp` and `load-capacity` provoke
+failures on purpose and check the contract only. `agent-recovery` is not inspected,
+because it recreates `api` and `worker` while cleaning up. The block Hocuspocus
+prints when a hook rejects an update is counted as library text, not as a broken
+contract; any other text line is one.
+
+The inspection reports `not_run` with a reason when it has no foundation: no
+`--container-engine`, no `api` or `web` container, an empty log, a log that starts
+later than the run because it was rotated or the clocks differ, or logs in text
+format. A run that selected a container engine then ends as `blocked`, never as
+`passed`. The npm scripts of the four profiles above select Podman; with Docker,
+pass `-- --container-engine docker`.
+
 ## Run lifecycle
 
 The `agent-recovery` profile requires a healthy, idle canonical local Podman
@@ -274,6 +299,24 @@ number, and a memo that cites only labels of its own references; an applied
 revision must have raised the memo's revision and shown its findings. Whether the verdict is right and what an edit changed belong to
 the content and trace review.
 
+Every completed turn records the review its Stufe owes in the outcome record:
+`completed` where the level owes one, `waived` where the Stufe skips it. A
+review that ran but gave no usable verdict ("Prüfung nicht auswertbar") fails
+`agent.review-matches-tier` with the turn named; it does not stop the
+conversation, so the turns after it are still measured.
+
+Three scenarios cover the controls of the session itself. A researching turn
+is stopped through the visible Stop control; it must end cancelled, and so
+must the delegated work that was still running when the Stop arrived (work
+that had finished before keeps its outcome); the conversation must show that
+it was stopped, and
+the next turn must complete in the same session
+(`agent.conversation-stop-continue`). A session renamed by hand in the session
+list keeps that title through the next turn, on the server and on the page
+(`agent.conversation-manual-title`). The Canvas report copies as Markdown that
+is the stored report unchanged, followed by the AI notice
+(`agent.conversation-canvas-copy`).
+
 A turn that cannot be submitted or never ends stops the conversation. A
 turn that completes but misses one of its expectations fails its scenario
 (and with it the run) and is logged, while the later turns still run and are
@@ -292,7 +335,7 @@ cancellation path.
 Authentication sessions, credentials, processes and unmarked technical fixtures
 are cleaned normally. The cleanup ledger records `retained`, and the report
 publishes its retained-resource count and status separately from `clean`.
-The report schema is version 4. Without this opt-in, normal cleanup applies;
+The report schema is version 6. Without this opt-in, normal cleanup applies;
 retention is not supported by the controlled recovery profile.
 
 For in-app visual inspection before cleanup in either agent profile, set
@@ -323,18 +366,30 @@ e2e/.results/verification/<run-id>/report.json
 e2e/.results/verification/<run-id>/cleanup-ledger.json
 ```
 
-Both files use mode `0600`. The report schema is version 4 and records the
-Inqtrix version read from `src/inqtrix/__init__.py`, the profile, selected
+Both files use mode `0600`. The report schema is version 6 and records the
+Inqtrix version read from `src/inqtrix/version.py`, the profile, selected
 engines, scenario records, source revision and dirty-state flag, explicit
 status values, preflight results, adapter exit metadata, and cleanup state.
-The CLI summary prints the same Inqtrix version. Scenario records use exactly:
+The CLI summary prints the same Inqtrix version and lists every skipped
+scenario with its reason. Scenario records use exactly:
 
 - `passed`: the selected engine explicitly reported that scenario as passed;
-- `failed`: that scenario ran and failed, or the engine failed before it could
-  identify a more precise first failure;
+- `failed`: that scenario ran and failed, or stands on a step of the same run
+  that failed; the engine gives the reason;
+- `skipped`: the engine left the scenario out for the reason it gives (today
+  only the guest-link matrix of `system-smoke` without HTTPS or enabled guest
+  links); it never counts as covered, and `INQTRIX_E2E_REQUIRE_GUEST_LINKS=1`
+  turns it into a failure;
 - `blocked`: the owning engine failed preflight and never started;
-- `not_run`: the profile selected the scenario, but execution never reached it;
+- `not_run`: the profile selected the scenario, but it was not measured: the
+  run ended before it, or a browser it needs did not measure it. An engine that
+  ends early leaves these `not_run`; no other scenario is marked failed in their
+  place, and the engine's own status keeps the run red;
 - `not_applicable`: the scenario belongs to another profile.
+
+Engines report through one writer, `tests/verification/fixtures/scenario-sidecar.mjs`,
+which also keeps an engine's verdicts (`createScenarioBook`): a failure keeps its
+first reason and is never replaced by a later pass.
 
 An exit code of zero without complete explicit scenario results is converted to
 an execution failure. Missing results are never inferred as passed, and
@@ -489,9 +544,9 @@ INQTRIX_E2E_ADMIN_EMAIL          required; no seed-account default
 INQTRIX_E2E_TESTER_EMAIL         required; must identify a different account
 INQTRIX_E2E_ADMIN_PASSWORD       required; no password default
 INQTRIX_E2E_USER_PASSWORD        required; no fallback to the admin password
-INQTRIX_E2E_BASE_URL             optional; defaults to http://127.0.0.1:8080
+INQTRIX_E2E_BASE_URL             optional; defaults to http://localhost:8080
 PLAYWRIGHT_EXECUTABLE_PATH       optional; Playwright resolves its browser otherwise
-INQTRIX_E2E_REQUIRE_GUEST_LINKS  optional strict capability requirement
+INQTRIX_E2E_REQUIRE_GUEST_LINKS  optional; `1` fails the run when HTTPS or guest links are missing, instead of skipping the guest-link matrix
 ```
 
 The engine saves German on its four temporary accounts and requires it of the
@@ -522,7 +577,7 @@ Product cleanup is durable from the parent orchestrator's perspective:
 `load-smoke` uses the same product-resource IPC and cleanup ledger as the live
 system engine. It needs `INQTRIX_E2E_ADMIN_EMAIL`,
 `INQTRIX_E2E_ADMIN_PASSWORD`, and `INQTRIX_E2E_USER_PASSWORD`;
-`INQTRIX_E2E_BASE_URL` defaults to `http://127.0.0.1:8080`. The owner creates
+`INQTRIX_E2E_BASE_URL` defaults to `http://localhost:8080`. The owner creates
 four deterministic temporary users, shares one Run-ID-bound collaboration
 document with Edit access, and issues exactly five leases per temporary
 identity. The 20 sessions are ordered across identities so the first five
@@ -533,6 +588,16 @@ loopback/LAN test must set `INQTRIX_OIDC_INSECURE_DEV_COOKIES=true` in that
 temporary test environment; otherwise the login response can succeed while a
 standalone API test client correctly refuses to replay the `Secure` cookie.
 Never carry this development escape hatch into production.
+
+Over HTTPS with a throwaway certificate, trust that certificate instead of
+switching verification off: set `NODE_EXTRA_CA_CERTS` to its file for the run,
+or to the file of the local CA that signed it. `INQTRIX_E2E_IGNORE_HTTPS_ERRORS=1`
+reaches every browser context and API session of the gates (they all take it
+from `tests/verification/fixtures/https-errors.mjs`), not the load engine's own
+requests. Without the trusted certificate its API latency probe fails, names
+the certificate error and the way out that fits it: trust the certificate, use
+a host name the certificate was issued for, issue a new certificate, or use
+`https://` only for an HTTPS port.
 
 The generated version-2 fixture contains only protocol fields required by the
 load engine. It is atomically written with mode `0600` below the run's private

@@ -8,25 +8,22 @@ to the library example.
 
 Required environment variables
 ------------------------------
-- ``AZURE_OPENAI_API_KEY``           (LLM — Option A default)
+- ``AZURE_OPENAI_API_KEY``           (LLM)
 - ``AZURE_OPENAI_ENDPOINT``
-- ``AZURE_OPENAI_DEPLOYMENT_NAME``
 - ``AZURE_AI_PROJECT_ENDPOINT``
+- ``AZURE_AI_PROJECT_API_KEY``       (web search, Foundry project key)
 - ``WEB_SEARCH_AGENT_NAME``
 
 Optional (parity with provider_stacks):
 - ``WEB_SEARCH_AGENT_VERSION``
-- ``AZURE_AI_PROJECT_API_KEY``
-- ``AZURE_OPENAI_CLAIM_EXTRACT_DEPLOYMENT_NAME``
-- ``AZURE_TENANT_ID`` / ``AZURE_CLIENT_ID`` / ``AZURE_CLIENT_SECRET``
+- ``AZURE_OPENAI_CONTEXT_WINDOW_TOKENS``  (context window of the deployments; default 128000)
 
-Foundry token caveat
---------------------
-The Foundry web-search provider mints a bearer token at constructor
-time (~60-75 min lifetime, auto-refresh via ``azure.identity``). For
-long-running servers keep a single per-process instance and rely on
-the credential's automatic refresh; chronic 401s after long uptime are
-the documented signal to restart the process.
+Deployments
+-----------
+The Azure deployment names are set in the provider builder below as three
+model tiers (high for the answer, mid for plan / evaluate / direct chat, fast
+for classify and claim extraction), as in the library example; replace them
+with your deployment names.
 
 Optional logging / server / security: see ``examples/webserver_stacks/README.md``
 (``INQTRIX_LOG_*``, ``OBSERVABILITY_PROFILE``).
@@ -83,10 +80,14 @@ def _build_providers() -> ProviderContext:
     project_endpoint = _require_env("AZURE_AI_PROJECT_ENDPOINT")
     web_agent_name = _require_env("WEB_SEARCH_AGENT_NAME")
     web_agent_version = _optional_env("WEB_SEARCH_AGENT_VERSION")
+    azure_context_window_tokens = int(
+        os.environ.get("AZURE_OPENAI_CONTEXT_WINDOW_TOKENS", "128000").strip()
+        or "128000"
+    )
 
     # -- LLM Provider ---------------------------------------------------------
     #
-    # Option A: API Key (default)
+    # Authentication: the API key of the Azure OpenAI resource.
     azure_api_key = _require_env("AZURE_OPENAI_API_KEY")
 
     llm = AzureOpenAILLM(
@@ -112,68 +113,20 @@ def _build_providers() -> ProviderContext:
         # -nano map to their cards. Omit this argument to keep the plain tier
         # picker; nothing else in the stack depends on it.
         selectable_models=["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
+        context_window_tokens=azure_context_window_tokens,
     )
 
-    # -- Option B: Service Principal — direct constructor args ----------------
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     tenant_id=os.environ["AZURE_TENANT_ID"],
-    #     client_id=os.environ["AZURE_CLIENT_ID"],
-    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # -- Option C: Service Principal — manual token provider ------------------
-    # from azure.identity import ClientSecretCredential, get_bearer_token_provider
-    # credential = ClientSecretCredential(
-    #     tenant_id=os.environ["AZURE_TENANT_ID"],
-    #     client_id=os.environ["AZURE_CLIENT_ID"],
-    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
-    # )
-    # token_provider = get_bearer_token_provider(
-    #     credential, "https://cognitiveservices.azure.com/.default",
-    # )
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     azure_ad_token_provider=token_provider,
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # -- Option D: Existing token provider ------------------------------------
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     azure_ad_token_provider=existing_token_provider,
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # -- Option E: DefaultAzureCredential -------------------------------------
-    # from azure.identity import DefaultAzureCredential
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     credential=DefaultAzureCredential(),
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
     # -- Search Provider ------------------------------------------------------
-    # Auth order via azure-ai-projects: project API key (api-key header),
-    # Service Principal, then DefaultAzureCredential.
-    project_api_key = _optional_env("AZURE_AI_PROJECT_API_KEY")
-    tenant_id = _optional_env("AZURE_TENANT_ID")
-    client_id = _optional_env("AZURE_CLIENT_ID")
-    client_secret = _optional_env("AZURE_CLIENT_SECRET")
+    # Auth: the Foundry project key, sent in the api-key header.
+    project_api_key = _require_env("AZURE_AI_PROJECT_API_KEY")
 
     search_kwargs: dict[str, Any] = {
         "project_endpoint": project_endpoint,
         "agent_name": web_agent_name,
+        "api_key": project_api_key,
     }
     if web_agent_version:
         search_kwargs["agent_version"] = web_agent_version
-    if project_api_key:
-        search_kwargs["api_key"] = project_api_key
-    elif tenant_id and client_id and client_secret:
-        search_kwargs["tenant_id"] = tenant_id
-        search_kwargs["client_id"] = client_id
-        search_kwargs["client_secret"] = client_secret
 
     search = AzureFoundryWebSearch(**search_kwargs)
 

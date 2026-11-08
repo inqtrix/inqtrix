@@ -14,14 +14,15 @@ from inqtrix.project.agent_sessions_ports import (
     AgentSessionGroupNotFound,
     AgentSessionNotFound,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.services.agent_sessions_service import AgentSessionsService
+from tests._store_doubles import BothNames
 
 ALICE = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 BOB = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
 
-class _HistoricalRuns:
+class _HistoricalRuns(BothNames):
     def __init__(
         self,
         owners: set[tuple[str | None, uuid.UUID | None]] | None = None,

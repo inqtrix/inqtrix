@@ -29,7 +29,8 @@ from pydantic import BaseModel, ValidationError
 
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.observability.context import bind_purpose
-from inqtrix.providers.base import observe_provider_retries
+from inqtrix.providers.attempts import observe_retries
+from inqtrix.providers.base import counted_input_tokens
 
 log = logging.getLogger(__name__)
 
@@ -65,15 +66,17 @@ def observe_structured_retries(
 
 
 @contextmanager
-def observe_bound_model_retries(llm: Any, node: str) -> Iterator[None]:
-    """Bind the current Agent retry sink at one concrete provider boundary."""
+def observe_bound_model_retries(node: str) -> Iterator[None]:
+    """Bind the current Agent retry sink to the model retries of one call.
+
+    Without a sink nothing is bound, so a retry log bound further out keeps
+    taking the retries.
+    """
     retry_sink = _STRUCTURED_RETRY_SINK.get()
-    retry_callback = (
-        (lambda notice: retry_sink(node, notice))
-        if retry_sink is not None
-        else None
-    )
-    with observe_provider_retries(llm, retry_callback):
+    if retry_sink is None:
+        yield
+        return
+    with observe_retries("model", lambda notice: retry_sink(node, notice)):
         yield
 
 
@@ -146,7 +149,7 @@ def structured_call(
         # The node name is the call's purpose on the provider span: this
         # helper is the one boundary every structured phase call crosses,
         # so binding here attributes all of them without call-site edits.
-        with observe_bound_model_retries(llm, node), bind_purpose(node):
+        with observe_bound_model_retries(node), bind_purpose(node):
             response = llm.complete_structured(
                 prompt,
                 schema=schema,
@@ -175,7 +178,7 @@ def structured_call(
             )
             return StructuredOutcome(None, usage, STRUCTURED_MARKER_FALLBACK)
 
-    with observe_bound_model_retries(llm, node), bind_purpose(node):
+    with observe_bound_model_retries(node), bind_purpose(node):
         response = llm.complete_with_metadata(
             prompt,
             system=system,
@@ -209,6 +212,6 @@ def structured_call(
 
 def _usage(response: Any) -> dict[str, int]:
     return {
-        "prompt_tokens": getattr(response, "prompt_tokens", 0) or 0,
+        "prompt_tokens": counted_input_tokens(response),
         "completion_tokens": getattr(response, "completion_tokens", 0) or 0,
     }

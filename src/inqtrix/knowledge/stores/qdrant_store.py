@@ -40,7 +40,7 @@ import uuid
 from contextlib import nullcontext
 from typing import Any, Callable
 
-from inqtrix.knowledge.evidence import source_excerpt_is_verified
+from inqtrix.knowledge.evidence import CanonicalBodies
 from inqtrix.pagination import keyset_page
 from inqtrix.knowledge.stores.ports import (
     VectorStoreUnavailable,
@@ -72,13 +72,17 @@ from inqtrix.knowledge.stores.vector_index import (
     VectorSearchScope,
 )
 from inqtrix.knowledge.source_cleanup import SourceCleanupPlan
-from inqtrix.source_authority import SourceDeletionPermit
+from inqtrix.storage.source_authority import SourceDeletionPermit
 
 log = logging.getLogger(__name__)
 
 REGISTRY_COLLECTION = "inqtrix_registry"
 CHUNKS_PREFIX = "inqtrix_chunks__"
 _REGISTRY_CAS_MAX_ATTEMPTS = 32
+_UPSERT_BATCH_POINTS = 64
+"""Points in one write request. The server refuses a request above 32 MB by default
+(``service.max_request_size_mb``), and one vector of 3072 dimensions alone is about
+60 KB of JSON."""
 
 _IMPORT_HINT = (
     "Qdrant support requires the 'knowledge-qdrant' extra "
@@ -150,6 +154,17 @@ def _payload_user_id(value: Any) -> uuid.UUID | None:
 
 
 _T = TypeVar("_T")
+
+
+def _upsert_in_batches(client: Any, points: list[Any], **write: Any) -> None:
+    """Write *points* in requests the server accepts, however large the document is.
+
+    Point ids are deterministic when the document has a revision, so a retry after
+    a failed request overwrites what the earlier requests wrote; the legacy paths
+    without one write fresh ids.
+    """
+    for start in range(0, len(points), _UPSERT_BATCH_POINTS):
+        client.upsert(points=points[start : start + _UPSERT_BATCH_POINTS], **write)
 
 
 def _unavailable_from(exc: BaseException) -> VectorStoreUnavailable | None:
@@ -313,15 +328,22 @@ def _ensure_chunks_collection(
             if sparse_enabled
             else None
         )
-        client.create_collection(
-            collection_name=name,
-            vectors_config={
-                "dense": models.VectorParams(
-                    size=embedding_dim, distance=models.Distance.COSINE
-                )
-            },
-            sparse_vectors_config=sparse_config,
-        )
+        try:
+            client.create_collection(
+                collection_name=name,
+                vectors_config={
+                    "dense": models.VectorParams(
+                        size=embedding_dim, distance=models.Distance.COSINE
+                    )
+                },
+                sparse_vectors_config=sparse_config,
+            )
+        except Exception:
+            # Two first collections of a model may both observe it as absent.
+            # The create loser is harmless only when the winner's collection
+            # is now visible; every other dependency failure remains loud.
+            if not client.collection_exists(name):
+                raise
     # Create missing payload indexes for pre-existing model collections too.
     # Qdrant treats an identical create_payload_index request idempotently.
     for field_name, schema in (
@@ -589,7 +611,7 @@ class QdrantVectorIndex:
                     },
                 )
             )
-        self._client.upsert(collection_name=name, points=points, wait=True)
+        _upsert_in_batches(self._client, points, collection_name=name, wait=True)
 
     async def delete_document(
         self, *, embedding_model: str, document_id: str
@@ -2248,13 +2270,13 @@ class QdrantKnowledgeStore:
                     },
                 )
             )
-        if points:
-            self._client.upsert(
-                collection_name=chunks_name,
-                points=points,
-                wait=True,
-                ordering=models.WriteOrdering.STRONG,
-            )
+        _upsert_in_batches(
+            self._client,
+            points,
+            collection_name=chunks_name,
+            wait=True,
+            ordering=models.WriteOrdering.STRONG,
+        )
 
     def _delete_revision_chunks(
         self,
@@ -2921,6 +2943,7 @@ class QdrantKnowledgeStore:
             if offset is None:
                 break
         chunks = []
+        bodies = CanonicalBodies()
         for point in points:
             payload = dict(point.payload or {})
             source_text = str(payload.get("source_text") or "")
@@ -2942,7 +2965,8 @@ class QdrantKnowledgeStore:
                     revision_id=payload.get("revision_id"),
                     generation_id=payload.get("generation_id"),
                     page_number=_optional_int(payload.get("page_number")),
-                    source_verified=source_excerpt_is_verified(
+                    source_verified=bodies.excerpt_is_verified(
+                        body_key=document_id,
                         canonical_text=document.text,
                         source_text=source_text,
                         source_start=source_start,
@@ -3147,6 +3171,7 @@ class QdrantKnowledgeStore:
 
     def _candidates_from_points(self, points) -> list[RetrievalCandidate]:
         candidates = []
+        bodies = CanonicalBodies()
         for point in points:
             payload = dict(point.payload or {})
             document_id = str(payload.get("document_id", ""))
@@ -3180,7 +3205,8 @@ class QdrantKnowledgeStore:
             source_text = payload.get("source_text", "")
             source_start = _optional_int(payload.get("source_start"))
             source_end = _optional_int(payload.get("source_end"))
-            source_verified = source_excerpt_is_verified(
+            source_verified = bodies.excerpt_is_verified(
+                body_key=(document_id, point_revision),
                 canonical_text=str(document.get("text", "")),
                 source_text=source_text,
                 source_start=source_start,

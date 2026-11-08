@@ -88,7 +88,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal, _session, _mirror = resolved
 
         # Store round-trips block; keep the event loop free.
-        trace_id = await asyncio.to_thread(run_store.trace_id, run_id)
+        trace_id = await run_store.atrace_id(run_id)
         if trace_id is None:
             # run_events cascades with the run; the WORM audit row does not.
             # Primary source stays run_events because a RUNNING run has no

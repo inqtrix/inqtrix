@@ -1,0 +1,7 @@
+[
+ {
+  "content": "{\"sufficient\": true, \"coverage\": \"complete\", \"rewritten_query\": \"\", \"reason\": \"Die Auszüge decken die Frage ab.\"}",
+  "prompt_tokens": 120,
+  "completion_tokens": 40
+ }
+]

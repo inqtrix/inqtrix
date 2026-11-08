@@ -181,6 +181,7 @@ export function applyAgentRunEvent(
     }
     case 'inqtrix.run.cancelled':
       next.status = 'cancelled'
+      next.cancelReason = stringField(data, 'reason') || record.cancelReason
       next.artifactsStale = true
       applyTerminalRunTime(next, event)
       settleOpenKernelToolRows(next, record, 'failed')
@@ -1726,7 +1727,7 @@ function childTaskStatus(
   if (runStatus === 'cancelled' && current === 'cancel_requested') {
     return 'cancel_requested'
   }
-  if (runStatus === 'failed' || runStatus === 'cancelled' || runStatus === 'expired') {
+  if (runStatus === 'failed' || runStatus === 'cancelled') {
     return 'failed'
   }
   if (runStatus === 'completed') return 'completed'

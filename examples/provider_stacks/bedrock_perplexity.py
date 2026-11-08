@@ -24,6 +24,7 @@ Use this example when:
 Required environment variables (in .env or process env):
 - PERPLEXITY_API_KEY
 - AWS_PROFILE          (optional — defaults to the default profile)
+- AWS_BEARER_TOKEN_BEDROCK (optional; a Bedrock API key, boto3 signs with it instead of the profile)
 - AWS_REGION           (optional — defaults to eu-central-1)
 
 Prerequisites:

@@ -31,9 +31,9 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import bindparam, text
 
+from inqtrix import aio
 from inqtrix.auth.log_redaction import pseudonymous_log_reference
 from inqtrix.storage.db import tenant_session
-from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -114,7 +114,7 @@ def sweep_orphaned_file_objects(
     deleted = 0
     for tenant_id in sorted(by_tenant):
         listed = by_tenant[tenant_id]
-        registered = run_coro_sync(
+        registered = aio.call_from_thread(
             _tenant_registered_ids(
                 session_factory,
                 tenant_id=tenant_id,

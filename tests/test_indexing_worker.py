@@ -21,6 +21,7 @@ from inqtrix.worker.indexing_loop import (
     FencedIndexingJobHandle,
     IndexingWorkerLoop,
 )
+from tests._process_loop import run_on_configured_loop
 
 
 class StubStore:
@@ -117,7 +118,7 @@ class StubQueue:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def ack(self, message_id: str) -> None:
+    async def ack(self, message_id: str) -> None:
         self.calls.append(("ack", message_id))
 
 
@@ -251,10 +252,7 @@ def test_indexing_worker_uses_reconcile_cadence_for_generation_retention() -> No
         heartbeat_seconds=1.0,
         claim_idle_seconds=5.0,
     )
-    try:
-        loop._periodic_maintenance()
-    finally:
-        loop._executor.shutdown(wait=True)
+    run_on_configured_loop(loop._periodic_maintenance())
 
     assert knowledge.calls == 1
 
@@ -285,20 +283,17 @@ def test_ownerless_worker_job_executes_with_an_explicit_null_actor(
         queue=queue,
         authority=RecordingAuthority(),
     )
-    try:
-        loop._execute(
-            queued_job(),
-            ClaimedIndexingJob(
-                job_id="ix_1",
-                tenant_id="default",
-                attempt=1,
-                collection_id="kc_1",
-                embedding_model="embedding-model",
-            ),
-            threading.Event(),
-        )
-    finally:
-        loop._executor.shutdown(wait=True)
+    loop._execute(
+        queued_job(),
+        ClaimedIndexingJob(
+            job_id="ix_1",
+            tenant_id="default",
+            attempt=1,
+            collection_id="kc_1",
+            embedding_model="embedding-model",
+        ),
+        threading.Event(),
+    )
 
     assert observed == {
         "actor_user_id": None,
@@ -334,22 +329,19 @@ def test_worker_fails_closed_on_incomplete_requester_attribution(
         execute,
     )
     loop = make_loop(store=store, queue=queue)
-    try:
-        loop._execute(
-            queued_job(),
-            ClaimedIndexingJob(
-                job_id="ix_1",
-                tenant_id="default",
-                attempt=4,
-                collection_id="kc_1",
-                embedding_model="embedding-model",
-                created_by_user_id=created_by_user_id,
-                created_by_tenant_id=created_by_tenant_id,
-            ),
-            threading.Event(),
-        )
-    finally:
-        loop._executor.shutdown(wait=True)
+    loop._execute(
+        queued_job(),
+        ClaimedIndexingJob(
+            job_id="ix_1",
+            tenant_id="default",
+            attempt=4,
+            collection_id="kc_1",
+            embedding_model="embedding-model",
+            created_by_user_id=created_by_user_id,
+            created_by_tenant_id=created_by_tenant_id,
+        ),
+        threading.Event(),
+    )
 
     assert executed is False
     assert any(

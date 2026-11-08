@@ -143,6 +143,28 @@ for chunk in agent.stream("Meine Frage", include_progress=False):
 
 Progress messages look like `Analysiere Frage...`, `Plane Suchanfragen (Runde 1/4)...`, `Durchsuche 8 Suchanfragen (Runde 1/4)...`, `Bewerte Informationsqualitaet (nach Runde 1/4)...`, `Formuliere Antwort (nach 3 Runden)...` — the number in the search message counts the search queries executed in that round, not the sources found. These are the German variants: the progress strings are bilingual and follow the language detected in the question, so an English question yields `Analyzing question...`, `Planning search queries (round 1/4)...`, `Searching 8 queries (round 1/4)...`, `Evaluating information quality (after round 1/4)...` and `Formulating answer (after 3 rounds)...` instead.
 
+From async code, use the coroutine and the async generator. Both work from any event loop, a notebook's included, and keep it free while the run works:
+
+```python
+result = await agent.aresearch("Meine Frage")
+
+async for chunk in agent.astream("Meine Frage"):
+    print(chunk, end="", flush=True)
+```
+
+A stream runs on while you do not read it. If you stop `stream()` early (`break`, an exception, Ctrl-C), the run is told to stop, and the call returns once the run ended at its next checkpoint. Python closes an async generator only when it finalizes it, so for the same stop with `astream()`, read it inside `contextlib.aclosing`:
+
+```python
+from contextlib import aclosing
+
+async with aclosing(agent.astream("Meine Frage")) as chunks:
+    async for chunk in chunks:
+        if "Quelle" in chunk:
+            break
+```
+
+Leaving the block tells the run to stop and returns once it ended.
+
 Runnable versions of both paths live in [`examples/quickstart/`](../../examples/quickstart): `basic_env.py` for the blocking call and `streaming.py` for the streaming loop.
 
 ## Logging when Inqtrix is embedded

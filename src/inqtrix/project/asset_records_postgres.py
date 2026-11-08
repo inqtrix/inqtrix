@@ -33,12 +33,12 @@ from inqtrix.project.asset_records_ports import (
     GroupNotFound,
     SectionNotFound,
 )
-from inqtrix.project.asset_lifecycle import (
+from inqtrix.storage.asset_lifecycle import (
     lock_asset_lifecycle,
     lock_group_lifecycle,
     lock_section_lifecycle,
 )
-from inqtrix.project.scoped_upsert import (
+from inqtrix.storage.scoped_upsert import (
     ResourceScope,
     delete_scoped_postgres,
     require_scoped_parent,
@@ -53,7 +53,7 @@ from inqtrix.storage.deletions_orm import (
     deletion_operation_assets,
     deletion_operations,
 )
-from inqtrix.source_authority import (
+from inqtrix.storage.source_authority import (
     PostgresSourceLifecycleAuthority,
     SourceLifecycleConflict,
     SourceScope,

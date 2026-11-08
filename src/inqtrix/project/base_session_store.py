@@ -2,7 +2,7 @@
 
 Every Postgres project-persistence store (chat, editor, and the asset
 / vector-index / account-preferences stores) opens its sessions the same
-way: a dedicated NullPool engine, a session factory bound to it, and a
+way: the engine of the process, a session factory bound to it, and a
 :func:`~inqtrix.storage.db.tenant_session` (restricted role +
 transaction-local tenant GUC, the RLS layering). Defined once here
 so the boilerplate cannot drift between stores; the
@@ -27,13 +27,12 @@ class BaseSessionStore:
     """Engine + tenant-scoped session lifecycle shared by project stores.
 
     Args:
-        engine: A dedicated NullPool async engine (loop-agnostic) for the
-            store's schema — never the shared HTTP-loop engine.
+        engine: The engine of the process. It belongs to whoever composed the
+            process, which disposes it.
         app_role: Restricted Postgres role for the tenant sessions.
     """
 
     def __init__(self, *, engine: AsyncEngine, app_role: str) -> None:
-        self._engine = engine
         self._session_factory = build_session_factory(engine)
         self._app_role = app_role
 
@@ -44,7 +43,3 @@ class BaseSessionStore:
             tenant_id=DEFAULT_TENANT,
             app_role=self._app_role,
         )
-
-    async def aclose(self) -> None:
-        """Dispose the dedicated engine at application shutdown."""
-        await self._engine.dispose()

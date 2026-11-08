@@ -1230,6 +1230,15 @@ def test_the_builder_sets_the_token_bounds() -> None:
     assert provider.pat_service.max_ttl_days == 90
 
 
+def test_the_gateway_provider_brings_the_engine_of_its_stores() -> None:
+    """The documented library path builds the provider first; create_app takes
+    this engine over instead of building a second one."""
+    provider = build_gateway_provider(_settings(_GATEWAY_JWT))
+
+    assert provider.database_engine is not None
+    assert provider.users._session_factory.kw["bind"] is provider.database_engine
+
+
 def test_the_builder_refuses_the_memory_backend() -> None:
     with pytest.raises(RuntimeError, match="INQTRIX_STORAGE_BACKEND=postgres"):
         build_gateway_provider(_settings(_GATEWAY_JWT, backend="memory"))

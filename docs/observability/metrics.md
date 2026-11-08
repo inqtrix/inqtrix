@@ -56,11 +56,12 @@ session labels, and HTTP paths are the matched route *template*
 | `inqtrix_run_queue_depth` | gauge | — | Native runs waiting in the queue (`status=queued`). Read from the run store at scrape time. |
 | `inqtrix_run_active` | gauge | — | Native runs currently executing (`status=running`). |
 | `inqtrix_run_capacity` | gauge | — | In-process concurrent run capacity. Emitted **only** for the in-memory run store; with the durable (Postgres + worker) backend the worker fleet owns the slots, so this series is absent. |
-| `inqtrix_run_admission_rejected_total` | counter | `reason` | Run/quota admissions rejected before entering the queue. `reason` is one of `queue_full` (global queue full), `per_user_limit` (per-user fairness cap), `quota` (monthly quota exhausted). |
+| `inqtrix_run_admission_rejected_total` | counter | `reason` | Run/quota admissions rejected before entering the queue. `reason` is one of `queue_full` (global queue full), `per_user_limit` (per-user fairness cap), `quota` (monthly quota exhausted), `knowledge_store_unavailable` (the knowledge store cannot be reached). |
 | `inqtrix_http_requests_total` | counter | `method`, `handler`, `status` | HTTP requests by route template and status. |
 | `inqtrix_http_request_duration_seconds` | histogram | `method`, `handler` | Request latency by route template. |
 | `inqtrix_gateway_rejections_total` | counter | `outcome` | Rejected sign-ins of mode `gateway` by outcome class; counts every rejection, while the WARNING about them is throttled. |
 | `inqtrix_jwks_refresh_failures_total` | counter | `cache` | Failed refreshes of a signing key set (`oidc` or `gateway`); the known keys stay in use. |
+| `inqtrix_checkpoint_types_blocked_total` | counter | `kind` | Agent checkpoint values left as raw data because their type is not allowed (`type` for a class, `method` for a method call the payload asked for). Any value above zero means a forgotten type or an altered checkpoint; the names are in the WARNING only. |
 
 Pair the gauges (`queue_depth` vs `active`/`capacity`) with
 `inqtrix_run_admission_rejected_total` to tell "saturated" apart from
@@ -97,6 +98,37 @@ use (add a model card) or override traffic worth investigating.
 | `inqtrix_indexing_documents_total` | counter | `outcome` | Documents finishing an indexing pass (`completed`, `failed` — pauses/cancellations are not failures and stay uncounted). |
 | `inqtrix_indexing_pauses_total` | counter | `status`, `source`, `kind` | Indexing jobs that paused (`paused_dependency`, `paused_validation`). `source` and `kind` are derived from the pause's error type into bounded sets: `contextualization`, `embedding`, `vector_store`, `quota`, `validation`, `other` and `circuit_open`, `rate_limited`, `timeout`, `unavailable`, `error`, `other`. |
 | `inqtrix_indexing_auto_resumes_total` | counter | `outcome` | Automatic resumes of dependency pauses: `planned` (a pause got a due time), `resumed` (the sweep continued a job), `stopped` (a streak ended: attempts exhausted, access lost, or execution unavailable). |
+
+### Event loop and thread lanes (API and worker)
+
+Each process has one event loop and a few bounded thread lanes for what must not
+run on it. These series read the current values at scrape time; they carry numbers
+only.
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `inqtrix_event_loop_lag_milliseconds` | gauge | `quantile` (`0.5`, `0.99`) | How late the loop's 100 ms probe woke up over the last five minutes. A rising `0.99` means something blocks the loop or keeps it busy, and every run and request of that process waits for it. |
+| `inqtrix_event_loop_stalls_total` | counter | — | Stalls of more than 2 s. Each one also logs one WARNING with the module, function and line the loop was in. |
+| `inqtrix_thread_lane_jobs` | gauge | `lane`, `state` (`running`, `waiting`) | Jobs on each lane. `waiting` above 0 for long means the lane is full: the loop stays healthy, the work queues. A full lane logs one WARNING per minute. |
+| `inqtrix_thread_lane_workers` | gauge | `lane` | Threads the lane may use. `blocking` follows `INQTRIX_BLOCKING_POOL_SIZE`, `provider` follows `INQTRIX_PROVIDER_POOL_SIZE`, `legacy_segment` is one per job slot of the process plus `INQTRIX_BLOCKING_POOL_SIZE`. |
+
+### Database pool (API and worker)
+
+Each process keeps one pool for all its stores. These series read it at scrape
+time, so a burst shorter than the scrape interval does not show.
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `inqtrix_database_pool_size` | gauge | — | Connections the pool may keep (`INQTRIX_DATABASE_POOL_SIZE`). |
+| `inqtrix_database_pool_in_use` | gauge | — | Connections in use right now. |
+
+Read the pool together with the event loop. A full pool while
+`inqtrix_event_loop_lag_milliseconds{quantile="0.99"}` rises is a process at the end
+of its core: requests hold their connection while they wait for the loop, and a
+larger pool only lets more of them wait there, so add replicas. A full pool with a
+healthy loop means the database answers slowly or the pool is too small for the
+distance to it: look at the database first, then raise
+`INQTRIX_DATABASE_POOL_SIZE`.
 
 ### Worker exporter
 

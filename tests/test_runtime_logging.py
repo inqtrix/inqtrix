@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from inqtrix.providers.attempts import report_retry
 from inqtrix.graph import run
 from inqtrix.logging_config import configure_logging
 from inqtrix.nodes import search
@@ -23,7 +24,7 @@ from inqtrix.runtime_logging import (
     sanitize_grounded_search_result,
     sanitize_event_payload,
 )
-from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource
+from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource, ProviderNotice
 from inqtrix.settings import AgentSettings
 from inqtrix.state import append_iteration_log, emit_run_event, initial_state
 from inqtrix.strategies import StrategyContext, create_default_strategies
@@ -279,6 +280,15 @@ def test_source_provenance_records_one_citation_per_place_the_answer_cites_it():
     assert [item["citation_id"] for item in again] == [item["citation_id"] for item in citations]
 
 
+
+def test_sanitizing_a_search_result_keeps_why_it_degraded() -> None:
+    notice = ProviderNotice("Search failed.", code="upstream_5xx", http_status=503)
+
+    result = sanitize_grounded_search_result(GroundedSearchResult(notices=(notice,)))
+
+    assert result.notices == (notice,)
+
+
 def test_a_scrubbed_answer_drops_the_places_its_sources_were_cited():
     """Offsets point into the answer as the provider wrote it; once a
     credential is scrubbed from it, they no longer point anywhere true."""
@@ -455,30 +465,21 @@ def test_search_emits_per_query_runtime_artifacts(recording):
     exporter = recording
 
     class _SearchWithNotice:
-        def __init__(self) -> None:
-            self._notice = None
-
         def search(self, *args, **kwargs):
-            self._notice = "search fallback"
             return GroundedSearchResult(
                 answer="Gefundener Text",
                 sources=[GroundedSource(url="https://example.com/report", rank=1)],
                 related_questions=["Was ist neu?"],
                 prompt_tokens=11,
                 completion_tokens=7,
+                notices=(ProviderNotice("search fallback"),),
             )
-
-        def consume_nonfatal_notice(self):
-            notice = self._notice
-            self._notice = None
-            return notice
 
         def is_available(self):
             return True
 
     class _ClaimExtractLLM:
         def __init__(self) -> None:
-            self._notice = None
             self.models = SimpleNamespace(
                 reasoning_model="reasoning-model",
                 effective_claim_extract_model="claim-extract-model",
@@ -486,11 +487,6 @@ def test_search_emits_per_query_runtime_artifacts(recording):
 
         def complete(self, *args, **kwargs):
             return ""
-
-        def consume_nonfatal_notice(self):
-            notice = self._notice
-            self._notice = None
-            return notice
 
         def is_available(self):
             return True
@@ -1021,30 +1017,15 @@ def test_search_respects_provider_max_concurrency_cap():
 
 def test_search_retry_progress_labels_parallel_query_position() -> None:
     class _RetryingSearch:
-        def observe_retries(self, callback: Any) -> Any:
-            class _RetryContext:
-                def __enter__(self_inner: Any) -> Any:
-                    callback({
-                        "provider": "RetryingSearch",
-                        "model": "test-search",
-                        "attempt": 1,
-                        "max_attempts": 5,
-                        "delay_seconds": 0.0,
-                        "error_code": "APITimeoutError",
-                    })
-                    return self_inner
-
-                def __exit__(
-                    self_inner: Any,
-                    exc_type: type[BaseException] | None,
-                    exc: BaseException | None,
-                    tb: object | None,
-                ) -> bool:
-                    return False
-
-            return _RetryContext()
-
         def search(self, query: str, **kwargs: Any) -> GroundedSearchResult:
+            report_retry("search", {
+                "provider": "RetryingSearch",
+                "model": "test-search",
+                "attempt": 1,
+                "max_attempts": 5,
+                "delay_seconds": 0.0,
+                "error_code": "APITimeoutError",
+            })
             return GroundedSearchResult(answer=f"Antwort fuer {query}")
 
         def is_available(self) -> bool:

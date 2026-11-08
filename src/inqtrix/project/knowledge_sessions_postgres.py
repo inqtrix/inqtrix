@@ -24,7 +24,7 @@ from inqtrix.project.knowledge_sessions_ports import (
     KnowledgeSessionGroupNotFound,
     KnowledgeSessionNotFound,
 )
-from inqtrix.project.scoped_upsert import (
+from inqtrix.storage.scoped_upsert import (
     ResourceScope,
     delete_scoped_postgres,
     require_scoped_parent,

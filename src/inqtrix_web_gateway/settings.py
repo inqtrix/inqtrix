@@ -20,13 +20,19 @@ log = logging.getLogger("inqtrix.web_gateway")
 _PROXY_BODY_HEADROOM_BYTES = 10 * 1024 * 1024
 _DEFAULT_MAX_FILE_BYTES = 100 * 1024 * 1024
 _DEFAULT_MAX_REQUEST_BYTES = _DEFAULT_MAX_FILE_BYTES + _PROXY_BODY_HEADROOM_BYTES
-# Sized against the API's own admission caps, not guessed: chat and native
-# runs each admit up to 100 by default, and every open event stream holds one
-# upstream connection for the run's whole duration on top of that. At 200 the
-# shipped caps alone could fill the pool, and the next request -- a page load,
-# a quota poll -- gets a 503 rather than waiting. httpx opens connections on
-# demand, so a higher ceiling costs nothing until the load actually arrives.
-_DEFAULT_MAX_UPSTREAM_CONNECTIONS = 512
+# Every open browser tab holds one upstream connection for as long as it stays
+# open, and so does every open run view. A full pool fails every request through
+# this process after the pool wait, a page load as much as a new stream, so the
+# ceiling belongs above what one process can relay and not near the number of
+# users. httpx opens connections on demand, so a higher ceiling costs nothing
+# until the load arrives. A stream takes two file descriptors, one per side.
+_DEFAULT_MAX_UPSTREAM_CONNECTIONS = 4096
+# The request head (request line and every header, cookies included) that both
+# web edges accept however its bytes arrive. Fixed, not a setting. Here h11
+# refuses an incomplete head above it; nginx gets one buffer of this size per
+# header line (deploy/nginx/inqtrix.conf.template). Above it either edge may
+# answer 400, depending on how the bytes arrive or fill nginx's buffers.
+_REQUEST_HEAD_MAX_BYTES = 32 * 1024
 
 _COLLABORATION_MIN_FRAME_BYTES = 65_536
 _COLLABORATION_MAX_FRAME_BYTES = 16 * 1_048_576
@@ -455,6 +461,20 @@ def _parse_backend_origin(value: str) -> str:
         else f"{normalized_host}:{port}"
     )
     return f"{scheme}://{authority}"
+
+
+def _resolve_max_upstream_connections() -> int:
+    """The per-worker ceiling of pooled backend connections, defaulted."""
+    return (
+        _validate_positive_int(
+            _parse_optional_int(
+                os.getenv("INQTRIX_MAX_UPSTREAM_CONNECTIONS"),
+                env_var="INQTRIX_MAX_UPSTREAM_CONNECTIONS",
+            ),
+            env_var="INQTRIX_MAX_UPSTREAM_CONNECTIONS",
+        )
+        or _DEFAULT_MAX_UPSTREAM_CONNECTIONS
+    )
 
 
 def _resolve_proxy_max_body_bytes() -> int | None:

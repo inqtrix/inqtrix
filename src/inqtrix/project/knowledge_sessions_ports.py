@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 
 class KnowledgeSessionNotFound(KeyError):
@@ -169,5 +169,3 @@ class KnowledgeSessionStore(Protocol):
     ) -> None:
         """Delete a group; its sessions orphan to ungrouped."""
         ...
-
-    async def aclose(self) -> None: ...

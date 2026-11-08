@@ -27,6 +27,13 @@ from inqtrix.urls import (
     sanitize_error,
     scrub_credential_urls,
 )
+from inqtrix.harness.contracts.events import (
+    ANSWER_DRAFT_EVENT,
+    NARRATION_EVENT,
+    OUTCOME_EVENT,
+    RESEARCH_QUERY_FINISHED_EVENT,
+    RESEARCH_QUERY_STARTED_EVENT,
+)
 
 log = logging.getLogger(__name__)
 
@@ -319,7 +326,7 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
     # Agent-Desk narration: a strict allowlist so the prose channel can
     # never grow surprise fields — the transcript renders the payload
     # verbatim.
-    "inqtrix.agent.narration": frozenset({
+    NARRATION_EVENT: frozenset({
         "narration_id",
         "kind",
         "text",
@@ -329,7 +336,7 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
     # The draft of a reviewed answer, rendered verbatim like the answer it
     # precedes: a strict allowlist, and its Markdown under a key no audit
     # bound in ``_TEXT_CAPS`` names, because a draft is shown whole.
-    "inqtrix.answer.draft": frozenset({
+    ANSWER_DRAFT_EVENT: frozenset({
         "artifact_id",
         "draft_id",
         "markdown",
@@ -339,7 +346,7 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
     # its parent, as numbers and its closed summary sentence, so its fields
     # are allowlisted: a label or detail smuggled into the payload must
     # never become the parent's message.
-    "inqtrix.agent.outcome": frozenset({
+    OUTCOME_EVENT: frozenset({
         "outcome_id",
         "final",
         "review",
@@ -474,7 +481,7 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "duration_ms",
         "usage",
     }),
-    "inqtrix.research.query.started": frozenset({
+    RESEARCH_QUERY_STARTED_EVENT: frozenset({
         "invocation_id",
         "query_id",
         "round",
@@ -486,7 +493,7 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "status",
         "started_at",
     }),
-    "inqtrix.research.query.finished": frozenset({
+    RESEARCH_QUERY_FINISHED_EVENT: frozenset({
         "invocation_id",
         "query_id",
         "round",
@@ -759,7 +766,6 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
 }
 
 
-
 def new_run_id() -> str:
     """Return an opaque, log-safe identifier for one research run."""
     return f"run_{uuid.uuid4().hex}"
@@ -838,7 +844,7 @@ def sanitize_event_payload(event: str, payload: dict[str, Any]) -> dict[str, Any
     if schema is not None:
         allowed = schema | _COMMON_EVENT_KEYS
         payload = {k: v for k, v in payload.items() if k in allowed}
-    if event == "inqtrix.agent.narration" and isinstance(payload.get("text"), str):
+    if event == NARRATION_EVENT and isinstance(payload.get("text"), str):
         # Narration is rendered verbatim as plain text.  It is a compact
         # process-status channel, never storage for an answer body.  Keep the
         # bound event-specific instead of weakening evidence/audit fields that
@@ -1010,7 +1016,6 @@ def _console_iteration_projection(entry: dict[str, Any]) -> dict[str, Any]:
     # fields are all intentionally withheld.
     projected.setdefault("event", "iteration_summary")
     return projected
-
 
 
 def emit_runtime_event(event: str, payload: dict[str, Any]) -> None:
@@ -1209,6 +1214,7 @@ def sanitize_grounded_search_result(
         cache_creation_tokens=result.cache_creation_tokens,
         reasoning_tokens=result.reasoning_tokens,
         tool_call_count=result.tool_call_count,
+        notices=result.notices,
     )
 
 

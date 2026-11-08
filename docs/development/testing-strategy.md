@@ -65,7 +65,7 @@ purpose:
 | `PerplexitySearch` | `inqtrix.providers.perplexity` | Perplexity SDK responses | unit stubs + debug dataflow script |
 | `AzureOpenAILLM` | `inqtrix.providers.azure` | OpenAI SDK → httpx | vcrpy |
 | `AzureFoundryWebSearch` | `inqtrix.providers.azure_web_search` | Azure AI Foundry / OpenAI SDK responses | unit stubs (`_parse_response` contract) |
-| `AnthropicLLM` | `inqtrix.providers.anthropic` | `urllib.request.urlopen` | vcrpy (patches `http.client.HTTPConnection`) |
+| `AnthropicLLM` | `inqtrix.providers.anthropic` | `httpx.AsyncClient` | vcrpy (patches `httpx`) |
 | `BedrockLLM` | `inqtrix.providers.bedrock` | `boto3.client("bedrock-runtime")` | `botocore.stub.Stubber` (VCR's boto3 integration is fragile; Moto does not yet support `bedrock-runtime`) |
 
 **Single-library principle**: every replay test in this repo uses
@@ -189,6 +189,15 @@ What happens internally:
    protective scan stays green.
 6. Commit the cassette together with any test or sanitizer changes.
 
+`tests/replay/engine/test_replay_determinism.py` replays whole runs: one research
+and one knowledge run, with the request body in the match. Two replays must give
+the same export apart from wall clock and drawn identifiers, every recorded call
+must be made again, and a changed model input does not replay, so a deliberate
+prompt change means recording anew. That costs nothing: these cassettes come from
+the provider stand-in answering from an invented corpus, so neither real search
+hits nor recorded answers enter the repository. The commands stand at the top of
+that file.
+
 Allowed `INQTRIX_RECORD_MODE` values mirror VCR's record modes:
 
 | Value | Behavior |
@@ -205,16 +214,13 @@ in a future automation environment.
 ## Cookbook: adding a test for provider X
 
 1. **Inspect the provider's transport.** Read the relevant
-   `src/inqtrix/providers/<x>.py`: does it use the OpenAI SDK
-   (httpx → vcrpy), `urllib.request.urlopen` (also vcrpy), or
-   `boto3` (`Stubber`)?
+   `src/inqtrix/providers/<x>.py`: does it use the OpenAI SDK or
+   `httpx` directly (both vcrpy), or `boto3` (`Stubber`)?
 2. **Pick a scenario.** The minimum coverage per provider is five
    distinct cassettes/stubs: success + rate-limit + API error +
-   one provider-specific edge case (empty response, structured output, SP
-   auth, etc.) + one more variation. For Azure providers, cover all
-   four auth modes (api_key, SP, custom token_provider, pre-built
-   credential) — reuse cassettes via explicit `@pytest.mark.vcr("...")`
-   when wire shape is identical.
+   one provider-specific edge case (empty response, structured output,
+   etc.) + one more variation. Reuse cassettes via explicit
+   `@pytest.mark.vcr("...")` when the wire shape is identical.
 3. **Add the cassette / stub fixture.** For VCR providers, create
    `tests/fixtures/cassettes/<provider>/<test_name>.yaml` matching
    the [layout above](#cassette-layout-and-naming). For Bedrock,
@@ -380,10 +386,11 @@ current inventory):
 | `load-capacity` | Fixed 1,000-socket/100-writer capacity, restart, lease rotation, and reconstruction gate | Explicit production-like HTTPS fixture and budget | Browser UX/accessibility |
 | `edge-conformance` | Black-box parity of the packaged Python and nginx web adapters | Explicit Podman or Docker engine; synthetic isolated backend | Authentication, persistence, browser UX, or production capacity |
 | `owner-setup` | One visible first-run local-owner session through setup, initial persistence, user administration, and pointer logout | Externally prepared fresh stack, exactly one explicit `--browser` target | Multiuser collaboration, capacity, or fault controls |
-| `agent-desk` | Kernel answer experience through the visible Agent Desk: run submission, tool activity, clickable citations, console/network hygiene, cleanup integrity | Live stack with configured model providers | Collaboration transport, capacity, or fault controls |
+| `agent-desk` | Kernel answer experience through the visible Agent Desk: run submission, tool activity, clickable citations, a stopped turn and work going on in the same session, a manual session title, research follow-ups and synthesis over the saved conversation, a Canvas report and its Markdown copy, knowledge, editor and attachment context, review by tier, Firefox and WebKit reading the saved conversation, console/network hygiene, cleanup integrity | Live stack with configured model providers | Collaboration transport, capacity, or fault controls |
 | `chat-prompt` | Chat and Prompt Library browser matrix: real completions, reload ordering, duplicated tabs, offline recovery, library CRUD in Chromium, Firefox, and WebKit | Live stack with configured model providers, all three browser engines | Collaboration transport, capacity, or fault controls |
 | `load-soak` | Thirty-minute, 25-identity mixed collaboration soak with phased network shaping and resource recovery budgets | Live collaboration stack, provisioning credentials, explicit Podman engine | Production capacity |
 | `load-ramp` | Resource-gated socket fan-out ladder (20/100/250/500/1000) from a capped identity pool; a controlled stop reports the highest rung reached | Live collaboration stack, provisioning credentials, explicit Podman engine | The production capacity gate, which it never discharges |
+| `run-load` | Many signed-in users driving Research, Knowledge, Agent, and direct chat runs in stages, with counters from outside the application, a comparable report, and a zero-residue check | Running stack whose models are the provider stand-in, provisioning credentials, explicit Podman engine | Answer quality, real provider behavior, or a capacity limit by itself |
 
 Use only the profile entrypoints. The command list, the mandatory
 `--container-engine`/`--browser` flags, and the fault-seam recreation steps are
@@ -391,11 +398,23 @@ in [Running tests](running-tests.md#browser-system-fault-and-load-verification).
 
 Every run receives an `inqv-…` Run ID and a redacted report under
 `e2e/.results/verification/<run-id>/`. Missing users, documents, controls,
-browsers, HTTPS, or capacity metadata block the relevant profile before an
-engine starts; they are never converted to a skip/pass. Every created resource
+browsers, or capacity metadata block the relevant profile before an engine
+starts, as does missing HTTPS for the profiles that require it up front; they
+are never converted to a pass. Every created resource
 must carry the Run ID, be registered immediately, and be removed after success,
 failure, or interruption. A cleanup failure changes the overall result to
 `cleanup_failed`.
+
+Each engine reports every scenario it owns as `passed`, `failed`, `not_run`
+(not measured), or `skipped` with the reason it was left out, through one
+writer (`tests/verification/fixtures/scenario-sidecar.mjs`) that the
+orchestrator reads with the same rule. A skip without its reason is refused, a
+skipped scenario never counts as covered, and the summary lists every skip
+with its reason. Today only the guest-link matrix of `system-smoke` can skip:
+it needs HTTPS and enabled guest links, and `INQTRIX_E2E_REQUIRE_GUEST_LINKS=1`
+turns the skip into a failure, as a release gate requires. An engine that ends
+early leaves the scenarios it did not reach `not_run`; its own status keeps the
+run red, and no other scenario is marked failed in their place.
 
 `system-smoke` covers the real UI through isolated identities and exercises
 Owner/Edit/Suggest/View, identical titles under different owners, a private
@@ -404,6 +423,21 @@ unauthorized requests, comments, suggestions, presence, rapid document
 switching, reload/navigation, reconnect, and responsive/focus behavior. It
 must inspect browser console/network state and relevant service logs; an API
 response alone is not sufficient.
+
+`run-load` compares two states of a stack without model cost. Its numbers are
+assumptions held against each other, so a value matters against a base report of
+the same stage and not on its own; `INQTRIX_RUN_LOAD_BASELINE` names that report.
+Without one, `run-load.baseline-holds` stays `not_run` while the other scenarios
+decide the run. See [`tests/load/README.md`](../../tests/load/README.md#run-load).
+
+A change to how runs, events, evidence, artifacts or database connections are read
+or written runs stage `l1` against the last accepted base before it counts as done.
+That comparison is a load gate: more than 10 % more transactions per provider call,
+more connections in a container, a median delivery delay above the base and its
+tolerance, a p95 delivery delay above 1 second, or an event-loop lag p99 above 50 ms
+is red. Tail times above the base show as a warning, because they scatter between
+runs of the same code far more than the median does, so a slow drift stays visible
+without keeping the gate red.
 
 `load-smoke` is the bounded local gate required for ordinary changes. The
 stricter `load-capacity` profile is the fixed-capacity environment gate.
@@ -451,12 +485,8 @@ invisible to text assertions by construction.
 - **Azure Foundry auth** is not exercised by any replay test — `tests/replay/`
   holds cassette suites for Anthropic, Azure OpenAI and LiteLLM, plus the
   Stubber-based Bedrock suite.
-  Neither auth path needs periodic re-instantiation: the Entra path hands the
-  OpenAI client the refreshing bearer-token provider returned by
-  `AIProjectClient.get_openai_client()`
-  (`src/inqtrix/providers/azure_web_search.py:181-200`), and the API-key path
-  sends a static project key in the `api-key` header, which carries no token
-  lifetime.
+  The adapter sends a static project key in the `api-key` header, which
+  carries no token lifetime, so no client needs periodic re-instantiation.
 - **Retry sequences** are reflected as multi-interaction cassettes when
   needed (for example Anthropic 529-then-success). LLM providers backed by
   the OpenAI SDK disable hidden SDK retries and use Inqtrix-owned retry loops;

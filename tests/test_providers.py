@@ -11,6 +11,7 @@ import httpx
 import pytest
 from perplexity import APIError, APIStatusError, APITimeoutError, RateLimitError
 
+from inqtrix.providers.attempts import observe_retries
 from inqtrix.exceptions import AgentRateLimited
 from inqtrix.providers.base import (
     DEFAULT_LLM_FANOUT,
@@ -20,6 +21,7 @@ from inqtrix.providers.base import (
 from inqtrix.providers.litellm import LiteLLM
 from inqtrix.providers.perplexity import PerplexitySearch
 from inqtrix.providers.base import _bounded_timeout
+from tests._sdk_doubles import async_responses_sdk, serve_sdk_calls
 
 
 def test_litellm_provider_handles_sse_string_response() -> None:
@@ -30,7 +32,7 @@ def test_litellm_provider_handles_sse_string_response() -> None:
         'data: [DONE]\n\n'
     )
     provider = LiteLLM(api_key="test-key", default_model="gpt-4o")
-    provider._client = client  # inject mock
+    serve_sdk_calls(provider, client)  # inject mock
 
     state = {"total_prompt_tokens": 0, "total_completion_tokens": 0}
     response = provider.complete_with_metadata("Hello", state=state)
@@ -54,7 +56,7 @@ def test_litellm_complete_passes_max_output_tokens() -> None:
         }),
     )
     provider = LiteLLM(api_key="test-key", default_model="gpt-4o")
-    provider._client = client
+    serve_sdk_calls(provider, client)
 
     provider.complete("Hello", max_output_tokens=42)
 
@@ -73,7 +75,7 @@ def test_litellm_complete_with_metadata_propagates_finish_reason() -> None:
         }),
     )
     provider = LiteLLM(api_key="test-key", default_model="gpt-4o")
-    provider._client = client
+    serve_sdk_calls(provider, client)
 
     response = provider.complete_with_metadata("Hello")
 
@@ -105,11 +107,11 @@ def test_litellm_transient_status_retries_with_visible_notice() -> None:
     client = MagicMock()
     client.chat.completions.create.side_effect = [transient_error, response]
     provider = LiteLLM(api_key="test-key", default_model="gpt-4o")
-    provider._client = client
+    serve_sdk_calls(provider, client)
     observed = []
 
-    with patch("inqtrix.providers.base._sleep_before_retry") as sleep:
-        with provider.observe_retries(lambda notice: observed.append(notice)):
+    with patch("inqtrix.providers.attempts._sleep_before_retry") as sleep:
+        with observe_retries("model", lambda notice: observed.append(notice)):
             result = provider.complete_with_metadata("Hello")
 
     assert result.content == "ok"
@@ -161,7 +163,7 @@ def _agent_search(response=None, *, side_effect=None, **kwargs):
         client.responses.create.side_effect = side_effect
     else:
         client.responses.create.return_value = response
-    params = {"api_key": "test-key", "_client": client}
+    params = {"api_key": "test-key", "_client": async_responses_sdk(client)}
     params.update(kwargs)
     return PerplexitySearch(**params), client
 
@@ -310,8 +312,22 @@ def test_perplexity_agent_empty_response_sets_notice() -> None:
     result = search.search("nichts")
     assert result.answer == ""
     assert result.sources == []
-    notice = search.consume_nonfatal_notice()
+    notice = next((item.message for item in result.notices), None)
     assert notice is not None and "neither answer text nor sources" in notice
+
+
+def test_a_cached_perplexity_result_does_not_repeat_its_empty_answer_notice() -> None:
+    """The notice belongs to the call that met the empty answer, not to the cache."""
+    search, client = _agent_search(_agent_response(answer="", results=[]))
+
+    first = search.search("nichts")
+    second = search.search("nichts")
+
+    assert client.responses.create.call_count == 1
+    assert [item.message for item in first.notices] == [
+        "Perplexity-WebSearch returned neither answer text nor sources."
+    ]
+    assert second.notices == ()
 
 
 def test_perplexity_agent_rate_limit_escalates() -> None:
@@ -328,7 +344,7 @@ def test_perplexity_agent_api_error_degrades_to_empty() -> None:
     result = search.search("frage")
     assert result.answer == ""
     assert result.sources == []
-    notice = search.consume_nonfatal_notice()
+    notice = next((item.message for item in result.notices), None)
     assert notice is not None and "Perplexity-WebSearch failed" in notice
 
 
@@ -342,9 +358,9 @@ def test_perplexity_failure_does_not_copy_query_or_provider_error_to_logs(
         side_effect=APIError(provider_secret, request=req, body=None)
     )
     with caplog.at_level(logging.ERROR, logger="inqtrix"):
-        search.search(query_secret)
+        result = search.search(query_secret)
 
-    notice = search.consume_nonfatal_notice()
+    notice = next((item.message for item in result.notices), None)
     assert query_secret not in caplog.text
     assert provider_secret not in caplog.text
     assert notice is not None
@@ -357,7 +373,7 @@ def test_perplexity_agent_timeout_keeps_provider_timeout_notice() -> None:
     search, _ = _agent_search(side_effect=APITimeoutError(request=req))
 
     result = search.search("frage")
-    notice = search.consume_nonfatal_notice_detail()
+    notice = next((item.as_detail() for item in result.notices), None)
 
     assert result.sources == []
     assert notice is not None
@@ -372,7 +388,7 @@ def test_perplexity_agent_http_408_keeps_provider_timeout_notice() -> None:
     search, _ = _agent_search(side_effect=error)
 
     result = search.search("frage")
-    notice = search.consume_nonfatal_notice_detail()
+    notice = next((item.as_detail() for item in result.notices), None)
 
     assert result.sources == []
     assert notice is not None
@@ -499,11 +515,11 @@ def test_litellm_rate_limit_retries_then_succeeds() -> None:
     client = MagicMock()
     client.chat.completions.create.side_effect = [rate_limited, rate_limited, ok]
     provider = LiteLLM(api_key="k", default_model="gpt-4o")
-    provider._client = client
+    serve_sdk_calls(provider, client)
     observed = []
 
-    with patch("inqtrix.providers.base._sleep_before_retry") as sleep:
-        with provider.observe_retries(lambda n: observed.append(n)):
+    with patch("inqtrix.providers.attempts._sleep_before_retry") as sleep:
+        with observe_retries("model", lambda n: observed.append(n)):
             result = provider.complete_with_metadata("Hello")
 
     assert result.content == "ok"
@@ -527,9 +543,9 @@ def test_litellm_rate_limit_escalates_when_budget_exhausted() -> None:
     client = MagicMock()
     client.chat.completions.create.side_effect = rate_limited
     provider = LiteLLM(api_key="k", default_model="gpt-4o")
-    provider._client = client
+    serve_sdk_calls(provider, client)
 
-    with patch("inqtrix.providers.base._sleep_before_retry"):
+    with patch("inqtrix.providers.attempts._sleep_before_retry"):
         with pytest.raises(AgentRateLimited):
             provider.complete("Hello")
     # initial + _SDK_RATE_LIMIT_MAX_RETRIES retries.
@@ -566,9 +582,9 @@ def test_rate_limit_and_transient_failures_share_three_attempts() -> None:
         _status(429), _status(503), _status(429), _status(503), _status(429), ok,
     ]
     provider = LiteLLM(api_key="k", default_model="gpt-4o")
-    provider._client = client
+    serve_sdk_calls(provider, client)
 
-    with patch("inqtrix.providers.base._sleep_before_retry"):
+    with patch("inqtrix.providers.attempts._sleep_before_retry"):
         with pytest.raises(AgentRateLimited):
             provider.complete_with_metadata("Hello")
     assert client.chat.completions.create.call_count == 3

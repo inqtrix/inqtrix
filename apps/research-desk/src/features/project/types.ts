@@ -468,6 +468,9 @@ export type ResearchRunRecord = {
   sessionId?: string
   durationSeconds?: number
   error?: string
+  /** The server's failure code (`error.type`), so every surface names the
+   * failure in the reader's language; `error` keeps the raw detail. */
+  errorCode?: string
   /** Transient: the last request for this completed run's result failed.
    * Deliberately NOT a status -- the run itself completed on the server, so
    * the report surface offers a retry instead of a failure claim. Never
@@ -1276,6 +1279,7 @@ export function fromRunSummary(
       ? summary.elapsed_seconds ?? undefined
       : undefined,
     error: summary.error?.message,
+    errorCode: summary.error?.type,
     events: [],
     finishedAt: finishedAt ?? undefined,
     metrics: {
@@ -1403,6 +1407,7 @@ export function applyRunEvent(
   return {
     ...updated,
     error: errorFromEvent(event) ?? updated.error,
+    errorCode: errorCodeFromEvent(event) ?? updated.errorCode,
     events,
     finishedAt: terminalStatus(nextStatus) && !updated.finishedAt
       ? toIsoString(event.created_at) ?? new Date().toISOString()
@@ -1561,7 +1566,6 @@ function statusFromEvent(event: ResearchRunEvent): JobStatus | undefined {
     || status === 'completed'
     || status === 'failed'
     || status === 'cancelled'
-    || status === 'expired'
   ) {
     return status
   }
@@ -1572,7 +1576,6 @@ function terminalStatus(status: JobStatus) {
   return status === 'completed'
     || status === 'failed'
     || status === 'cancelled'
-    || status === 'expired'
 }
 
 function eventRecordFromRunEvent(
@@ -1697,6 +1700,12 @@ function errorFromEvent(event: ResearchRunEvent) {
   const error = event.data.error
   if (!error || typeof error !== 'object' || Array.isArray(error)) return undefined
   return asNonEmptyString((error as { message?: unknown }).message)
+}
+
+function errorCodeFromEvent(event: ResearchRunEvent) {
+  const error = event.data.error
+  if (!error || typeof error !== 'object' || Array.isArray(error)) return undefined
+  return asNonEmptyString((error as { type?: unknown }).type)
 }
 
 function queueNoteFromSummary(summary: ResearchRunSummary) {

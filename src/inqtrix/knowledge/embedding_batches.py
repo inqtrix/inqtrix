@@ -21,10 +21,12 @@ index-sort and count check apply (``_OpenAISDKEmbeddings._embed``).
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from collections.abc import Callable
 
+from inqtrix import aio
 from inqtrix.provider_failure_contract import (
     ProviderFailureKind,
     classify_provider_failure,
@@ -36,7 +38,7 @@ from inqtrix.providers.embeddings import EmbeddingProviderError
 log = logging.getLogger(__name__)
 
 # ~25k tokens at the 4-chars/token heuristic used by quota metering
-# (inqtrix.quota.models.estimate_tokens). Below the smallest observed
+# (inqtrix.text.estimate_tokens). Below the smallest observed
 # working request window and small enough that several slices fit into
 # one quota minute; documents at or below ~50 default chunks go out as
 # one request.
@@ -147,9 +149,9 @@ async def embed_in_slices(
             if cancel_check is not None:
                 cancel_check()
             if on_batch is not None:
-                on_batch(number, total)
+                await aio.run_legacy_segment(functools.partial(on_batch, number, total))
             try:
-                result = await asyncio.to_thread(embed_fn, slice_texts)
+                result = await aio.run_provider_blocking(embed_fn, slice_texts)
             except Exception as exc:
                 classification = classify_provider_failure(exc)
                 if (
@@ -171,7 +173,7 @@ async def embed_in_slices(
                     delay,
                 )
                 if on_wait is not None:
-                    on_wait(number, total)
+                    await aio.run_legacy_segment(functools.partial(on_wait, number, total))
                 await _cancellable_wait(delay, cancel_check)
                 continue
             vectors.extend(result)

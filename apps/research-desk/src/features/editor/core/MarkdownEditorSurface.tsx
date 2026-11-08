@@ -922,6 +922,16 @@ export function MarkdownEditorSurface({
             ? 'w-full'
             : 'min-h-[calc(100svh-var(--header-h)-10rem)] w-full px-10 py-8'
         }
+        onMouseDown={(event) => {
+          // A click into the empty page below the last line puts the cursor
+          // at the end of the document, as Docs and Word do. The editable
+          // element ends with the last line, so such a click would land on
+          // this page and leave the focus on the body.
+          if (embedded || !editor?.isEditable || event.target !== event.currentTarget) return
+          if (event.clientY <= editor.view.dom.getBoundingClientRect().bottom) return
+          event.preventDefault()
+          editor.commands.focus('end')
+        }}
       >
         {editor && lifecyclePolicy.editable ? (
           <EditorBubbleMenu

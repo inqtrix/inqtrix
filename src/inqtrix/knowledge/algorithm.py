@@ -27,6 +27,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from inqtrix import aio
 from inqtrix.i18n import t
 from inqtrix.core.results import AgentResult, RunRequest
 from inqtrix.exceptions import AgentCancelled
@@ -71,7 +72,6 @@ from inqtrix.agents.markdown import normalize_agent_markdown
 from inqtrix.observability.context import bind_purpose
 from inqtrix.prompt_language import resolve_answer_language
 from inqtrix.prompts import build_knowledge_answer_prompt
-from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:
     from inqtrix.core.context import RunContext, RuntimeContext
@@ -195,7 +195,7 @@ def _scoped_document_count(
         return sum(collection.document_count for collection in collections)
 
     try:
-        return run_coro_sync(_count())
+        return aio.call_from_thread(_count())
     except Exception as exc:  # noqa: BLE001 - a count must never fail the answer
         log.warning(
             "Knowledge: could not determine the collection document count "
@@ -295,6 +295,7 @@ class KnowledgeAlgorithm:
 
     id = "knowledge"
     display_name = "Knowledge Retrieval"
+    contract_version = 1
 
     def __init__(
         self,
@@ -510,9 +511,9 @@ class KnowledgeAlgorithm:
         """Execute retrieval + cited answer synthesis for one question.
 
         Binds the run's cancel probe for every provider call on this
-        thread — providers consult it at retry-attempt boundaries and
-        during backoff sleeps; an in-flight HTTP attempt still runs to
-        its transport timeout — then delegates to the pipeline, whose
+        thread — providers consult it before each attempt, during backoff
+        sleeps and while a call waits, which ends the waiting request —
+        then delegates to the pipeline, whose
         stage checkpoints raise :class:`AgentCancelled` between stages.
         """
         probe = (
@@ -671,9 +672,9 @@ class KnowledgeAlgorithm:
 
         def _on_rerank_retry(notice: dict[str, Any]) -> None:
             # Rerank retries stay visible on the run's event surface (no
-            # silent fallbacks); the notice dict is the shared
-            # _RetryNoticeMixin shape. Fires on the rerank worker thread
-            # while this run-worker thread is parked in run_coro_sync, so
+            # silent fallbacks); the notice dict is the shared retry
+            # notice of ``providers.attempts``. Fires on the rerank worker thread
+            # while this run-worker thread waits for the loop, so
             # the emit is temporally exclusive per run.
             emit(
                 "inqtrix.knowledge.rerank.retry",
@@ -720,7 +721,7 @@ class KnowledgeAlgorithm:
                     "inqtrix.rerank": bool(plan.rerank),
                 },
             ) as retrieve_span:
-                batch = run_coro_sync(
+                batch = aio.call_from_thread(
                     retrieve(
                         knowledge,
                         query=query,

@@ -23,6 +23,7 @@ from inqtrix.agents.research_prospect import Prospect
 from inqtrix.agents.scheduler import TaskOutcome
 
 from tests.agents.test_review_pass import CallLLM, _verdict, unquoted
+from inqtrix.harness.contracts.events import LIMIT_REACHED_EVENT
 
 UNQUOTED = unquoted("finding_1")
 """The re-check of the one applied edit: it quotes no basis, so the edit
@@ -696,7 +697,6 @@ def test_every_limit_that_applies_is_named(monkeypatch):
 
 
 def test_round_cap_and_time_budget_are_both_reported(monkeypatch):
-    from inqtrix.agents.limit_contract import LIMIT_REACHED_EVENT
 
     deps, events, _ = _mission(monkeypatch, llm=CallLLM([_information_open(1)]))
     deps.platform.mission_time_budget_seconds = 60
@@ -788,7 +788,7 @@ def test_how_a_review_ended_travels_only_in_the_outcome_record(monkeypatch):
     """A passing and an open mission review and a kernel review each end
     without an activity that states the review's outcome: the record is
     the one carrier."""
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.phase_models import DeepReviewVerdict
 
     from tests.agents.test_kernel_deep_mode import StructuredScriptedLLM
@@ -865,7 +865,7 @@ def test_a_mission_parks_on_its_review_role_and_continues_with_its_verdict(monke
     role, waits slot-free as it waits for research children, is woken by the
     child's terminal write and applies the role's verdict. One child, one
     role row — however often the critic node was entered."""
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.providers.base import ChatTurn, ToolCallRequest
     from inqtrix.settings import AgentPlatformSettings
     from tests.agents.test_kernel_deep_mode import REVIEW_RESULT_CALL

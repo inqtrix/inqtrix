@@ -304,7 +304,7 @@ async def test_legacy_rendering_stays_readable_but_never_claims_original_fidelit
 
 
 def _read_tool():
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.tools import build_kernel_tools
 
     return next(tool for tool in build_kernel_tools() if tool.name == "read_canvas")

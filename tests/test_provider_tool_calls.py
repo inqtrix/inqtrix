@@ -20,6 +20,7 @@ from inqtrix.providers.base import (
     chat_turn_from_openai_response,
 )
 from inqtrix.providers.litellm import LiteLLM
+from tests._sdk_doubles import serve_sdk_calls
 
 
 def _tool_call(call_id: str, name: str, arguments: str):
@@ -108,7 +109,7 @@ def test_litellm_chat_forwards_messages_and_tools():
         content="Fertig.", tool_calls=None
     )
     provider = LiteLLM(api_key="test-key", default_model="gpt-4o")
-    provider._client = client
+    serve_sdk_calls(provider, client)
 
     messages = [
         {"role": "system", "content": "Du bist der Kernel."},
@@ -152,7 +153,7 @@ def test_litellm_chat_without_tools_omits_the_parameter():
     client = MagicMock()
     client.chat.completions.create.return_value = _response(content="Hi.")
     provider = LiteLLM(api_key="test-key", default_model="gpt-4o")
-    provider._client = client
+    serve_sdk_calls(provider, client)
 
     provider.chat([{"role": "user", "content": "Hi"}])
     assert "tools" not in client.chat.completions.create.call_args.kwargs
@@ -247,7 +248,7 @@ def test_capability_questions_survive_every_decorator():
     """
     from inqtrix.execution_authority import AuthorizationGuardedLLM
     from inqtrix.observability.content import ContentCapturePolicy
-    from inqtrix.observability.provider_tracing import TracingLLMProvider
+    from inqtrix.providers.tracing import TracingLLMProvider
     from inqtrix.providers.base import (
         ConfiguredLLMProvider,
         reported_capability,
@@ -303,7 +304,7 @@ def _azure_with_client(client):
         api_key="test-key",
         default_model="my-deployment",
     )
-    provider._client = client
+    serve_sdk_calls(provider, client)
     return provider
 
 
@@ -318,7 +319,7 @@ def test_chat_sends_the_obligation_to_call_a_tool_only_when_asked(build):
         if build == "litellm"
         else _azure_with_client(client)
     )
-    provider._client = client
+    serve_sdk_calls(provider, client)
     messages = [{"role": "user", "content": "Prüfe."}]
 
     provider.chat(messages, tools=_WEB_TOOL, tool_choice="required")
@@ -335,7 +336,7 @@ def test_the_obligation_to_call_a_tool_survives_every_decorator():
     invents it for a plain turn."""
     from inqtrix.execution_authority import AuthorizationGuardedLLM
     from inqtrix.observability.content import ContentCapturePolicy
-    from inqtrix.observability.provider_tracing import TracingLLMProvider
+    from inqtrix.providers.tracing import TracingLLMProvider
     from inqtrix.providers.base import (
         ConfiguredLLMProvider,
         UntrustedContentRuleProvider,

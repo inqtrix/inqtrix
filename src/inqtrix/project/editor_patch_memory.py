@@ -118,6 +118,3 @@ class MemoryEditorPatchStore:
         if patch.status != "pending":
             raise PatchAlreadyDecided(patch)
         return patch
-
-    async def aclose(self) -> None:
-        """No-op; symmetric with the Postgres store."""

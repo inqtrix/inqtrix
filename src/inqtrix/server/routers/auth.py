@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Callable
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from inqtrix import aio
 from inqtrix.auth.log_redaction import (
     pseudonymous_log_reference,
     stable_pseudonym,
@@ -552,7 +553,7 @@ def _build_password_auth_router(
                 user_id=uuid.uuid4(),
                 subject=new_subject(),
                 email=email,
-                password_hash=hash_password(password),
+                password_hash=await aio.run_blocking(hash_password, password),
                 display_name=display_name,
                 created_at=_time.time(),
             )
@@ -698,8 +699,8 @@ def _build_password_auth_router(
             credential = await provider.credentials.get_by_user_id(
                 tenant_id="default", user_id=session.user_id
             )
-            if credential is None or not verify_password(
-                credential.password_hash, current
+            if credential is None or not await aio.run_blocking(
+                verify_password, credential.password_hash, current
             ):
                 return error_response(
                     401, "Current password is incorrect", "unauthorized"
@@ -707,7 +708,7 @@ def _build_password_auth_router(
             await provider.credentials.set_password(
                 tenant_id="default",
                 user_id=session.user_id,
-                password_hash=hash_password(new_password),
+                password_hash=await aio.run_blocking(hash_password, new_password),
             )
             return JSONResponse({"changed": True})
 

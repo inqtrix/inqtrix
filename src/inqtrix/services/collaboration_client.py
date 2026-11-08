@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import binascii
-import contextlib
 import logging
 import re
 import uuid
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -80,17 +77,7 @@ class CollaborationSuggestionResult:
 
 
 class CollaborationNodeClient:
-    """Constructor-configured client; secrets never enter URLs or logs.
-
-    The pooled ``httpx.AsyncClient`` keeps its keep-alive connections bound
-    to the event loop that first used it. Synchronous callers such as kernel
-    tool threads run every request on a private, short-lived loop
-    (``sync_bridge.run_coro_sync``), and several tool calls of one model turn
-    execute concurrently. A pooled connection created on one such loop fails
-    with ``RuntimeError: Event loop is closed`` when a later loop reuses it.
-    The pool is therefore owned by the loop that first used it; a request
-    from any other loop uses a one-shot client that closes with the request.
-    """
+    """Constructor-configured client; secrets never enter URLs or logs."""
 
     def __init__(
         self,
@@ -105,7 +92,6 @@ class CollaborationNodeClient:
         self._timeout_seconds = timeout_seconds
         self._transport = transport
         self._client = self._new_client()
-        self._owner_loop: asyncio.AbstractEventLoop | None = None
 
     def _new_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -115,23 +101,16 @@ class CollaborationNodeClient:
             transport=self._transport,
         )
 
-    @contextlib.asynccontextmanager
-    async def _client_for_current_loop(self) -> AsyncIterator[httpx.AsyncClient]:
-        """The pooled client on its owning loop, a one-shot client elsewhere."""
-        loop = asyncio.get_running_loop()
-        if self._owner_loop is None and not self._client.is_closed:
-            self._owner_loop = loop
-        if loop is self._owner_loop and not self._client.is_closed:
-            yield self._client
-            return
-        async with self._new_client() as client:
-            yield client
+    def _open_client(self) -> httpx.AsyncClient:
+        """The pooled client; a lifespan that starts again opens a new one."""
+        if self._client.is_closed:
+            self._client = self._new_client()
+        return self._client
 
     async def available(self) -> bool:
         """Whether Node currently reports its fenced instance as ready."""
         try:
-            async with self._client_for_current_loop() as client:
-                response = await client.get("/health/ready")
+            response = await self._open_client().get("/health/ready")
         except httpx.HTTPError:
             log.warning("Collaboration service readiness request failed.")
             return False
@@ -315,19 +294,13 @@ class CollaborationNodeClient:
 
     async def aclose(self) -> None:
         """Close the pooled internal HTTP client."""
-        if self._owner_loop is not None and self._owner_loop.is_closed():
-            # The owning loop is gone, and its keep-alive sockets went with
-            # it; closing the pool would need that loop.
-            log.debug("Collaboration client pool belonged to a closed event loop.")
-            return
         await self._client.aclose()
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
-            async with self._client_for_current_loop() as client:
-                response = await client.post(
-                    path, json=body, headers=_correlation_headers()
-                )
+            response = await self._open_client().post(
+                path, json=body, headers=_correlation_headers()
+            )
         except httpx.HTTPError as exc:
             raise CollaborationServiceUnavailable(
                 "collaboration service is unreachable"

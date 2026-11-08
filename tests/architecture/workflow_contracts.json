@@ -1,0 +1,945 @@
+{
+ "agent_kernel": {
+  "checkpoint_types": [],
+  "contract_version": 3,
+  "graphs": {
+   "autonomous": {
+    "channels": {
+     "__pregel_tasks": {
+      "class": "Topic"
+     },
+     "__start__": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:HumanInTheLoopMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelChildBatchGuardMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSkillInputMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSufficiencyMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelToolBudgetMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:TodoListMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:tools": {
+      "class": "EphemeralValue"
+     },
+     "context_source_authorization": {
+      "class": "LastValue"
+     },
+     "inqtrix_compaction": {
+      "class": "LastValue"
+     },
+     "jump_to": {
+      "class": "EphemeralValue"
+     },
+     "kernel_usage": {
+      "class": "LastValue"
+     },
+     "messages": {
+      "class": "DeltaChannel",
+      "snapshot_frequency": 50
+     },
+     "structured_response": {
+      "class": "LastValue"
+     },
+     "todos": {
+      "class": "LastValue"
+     }
+    },
+    "edges": [
+     [
+      "HumanInTheLoopMiddleware.after_model",
+      "KernelToolBudgetMiddleware.after_model",
+      false
+     ],
+     [
+      "KernelChildBatchGuardMiddleware.after_model",
+      "TodoListMiddleware.after_model",
+      false
+     ],
+     [
+      "KernelSkillInputMiddleware.before_model",
+      "KernelSufficiencyMiddleware.before_model",
+      false
+     ],
+     [
+      "KernelSufficiencyMiddleware.before_model",
+      "model",
+      false
+     ],
+     [
+      "KernelToolBudgetMiddleware.after_model",
+      "KernelChildBatchGuardMiddleware.after_model",
+      false
+     ],
+     [
+      "TodoListMiddleware.after_model",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ],
+     [
+      "TodoListMiddleware.after_model",
+      "__end__",
+      true
+     ],
+     [
+      "TodoListMiddleware.after_model",
+      "tools",
+      true
+     ],
+     [
+      "__start__",
+      "KernelSkillInputMiddleware.before_model",
+      false
+     ],
+     [
+      "model",
+      "HumanInTheLoopMiddleware.after_model",
+      false
+     ],
+     [
+      "tools",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ]
+    ],
+    "nodes": [
+     "HumanInTheLoopMiddleware.after_model",
+     "KernelChildBatchGuardMiddleware.after_model",
+     "KernelSkillInputMiddleware.before_model",
+     "KernelSufficiencyMiddleware.before_model",
+     "KernelToolBudgetMiddleware.after_model",
+     "TodoListMiddleware.after_model",
+     "__end__",
+     "__start__",
+     "model",
+     "tools"
+    ]
+   },
+   "balanced": {
+    "channels": {
+     "__pregel_tasks": {
+      "class": "Topic"
+     },
+     "__start__": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:HumanInTheLoopMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelChildBatchGuardMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSkillInputMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSufficiencyMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelToolBudgetMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:TodoListMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:tools": {
+      "class": "EphemeralValue"
+     },
+     "context_source_authorization": {
+      "class": "LastValue"
+     },
+     "inqtrix_compaction": {
+      "class": "LastValue"
+     },
+     "jump_to": {
+      "class": "EphemeralValue"
+     },
+     "kernel_usage": {
+      "class": "LastValue"
+     },
+     "messages": {
+      "class": "DeltaChannel",
+      "snapshot_frequency": 50
+     },
+     "structured_response": {
+      "class": "LastValue"
+     },
+     "todos": {
+      "class": "LastValue"
+     }
+    },
+    "edges": [
+     [
+      "HumanInTheLoopMiddleware.after_model",
+      "KernelToolBudgetMiddleware.after_model",
+      false
+     ],
+     [
+      "KernelChildBatchGuardMiddleware.after_model",
+      "TodoListMiddleware.after_model",
+      false
+     ],
+     [
+      "KernelSkillInputMiddleware.before_model",
+      "KernelSufficiencyMiddleware.before_model",
+      false
+     ],
+     [
+      "KernelSufficiencyMiddleware.before_model",
+      "model",
+      false
+     ],
+     [
+      "KernelToolBudgetMiddleware.after_model",
+      "KernelChildBatchGuardMiddleware.after_model",
+      false
+     ],
+     [
+      "TodoListMiddleware.after_model",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ],
+     [
+      "TodoListMiddleware.after_model",
+      "__end__",
+      true
+     ],
+     [
+      "TodoListMiddleware.after_model",
+      "tools",
+      true
+     ],
+     [
+      "__start__",
+      "KernelSkillInputMiddleware.before_model",
+      false
+     ],
+     [
+      "model",
+      "HumanInTheLoopMiddleware.after_model",
+      false
+     ],
+     [
+      "tools",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ]
+    ],
+    "nodes": [
+     "HumanInTheLoopMiddleware.after_model",
+     "KernelChildBatchGuardMiddleware.after_model",
+     "KernelSkillInputMiddleware.before_model",
+     "KernelSufficiencyMiddleware.before_model",
+     "KernelToolBudgetMiddleware.after_model",
+     "TodoListMiddleware.after_model",
+     "__end__",
+     "__start__",
+     "model",
+     "tools"
+    ]
+   },
+   "profile:review": {
+    "channels": {
+     "__pregel_tasks": {
+      "class": "Topic"
+     },
+     "__start__": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelChildBatchGuardMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSkillInputMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSufficiencyMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelToolBudgetMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:tools": {
+      "class": "EphemeralValue"
+     },
+     "context_source_authorization": {
+      "class": "LastValue"
+     },
+     "inqtrix_compaction": {
+      "class": "LastValue"
+     },
+     "jump_to": {
+      "class": "EphemeralValue"
+     },
+     "kernel_usage": {
+      "class": "LastValue"
+     },
+     "messages": {
+      "class": "DeltaChannel",
+      "snapshot_frequency": 50
+     },
+     "structured_response": {
+      "class": "LastValue"
+     }
+    },
+    "edges": [
+     [
+      "KernelChildBatchGuardMiddleware.after_model",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ],
+     [
+      "KernelChildBatchGuardMiddleware.after_model",
+      "__end__",
+      true
+     ],
+     [
+      "KernelChildBatchGuardMiddleware.after_model",
+      "tools",
+      true
+     ],
+     [
+      "KernelSkillInputMiddleware.before_model",
+      "KernelSufficiencyMiddleware.before_model",
+      false
+     ],
+     [
+      "KernelSufficiencyMiddleware.before_model",
+      "model",
+      false
+     ],
+     [
+      "KernelToolBudgetMiddleware.after_model",
+      "KernelChildBatchGuardMiddleware.after_model",
+      false
+     ],
+     [
+      "__start__",
+      "KernelSkillInputMiddleware.before_model",
+      false
+     ],
+     [
+      "model",
+      "KernelToolBudgetMiddleware.after_model",
+      false
+     ],
+     [
+      "tools",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ],
+     [
+      "tools",
+      "__end__",
+      true
+     ]
+    ],
+    "nodes": [
+     "KernelChildBatchGuardMiddleware.after_model",
+     "KernelSkillInputMiddleware.before_model",
+     "KernelSufficiencyMiddleware.before_model",
+     "KernelToolBudgetMiddleware.after_model",
+     "__end__",
+     "__start__",
+     "model",
+     "tools"
+    ]
+   },
+   "profile:section_writer": {
+    "channels": {
+     "__pregel_tasks": {
+      "class": "Topic"
+     },
+     "__start__": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelChildBatchGuardMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSkillInputMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSufficiencyMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelToolBudgetMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:tools": {
+      "class": "EphemeralValue"
+     },
+     "context_source_authorization": {
+      "class": "LastValue"
+     },
+     "inqtrix_compaction": {
+      "class": "LastValue"
+     },
+     "jump_to": {
+      "class": "EphemeralValue"
+     },
+     "kernel_usage": {
+      "class": "LastValue"
+     },
+     "messages": {
+      "class": "DeltaChannel",
+      "snapshot_frequency": 50
+     },
+     "structured_response": {
+      "class": "LastValue"
+     }
+    },
+    "edges": [
+     [
+      "KernelChildBatchGuardMiddleware.after_model",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ],
+     [
+      "KernelChildBatchGuardMiddleware.after_model",
+      "__end__",
+      true
+     ],
+     [
+      "KernelChildBatchGuardMiddleware.after_model",
+      "tools",
+      true
+     ],
+     [
+      "KernelSkillInputMiddleware.before_model",
+      "KernelSufficiencyMiddleware.before_model",
+      false
+     ],
+     [
+      "KernelSufficiencyMiddleware.before_model",
+      "model",
+      false
+     ],
+     [
+      "KernelToolBudgetMiddleware.after_model",
+      "KernelChildBatchGuardMiddleware.after_model",
+      false
+     ],
+     [
+      "__start__",
+      "KernelSkillInputMiddleware.before_model",
+      false
+     ],
+     [
+      "model",
+      "KernelToolBudgetMiddleware.after_model",
+      false
+     ],
+     [
+      "tools",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ],
+     [
+      "tools",
+      "__end__",
+      true
+     ]
+    ],
+    "nodes": [
+     "KernelChildBatchGuardMiddleware.after_model",
+     "KernelSkillInputMiddleware.before_model",
+     "KernelSufficiencyMiddleware.before_model",
+     "KernelToolBudgetMiddleware.after_model",
+     "__end__",
+     "__start__",
+     "model",
+     "tools"
+    ]
+   },
+   "strict": {
+    "channels": {
+     "__pregel_tasks": {
+      "class": "Topic"
+     },
+     "__start__": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:HumanInTheLoopMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelChildBatchGuardMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSkillInputMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelSufficiencyMiddleware.before_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:KernelToolBudgetMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:TodoListMiddleware.after_model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:model": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:tools": {
+      "class": "EphemeralValue"
+     },
+     "context_source_authorization": {
+      "class": "LastValue"
+     },
+     "inqtrix_compaction": {
+      "class": "LastValue"
+     },
+     "jump_to": {
+      "class": "EphemeralValue"
+     },
+     "kernel_usage": {
+      "class": "LastValue"
+     },
+     "messages": {
+      "class": "DeltaChannel",
+      "snapshot_frequency": 50
+     },
+     "structured_response": {
+      "class": "LastValue"
+     },
+     "todos": {
+      "class": "LastValue"
+     }
+    },
+    "edges": [
+     [
+      "HumanInTheLoopMiddleware.after_model",
+      "KernelToolBudgetMiddleware.after_model",
+      false
+     ],
+     [
+      "KernelChildBatchGuardMiddleware.after_model",
+      "TodoListMiddleware.after_model",
+      false
+     ],
+     [
+      "KernelSkillInputMiddleware.before_model",
+      "KernelSufficiencyMiddleware.before_model",
+      false
+     ],
+     [
+      "KernelSufficiencyMiddleware.before_model",
+      "model",
+      false
+     ],
+     [
+      "KernelToolBudgetMiddleware.after_model",
+      "KernelChildBatchGuardMiddleware.after_model",
+      false
+     ],
+     [
+      "TodoListMiddleware.after_model",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ],
+     [
+      "TodoListMiddleware.after_model",
+      "__end__",
+      true
+     ],
+     [
+      "TodoListMiddleware.after_model",
+      "tools",
+      true
+     ],
+     [
+      "__start__",
+      "KernelSkillInputMiddleware.before_model",
+      false
+     ],
+     [
+      "model",
+      "HumanInTheLoopMiddleware.after_model",
+      false
+     ],
+     [
+      "tools",
+      "KernelSkillInputMiddleware.before_model",
+      true
+     ]
+    ],
+    "nodes": [
+     "HumanInTheLoopMiddleware.after_model",
+     "KernelChildBatchGuardMiddleware.after_model",
+     "KernelSkillInputMiddleware.before_model",
+     "KernelSufficiencyMiddleware.before_model",
+     "KernelToolBudgetMiddleware.after_model",
+     "TodoListMiddleware.after_model",
+     "__end__",
+     "__start__",
+     "model",
+     "tools"
+    ]
+   }
+  },
+  "interrupts": {
+   "children": [
+    "kind"
+   ],
+   "clarification": [
+    "id",
+    "kind"
+   ],
+   "tool_approval": [
+    "action_requests",
+    "review_configs"
+   ]
+  },
+  "tools": {
+   "ask_user": "7d15ecb790b90b78",
+   "cite_document_passages": "572ac435a1e12503",
+   "delegate_batch": "0350274bb89dba66",
+   "load_skill": "9718f6e64793a4b5",
+   "propose_editor_patch": "562ef4c1b65b8db5",
+   "read_canvas": "332e04eaacc45658",
+   "read_context": "bda32443181c020b",
+   "read_editor_document": "827b062ea3040969",
+   "read_evidence": "2d3c69191ed70d60",
+   "read_project_document": "385d9d58531c9932",
+   "read_research_report": "21fa9a9a69b79f9a",
+   "run_deep_mission": "7cdf9eb6aee984ed",
+   "run_web_research": "2666295ee8306281",
+   "search_context": "f49bff8ea8bae7d8",
+   "search_editor_document": "f47dbfd51b260919",
+   "search_project_knowledge": "1d936e234ab685e8",
+   "web_instant": "3bfb5523db6f8e2b",
+   "write_canvas": "ddf69f6bfc324010",
+   "write_todos": "1738303886ff4e7a"
+  },
+  "transcript_markers": [
+   "[skill_loaded:{skill_id}@{revision}]",
+   "[editor_read:{document_id}@{revision}]"
+  ]
+ },
+ "workspace_agent": {
+  "checkpoint_types": [],
+  "contract_version": 1,
+  "graphs": {
+   "mission": {
+    "channels": {
+     "__pregel_tasks": {
+      "class": "Topic"
+     },
+     "__start__": {
+      "class": "EphemeralValue"
+     },
+     "answered_subjects": {
+      "class": "LastValue"
+     },
+     "artifact_id": {
+      "class": "LastValue"
+     },
+     "artifact_registry": {
+      "class": "LastValue"
+     },
+     "autonomy": {
+      "class": "LastValue"
+     },
+     "branch:to:children_wait": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:clarify": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:clarify_gaps": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:critic": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:discovery": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:evidence": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:execute": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:finalize": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:intake": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:patch": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:patch_approval": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:plan": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:plan_approval": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:replan_gate": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:review_wait": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:synthesis_wait": {
+      "class": "EphemeralValue"
+     },
+     "branch:to:synthesize": {
+      "class": "EphemeralValue"
+     },
+     "cancelled": {
+      "class": "LastValue"
+     },
+     "claims": {
+      "class": "LastValue"
+     },
+     "clarification_asked": {
+      "class": "LastValue"
+     },
+     "clarification_assumptions": {
+      "class": "LastValue"
+     },
+     "clarification_rounds": {
+      "class": "LastValue"
+     },
+     "clarified_context": {
+      "class": "LastValue"
+     },
+     "contradictions": {
+      "class": "LastValue"
+     },
+     "critic": {
+      "class": "LastValue"
+     },
+     "delegated": {
+      "class": "LastValue"
+     },
+     "deliverable": {
+      "class": "LastValue"
+     },
+     "discovery": {
+      "class": "LastValue"
+     },
+     "discovery_tool_use_counts": {
+      "class": "LastValue"
+     },
+     "failure": {
+      "class": "LastValue"
+     },
+     "history": {
+      "class": "LastValue"
+     },
+     "language": {
+      "class": "LastValue"
+     },
+     "language_source": {
+      "class": "LastValue"
+     },
+     "last_response_form": {
+      "class": "LastValue"
+     },
+     "last_review": {
+      "class": "LastValue"
+     },
+     "legacy_budget_notice_task_ids": {
+      "class": "LastValue"
+     },
+     "memo_base_revision": {
+      "class": "LastValue"
+     },
+     "memo_markdown": {
+      "class": "LastValue"
+     },
+     "memo_title": {
+      "class": "LastValue"
+     },
+     "memo_user_prefix": {
+      "class": "LastValue"
+     },
+     "memory_briefing": {
+      "class": "LastValue"
+     },
+     "memory_candidates": {
+      "class": "LastValue"
+     },
+     "memory_status": {
+      "class": "LastValue"
+     },
+     "needs_plan_interrupt": {
+      "class": "LastValue"
+     },
+     "outcomes": {
+      "class": "LastValue"
+     },
+     "patch_decision": {
+      "class": "LastValue"
+     },
+     "patch_id": {
+      "class": "LastValue"
+     },
+     "pending_children": {
+      "class": "LastValue"
+     },
+     "phase": {
+      "class": "LastValue"
+     },
+     "plan_id": {
+      "class": "LastValue"
+     },
+     "plan_rejected": {
+      "class": "LastValue"
+     },
+     "plan_version": {
+      "class": "LastValue"
+     },
+     "planned_rounds": {
+      "class": "LastValue"
+     },
+     "prior_evidence_count": {
+      "class": "LastValue"
+     },
+     "prior_memo": {
+      "class": "LastValue"
+     },
+     "profile": {
+      "class": "LastValue"
+     },
+     "question": {
+      "class": "LastValue"
+     },
+     "references": {
+      "class": "LastValue"
+     },
+     "replan_gate": {
+      "class": "LastValue"
+     },
+     "replan_noop": {
+      "class": "LastValue"
+     },
+     "replan_rounds": {
+      "class": "LastValue"
+     },
+     "report_guidance": {
+      "class": "LastValue"
+     },
+     "report_requirement_parts": {
+      "class": "LastValue"
+     },
+     "research_prospect": {
+      "class": "LastValue"
+     },
+     "review_pending": {
+      "class": "LastValue"
+     },
+     "route": {
+      "class": "LastValue"
+     },
+     "session_id": {
+      "class": "LastValue"
+     },
+     "skill_point_answers": {
+      "class": "LastValue"
+     },
+     "skill_questions": {
+      "class": "LastValue"
+     },
+     "success_criteria": {
+      "class": "LastValue"
+     },
+     "sufficiency": {
+      "class": "LastValue"
+     },
+     "synthesis_pending": {
+      "class": "LastValue"
+     },
+     "synthesis_progress": {
+      "class": "LastValue"
+     },
+     "target_document_id": {
+      "class": "LastValue"
+     },
+     "tasks_before_round": {
+      "class": "LastValue"
+     },
+     "tool_use_counts": {
+      "class": "LastValue"
+     },
+     "usage": {
+      "class": "LastValue"
+     },
+     "web_consent": {
+      "class": "LastValue"
+     },
+     "web_consent_checked_version": {
+      "class": "LastValue"
+     },
+     "web_search_ledger": {
+      "class": "LastValue"
+     },
+     "web_searches": {
+      "class": "LastValue"
+     }
+    },
+    "edges": [
+     [
+      "__start__",
+      "intake",
+      false
+     ],
+     [
+      "intake",
+      "__end__",
+      false
+     ]
+    ],
+    "nodes": [
+     "__end__",
+     "__start__",
+     "children_wait",
+     "clarify",
+     "clarify_gaps",
+     "critic",
+     "discovery",
+     "evidence",
+     "execute",
+     "finalize",
+     "intake",
+     "patch",
+     "patch_approval",
+     "plan",
+     "plan_approval",
+     "replan_gate",
+     "review_wait",
+     "synthesis_wait",
+     "synthesize"
+    ]
+   }
+  },
+  "interrupts": {},
+  "tools": {}
+ }
+}

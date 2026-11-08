@@ -7,6 +7,7 @@ no process-global tracing state is touched.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 
 import pytest
@@ -17,7 +18,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 
 from inqtrix.observability.content import ContentCapturePolicy
-from inqtrix.observability.provider_tracing import (
+from inqtrix.providers.tracing import (
     TracingLLMProvider,
     instrument_embeddings,
     instrument_llm,
@@ -33,7 +34,7 @@ from inqtrix.providers.base import (
 )
 from inqtrix.providers.embeddings import EmbeddingProvider
 from inqtrix.runtime_logging import describe_llm_provider
-from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource
+from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource, ProviderNotice
 from inqtrix.services.health_service import provider_label
 
 SUMMARY = ContentCapturePolicy(configured_capture=False, max_attr_bytes=32_768)
@@ -184,7 +185,7 @@ def test_rejected_tool_json_retains_content_and_billed_usage(exporter_and_provid
 
     exporter, tracer = exporter_and_provider
     receipts = []
-    monkeypatch.setattr("inqtrix.usage.recorder.record_provider_call", lambda **data: receipts.append(data))
+    monkeypatch.setattr("inqtrix.providers.tracing._usage_sink", lambda **data: receipts.append(data))
     raw = '{"text":"MARKE1"'
     inner = provider(wire(requested("call_bad", "write_todos", raw)))
     wrapped = TracingLLMProvider(inner, provider_name="openai", policy=FORENSIC, tracer_provider=tracer)
@@ -594,6 +595,25 @@ def test_search_standard_io_preserves_text_and_provider_usage(
     assert attrs["inqtrix.search.answer"] == text
     assert attrs["gen_ai.usage.input_tokens"] == 23
     assert attrs["gen_ai.usage.output_tokens"] == 7
+
+
+def test_a_degraded_search_is_a_warning_generation(exporter_and_provider):
+    exporter, provider = exporter_and_provider
+    notice = ProviderNotice(
+        "Azure-Foundry-WebSearch stopped before the answer was finished "
+        "(content_filter); the empty result remains a visible evidence gap.",
+        code="content_filter",
+        http_status=502,
+    )
+    degraded = GroundedSearchResult(prompt_tokens=8338, completion_tokens=209, notices=(notice,))
+    for result in (degraded, GroundedSearchResult(answer="the answer")):
+        instrument_search(
+            SuppliedSearch(result), policy=SUMMARY, tracer_provider=provider
+        ).search("question")
+    warned, normal = (dict(span.attributes) for span in exporter.get_finished_spans())
+    assert warned["langfuse.observation.level"] == "WARNING"
+    assert warned["langfuse.observation.status_message"] == notice.message
+    assert "langfuse.observation.level" not in normal
 
 
 def test_search_standard_io_is_content_gated(exporter_and_provider):
@@ -1020,7 +1040,7 @@ def _metered_call(exporter_and_provider, monkeypatch, finish_reason: str, call: 
     monkeypatch.setattr(metrics_defs, "_active", metrics_defs.build_call_metrics(registry))
     receipts = []
     monkeypatch.setattr(
-        "inqtrix.usage.recorder.record_provider_call",
+        "inqtrix.providers.tracing._usage_sink",
         lambda **data: receipts.append(data),
     )
     llm = TracingLLMProvider(
@@ -1077,3 +1097,140 @@ def test_a_finished_response_stays_a_plain_success(exporter_and_provider, monkey
     assert semconv.LANGFUSE_OBSERVATION_LEVEL not in attrs
     assert metric_outcomes == ["success"]
     assert ledger_outcomes == ["success"]
+
+
+@pytest.mark.parametrize("cap", [4096, 64], ids=["fits", "cut"])
+def test_a_structured_value_keeps_both_views_valid_json(cap):
+    """A structure with a JSON text view stays JSON in both views, also when the cap cuts it."""
+    from inqtrix.observability import semconv
+    from inqtrix.providers.tracing import _set_content
+
+    exporter = InMemorySpanExporter()
+    tracer = TracerProvider()
+    tracer.add_span_processor(SimpleSpanProcessor(exporter))
+    policy = ContentCapturePolicy(configured_capture=True, max_attr_bytes=cap)
+    value = {"answer": "x" * 500}
+
+    with tracer.get_tracer("test").start_as_current_span("search") as span:
+        _set_content(
+            span,
+            semconv.INQTRIX_SEARCH_ANSWER,
+            value,
+            policy,
+            json_text_key=semconv.LANGFUSE_OBSERVATION_OUTPUT,
+        )
+
+    (finished,) = exporter.get_finished_spans()
+    native = finished.attributes[semconv.INQTRIX_SEARCH_ANSWER]
+    assert json.loads(finished.attributes[semconv.LANGFUSE_OBSERVATION_OUTPUT]) == native
+    assert isinstance(native, str)
+    cut = [event for event in finished.events if event.name == semconv.TRUNCATION_EVENT]
+    assert (json.loads(native) == value) if cap == 4096 else (len(cut) == 1)
+
+
+
+class _ReasoningLLM(LLMProvider):
+    """Answers each call with the next reasoning-token figure."""
+
+    def __init__(self, *reasoning: int | None, model: str) -> None:
+        self._reasoning = list(reasoning)
+        self._model = model
+
+    def complete(self, prompt, **kwargs) -> str:
+        return "ok"
+
+    def complete_with_metadata(self, prompt, **kwargs) -> LLMResponse:
+        return LLMResponse(
+            content="ok",
+            prompt_tokens=5,
+            completion_tokens=3,
+            model=self._model,
+            finish_reason="stop",
+            reasoning_tokens=self._reasoning.pop(0),
+        )
+
+    def chat(self, messages, **kwargs) -> ChatTurn:
+        return ChatTurn(
+            text="ok",
+            finish_reason="stop",
+            model=self._model,
+            prompt_tokens=5,
+            completion_tokens=3,
+            reasoning_tokens=self._reasoning.pop(0),
+        )
+
+    def supports_tool_calls(self, *, model=None) -> bool:
+        return True
+
+    def is_available(self) -> bool:
+        return True
+
+
+@pytest.fixture()
+def fresh_thinking_watch(monkeypatch):
+    from inqtrix.providers import tracing as tracing_module
+
+    monkeypatch.setattr(tracing_module, "_THINKING_WATCH", tracing_module._ThinkingWatch())
+
+
+def _levels(*reasoning, effort="high", model="gpt-5.4", reported=None, sampler=None, chat=False):
+    from inqtrix.observability import semconv
+
+    exporter = InMemorySpanExporter()
+    tracer = TracerProvider(sampler=sampler) if sampler is not None else TracerProvider()
+    tracer.add_span_processor(SimpleSpanProcessor(exporter))
+    wrapped = TracingLLMProvider(
+        _ReasoningLLM(*reasoning, model=reported or model),
+        provider_name="openai",
+        policy=SUMMARY,
+        tracer_provider=tracer,
+    )
+    for _ in reasoning:
+        if chat:
+            wrapped.chat([{"role": "user", "content": "Frage"}], reasoning_effort=effort, model=model)
+        else:
+            wrapped.complete_with_metadata("Frage", reasoning_effort=effort, model=model)
+    return [span.attributes.get(semconv.LANGFUSE_OBSERVATION_LEVEL) for span in exporter.get_finished_spans()]
+
+
+def test_kernel_turns_without_reasoning_are_marked_as_well(fresh_thinking_watch):
+    """The kernel's turns go through chat(), the main path of an agent run."""
+    assert _levels(0, 0, 0, chat=True) == [None, None, "WARNING"]
+
+
+def test_answers_without_reasoning_are_marked_from_the_third_and_said_once(fresh_thinking_watch, caplog):
+    with caplog.at_level(logging.WARNING, logger="inqtrix.providers.tracing"):
+        levels = _levels(0, 0, 0, 0)
+
+    assert levels == [None, None, "WARNING", "WARNING"]
+    said = [record.getMessage() for record in caplog.records if "reasoning tokens" in record.getMessage()]
+    assert len(said) == 1
+    assert "gpt-5.4" in said[0] and "high" in said[0]
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "effort", "model"),
+    [
+        ((None, None, None), "high", "gpt-5.4"),
+        ((0, 0, 0), "low", "gpt-5.4"),
+        ((0, 0, 0), "high", "my-deployment"),
+        ((0, 0, 7, 0, 0), "high", "gpt-5.4"),
+    ],
+    ids=["no-figure", "low-effort", "no-card", "reset"],
+)
+def test_no_verdict_without_three_known_misses_in_a_row(fresh_thinking_watch, reasoning, effort, model):
+    assert set(_levels(*reasoning, effort=effort, model=model)) == {None}
+
+
+def test_a_dated_reported_model_is_judged_by_the_requested_one(fresh_thinking_watch):
+    """Providers report dated names a card does not know; the requested name finds it."""
+    assert _levels(0, 0, 0, model="gpt-5.4", reported="gpt-5.4-2026-03-05") == [None, None, "WARNING"]
+
+
+def test_the_watch_says_it_with_tracing_off(fresh_thinking_watch, caplog):
+    from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+
+    with caplog.at_level(logging.WARNING, logger="inqtrix.providers.tracing"):
+        assert _levels(0, 0, 0, sampler=ALWAYS_OFF) == []
+
+    assert [record for record in caplog.records if "reasoning tokens" in record.getMessage()]

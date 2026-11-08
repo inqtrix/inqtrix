@@ -5,6 +5,8 @@ Use this example when:
 - the LLM and search side are still served by the standard env-based provider setup
 
 Set INCLUDE_PROGRESS to False if another program should consume only answer chunks.
+From async code, read agent.astream(...) with async for, inside
+contextlib.aclosing when the loop may stop early.
 
 Run with:
     uv run python examples/quickstart/streaming.py

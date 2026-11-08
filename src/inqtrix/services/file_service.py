@@ -30,9 +30,11 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import AsyncIterator, Iterator
 
+from inqtrix import aio
 from inqtrix.auth.permissions import (
     AuthorizationService,
     ResourceNotFound,
@@ -418,8 +420,9 @@ class FileService:
         content = await asyncio.to_thread(lambda: b"".join(chunks))
         parser = self._document_parser
         try:
-            extraction = await asyncio.to_thread(
-                extract_file, parser, file_name=record.file_name, content=content
+            # May compute for minutes, so not on the short-work lane.
+            extraction = await aio.run_legacy_segment(
+                partial(extract_file, parser, file_name=record.file_name, content=content)
             )
         except DocumentParseError as exc:
             raise FileTextExtractionError(str(exc)) from exc

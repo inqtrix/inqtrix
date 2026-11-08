@@ -139,6 +139,8 @@ not exist.
 | Route | Method | Purpose |
 |---|---|---|
 | `/v1/admin/system/runtime` | GET | Sanitized runtime categories for the System settings page: storage, run queue/execution, file store, knowledge backends, API documentation state, and read-only reachability booleans for optional backing services. |
+| `/v1/admin/system/run-bindings` | GET | Open runs by workflow binding for an instance admin: the `contracts` this process carries per mode, `counts` per mode, status and `workflow_contract` (a running run already asked to stop counts as `cancel_requested`), and with `below=<version>` or `above=<version>` (optionally `mode=`) the `runs` bound outside it, oldest first and at most 1,000 (`runs_total`, `truncated`). Read before raising a contract and when rolling back; see [Runbooks](runbooks.md#workflow-contracts-in-an-update). |
+| `/v1/admin/system/run-bindings/cancel` | POST | Instance admin only (browser session with CSRF token). Body `{"mode": "<mode>"}`: cancels the open runs of that mode this process cannot run, bound above its contract or of a mode it does not register, with their active children, and skips a running run already asked to stop; answers `mode`, `server_contract`, `cancelled` and `cancel_requested` (runs newly asked to stop). Audited per run as `run.cancelled_by_admin`; each run ends with the reason `cancelled_by_admin`, which the Agent Desk shows the owner of an agent run with a way to start the question again. See [Runbooks](runbooks.md#workflow-contracts-in-an-update). |
 
 ### Auth (registered in the cookie-session modes, `INQTRIX_AUTH_MODE=oidc`, `local` and `gateway`)
 
@@ -304,9 +306,10 @@ Because those semaphores are shared capacity, request-scoped endpoints stop
 working for callers that are gone: non-streaming `/v1/chat/completions` and
 both editor assist routes watch the client connection and cancel the
 server-side work cooperatively when the caller disconnects mid-request
-(provider calls stop at attempt boundaries and during retry backoff waits,
-which poll the cancel signal about every half second; a single in-flight
-HTTP attempt still runs to its transport timeout). A request abandoned this way is
+(the provider call ends at once: its retries, its backoff waits and the
+request it waits for, which polls the cancel signal ten times a second; only
+a Bedrock request thread runs on, unseen, to its read timeout). A request
+abandoned this way is
 answered with HTTP 499 and the typed error `client_closed_request` — never
 delivered to the caller. The API's own uvicorn access log stays silent
 (uvicorn skips access logging for clients that are already gone); the web
@@ -325,7 +328,7 @@ the API must do the same for server-side cancellation to trigger.
 
 The research graph and document re-embedding are **synchronous work on a bounded thread pool**: each active job holds one OS thread for its full duration, and you scale *out* (more worker processes) rather than *up* (thousands of threads in one process). See [Settings and environment](../configuration/settings-and-env.md) for `MAX_CONCURRENT`, the AI thread lane it sizes, and the real ceiling (provider rate limit, host CPU/RAM).
 
-Streaming disconnects and `POST /v1/runs/{run_id}/cancel` set the same cancel event; execution stops at the next safe boundary (the current logical provider operation may use up to its configured 600-second budget). Explicit cancellation locks and transitions the complete descendant tree, then reconciles every affected Agent plan task from the terminal run rows. A read of an older partially reconciled plan repeats that idempotent settlement, covering a process failure after the run transaction committed. Queued and waiting rows cancel immediately. Agent Desk additionally exposes `POST /v1/runs/{run_id}/tasks/{task_id}/cancel`: pending work ends immediately, research children reuse run cancellation, and an in-flight synchronous instant request records `cancel_requested`, performs no retry or result commit, and ends naturally. Hard network interruption of that synchronous provider request is out of scope.
+Streaming disconnects and `POST /v1/runs/{run_id}/cancel` set the same cancel event. Every engine binds that event once for its whole run, so a provider call the run waits for ends at once, wherever in the run it is made; other work stops at the next safe boundary. Explicit cancellation locks and transitions the complete descendant tree, then reconciles every affected Agent plan task from the terminal run rows. A read of an older partially reconciled plan repeats that idempotent settlement, covering a process failure after the run transaction committed. Queued and waiting rows cancel immediately. Agent Desk additionally exposes `POST /v1/runs/{run_id}/tasks/{task_id}/cancel`: pending work ends immediately, research children reuse run cancellation, and an in-flight synchronous instant request records `cancel_requested`, performs no retry or result commit, and ends naturally. Hard network interruption of that synchronous provider request is out of scope.
 
 ## Deployment sizing: with or without Valkey
 

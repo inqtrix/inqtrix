@@ -13,6 +13,7 @@ from inqtrix.providers.base import (
     SearchProvider,
     StructuredLLMResponse,
     reported_capability,
+    reported_reasoning_levels,
 )
 from inqtrix.search_result import GroundedSearchResult
 
@@ -192,6 +193,10 @@ class AuthorizationGuardedLLM(_GuardedProvider, LLMProvider):
         return reported_capability(
             self._provider, "supports_tool_calls", model=model
         )
+
+    def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
+        """Forward the efforts the wrapped provider can send for *model*."""
+        return reported_reasoning_levels(self._provider, model=model or "")
 
     def is_available(self) -> bool:
         """Forward local provider readiness without consuming authority."""

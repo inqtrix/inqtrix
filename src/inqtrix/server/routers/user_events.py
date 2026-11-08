@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import random
+import time
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,6 +17,15 @@ from inqtrix.services.request_parsing import error_response
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
     from inqtrix.user_events import UserInvalidation
+
+_KEEPALIVE_SECONDS = 5.0
+"""How often a quiet stream proves itself alive to the browser and to proxies."""
+
+_CHECK_WINDOW_SECONDS = (45.0, 60.0)
+"""When a quiet stream checks its credential and reads its page once. The upper
+bound is how long a signed-out or expired session can keep a stream open; only
+comments flow in that time. A window, so that tabs reconnecting together after a
+restart do not stay in step."""
 
 
 def _sse_frame(
@@ -90,7 +101,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         tenant_id = principal.tenant_id
 
         async def _still_authorized() -> bool:
-            """Re-resolve credentials immediately before each data frame."""
+            """Re-resolve credentials before each data frame and each quiet check."""
             try:
                 current = await resolve_live_principal(principal_dep, request)
             except (HTTPException, PrincipalChangedError):
@@ -100,43 +111,54 @@ def build_router(container: "AppContainer") -> APIRouter:
                 and current.tenant_id == tenant_id
             )
 
+        def _next_check() -> float:
+            return time.monotonic() + random.uniform(*_CHECK_WINDOW_SECONDS)
+
         async def _events():
             nonlocal cursor
             if not await _still_authorized():
                 return
+            check_at = _next_check()
             yield _sse_frame(
                 "ready",
                 {"user_id": str(expected_user_id), "cursor": str(cursor)},
             )
+            read_page = True
             while True:
                 if await request.is_disconnected():
                     return
-                page = await store.page_after(
+                if read_page:
+                    page = await store.page_after(
+                        tenant_id=tenant_id,
+                        target_user_id=expected_user_id,
+                        cursor=cursor,
+                    )
+                    if page.reset_required:
+                        if not await _still_authorized():
+                            return
+                        yield _sse_frame("reset", {})
+                        cursor = page.current_cursor
+                    for event in page.events:
+                        if not await _still_authorized():
+                            return
+                        yield _invalidation_frame(event)
+                        cursor = event.id
+                read_page = await store.wait_for_change(
                     tenant_id=tenant_id,
                     target_user_id=expected_user_id,
                     cursor=cursor,
+                    timeout=min(_KEEPALIVE_SECONDS, check_at - time.monotonic()),
                 )
-                if page.reset_required:
-                    if not await _still_authorized():
-                        return
-                    yield _sse_frame("reset", {})
-                    cursor = page.current_cursor
+                if read_page:
                     continue
-                for event in page.events:
+                if time.monotonic() >= check_at:
                     if not await _still_authorized():
                         return
-                    yield _invalidation_frame(event)
-                    cursor = event.id
-                await store.wait_for_change(
-                    tenant_id=tenant_id,
-                    target_user_id=expected_user_id,
-                    cursor=cursor,
-                    timeout=5.0,
-                )
-                if not page.events:
-                    if not await _still_authorized():
-                        return
-                    yield ": keepalive\n\n"
+                    check_at = _next_check()
+                    # Only a read finds a cursor that no longer fits: the wake-up
+                    # compares ids and stays silent when they became smaller.
+                    read_page = True
+                yield ": keepalive\n\n"
 
         return StreamingResponse(
             _events(),

@@ -25,6 +25,7 @@ from inqtrix.server.routers.admin_trace import (
     build_router as build_admin_trace_router,
 )
 from inqtrix.server.routers.auth import build_auth_router
+from tests._store_doubles import BothNames
 from inqtrix.settings import (
     AuthSettings,
     ObservabilitySettings,
@@ -62,7 +63,7 @@ class _RecordingAuditSink:
         return rows, None
 
 
-class _FakeRunStore:
+class _FakeRunStore(BothNames):
     def __init__(self, trace_ids: dict[str, str | None]) -> None:
         self._trace_ids = trace_ids
 

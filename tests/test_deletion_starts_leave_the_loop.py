@@ -2,16 +2,14 @@
 
 Registering an operation can wait for row and tenant locks that other
 requests hold. Those requests' transactions run on the same event loop and
-can only commit while it keeps running, so a start that waited for the
-store on the loop would wait for itself: every request of the process stops
-until a timeout breaks the cycle. The store refuses a write on an event
-loop thread, and every start hands its registration to a worker thread.
+can only commit while it keeps running, so a start that blocked the loop
+would wait for itself: every request of the process stops until a timeout
+breaks the cycle. Every start awaits the store's async name.
 """
 
 from __future__ import annotations
 
 import asyncio
-import threading
 import uuid
 from types import SimpleNamespace
 
@@ -20,9 +18,7 @@ import pytest
 from inqtrix.auth.lifecycle import AdminActor
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.runs.deletion_operations import (
-    DeletionOperationStore,
     DeletionTargetKind,
-    refuse_on_event_loop,
 )
 from inqtrix.services.asset_deletion_service import AssetDeletionService
 
@@ -32,18 +28,20 @@ VISIBLE = UserContext(principal=PRINCIPAL, workspace_ids=())
 
 
 class _Store:
-    """The deletion store's write path, holding the store's own guard."""
+    """The deletion store's write path; its sync name would block the loop."""
 
     def __init__(self) -> None:
         self.registered: list[DeletionTargetKind] = []
 
-    def find_for_target(self, *args, **kwargs):
+    async def afind_for_target(self, *args, **kwargs):
         return None
 
-    def submit(self, **kwargs):
-        refuse_on_event_loop("registration")
+    async def asubmit(self, **kwargs):
         self.registered.append(kwargs["target_kind"])
         return {"operation_id": "del_probe", "status": "queued"}
+
+    def submit(self, **kwargs):
+        raise AssertionError("the sync name would block the loop")
 
 
 class _Assets:
@@ -124,7 +122,7 @@ STARTS = {
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", list(STARTS), ids=lambda kind: kind.value)
-async def test_every_start_registers_away_from_the_event_loop(kind) -> None:
+async def test_every_start_awaits_the_store(kind) -> None:
     store = _Store()
 
     summary = await STARTS[kind](_service(store))
@@ -137,16 +135,15 @@ async def test_every_start_registers_away_from_the_event_loop(kind) -> None:
 async def test_a_registration_waiting_for_another_request_lets_it_finish() -> None:
     """The registration waits for a lock another request on this loop holds.
 
-    That request releases it only if the loop keeps running; with the
-    registration on the loop, both would wait until a timeout.
+    That request releases it only if the loop keeps running; with a
+    registration that blocks the loop, both would wait until a timeout.
     """
-    released = threading.Event()
+    released = asyncio.Event()
 
     class _LockedStore(_Store):
-        def submit(self, **kwargs):
-            if not released.wait(timeout=5):
-                raise AssertionError("the registration held the event loop")
-            return super().submit(**kwargs)
+        async def asubmit(self, **kwargs):
+            await asyncio.wait_for(released.wait(), timeout=5)
+            return await super().asubmit(**kwargs)
 
     async def other_request() -> None:
         released.set()
@@ -156,28 +153,3 @@ async def test_a_registration_waiting_for_another_request_lets_it_finish() -> No
     await other
 
     assert summary["operation_id"] == "del_probe"
-
-
-@pytest.mark.asyncio
-async def test_the_deletion_store_refuses_a_write_on_an_event_loop() -> None:
-    store = DeletionOperationStore()
-
-    with pytest.raises(RuntimeError, match="event loop"):
-        store.submit(
-            target_kind=DeletionTargetKind.ASSET,
-            target_id="fa_1",
-            manifest=(),
-            tenant_id="default",
-            created_by_user_id=OWNER,
-            workspace_id=None,
-            work=lambda handle: None,
-            total_items=1,
-        )
-    with pytest.raises(RuntimeError, match="event loop"):
-        store.retry(
-            "del_missing",
-            tenant_id="default",
-            created_by_user_id=OWNER,
-            workspace_id=None,
-            work=lambda handle: None,
-        )

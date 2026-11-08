@@ -1,6 +1,6 @@
 """The run-store port: the surface routers and services program against.
 
-Both backends — the in-memory :class:`~inqtrix.server.runs.RunStore`
+Both backends — the in-memory :class:`~inqtrix.runs.memory_store.RunStore`
 (default) and :class:`~inqtrix.runs.postgres_store.PostgresRunStore`
 (opt-in durability) — satisfy this Protocol structurally; the runs
 router, :class:`~inqtrix.services.run_service.RunService`, and the
@@ -16,11 +16,11 @@ import uuid
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from inqtrix.auth.principal import Principal, UserContext
     from inqtrix.auth.shares import ShareFacts
-    from inqtrix.server.runs import RunWork
+    from inqtrix.runs.records import RunWork
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,11 @@ class RunSubscriptionPort(Protocol):
 
 
 class RunStorePort(Protocol):
-    """Public surface shared by every run-store backend."""
+    """Public surface shared by every run-store backend.
+
+    Each operation has two names: ``get`` for a synchronous job body on a thread,
+    ``aget`` for a coroutine on the process loop.
+    """
 
     def submit(
         self,
@@ -61,8 +65,9 @@ class RunStorePort(Protocol):
         question: str,
         stack_name: str,
         work: "RunWork",
+        mode: str,
+        workflow_contract: int,
         agent_overrides: dict[str, Any] | None = None,
-        mode: str = "research",
         workspace_id: str | None = None,
         created_by_user_id: uuid.UUID | None = None,
         created_by_tenant_id: str | None = None,
@@ -76,10 +81,12 @@ class RunStorePort(Protocol):
     ) -> dict[str, Any]:
         """Accept one run; returns the public summary (HTTP 202 body).
 
-        The tree kwargs (``kind``/``parent_run_id``/``root_run_id``) and the
-        saved-session relation (``session_id``) default to the standard-run
-        shape; summaries omit them entirely at defaults, so historical
-        callers are untouched.
+        ``mode`` and ``workflow_contract`` are the run's binding: the caller
+        names both, the contract being the one the mode's algorithm carries
+        on acceptance. The tree kwargs (``kind``/``parent_run_id``/
+        ``root_run_id``) and the saved-session relation (``session_id``)
+        default to the standard-run shape; summaries omit them entirely at
+        defaults, so historical callers are untouched.
         """
         ...
 
@@ -152,6 +159,53 @@ class RunStorePort(Protocol):
         backend reads its in-process counters under the store lock; the
         durable backend runs a single grouped COUNT. See
         :class:`RunStoreMetrics` for the field semantics.
+        """
+        ...
+
+    def binding_overview(
+        self,
+        *,
+        mode: str | None,
+        below: int | None,
+        above: int | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        """Open runs by binding, for an operator raising or rolling back a contract.
+
+        ``counts`` holds ``{mode, status, workflow_contract, runs}`` per open
+        group, sorted. ``runs`` names the open runs bound below *below* or
+        above *above*, oldest first and at most *limit* of them;
+        ``runs_total`` counts them all and ``truncated`` says the list was
+        cut. *mode* narrows both to one mode. Terminal runs never resume, so
+        neither part holds them.
+        """
+        ...
+
+    def cancel_outside_binding(
+        self,
+        *,
+        mode: str,
+        workflow_contracts: Mapping[str, int],
+        actor_user_id: uuid.UUID | None,
+    ) -> dict[str, int]:
+        """Cancel the open runs of *mode* that *workflow_contracts* cannot run.
+
+        Those are the runs bound above the contract *workflow_contracts* names
+        for *mode*, or every open run of *mode* when it names none. A run bound
+        below is left alone: with a stored checkpoint it ends at its next claim,
+        without one the claim binds it to the current contract. A running run
+        already asked to stop is skipped: neither asked, audited nor counted
+        again. Each run is judged again under its lineage lock and cancelled
+        with its children:
+        the run itself with :data:`~inqtrix.runs.shared.ADMIN_CANCEL_REASON`,
+        an active child with ``parent_cancelled``. Each cancel is audited as
+        ``run.cancelled_by_admin`` with *actor_user_id* and reaches the
+        owner's open views.
+
+        Returns:
+            ``cancelled``: runs that ended at once; ``cancel_requested``:
+            running runs newly asked to stop, which end at their next step
+            or at the next claim of a worker.
         """
         ...
 
@@ -392,6 +446,10 @@ class RunStorePort(Protocol):
     ) -> None:
         """Mark cancelled after the executor observed the cancel.
 
+        A run that was asked to stop ends with the reason of its latest
+        request; *reason* names the end only of a run that stopped on its
+        own. Its live children end with it (``parent_cancelled``).
+
         Args:
             fence_attempt: Durable claim-attempt fence (see
                 :meth:`mark_waiting`); in-process backends ignore it.
@@ -451,8 +509,8 @@ class RunStorePort(Protocol):
         question: str,
         stack_name: str,
         result: dict[str, Any],
+        mode: str,
         status: str = "completed",
-        mode: str = "research",
         agent_overrides: dict[str, Any] | None = None,
         snapshot: dict[str, Any] | None = None,
         error: dict[str, Any] | None = None,
@@ -468,6 +526,80 @@ class RunStorePort(Protocol):
         the user. ``source_run_id`` is an owner-scoped idempotency key; a new
         row always gets a server-generated ``run_id``. ``created_at`` keeps the
         report's original date; the durable-retention clock starts at import
-        time, hence no ``finished_at`` parameter. Returns the public summary.
+        time, hence no ``finished_at`` parameter. The run is bound to
+        ``mode`` and to ``IMPORTED_RUN_CONTRACT``. Returns the public summary.
         """
+        ...
+
+    # The same operations for a coroutine on the process loop: same arguments, same
+    # results. The sync names above are for job bodies on threads.
+
+    async def asubmit(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def aget(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def alist(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
+
+    async def alist_session_runs(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
+
+    async def asession_owners(self, *args: Any, **kwargs: Any) -> set[tuple[str | None, uuid.UUID | None]]: ...
+
+    async def alist_page(self, *args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], str | None]: ...
+
+    async def ametrics_snapshot(self, *args: Any, **kwargs: Any) -> RunStoreMetrics: ...
+
+    async def abinding_overview(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def acancel_outside_binding(self, *args: Any, **kwargs: Any) -> dict[str, int]: ...
+
+    async def aresult(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def acancel(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def acancel_tree(self, *args: Any, **kwargs: Any) -> tuple[dict[str, Any], tuple[str, ...]]: ...
+
+    async def aauthorized_control_write(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    async def asweep(self, *args: Any, **kwargs: Any) -> None: ...
+
+    async def adelete(self, *args: Any, **kwargs: Any) -> None: ...
+
+    async def asubscribe(self, *args: Any, **kwargs: Any) -> RunSubscriptionPort: ...
+
+    async def aowner_user_id(self, *args: Any, **kwargs: Any) -> uuid.UUID | None: ...
+
+    async def ashare_facts(self, *args: Any, **kwargs: Any) -> dict[str, ShareFacts]: ...
+
+    async def atrace_id(self, *args: Any, **kwargs: Any) -> str | None: ...
+
+    async def aexecution_request_body(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def asource_request_body(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def asource_run_catalogue(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
+
+    async def asource_origins_visible(self, *args: Any, **kwargs: Any) -> bool: ...
+
+    async def aexecution_principal(self, *args: Any, **kwargs: Any) -> "Principal | None": ...
+
+    async def atotal_elapsed_seconds(self, *args: Any, **kwargs: Any) -> float: ...
+
+    async def aemit(self, *args: Any, **kwargs: Any) -> None: ...
+
+    async def acomplete(self, *args: Any, **kwargs: Any) -> None: ...
+
+    async def afail(self, *args: Any, **kwargs: Any) -> None: ...
+
+    async def amark_cancelled(self, *args: Any, **kwargs: Any) -> None: ...
+
+    async def amark_waiting(self, *args: Any, **kwargs: Any) -> None: ...
+
+    async def aresume_run(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def achildren(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]: ...
+
+    async def aimport_completed_run(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def aclose(self) -> None:
+        """Called once when the process stops serving."""
         ...

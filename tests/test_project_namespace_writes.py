@@ -676,6 +676,8 @@ def test_artifact_exported_by_a_token_without_header_is_in_the_ui_editor_list(
     """Does an editor document a script exports from an agent artifact
     appear in the editor list the interface loads?"""
     summary = world.container.run_store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent task",
         stack_name="default",
         work=lambda handle: handle.complete({"answer": "done"}),

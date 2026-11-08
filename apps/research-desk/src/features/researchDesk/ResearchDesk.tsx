@@ -218,10 +218,14 @@ import {
   evaluateBudget,
   shouldShowAttachmentBudgetNotice,
 } from '@/features/files/budget'
-import { estimateTokensFromText } from '@/features/files/contextTokens'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { useTheme } from '@/theme/ThemeProvider'
 import { contentWithAttachmentContext } from '@/features/project/attachmentContext'
+import {
+  chatContextEstimate,
+  currentMessageContent,
+  historyRequestMessages,
+} from '@/features/chat/conversationContext'
 import { AppRail } from './components/AppRail'
 import { ProfileAvatar } from './components/ProfileAvatar'
 import { ResearchWorkspace } from './components/ResearchWorkspace'
@@ -377,8 +381,8 @@ export function ResearchDesk({
   }, [])
   const scheduledChatContentByThreadIdRef = useRef<Map<string, ScheduledChatContent>>(new Map())
   const allJobs = useMemo(
-    () => projectResearchJobs(state),
-    [state.researchRunOrder, state.researchRuns],
+    () => projectResearchJobs(state, locale),
+    [locale, state.researchRunOrder, state.researchRuns],
   )
   const visibleJobs = useMemo(
     () => visibleResearchJobs(allJobs, state.ui.activeFilter),
@@ -951,6 +955,7 @@ export function ResearchDesk({
     deleteRun,
     lastError: runError,
     pollingRunIds,
+    loadRunSteps,
     replayRunHistory,
     requestRunResults,
     retryResult: retryRunResult,
@@ -982,6 +987,19 @@ export function ResearchDesk({
   useEffect(() => {
     if (selectedAgentRunIds?.length) replayRunHistory(selectedAgentRunIds)
   }, [replayRunHistory, selectedAgentRunIds])
+  // The stored steps of a finished research run load when its step log is
+  // opened; until they arrived the log says it is loading, not that none
+  // were stored.
+  const [runStepsLoads, setRunStepsLoads] = useState<Record<string, 'done' | 'loading'>>({})
+  const requestedRunStepsRef = useRef(new Set<string>())
+  const requestRunSteps = useCallback((runId: string) => {
+    if (requestedRunStepsRef.current.has(runId)) return
+    requestedRunStepsRef.current.add(runId)
+    setRunStepsLoads((current) => ({ ...current, [runId]: 'loading' }))
+    void loadRunSteps(runId).finally(() => {
+      setRunStepsLoads((current) => ({ ...current, [runId]: 'done' }))
+    })
+  }, [loadRunSteps])
   // A finished knowledge ask's result loads once its question is in view
   // (its session opened or prefetched); questions never loaded cost nothing.
   const knowledgeItemRunIds = useMemo(
@@ -1350,6 +1368,7 @@ export function ResearchDesk({
   } = useVectorIndexHistoryApi({
     apiKey: apiKey.trim() || undefined,
     dispatch,
+    fileAssets: state.fileAssets,
     vectorIndexes: state.vectorIndexes,
     projectEpoch: state.projectEpoch,
     syncActive: projectSyncActive,
@@ -2205,26 +2224,11 @@ export function ResearchDesk({
     (entry) => entry.model_id === state.ui.selectedChatModel,
   )?.card ?? null
   // Per-category token estimate for the composer meter (the composer draft is
-  // added live inside ChatWorkspace). The attachment content is the same the
-  // request will carry; history mirrors buildChatMessages' last-20 window.
-  const chatContextBase = useMemo(() => {
-    const attachments = chatAttachmentsFromRefs(chatResolveState, combinedChatRefs)
-    let documents = 0
-    let reports = 0
-    let rules = 0
-    for (const attachment of attachments) {
-      const tokens = estimateTokensFromText(attachment.contentMarkdown ?? '')
-      if (attachment.kind === 'research-report') reports += tokens
-      else if (attachment.kind === 'chat-rule') rules += tokens
-      else documents += tokens
-    }
-    const history = (displayedChatThread?.messages ?? []).slice(-20)
-    const conversation = history.reduce(
-      (sum, message) => sum + estimateTokensFromText(message.contentMarkdown ?? ''),
-      0,
-    )
-    return { documents, reports, rules, conversation }
-  }, [chatResolveState, combinedChatRefs, displayedChatThread])
+  // added live inside ChatWorkspace).
+  const chatContextBase = useMemo(() => chatContextEstimate(
+    displayedChatThread?.messages ?? [],
+    chatAttachmentsFromRefs(chatResolveState, combinedChatRefs),
+  ), [chatResolveState, combinedChatRefs, displayedChatThread])
   const chatContextCapacity = {
     contextWindowTokens: selectedChatCard?.context_window_tokens ?? null,
     reservedOutputTokens: selectedChatCard?.max_output_tokens ?? 0,
@@ -3772,6 +3776,8 @@ export function ResearchDesk({
               onToggleJob={(jobId) => dispatch({ jobId, type: 'toggleJob' })}
               onSetReportAutocomplete={handleSetReportAutocomplete}
               onRetryReportResult={(runId) => void retryRunResult(runId)}
+              onRequestRunSteps={requestRunSteps}
+              selectedRunStepsLoad={selectedRun ? runStepsLoads[selectedRun.runId] : undefined}
               onUseReportInChat={handleUseReportInChat}
               onShareJob={sharingEnabled
                 ? (jobId) => setShareTarget({
@@ -4597,21 +4603,11 @@ function buildChatMessages(
   contentMarkdown: string,
   attachments: ChatMessageAttachmentRecord[],
 ): ChatCompletionMessage[] {
-  const messages = history
-    .filter((message) => message.contentMarkdown.trim().length > 0)
-    .slice(-20)
-    .map((message) => ({
-      content: message.contentMarkdown,
-      role: message.role,
-    }))
-
+  const messages = historyRequestMessages(history)
   messages.push({
-    content: attachments.length > 0
-      ? contentWithAttachmentContext(contentMarkdown, attachments)
-      : contentMarkdown,
+    content: currentMessageContent(contentMarkdown, history, attachments),
     role: 'user',
   })
-
   return messages
 }
 
@@ -4626,10 +4622,7 @@ function buildChainStepMessages(
   runningText: string,
   sources: ChatMessageAttachmentRecord[],
 ): ChatCompletionMessage[] {
-  const messages = history
-    .filter((message) => message.contentMarkdown.trim().length > 0)
-    .slice(-20)
-    .map((message) => ({ content: message.contentMarkdown, role: message.role }))
+  const messages = historyRequestMessages(history)
   const subject = sources.length > 0
     ? contentWithAttachmentContext(runningText, sources)
     : runningText

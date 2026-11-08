@@ -76,7 +76,7 @@ def test_the_kernel_hands_its_recorded_answers_to_the_judge():
     run must actually reach the coverage prompt."""
     import pytest
 
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.cognition import judge_kernel_sufficiency
     from inqtrix.agents.kernel.deps import KernelDeps
 
@@ -109,7 +109,7 @@ def test_the_kernel_judge_reads_a_long_register_line_cut_visibly():
     marked, never on a partial number the judge could take as the fact."""
     import pytest
 
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.cognition import judge_kernel_sufficiency
     from inqtrix.agents.kernel.deps import KernelDeps
 

@@ -76,6 +76,7 @@ class WebResearchAlgorithm:
 
     id = AlgorithmId.RESEARCH.value
     display_name = "Web Research"
+    contract_version = 1
 
     def capabilities(self) -> dict:
         """Manifest entry for the capability endpoint and clients.
@@ -115,6 +116,7 @@ class DirectLlmAlgorithm:
 
     id = AlgorithmId.DIRECT_LLM.value
     display_name = "Direct LLM"
+    contract_version = 1
 
     def capabilities(self) -> dict:
         """Manifest entry for the capability endpoint and clients."""

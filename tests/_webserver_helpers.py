@@ -32,6 +32,7 @@ when stubs are installed.
 from __future__ import annotations
 
 import importlib
+import sys
 from typing import Any
 
 import pytest
@@ -100,10 +101,11 @@ _SEARCH_TARGETS = (
 
 
 def patch_provider_constructors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace every public provider class with the matching stub.
+    """Replace every public provider class on ``inqtrix`` with the matching stub.
 
-    Patches both ``inqtrix.<Name>`` and the underlying submodule path
-    so example scripts that import via either route get the stub.
+    The examples bind the classes when they are imported
+    (``from inqtrix import ...``), so import the example after this patch:
+    :func:`import_stack_module` imports it afresh for that reason.
     """
     import inqtrix
 
@@ -152,6 +154,7 @@ _MIN_ENV_BY_STACK: dict[str, dict[str, str]] = {
         "AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com/",
         "AZURE_OPENAI_DEPLOYMENT_NAME": "test-deployment",
         "AZURE_AI_PROJECT_ENDPOINT": "https://example.services.ai.azure.com/api/projects/test",
+        "AZURE_AI_PROJECT_API_KEY": "test-project-key",
         "WEB_SEARCH_AGENT_NAME": "test-web-search-agent",
     },
     # The multi-stack example needs every env var that any single-stack
@@ -167,6 +170,7 @@ _MIN_ENV_BY_STACK: dict[str, dict[str, str]] = {
         "AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com/",
         "AZURE_OPENAI_DEPLOYMENT_NAME": "test-deployment",
         "AZURE_AI_PROJECT_ENDPOINT": "https://example.services.ai.azure.com/api/projects/test",
+        "AZURE_AI_PROJECT_API_KEY": "test-project-key",
         "WEB_SEARCH_AGENT_NAME": "test-web-search-agent",
     },
 }
@@ -179,8 +183,14 @@ def set_minimum_env(monkeypatch: pytest.MonkeyPatch, stack_name: str) -> None:
 
 
 def import_stack_module(stack_name: str) -> Any:
-    """Import an ``examples.webserver_stacks.<stack_name>`` module fresh."""
+    """Import an ``examples.webserver_stacks.<stack_name>`` module afresh.
+
+    A module imported earlier keeps the provider classes it bound then; a
+    fresh import binds what ``inqtrix`` holds now, the stubs once
+    :func:`patch_provider_constructors` ran.
+    """
     module_path = f"examples.webserver_stacks.{stack_name}"
+    sys.modules.pop(module_path, None)
     return importlib.import_module(module_path)
 
 

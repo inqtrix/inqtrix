@@ -222,7 +222,3 @@ class EditorPatchStore(Protocol):
         Same error contract as :meth:`mark_applied`.
         """
         ...
-
-    async def aclose(self) -> None:
-        """Release backing resources at application shutdown."""
-        ...

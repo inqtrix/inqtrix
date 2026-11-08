@@ -20,11 +20,9 @@ vector duplication in Postgres and no separate sync worker.
 Every operation runs inside :func:`~inqtrix.storage.db.tenant_session`
 (restricted role + transaction-local tenant GUC), with explicit tenant
 predicates as layer 1 and row-level security as layer 2 — identical to
-the other Postgres repositories. The engine is its own NullPool engine
-(loop-agnostic): this store is awaited from the HTTP loop AND bridged
-from the synchronous research graph / reindex worker via
-``run_coro_sync`` (a fresh per-call loop), which a pooled asyncpg
-connection could not survive.
+the other Postgres repositories. This store is awaited from the HTTP loop and
+reached from the synchronous research graph and reindex worker through
+``aio.call_from_thread``.
 """
 
 from __future__ import annotations
@@ -56,7 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from inqtrix.auth.permissions import ResourceAccess, SharePermission
 from inqtrix.auth.shares import ShareFacts
 from inqtrix.knowledge.chunk_identity import deterministic_chunk_id
-from inqtrix.knowledge.evidence import source_excerpt_is_verified
+from inqtrix.knowledge.evidence import CanonicalBodies
 from inqtrix.knowledge.source_cleanup import (
     SourceCleanupPlan,
     SourceCleanupTarget,
@@ -94,7 +92,7 @@ from inqtrix.knowledge.stores.vector_index import (
     VectorSearchScope,
 )
 from inqtrix.pagination import encode_cursor
-from inqtrix.source_authority import (
+from inqtrix.storage.source_authority import (
     PostgresSourceLifecycleAuthority,
     SourceDeletionPermit,
     SourceLifecycleConflict,
@@ -172,8 +170,8 @@ class PostgresKnowledgeStore:
     """Canonical knowledge store over Postgres + a vector index.
 
     Args:
-        engine: A dedicated NullPool async engine (loop-agnostic) for the
-            knowledge schema — never the shared HTTP-loop engine.
+        engine: The engine of the process. It belongs to whoever composed the
+            process, which disposes it.
         app_role: Restricted Postgres role for the tenant sessions.
         vector_index: Where chunk vectors live (Qdrant or in-process).
     """
@@ -187,7 +185,6 @@ class PostgresKnowledgeStore:
         restrict_to_workspace_members: bool = False,
         sharing_enabled: bool = True,
     ) -> None:
-        self._engine = engine
         self._session_factory = build_session_factory(engine)
         self._app_role = app_role
         self._vectors = vector_index
@@ -246,10 +243,6 @@ class PostgresKnowledgeStore:
             tenant_id=_DEFAULT_TENANT,
             app_role=self._app_role,
         )
-
-    async def aclose(self) -> None:
-        """Dispose the dedicated engine at application shutdown."""
-        await self._engine.dispose()
 
     # -- maintenance ------------------------------------------------------ #
 
@@ -1426,6 +1419,7 @@ class PostgresKnowledgeStore:
                     .order_by(knowledge_chunks.c.chunk_index)
                 )
             ).all()
+        bodies = CanonicalBodies()
         return [
             DocumentChunk(
                 id=row[0],
@@ -1441,7 +1435,8 @@ class PostgresKnowledgeStore:
                 revision_id=row[10],
                 generation_id=row[11],
                 page_number=row[12],
-                source_verified=source_excerpt_is_verified(
+                source_verified=bodies.excerpt_is_verified(
+                    body_key=document.id,
                     canonical_text=document.text,
                     source_text=row[5],
                     source_start=row[7],
@@ -4226,6 +4221,7 @@ class PostgresKnowledgeStore:
         # content hash -> first document that contributed it. Rank order
         # is already best-first, so the winner is the strongest hit.
         seen_content_hashes: dict[str, str] = {}
+        bodies = CanonicalBodies()
         for hit in hits:
             row = by_chunk.get(hit.chunk_id)
             if row is None:
@@ -4239,7 +4235,8 @@ class PostgresKnowledgeStore:
                 )
                 missing_canonical_count += 1
                 continue
-            source_verified = source_excerpt_is_verified(
+            source_verified = bodies.excerpt_is_verified(
+                body_key=(row[1], row[10]),
                 canonical_text=row[14],
                 source_text=row[5],
                 source_start=row[7],

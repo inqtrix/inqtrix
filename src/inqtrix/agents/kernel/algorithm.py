@@ -2,7 +2,7 @@
 
 ``mode=agent_kernel`` is a SECOND registered ``AgentAlgorithm`` next to
 the deterministic phase machine: an LLM tool-calling loop
-on deepagents, executed strictly through the platform seams — same
+on LangChain's agent loop, executed strictly through the platform seams — same
 RunService -> queue -> worker path, park/resume against control rows,
 sync ``graph.stream`` only, shared checkpointer with
 ``thread_id=run_id``.
@@ -22,24 +22,25 @@ import math
 import re
 import threading
 from dataclasses import replace as dataclass_replace
-from collections.abc import Callable, Collection, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.prompt_language import resolve_answer_language
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.agents.checkpoint_guard import ensure_checkpoint_restart_safe
-from inqtrix.agents.algorithm import (
-    ARTIFACT_UPDATED_EVENT,
-    CANVAS_CONTEXT_ATTACHED_EVENT,
-    REQUIREMENT_ATTACHED_EVENT,
-)
+from inqtrix.agents.checkpointing import CheckpointTypeBlocked, blocked_checkpoint_types
 from inqtrix.agents.clarification import run_clarifications
 from inqtrix.agents.control_ports import (
     ApprovalNotFound,
     ApprovalRecord,
     artifact_event_payload,
 )
-from inqtrix.agents.kernel.chat_bridge import KERNEL_USAGE_STATE, REJECTED_TOOL_ARGUMENTS_FLAG, build_tool_chat_model
+from inqtrix.agents.kernel.chat_bridge import (
+    KERNEL_USAGE_STATE,
+    REJECTED_TOOL_ARGUMENTS_FLAG,
+    build_tool_chat_model,
+    counted_usage_of_message,
+)
 from inqtrix.agents.context_sources import (
     SourceCoverageLedger,
     coverage_records_from_artifact,
@@ -75,8 +76,6 @@ from inqtrix.agents.kernel.review_pass import (
     waived_activity,
 )
 from inqtrix.agents.kernel.tools import (
-    TOOL_FINISHED_EVENT,
-    TOOL_STARTED_EVENT,
     build_kernel_tools,
     failed_tool_message,
     kernel_child_scope,
@@ -99,8 +98,6 @@ from inqtrix.agents.kernel.work_profiles import (
 from inqtrix.agents.limit_contract import (
     LIMIT_CHOICE_CANCEL,
     LIMIT_CHOICE_PARTIAL,
-    LIMIT_DECIDED_EVENT,
-    LIMIT_REACHED_EVENT,
     AgentLimitGate,
     LimitChoice,
     create_or_get_limit_gate,
@@ -122,7 +119,7 @@ from inqtrix.citation_labels import (
 from inqtrix.agents.narration import emit_narration
 from inqtrix.agents.run_outcome import build_outcome, cancel_final, send_outcome
 from inqtrix.agents.patterns._structured import observe_structured_retries
-from inqtrix.agents.telemetry import model_retry_activity, provider_retry_activity
+from inqtrix.agents.telemetry import COMPACTION_PURPOSE, model_retry_activity, provider_retry_activity
 from inqtrix.agents.skills_runtime import (
     skill_model_pins,
     strictest_requires_plan,
@@ -141,8 +138,25 @@ from inqtrix.model_routing import (
     describe_unresolved_resolution,
 )
 from inqtrix.observability.context import bind_purpose, current_purpose
-from inqtrix.providers.base import observe_provider_retries, provider_attempt_timeout, provider_cancel_scope
+from inqtrix.providers.attempts import observe_retries
+from inqtrix.providers.base import provider_attempt_timeout, provider_cancel_scope
 from inqtrix.urls import normalize_url, scrub_credential_urls
+from inqtrix.harness.contracts.events import (
+    ACTIVITY_EVENT,
+    ANSWER_DRAFT_EVENT,
+    APPROVAL_REQUESTED_EVENT,
+    ARTIFACT_UPDATED_EVENT,
+    CANVAS_CONTEXT_ATTACHED_EVENT,
+    CITATION_VALIDATION_EVENT,
+    CLARIFICATION_REQUESTED_EVENT,
+    LIMIT_DECIDED_EVENT,
+    LIMIT_REACHED_EVENT,
+    PHASE_CHANGED_EVENT,
+    REQUIREMENT_ATTACHED_EVENT,
+    TODO_UPDATED_EVENT,
+    TOOL_FINISHED_EVENT,
+    TOOL_STARTED_EVENT,
+)
 
 if TYPE_CHECKING:
     from inqtrix.agents.checkpointing import CheckpointerHandle
@@ -206,8 +220,6 @@ _WAITING_STATUS_BY_ORIGIN = {
     CHILDREN_INTERRUPT: "waiting_for_children",
 }
 
-PHASE_CHANGED_EVENT = "inqtrix.agent.phase.changed"
-TODO_UPDATED_EVENT = "inqtrix.agent.todo.updated"
 
 #: LangGraph checkpoint durability of every kernel segment. ``"sync"``
 #: stores a superstep's checkpoint before the next superstep starts: a
@@ -416,11 +428,11 @@ def _todo_in_progress_index(todos: list[Any]) -> int | None:
     )
 
 
-_ANSWER_TURN_SUPERSTEPS = 9
+_ANSWER_TURN_SUPERSTEPS = 8
 """Super-steps of the bare final answer turn (measured alongside the
-per-tool-turn price; the answer turn carries the graph's entry/exit
-overhead, so it costs ONE more than a tool turn). A ceiling formula is
-always ``_ANSWER_TURN_SUPERSTEPS + turns * _SUPERSTEPS_PER_TOOL_TURN``
+per-tool-turn price; the answer turn carries the graph's entry and exit
+but no tool node, so it costs as much as a tool turn). A ceiling formula
+is always ``_ANSWER_TURN_SUPERSTEPS + turns * _SUPERSTEPS_PER_TOOL_TURN``
 — pinned by the same contract test."""
 
 _SCHNELL_TOOL_TURNS = 3
@@ -432,14 +444,16 @@ that call plus the answer would make every schnell tool run a
 guaranteed ``GraphRecursionError`` (published != enforced) — the
 pre-recalibration literal ``8`` did exactly that."""
 
-_SCHNELL_READ_TURNS = 3
+_SCHNELL_READ_TURNS = 8
 """Read-only turns the ``schnell`` clamp affords ON TOP of
 :data:`_SCHNELL_TOOL_TURNS`: reads of evidence the session already
 retained (``read_evidence``: one index call plus one call per selected
-reference), canvas documents and attached reports. A follow-up turn in a
-session with earlier searches reads before it answers; reads cost no
-source budget and are bounded here, so the clamp keeps the tier's search
-cost class (the source budgets of the tier table) while affording them."""
+reference), canvas documents, attached reports and the windows of a named
+document. A document of 60,000 characters takes four windows, and citing it
+and writing the memo take turns of their own. Together with the tool turns
+and the answer this makes twelve model calls. Reads cost no source budget
+and are bounded here, so the clamp keeps the tier's search cost class (the
+source budgets of the tier table) while affording them."""
 
 def _emit_kernel_model_retry(
     deps: KernelDeps,
@@ -448,7 +462,7 @@ def _emit_kernel_model_retry(
 ) -> None:
     """Emit one Kernel model retry through the shared activity channel."""
     deps.emit(
-        "inqtrix.agent.activity",
+        ACTIVITY_EVENT,
         model_retry_activity(
             notice,
             node=node,
@@ -483,18 +497,19 @@ class _DepsChatProvider:
         deps.check_abort()
         bound_purpose = current_purpose()
         purpose = (
-            "agent_context_projection"
-            if bound_purpose is not None and bound_purpose.purpose == "agent_context_projection"
+            # A compaction summary inside a kernel turn keeps its own
+            # purpose, so it is billed and traced as what it is.
+            bound_purpose.purpose
+            if bound_purpose is not None
+            and bound_purpose.purpose == COMPACTION_PURPOSE
             # A role's model turns carry the purpose of its routing node, so
             # the review stays findable (and billed) as the review it is.
             else deps.work_profile.routing_node
             if deps.work_profile is not None
             else "agent_kernel"
         )
-        with provider_cancel_scope(
-            deps.cancel_token.is_set if deps.cancel_token is not None else None
-        ), observe_provider_retries(
-            deps.llm,
+        with observe_retries(
+            "model",
             lambda notice: _emit_kernel_model_retry(
                 deps, purpose, notice
             ),
@@ -673,6 +688,7 @@ class KernelAgentAlgorithm:
 
     id = "agent_kernel"
     display_name = "Agent-Kernel"
+    contract_version = 3
 
     def __init__(
         self,
@@ -728,7 +744,26 @@ class KernelAgentAlgorithm:
         runtime: "RuntimeContext",
         context: "RunContext",
     ) -> "AgentResult":
-        """Execute or RESUME one kernel run (segment-aware)."""
+        """Execute or RESUME one kernel run (segment-aware).
+
+        The run's cancel probe is bound here, once for every provider call of
+        the run: model turns, review passes and tool calls (tool threads copy
+        this context), so a cancelled run ends the call it waits for.
+        """
+        probe = (
+            context.cancel_token.is_set if context.cancel_token is not None else None
+        )
+        with provider_cancel_scope(probe):
+            return self._run_in_cancel_scope(request, runtime=runtime, context=context)
+
+    def _run_in_cancel_scope(
+        self,
+        request: "RunRequest",
+        *,
+        runtime: "RuntimeContext",
+        context: "RunContext",
+    ) -> "AgentResult":
+        """The kernel run behind :meth:`run`, inside the run's cancel scope."""
         from inqtrix.core.results import AgentResult
 
         if context.run_id is None or context.park is None:
@@ -893,7 +928,12 @@ class KernelAgentAlgorithm:
         )
         result_calls = _result_call_names(profile)
         state_config = {"configurable": {"thread_id": run_id}}
-        existing = graph.get_state(state_config)
+        with blocked_checkpoint_types() as blocked:
+            existing = graph.get_state(state_config)
+        if blocked:
+            # Raw data where the state expects objects: resuming would act on
+            # a checkpoint that is not the one the run wrote.
+            raise CheckpointTypeBlocked()
         deps.hydrate_source_receipts(existing)
         deps.check_abort()
         deps.prior_usage = _checkpointed_usage(existing)
@@ -1282,7 +1322,7 @@ class KernelAgentAlgorithm:
             if deps.tier:
                 deps.review_facts = {"last_review": {"status": "waived", "round": 0}}
             deps.emit(
-                "inqtrix.agent.activity",
+                ACTIVITY_EVENT,
                 waived_activity(
                     deps.verify_level,
                     tier=deps.tier,
@@ -1413,7 +1453,7 @@ class KernelAgentAlgorithm:
         deps.emit(LIMIT_REACHED_EVENT, {**payload, "state": "waiting_for_input"})
         if created:
             deps.emit(
-                "inqtrix.agent.clarification.requested",
+                CLARIFICATION_REQUESTED_EVENT,
                 {
                     "clarification_id": record.clarification_id,
                     "question": record.question,
@@ -1504,6 +1544,7 @@ class KernelAgentAlgorithm:
             gate,
             list(deps.evidence_refs.values()),
             language=resolve_answer_language(deps.question).code,
+            documents=self._documents_for_the_receipt(deps),
         )
         answer = _validate_kernel_answer_citations(
             deps,
@@ -1690,6 +1731,18 @@ class KernelAgentAlgorithm:
             },
         )
 
+    def _documents_for_the_receipt(self, deps: KernelDeps) -> list[str]:
+        """Titles of what this run already wrote; the receipt stands without them."""
+        try:
+            return [item.title for item in self._current_run_canvases(deps) if item.title]
+        except Exception as exc:  # noqa: BLE001 - the partial answer still arrives
+            log.warning(
+                "The partial answer of run %s names no documents: %s",
+                deps.run_id,
+                type(exc).__name__,
+            )
+            return []
+
     def _current_run_canvases(self, deps: KernelDeps) -> list[Any]:
         """Load every document this run's work produced or updated.
 
@@ -1785,10 +1838,8 @@ class KernelAgentAlgorithm:
                 guard=deps.guard_reader_text,
             )["summary"]
 
-        from inqtrix.agents.kernel.middleware import (
-            SKILL_INPUTS_RESOLVED_FLAG,
-            SKILL_INPUTS_RESOLVED_MARKER,
-        )
+        from inqtrix.agents.kernel.middleware import SKILL_INPUTS_RESOLVED_FLAG
+        from inqtrix.agents.kernel.tools import loaded_skill_result
 
         resolved_skill_blocks: list[str] = []
         for message in messages:
@@ -1807,11 +1858,7 @@ class KernelAgentAlgorithm:
                         SKILL_INPUTS_RESOLVED_FLAG
                     )
                 )
-            ) or (
-                message_type == "ToolMessage"
-                and getattr(message, "name", "") == "load_skill"
-                and SKILL_INPUTS_RESOLVED_MARKER in content
-            )
+            ) or loaded_skill_result(message)
             if trusted_resolved_block:
                 resolved_skill_blocks.append(content)
         from inqtrix.agents.source_policy import effective_source_policy
@@ -1984,7 +2031,7 @@ class KernelAgentAlgorithm:
                 "last_review": {"status": "unavailable", "round": 1, "reason": review.reason},
             }
             deps.emit(
-                "inqtrix.agent.activity",
+                ACTIVITY_EVENT,
                 unavailable_activity(review, _review_words["language"] or ""),
             )
             log.warning(
@@ -2030,14 +2077,14 @@ class KernelAgentAlgorithm:
             # reason in reader words: what the narration counts as open.
             unapplied = unapplied_activity(results, assessment.names, language)
             if unapplied is not None:
-                deps.emit("inqtrix.agent.activity", unapplied)
+                deps.emit(ACTIVITY_EVENT, unapplied)
 
         if assessment.status != "revise":
             if marked_results(assessment.results):
                 # Marked passages are the review's substance too, though no
                 # revision is asked for them.
                 deps.emit(
-                    "inqtrix.agent.activity",
+                    ACTIVITY_EVENT,
                     findings_activity(
                         assessment, language,
                         titles={item.artifact_id: item.title for item in canvases},
@@ -2047,7 +2094,7 @@ class KernelAgentAlgorithm:
             _review_narration(_review_summary(), final=True)
             return answer
         deps.emit(
-            "inqtrix.agent.activity",
+            ACTIVITY_EVENT,
             findings_activity(
                 assessment, language,
                 titles={item.artifact_id: item.title for item in canvases},
@@ -2258,15 +2305,24 @@ class KernelAgentAlgorithm:
         deps.context_offload_chars = int(
             getattr(self._platform, "kernel_context_offload_chars", 0) or 0
         )
-        from inqtrix.model_cards import resolve_model_card
+        from inqtrix.model_cards import card_input_budget, resolve_model_card
         from inqtrix.agents.context_sources import has_external_input
 
         card = resolve_model_card(deps.model) if deps.model else None
         if card is not None and card.context_window_tokens:
-            deps.context_input_budget = max(
-                1, card.context_window_tokens - card.max_output_tokens
-                - max(1024, card.context_window_tokens // 50),
+            deps.context_input_budget = card_input_budget(card)
+        capped = capped_context_trigger(
+            deps.context_trigger_tokens, deps.context_input_budget
+        )
+        if capped != deps.context_trigger_tokens:
+            log.warning(
+                "Kernel compaction trigger %d lies above the input budget of model %s; "
+                "it is capped at %d tokens.",
+                deps.context_trigger_tokens,
+                deps.model,
+                capped,
             )
+            deps.context_trigger_tokens = capped
         deps.source_service = self._sources
         deps.context_sources_available = self._sources is not None
         # Only raw file/image inputs keep the conservative transcript lock;
@@ -2341,24 +2397,19 @@ class KernelAgentAlgorithm:
         as that editor may still see it, even when it is shared in to
         them.
         """
-        from inqtrix.agents.kernel.tools import SKILL_LOADED_MARKER
+        from inqtrix.agents.kernel.tools import (
+            SKILL_LOADED_PREFIX,
+            loaded_skill_result,
+            tool_message_text,
+        )
 
         if snapshot is None or not snapshot.values:
             return
-        prefix = SKILL_LOADED_MARKER.split("{", 1)[0]
         for message in snapshot.values.get("messages") or []:
-            if getattr(message, "type", "") != "tool":
+            if not loaded_skill_result(message):
                 continue
-            # Trust the PRODUCING TOOL, not the content prefix: other
-            # tools relay provider-controlled text verbatim (web
-            # answers), so a marker-shaped result from them must never
-            # activate a skill.
-            if getattr(message, "name", "") != "load_skill":
-                continue
-            content = str(getattr(message, "content", "") or "")
-            if not content.startswith(prefix):
-                continue
-            marker_body = content[len(prefix):].split("]", 1)[0]
+            content = tool_message_text(message)
+            marker_body = content[len(SKILL_LOADED_PREFIX):].split("]", 1)[0]
             skill_id, separator, admitted_revision = marker_body.rpartition("@")
             if not skill_id or not separator or not admitted_revision:
                 log.warning("Loaded skill has no revision marker in the checkpoint.")
@@ -2508,7 +2559,7 @@ class KernelAgentAlgorithm:
             authority_check=context.authority_check,
             on_provider_retry=(
                 lambda notice: context.event_sink(
-                    "inqtrix.agent.activity",
+                    ACTIVITY_EVENT,
                     provider_retry_activity(
                         notice,
                         language=resolve_answer_language(
@@ -2915,7 +2966,7 @@ class KernelAgentAlgorithm:
             )
         )
         deps.emit(
-            "inqtrix.agent.approval.requested",
+            APPROVAL_REQUESTED_EVENT,
             {
                 "approval_id": record.approval_id,
                 "kind": "tool",
@@ -3229,14 +3280,29 @@ def configured_kernel_limits(
     return tool_base, tool_ceiling, step_base, step_ceiling
 
 
+def _receipt_title(title: str) -> str:
+    """One line of a title; brackets in it would read as a Markdown link or label.
+
+    Round brackets keep the words. A backslash escape is not an option: the web
+    renderer reads `\\[ … \\]` as a LaTeX display delimiter and would typeset the
+    title as an equation.
+    """
+    return " ".join(title.split()).replace("[", "(").replace("]", ")")
+
+
 def _partial_limit_answer(
-    gate: AgentLimitGate, references: list[dict[str, Any]], *, language: str
+    gate: AgentLimitGate,
+    references: list[dict[str, Any]],
+    *,
+    language: str,
+    documents: Iterable[str] = (),
 ) -> str:
     """Build a non-generative, explicitly incomplete answer receipt.
 
     A limit choice must not trigger another unbounded model call. The receipt
-    therefore reports only persisted evidence metadata; it makes no new claim
-    and points users to the complete evidence ledger for inspection.
+    therefore reports only persisted metadata, the sources and the documents
+    the run has already written; it makes no new claim and points users to the
+    complete evidence ledger for inspection.
     """
     words = {"language": language or ""}
     limit_name = t(
@@ -3250,28 +3316,40 @@ def _partial_limit_answer(
         "",
         t(words, "kernel_partial_intro", limit_name=limit_name),
         "",
-        t(words, "kernel_partial_evidence_heading"),
-        "",
     ]
+    titles = [_receipt_title(title) for title in documents]
+    if titles:
+        lines.extend(
+            [
+                t(words, "kernel_partial_documents_heading"),
+                "",
+                *(f"- {title}" for title in titles),
+                "",
+            ]
+        )
+    lines.extend([t(words, "kernel_partial_evidence_heading"), ""])
     if not references:
         lines.append(t(words, "kernel_partial_no_source"))
     else:
         fallback_label = t(words, "kernel_partial_source_fallback_label")
         untitled = t(words, "kernel_partial_source_untitled")
+        # Passages of one document share one line: its title five times in a
+        # row tells a reader less than the title once with its five labels.
+        labels_by_title: dict[str, list[str]] = {}
         for reference in references[:30]:
             label = str(reference.get("label") or fallback_label).strip()
-            title = str(
-                reference.get("title")
-                or reference.get("document_title")
-                or reference.get("url")
-                or untitled
+            title = _receipt_title(
+                str(
+                    reference.get("title")
+                    or reference.get("document_title")
+                    or reference.get("url")
+                    or untitled
+                )
             )
-            # Brackets in a title would read as a Markdown link or label;
-            # round brackets keep the words. A backslash escape is not an
-            # option: the web renderer reads `\[ … \]` as a LaTeX display
-            # delimiter and would typeset the title as an equation.
-            title = " ".join(title.split()).replace("[", "(").replace("]", ")")
-            lines.append(f"- [{label}] {title}")
+            labels_by_title.setdefault(title, []).append(label)
+        for title, labels in labels_by_title.items():
+            marks = " ".join(f"[{label}]" for label in labels)
+            lines.append(f"- {marks} {title}")
         omitted = len(references) - 30
         if omitted > 0:
             lines.append(
@@ -3291,8 +3369,21 @@ def _partial_limit_answer(
 _CONTEXT_TRIGGER_FLOOR_TOKENS = 128_000
 """Auto-trigger floor AND the no-card fallback: compacting earlier than
 128k would churn the prompt cache for runs that fit comfortably, and a
-model without a card gets a conservative threshold instead of the
-deepagents 170k default that the kernel's ceilings never reach."""
+model without a card gets a conservative threshold instead of a
+library default."""
+
+
+def capped_context_trigger(trigger: int, input_budget: int) -> int:
+    """The compaction trigger, never above the model's input budget.
+
+    Above the budget the input check of the model call would act first and
+    compaction would never run. Without a model card the budget is 0 (not
+    known), and the trigger stays as it is: a cap of 0 would switch
+    compaction off.
+    """
+    if input_budget <= 0 or trigger <= input_budget:
+        return trigger
+    return input_budget
 
 
 def resolve_context_trigger_tokens(
@@ -3390,7 +3481,7 @@ def _stage_kernel_memory(deps: KernelDeps, answer: str) -> None:
             "language": resolve_answer_language(deps.question).code
         }
         deps.emit(
-            "inqtrix.agent.activity",
+            ACTIVITY_EVENT,
             {
                 "kind": "memory_unavailable",
                 "label": t(_memory_words, "agent_memory_label_unavailable"),
@@ -3604,7 +3695,7 @@ def _validate_kernel_answer_citations(
             language=language,
         )
         deps.emit(
-            "inqtrix.agent.citation.validation",
+            CITATION_VALIDATION_EVENT,
             {
                 "status": "degraded",
                 "unknown_labels": remaining,
@@ -3633,7 +3724,7 @@ def _validate_kernel_answer_citations(
             language=language,
         )
         deps.emit(
-            "inqtrix.agent.citation.validation",
+            CITATION_VALIDATION_EVENT,
             {
                 "status": "degraded",
                 "unknown_labels": remaining,
@@ -3648,7 +3739,7 @@ def _validate_kernel_answer_citations(
         usage.get("completion_tokens", 0),
     )
     deps.emit(
-        "inqtrix.agent.citation.validation",
+        CITATION_VALIDATION_EVENT,
         {
             "status": "repaired",
             "unknown_labels": unknown,
@@ -3686,7 +3777,7 @@ def _show_answer_draft(deps: KernelDeps, answer: str) -> None:
     """
     from inqtrix.agents.kernel.review_pass import role_child_known
     from inqtrix.agents.report_quality import CitationValidationFailed, cited_references
-    from inqtrix.runs.shared import ANSWER_DRAFT_EVENT, answer_artifact_id, answer_draft_id
+    from inqtrix.runs.shared import answer_artifact_id, answer_draft_id
 
     if role_child_known(deps.run_service, deps.run_id):
         return
@@ -4043,11 +4134,9 @@ def _checkpointed_usage(snapshot: Any) -> dict[str, int]:
             raise ValueError("Checkpointed kernel usage is invalid.")
         return {key: stored[key] for key in totals}
     for message in snapshot.values.get("messages") or []:
-        meta = getattr(message, "usage_metadata", None) or {}
-        totals["prompt_tokens"] += int(meta.get("input_tokens", 0) or 0)
-        totals["completion_tokens"] += int(
-            meta.get("output_tokens", 0) or 0
-        )
+        input_tokens, output_tokens = counted_usage_of_message(message)
+        totals["prompt_tokens"] += input_tokens
+        totals["completion_tokens"] += output_tokens
     return totals
 
 

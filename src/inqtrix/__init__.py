@@ -25,14 +25,7 @@ Baukasten (building-block) pattern::
     agent = ResearchAgent(AgentConfig(llm=llm, search=search))
 """
 
-__version__ = "0.2.0"
-
-# The dev designation inside the current release line: the current dev
-# milestone, as the app shows it. It is deliberately
-# separate from ``__version__``, which stays on the three-segment release line
-# because packaging metadata, npm, and the eval baselines are pinned to it.
-# It must start with ``__version__`` — tests/test_routes.py pins that.
-__display_version__ = "0.2.0.11"
+from inqtrix.version import __display_version__, __version__  # noqa: F401 - package attributes
 
 # -- Public API (high-level) --
 from inqtrix.agent import AgentConfig, ResearchAgent

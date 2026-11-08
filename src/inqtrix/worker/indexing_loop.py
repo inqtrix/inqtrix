@@ -17,8 +17,10 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Callable
 
+from inqtrix import aio
 from inqtrix.auth.principal import Principal
 from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.execution_failures import classify_execution_failure
@@ -32,12 +34,8 @@ from inqtrix.knowledge.stores.ports import (
     IndexGenerationSuperseded,
 )
 from inqtrix.quota.models import QuotaSubject
-from inqtrix.server.indexing import (
-    FencedIndexingJobHandle,
-    IndexingOperationKind,
-)
+from inqtrix.runs.indexing_records import FencedIndexingJobHandle, IndexingOperationKind
 from inqtrix.services.indexing_service import execute_indexing_operation
-from inqtrix.sync_bridge import run_coro_sync
 from inqtrix.urls import sanitize_error
 from inqtrix.worker.loop import _RECONCILE_MIN_AGE_SECONDS, BaseWorkerLoop
 
@@ -84,7 +82,7 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
         claim_idle_seconds: float,
         quota_service: "QuotaService | None" = None,
         authority: "CollectionEditAuthorizer | None" = None,
-        claim_guard: Callable[[], None] | None = None,
+        claim_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(
             store=store,
@@ -94,7 +92,6 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
             heartbeat_seconds=heartbeat_seconds,
             claim_idle_seconds=claim_idle_seconds,
             claim_guard=claim_guard,
-            thread_prefix="inqtrix-reindex",
         )
         self._knowledge_service = knowledge_service
         self._quota_service = quota_service
@@ -103,19 +100,19 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
     def _entity_id(self, job: "QueuedIndexingJob") -> str:
         return job.job_id
 
-    def _stale_dispatch(self) -> list[tuple[str, str]]:
-        return self._store.stale_queued_jobs(
-            older_than_seconds=_RECONCILE_MIN_AGE_SECONDS
+    async def _stale_dispatch(self) -> list[tuple[str, str]]:
+        return await self._store.astale_queued_jobs(
+            older_than_seconds=_RECONCILE_MIN_AGE_SECONDS,
         )
 
-    def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
-        return self._store.cancel_requested_jobs(watched)
+    async def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
+        return await self._store.acancel_requested_jobs(watched)
 
-    def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
-        self._queue.enqueue(job_id=entity_id, tenant_id=tenant_id)
+    async def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
+        await self._queue.enqueue(job_id=entity_id, tenant_id=tenant_id)
 
-    def _periodic_maintenance(self) -> None:
-        report = run_coro_sync(self._knowledge_service.prune_expired_generations_all())
+    async def _periodic_maintenance(self) -> None:
+        report = await self._knowledge_service.prune_expired_generations_all()
         if report["collections"] or report["chunks"]:
             log.info(
                 "Generation retention removed %d chunks across %d collections",
@@ -133,28 +130,24 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
         job: "QueuedIndexingJob",
         claimed: "ClaimedIndexingJob",
         cancel_event: threading.Event,
-    ) -> None:
+    ) -> bool:
         if claimed.cancel_requested:
             cancel_event.set()
         handle = FencedIndexingJobHandle(
             self._store, job.job_id, cancel_event, claimed.attempt
         )
         # Root span + log correlation for the whole indexing segment;
-        # embedding spans (provider tracing wrapper) nest under it. Worker
-        # threads are reused — both undone in the outer finally.
+        # embedding spans (provider tracing wrapper) nest under it. The
+        # segment runs in a copy of the context, so neither outlives it.
         from contextlib import ExitStack as _ExitStack
 
         from inqtrix.observability import semconv
-        from inqtrix.observability.context import (
-            bind_log_context,
-            reset_log_context,
-        )
+        from inqtrix.observability.context import bind_log_context
         from inqtrix.observability.otel import operation_span
 
-        # Setup INSIDE the try so a telemetry failure never skips the
-        # finally (_finish_active); a leaked slot would wedge the worker.
+        # Setup INSIDE the try so a telemetry failure reaches the log below
+        # instead of the segment's task, like every other failure here.
         telemetry_stack = _ExitStack()
-        log_tokens: dict = {}
         old_message_acked = False
         try:
             telemetry_stack.enter_context(
@@ -168,9 +161,7 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
                     },
                 )
             )
-            log_tokens = bind_log_context(
-                run_id=job.job_id, tenant=job.tenant_id
-            )
+            bind_log_context(run_id=job.job_id, tenant=job.tenant_id)
             from inqtrix.observability.context import bind_feature
 
             bind_feature("indexing")
@@ -233,7 +224,7 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
                     and claimed.operation_kind
                     == IndexingOperationKind.COLLECTION_GENERATION
                 ):
-                    run_coro_sync(
+                    aio.call_from_thread(
                         self._knowledge_service.discard_generation(
                             collection_id=claimed.collection_id,
                             generation_id=claimed.generation_id,
@@ -270,7 +261,7 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
                     == IndexingOperationKind.COLLECTION_GENERATION
                 ):
                     try:
-                        run_coro_sync(
+                        aio.call_from_thread(
                             self._knowledge_service.discard_generation(
                                 collection_id=claimed.collection_id,
                                 generation_id=claimed.generation_id,
@@ -302,7 +293,7 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
             if handle.terminal_landed:
                 # Terminal state is committed; only now may the stream
                 # forget the job.
-                self._queue.ack(job.message_id)
+                aio.call_from_thread(self._queue.ack(job.message_id))
                 old_message_acked = True
                 _count_worker_job("indexing", "terminal")
             else:
@@ -317,7 +308,7 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
                     job.job_id,
                 )
                 _count_worker_job("indexing", "fenced")
-        except Exception as exc:  # noqa: BLE001 — Futures here are unobserved
+        except Exception as exc:  # noqa: BLE001 - the one place that says what failed
             log.error(
                 "Worker %s: terminal phase for indexing job %s failed; "
                 "redelivery remains responsible (error_type=%s).",
@@ -327,21 +318,8 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
             )
             _count_worker_job("indexing", "finalization_failed")
         finally:
-            reset_log_context(log_tokens)
-            _clear_feature_after_segment()
             telemetry_stack.close()
-            self._finish_active(job, allow_successor=old_message_acked)
-
-
-def _clear_feature_after_segment() -> None:
-    """Reused threads must not leak feature label or ledger subject."""
-    from inqtrix.observability.context import (
-        clear_feature,
-        clear_usage_subject,
-    )
-
-    clear_feature()
-    clear_usage_subject()
+        return old_message_acked
 
 
 def _count_worker_job(loop_name: str, outcome: str) -> None:

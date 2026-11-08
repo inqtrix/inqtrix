@@ -20,7 +20,7 @@ from inqtrix.project.vector_index_ports import (
     VectorIndexRecord,
     VectorIndexStore,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 if TYPE_CHECKING:
     pass

@@ -12,11 +12,11 @@ import asyncio
 import logging
 import threading
 import time
-from concurrent.futures import Future
 from typing import Any
 
 import pytest
 
+from inqtrix.harness.contracts.binding import RunBindingNewer, WorkflowUnavailable
 from inqtrix.logging_config import InqtrixLogFilter
 from inqtrix.storage.migration_contract import (
     SCHEMA_HEAD_REVISION,
@@ -46,10 +46,16 @@ from inqtrix.worker.__main__ import (
     _wait_for_database_claim_contract,
 )
 
+from tests._process_loop import run_on_configured_loop as drive
+from tests._store_doubles import BothNames
 from tests.contract._app import StubLLM, StubSearch, minimal_agent_result
 
 
-class StubStore:
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+class StubStore(BothNames):
     """Recording stand-in for the worker-facing store surface."""
 
     def __init__(
@@ -65,9 +71,16 @@ class StubStore:
         self.dispatch_status_value: str | None = "running"
         self.dispatch_status_error: BaseException | None = None
 
-    def claim_for_execution(self, run_id, tenant_id, *, allow_takeover):
+    def claim_for_execution(
+        self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+    ):
         self.calls.append(("claim", run_id, allow_takeover))
+        self.workflow_contracts = workflow_contracts
         return self.claim_result
+
+    def end_outdated_waits(self, workflow_contracts):
+        self.swept_with = workflow_contracts
+        return 0
 
     def total_elapsed_seconds(self, run_id):
         assert self.claim_result is not None
@@ -117,17 +130,17 @@ class StubQueue:
         self.calls: list[tuple[str, Any]] = []
         self.timeline = timeline if timeline is not None else []
 
-    def ack(self, message_id):
+    async def ack(self, message_id):
         self.calls.append(("ack", message_id))
         self.timeline.append("ack")
 
-    def dead_letter(self, job, *, reason):
+    async def dead_letter(self, job, *, reason):
         self.calls.append(("dead_letter", job.run_id, reason))
 
-    def enqueue(self, *, run_id, tenant_id):
+    async def enqueue(self, *, run_id, tenant_id):
         self.calls.append(("enqueue", run_id))
 
-    def heartbeat(self, message_ids):
+    async def heartbeat(self, message_ids):
         self.calls.append(("heartbeat", tuple(message_ids)))
 
 
@@ -169,21 +182,21 @@ def test_claim_guard_fails_before_pending_or_new_queue_claims(monkeypatch):
     store = StubStore(claim_result=None)
 
     class GuardedQueue(StubQueue):
-        def ensure_group(self):
+        async def ensure_group(self):
             self.calls.append(("ensure_group",))
 
-        def claim_pending(self):
+        async def claim_pending(self):
             raise AssertionError("pending claims must remain closed")
 
     queue = GuardedQueue()
 
-    def reject_claims() -> None:
+    async def reject_claims() -> None:
         raise WorkerClaimGuardError("database schema changed")
 
     loop = make_loop(store, queue, monkeypatch, claim_guard=reject_claims)
 
     with pytest.raises(WorkerClaimGuardError, match="schema changed"):
-        loop.run_forever()
+        drive(loop.run_forever())
 
     assert queue.calls == [("ensure_group",)]
     assert store.calls == []
@@ -208,9 +221,9 @@ def test_database_claim_guard_coalesces_and_latches_failures(monkeypatch):
     )
 
     with pytest.raises(WorkerClaimGuardError, match="unsafe database role"):
-        guard()
+        drive(guard())
     with pytest.raises(WorkerClaimGuardError, match="unsafe database role"):
-        guard()
+        drive(guard())
 
     assert calls == ["postgresql+asyncpg://runtime.invalid/inqtrix"]
 
@@ -247,17 +260,17 @@ def test_database_claim_guard_coalesces_transient_outage_and_recovers(
     )
 
     with pytest.raises(Exception) as first:
-        guard()
+        drive(guard())
     assert isinstance(first.value, WorkerClaimUnavailableError)
 
     with pytest.raises(Exception) as cached:
-        guard.verify_now()
+        drive(guard.verify_now())
     assert isinstance(cached.value, WorkerClaimUnavailableError)
     assert calls == ["postgresql+asyncpg://runtime.invalid/inqtrix"]
 
     now[0] += 5
-    guard()
-    guard()
+    drive(guard())
+    drive(guard())
 
     assert calls == [
         "postgresql+asyncpg://runtime.invalid/inqtrix",
@@ -300,30 +313,31 @@ def test_database_claim_guard_probes_slowly_when_healthy_and_quickly_after_an_ou
         login_policy="restricted",
     )
 
-    guard()
+    drive(guard())
     for moment in (110.0, 159.0):
         now[0] = moment
-        guard()
+        drive(guard())
     assert calls == [100.0]
 
     now[0] = 160.0
     outcomes.append("unavailable")
     with pytest.raises(WorkerClaimUnavailableError):
-        guard()
+        drive(guard())
     now[0] = 164.0
     with pytest.raises(WorkerClaimUnavailableError):
-        guard()
+        drive(guard())
     assert calls == [100.0, 160.0]
 
     now[0] = 165.0
-    guard()
+    drive(guard())
     assert calls == [100.0, 160.0, 165.0]
 
 
 def test_worker_bootstrap_waits_for_transient_contract_recovery() -> None:
     calls = 0
     sleeps: list[float] = []
-    def guard() -> None:
+
+    async def guard() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -332,10 +346,10 @@ def test_worker_bootstrap_waits_for_transient_contract_recovery() -> None:
                 retry_after_seconds=0.25,
             )
 
-    _wait_for_database_claim_contract(
-        guard,
-        sleep=sleeps.append,
-    )
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    drive(_wait_for_database_claim_contract(guard, sleep=record_sleep))
 
     assert calls == 2
     assert sleeps == [0.25]
@@ -352,14 +366,14 @@ def test_the_bootstrap_failure_names_the_cause_that_occurred() -> None:
     what a developer reads.
     """
 
-    def guard() -> None:
+    async def guard() -> None:
         raise WorkerClaimGuardError(
             "connection to postgresql://app:hunter2@db/inqtrix failed: "
             "password authentication failed"
         )
 
     with pytest.raises(RuntimeError) as failure:
-        _verified_database_claim_contract(guard, sleep=lambda _seconds: None)
+        drive(_verified_database_claim_contract(guard, sleep=_no_sleep))
 
     assert "password authentication failed" in str(failure.value)
     assert isinstance(failure.value.__cause__, WorkerClaimGuardError)
@@ -373,7 +387,7 @@ def test_the_bootstrap_still_waits_out_a_transient_outage() -> None:
     """Naming the cause must not turn a retryable outage into a fatality."""
     calls = 0
 
-    def guard() -> None:
+    async def guard() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -381,21 +395,21 @@ def test_the_bootstrap_still_waits_out_a_transient_outage() -> None:
                 "database temporarily unavailable", retry_after_seconds=0.25
             )
 
-    _verified_database_claim_contract(guard, sleep=lambda _seconds: None)
+    drive(_verified_database_claim_contract(guard, sleep=_no_sleep))
     assert calls == 2
 
 
 def test_worker_bootstrap_keeps_permanent_contract_failure_fatal() -> None:
     sleeps: list[float] = []
 
-    def guard() -> None:
+    async def guard() -> None:
         raise WorkerClaimGuardError("unsafe database role")
 
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
     with pytest.raises(WorkerClaimGuardError, match="unsafe database role"):
-        _wait_for_database_claim_contract(
-            guard,
-            sleep=sleeps.append,
-        )
+        drive(_wait_for_database_claim_contract(guard, sleep=record_sleep))
 
     assert sleeps == []
 
@@ -409,7 +423,7 @@ def test_worker_loop_waits_for_transient_startup_contract(
         def __init__(self) -> None:
             self.calls = 0
 
-        def verify_now(self) -> None:
+        async def verify_now(self) -> None:
             self.calls += 1
             if self.calls == 1:
                 raise WorkerClaimUnavailableError(
@@ -417,16 +431,16 @@ def test_worker_loop_waits_for_transient_startup_contract(
                     retry_after_seconds=0,
                 )
 
-        def __call__(self) -> None:
+        async def __call__(self) -> None:
             return None
 
     class StartupQueue(StubQueue):
         loop: WorkerLoop | None = None
 
-        def ensure_group(self):
+        async def ensure_group(self):
             self.calls.append(("ensure_group",))
 
-        def claim_pending(self):
+        async def claim_pending(self):
             self.calls.append(("claim_pending",))
             assert self.loop is not None
             self.loop.request_stop()
@@ -437,7 +451,7 @@ def test_worker_loop_waits_for_transient_startup_contract(
     loop = make_loop(store, queue, monkeypatch, claim_guard=guard)
     queue.loop = loop
 
-    loop.run_forever()
+    drive(loop.run_forever())
 
     assert guard.calls == 2
     assert queue.calls == [("ensure_group",), ("claim_pending",)]
@@ -450,7 +464,7 @@ def test_transient_claim_guard_pauses_every_claim_path(
     store = StubStore(claim_result=claimed())
     queue = StubQueue()
 
-    def pause_claims() -> None:
+    async def pause_claims() -> None:
         raise WorkerClaimUnavailableError(
             "database temporarily unavailable",
             retry_after_seconds=5,
@@ -459,7 +473,7 @@ def test_transient_claim_guard_pauses_every_claim_path(
     loop = make_loop(store, queue, monkeypatch, claim_guard=pause_claims)
 
     with pytest.raises(WorkerClaimUnavailableError):
-        loop._tick()
+        drive(loop._tick())
 
     assert store.calls == []
     assert queue.calls == []
@@ -471,10 +485,10 @@ def test_worker_loop_survives_transient_contract_failure_after_startup(
     store = StubStore(claim_result=None)
 
     class StartupQueue(StubQueue):
-        def ensure_group(self):
+        async def ensure_group(self):
             self.calls.append(("ensure_group",))
 
-        def claim_pending(self):
+        async def claim_pending(self):
             self.calls.append(("claim_pending",))
             return []
 
@@ -482,7 +496,7 @@ def test_worker_loop_survives_transient_contract_failure_after_startup(
     loop = make_loop(store, queue, monkeypatch)
     ticks = 0
 
-    def tick() -> None:
+    async def tick() -> None:
         nonlocal ticks
         ticks += 1
         if ticks == 1:
@@ -494,7 +508,7 @@ def test_worker_loop_survives_transient_contract_failure_after_startup(
 
     monkeypatch.setattr(loop, "_tick", tick)
 
-    loop.run_forever()
+    drive(loop.run_forever())
 
     assert ticks == 2
     assert queue.calls == [("ensure_group",), ("claim_pending",)]
@@ -521,9 +535,9 @@ def test_database_claim_guard_immediate_probe_bypasses_success_cache(
         interval_seconds=60,
     )
 
-    guard()
-    guard()
-    guard.verify_now()
+    drive(guard())
+    drive(guard())
+    drive(guard.verify_now())
 
     assert calls == [
         "postgresql+asyncpg://runtime.invalid/inqtrix",
@@ -573,7 +587,9 @@ def test_schema_fence_after_blocking_read_latches_and_never_acks(monkeypatch, ca
     """
 
     class FencedStore(StubStore):
-        def claim_for_execution(self, run_id, tenant_id, *, allow_takeover):
+        def claim_for_execution(
+            self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+        ):
             self.calls.append(("claim_blocked", run_id))
             raise SchemaHeadMismatch(installed="0079", expected="0078")
 
@@ -584,16 +600,16 @@ def test_schema_fence_after_blocking_read_latches_and_never_acks(monkeypatch, ca
             super().__init__()
             self.claims = 0
 
-        def ensure_group(self):
+        async def ensure_group(self):
             self.calls.append(("ensure_group",))
 
-        def claim_pending(self):
+        async def claim_pending(self):
             return []
 
-        def reclaim(self, *, min_idle_ms, count=10):
+        async def reclaim(self, *, min_idle_ms, count=10):
             return []
 
-        def claim_new(self, *, block_ms, count=1):
+        async def claim_new(self, *, block_ms, count=1):
             assert block_ms > 0 and count >= 1
             self.claims += 1
             if self.claims > 3:
@@ -610,7 +626,7 @@ def test_schema_fence_after_blocking_read_latches_and_never_acks(monkeypatch, ca
         def __init__(self) -> None:
             self.latched: list[str] = []
 
-        def __call__(self) -> None:
+        async def __call__(self) -> None:
             return None
 
         def latch_failure(self, message: str) -> None:
@@ -628,7 +644,7 @@ def test_schema_fence_after_blocking_read_latches_and_never_acks(monkeypatch, ca
     monkeypatch.setattr("inqtrix.worker.loop._ERROR_BACKOFF_SECONDS", 0.01)
 
     with pytest.raises(WorkerClaimGuardError, match="installed 0079, expected 0078"):
-        loop.run_forever()
+        drive(loop.run_forever())
 
     assert guard.latched, "the fence hit must stick the shared guard shut"
     assert _error_lines_as_logged(caplog) == [
@@ -650,7 +666,9 @@ def test_schema_fence_on_successor_claim_latches_the_shared_guard(monkeypatch, c
     """
 
     class FencedStore(StubStore):
-        def claim_for_execution(self, run_id, tenant_id, *, allow_takeover):
+        def claim_for_execution(
+            self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+        ):
             self.calls.append(("claim_blocked", run_id))
             raise SchemaHeadMismatch(installed="0079", expected="0078")
 
@@ -658,7 +676,7 @@ def test_schema_fence_on_successor_claim_latches_the_shared_guard(monkeypatch, c
         def __init__(self) -> None:
             self.latched: list[str] = []
 
-        def __call__(self) -> None:
+        async def __call__(self) -> None:
             return None
 
         def latch_failure(self, message: str) -> None:
@@ -672,14 +690,13 @@ def test_schema_fence_on_successor_claim_latches_the_shared_guard(monkeypatch, c
 
     old = job()
     successor = successor_job()
-    with loop._lock:
-        loop._active[old.run_id] = _ActiveJob(
-            job=old,
-            cancel_event=threading.Event(),
-            successor=successor,
-        )
+    loop._active[old.run_id] = _ActiveJob(
+        job=old,
+        cancel_event=threading.Event(),
+        successor=successor,
+    )
 
-    loop._finish_active(old, allow_successor=True)
+    drive(loop._finish_active(old, allow_successor=True))
 
     assert guard.latched, (
         "a fence hit on the successor claim is a verdict about the process "
@@ -693,10 +710,297 @@ def test_schema_fence_on_successor_claim_latches_the_shared_guard(monkeypatch, c
     assert ("ack", successor.message_id) not in queue.calls, (
         "the successor entry belongs to an upgraded worker"
     )
-    with loop._lock:
-        assert old.run_id not in loop._active, (
-            "the placeholder must not survive a failed activation"
+    assert old.run_id not in loop._active, (
+        "the placeholder must not survive a failed activation"
+    )
+
+
+def _lines_as_logged(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
+    """The loop's lines of one level after the log filter, which shows an exception by its type."""
+    log_filter = InqtrixLogFilter(service="worker")
+    records = [
+        record
+        for record in caplog.records
+        if record.levelno == level and record.name == "inqtrix.worker.loop"
+    ]
+    for record in records:
+        log_filter.filter(record)
+    return [record.getMessage() for record in records]
+
+
+_BINDING_FENCES = [
+    pytest.param(
+        lambda: RunBindingNewer(
+            run_id="run_w1", mode="agent_kernel", bound_contract=3, worker_contract=2
+        ),
+        logging.ERROR,
+        "Worker worker-test: run run_w1 is bound to agent_kernel contract 3, newer "
+        "than the 2 this process carries; this worker claims no further runs until "
+        "that run is cancelled, ends or parks, its other jobs go on{held}.",
+        id="newer",
+    ),
+    pytest.param(
+        lambda: WorkflowUnavailable(
+            run_id="run_w1", mode="knowledge", registered=("research", "direct_llm")
+        ),
+        logging.WARNING,
+        "Worker worker-test: run run_w1 belongs to mode knowledge, which this process "
+        "has not registered (registered: research, direct_llm); this worker claims no "
+        "further runs until that run is cancelled, ends or parks, its other jobs go on, "
+        "and the run and its checkpoint stay{held}.",
+        id="unavailable",
+    ),
+]
+
+
+def test_the_run_worker_claims_with_the_contracts_its_registry_carries(monkeypatch):
+    store = StubStore(claim_result=None)
+    loop = make_loop(store, StubQueue(), monkeypatch)
+
+    drive(loop._start(job(), takeover=False))
+
+    assert store.workflow_contracts == loop._registry.workflow_contracts()
+    assert store.workflow_contracts["research"] == 1
+
+
+def test_the_run_worker_ends_outdated_waits_with_the_contracts_its_registry_carries(
+    monkeypatch,
+):
+    store = StubStore(claim_result=None)
+    loop = make_loop(store, StubQueue(), monkeypatch)
+
+    drive(loop._periodic_maintenance())
+
+    assert store.swept_with == loop._registry.workflow_contracts()
+
+
+@pytest.mark.parametrize(("fence", "level", "line"), _BINDING_FENCES)
+def test_a_binding_fence_stops_only_the_run_claims_and_never_acks(
+    monkeypatch, caplog, fence, level, line
+):
+    """A run this process must not execute stops the run claims; the other job kinds go on.
+
+    The verdict is about the run's mode or contract, so the shared guard of all
+    loops stays open, and the loop claims nothing more while its active
+    entries finish.
+    """
+
+    class FencedStore(StubStore):
+        def claim_for_execution(
+            self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+        ):
+            raise fence()
+
+    class OneJobQueue(StubQueue):
+        def __init__(self) -> None:
+            super().__init__()
+            self.claims = 0
+
+        async def ensure_group(self):
+            return None
+
+        async def claim_pending(self):
+            return []
+
+        async def reclaim(self, *, min_idle_ms, count=10):
+            return []
+
+        async def claim_new(self, *, block_ms, count=1):
+            self.claims += 1
+            return [job()] if self.claims == 1 else []
+
+    class Guard:
+        loop: WorkerLoop | None = None
+
+        def __init__(self) -> None:
+            self.latched: list[str] = []
+            self.ticks = 0
+
+        async def __call__(self) -> None:
+            self.ticks += 1
+            if self.ticks > 4:
+                assert self.loop is not None
+                self.loop.request_stop()
+
+        def latch_failure(self, message: str) -> None:
+            self.latched.append(message)
+
+    guard = Guard()
+    queue = OneJobQueue()
+    loop = make_loop(FencedStore(claim_result=None), queue, monkeypatch, claim_guard=guard)
+    loop._last_reclaim = float("inf")
+    loop._last_reconcile = float("inf")
+    guard.loop = loop
+    monkeypatch.setattr("inqtrix.worker.loop._CLAIMS_STOPPED_IDLE_SECONDS", 0.01)
+
+    drive(loop.run_forever())
+
+    assert guard.latched == []
+    assert queue.claims == 1, "after the fence the loop claims nothing more"
+    assert _lines_as_logged(caplog, level) == [line.format(held="")]
+    assert ("ack", job().message_id) not in queue.calls
+
+
+@pytest.mark.parametrize(("fence", "level", "line"), _BINDING_FENCES)
+def test_the_other_entries_of_a_batch_still_start_after_a_binding_fence(
+    monkeypatch, caplog, fence, level, line
+):
+    """Each entry's claim checks its own binding; a healthy one of the same batch starts."""
+    tried: list[str] = []
+
+    class FencedStore(StubStore):
+        def claim_for_execution(
+            self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+        ):
+            tried.append(run_id)
+            if run_id == "run_w1":
+                raise fence()
+            return None
+
+    class BatchQueue(StubQueue):
+        async def claim_new(self, *, block_ms, count=1):
+            return [
+                job(),
+                QueuedJob(message_id="3-0", run_id="run_ok", tenant_id="default", delivery_count=1),
+            ]
+
+    queue = BatchQueue()
+    loop = make_loop(FencedStore(claim_result=None), queue, monkeypatch, concurrency=2)
+    loop._last_reclaim = float("inf")
+    loop._last_reconcile = float("inf")
+
+    drive(loop._tick())
+
+    assert tried == ["run_w1", "run_ok"]
+    assert loop._claims_blocked_by == {"run_w1": "default"}
+
+
+@pytest.mark.parametrize(("fence", "level", "line"), _BINDING_FENCES)
+def test_a_run_this_process_cannot_judge_is_never_failed_on_its_last_delivery(
+    monkeypatch, fence, level, line
+):
+    """Past the delivery budget, a run is failed only by a process allowed to judge it."""
+
+    class FencedStore(StubStore):
+        def claim_for_execution(
+            self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+        ):
+            raise fence()
+
+    store = FencedStore(claim_result=None)
+    queue = StubQueue()
+    loop = make_loop(store, queue, monkeypatch)
+
+    with pytest.raises((RunBindingNewer, WorkflowUnavailable)):
+        drive(loop._start(job(delivery_count=4), takeover=True))
+
+    assert "fail" not in store.names()
+    assert not [call for call in queue.calls if call[0] in {"dead_letter", "ack"}]
+
+
+@pytest.mark.parametrize(("fence", "level", "line"), _BINDING_FENCES)
+def test_a_binding_fence_while_draining_own_entries_at_start_stops_the_run_claims(
+    monkeypatch, caplog, fence, level, line
+):
+    class FencedStore(StubStore):
+        def claim_for_execution(
+            self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+        ):
+            raise fence()
+
+    class OwnEntryQueue(StubQueue):
+        def __init__(self) -> None:
+            super().__init__()
+            self.claims = 0
+
+        async def ensure_group(self):
+            return None
+
+        async def claim_pending(self):
+            return [job()]
+
+        async def claim_new(self, *, block_ms, count=1):
+            self.claims += 1
+            return []
+
+    class Guard:
+        loop: WorkerLoop | None = None
+
+        def __init__(self) -> None:
+            self.latched: list[str] = []
+            self.ticks = 0
+
+        async def __call__(self) -> None:
+            self.ticks += 1
+            if self.ticks > 4:
+                assert self.loop is not None
+                self.loop.request_stop()
+
+        async def verify_now(self) -> None:
+            return None
+
+        def latch_failure(self, message: str) -> None:
+            self.latched.append(message)
+
+    guard = Guard()
+    queue = OwnEntryQueue()
+    loop = make_loop(FencedStore(claim_result=None), queue, monkeypatch, claim_guard=guard)
+    loop._last_reclaim = float("inf")
+    loop._last_reconcile = float("inf")
+    guard.loop = loop
+    monkeypatch.setattr("inqtrix.worker.loop._CLAIMS_STOPPED_IDLE_SECONDS", 0.01)
+
+    drive(loop.run_forever())
+
+    assert guard.latched == []
+    assert queue.claims == 0, "after the fence the loop claims nothing more"
+    assert _lines_as_logged(caplog, level) == [line.format(held="")]
+    assert ("ack", job().message_id) not in queue.calls
+
+
+@pytest.mark.parametrize(("fence", "level", "line"), _BINDING_FENCES)
+def test_a_binding_fence_on_a_successor_claim_stops_the_run_claims(
+    monkeypatch, caplog, fence, level, line
+):
+    class FencedStore(StubStore):
+        def claim_for_execution(
+            self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+        ):
+            raise fence()
+
+    class Guard:
+        def __init__(self) -> None:
+            self.latched: list[str] = []
+
+        async def __call__(self) -> None:
+            return None
+
+        def latch_failure(self, message: str) -> None:
+            self.latched.append(message)
+
+    guard = Guard()
+    queue = StubQueue()
+    loop = make_loop(FencedStore(claim_result=None), queue, monkeypatch, claim_guard=guard)
+    from inqtrix.worker.loop import _ActiveJob
+
+    old = job()
+    successor = successor_job()
+    loop._active[old.run_id] = _ActiveJob(
+        job=old, cancel_event=threading.Event(), successor=successor
+    )
+
+    drive(loop._finish_active(old, allow_successor=True))
+
+    assert guard.latched == []
+    assert loop._claims_blocked_by == {"run_w1": "default"}
+    assert _lines_as_logged(caplog, level) == [
+        line.format(
+            held=f"; the follow-up dispatch for job {successor.run_id} "
+            "remains unacknowledged"
         )
+    ]
+    assert ("ack", successor.message_id) not in queue.calls
+    assert old.run_id not in loop._active
 
 
 def test_stop_during_contract_probe_never_mutates_or_claims(monkeypatch):
@@ -706,7 +1010,7 @@ def test_stop_during_contract_probe_never_mutates_or_claims(monkeypatch):
     class Guard:
         loop: WorkerLoop | None = None
 
-        def __call__(self) -> None:
+        async def __call__(self) -> None:
             # The pre-claim check is the coalesced guard now -- the hard
             # fence lives inside the claim transaction itself. A stop
             # arriving during this check must still prevent any claim.
@@ -717,7 +1021,7 @@ def test_stop_during_contract_probe_never_mutates_or_claims(monkeypatch):
     loop = make_loop(store, queue, monkeypatch, claim_guard=guard)
     guard.loop = loop
 
-    loop._start(job(delivery_count=99), takeover=False)
+    drive(loop._start(job(delivery_count=99), takeover=False))
 
     assert store.calls == []
     assert queue.calls == []
@@ -729,7 +1033,7 @@ def test_blocking_queue_return_after_stop_never_claims(monkeypatch):
     class StoppingQueue(StubQueue):
         loop: WorkerLoop | None = None
 
-        def claim_new(self, *, block_ms, count=1):
+        async def claim_new(self, *, block_ms, count=1):
             assert block_ms > 0
             assert count >= 1
             assert self.loop is not None
@@ -742,7 +1046,7 @@ def test_blocking_queue_return_after_stop_never_claims(monkeypatch):
     loop._last_reclaim = float("inf")
     loop._last_reconcile = float("inf")
 
-    loop._tick()
+    drive(loop._tick())
 
     assert store.calls == []
     assert queue.calls == []
@@ -753,7 +1057,7 @@ def test_held_successor_rechecks_contract_before_database_claim(monkeypatch):
     queue = StubQueue()
 
     class Guard:
-        def __call__(self) -> None:
+        async def __call__(self) -> None:
             # A latched guard surfaces here cheaply; the hard fence sits in
             # the claim transaction. Either way: no successor claim.
             raise WorkerClaimGuardError("worker revision is stale")
@@ -763,19 +1067,17 @@ def test_held_successor_rechecks_contract_before_database_claim(monkeypatch):
 
     old = job()
     successor = successor_job()
-    with loop._lock:
-        loop._active[old.run_id] = _ActiveJob(
-            job=old,
-            cancel_event=threading.Event(),
-            successor=successor,
-        )
+    loop._active[old.run_id] = _ActiveJob(
+        job=old,
+        cancel_event=threading.Event(),
+        successor=successor,
+    )
 
-    loop._finish_active(old, allow_successor=True)
+    drive(loop._finish_active(old, allow_successor=True))
 
     assert "claim" not in store.names()
     assert queue.calls == []
-    with loop._lock:
-        assert old.run_id not in loop._active
+    assert old.run_id not in loop._active
 
 
 def test_held_successor_is_left_for_redelivery_during_shutdown(monkeypatch):
@@ -786,20 +1088,18 @@ def test_held_successor_is_left_for_redelivery_during_shutdown(monkeypatch):
 
     old = job()
     successor = successor_job()
-    with loop._lock:
-        loop._active[old.run_id] = _ActiveJob(
-            job=old,
-            cancel_event=threading.Event(),
-            successor=successor,
-        )
+    loop._active[old.run_id] = _ActiveJob(
+        job=old,
+        cancel_event=threading.Event(),
+        successor=successor,
+    )
     loop.request_stop()
 
-    loop._finish_active(old, allow_successor=True)
+    drive(loop._finish_active(old, allow_successor=True))
 
     assert "claim" not in store.names()
     assert queue.calls == []
-    with loop._lock:
-        assert old.run_id not in loop._active
+    assert old.run_id not in loop._active
 
 
 def test_stop_during_successor_contract_probe_never_mutates_or_claims(
@@ -811,7 +1111,7 @@ def test_stop_during_successor_contract_probe_never_mutates_or_claims(
     class Guard:
         loop: WorkerLoop | None = None
 
-        def __call__(self) -> None:
+        async def __call__(self) -> None:
             # Coalesced pre-check; the hard fence is in the claim itself.
             assert self.loop is not None
             self.loop.request_stop()
@@ -829,19 +1129,95 @@ def test_stop_during_successor_contract_probe_never_mutates_or_claims(
         tenant_id=successor.tenant_id,
         delivery_count=99,
     )
-    with loop._lock:
-        loop._active[old.run_id] = _ActiveJob(
-            job=old,
-            cancel_event=threading.Event(),
-            successor=successor,
-        )
+    loop._active[old.run_id] = _ActiveJob(
+        job=old,
+        cancel_event=threading.Event(),
+        successor=successor,
+    )
 
-    loop._finish_active(old, allow_successor=True)
+    drive(loop._finish_active(old, allow_successor=True))
 
     assert store.calls == []
     assert queue.calls == []
-    with loop._lock:
-        assert old.run_id not in loop._active
+    assert old.run_id not in loop._active
+
+
+@pytest.mark.parametrize(
+    ("status", "cancel", "released"),
+    [
+        pytest.param("queued", False, False, id="still-queued"),
+        pytest.param("running", False, False, id="running-elsewhere-or-orphaned"),
+        pytest.param("running", True, True, id="cancel-requested"),
+        pytest.param("cancelled", False, True, id="ended"),
+        pytest.param("waiting_for_approval", False, True, id="parked"),
+        pytest.param(None, False, True, id="gone"),
+    ],
+)
+def test_the_claims_come_back_once_the_blocking_run_no_longer_waits_for_a_worker(
+    monkeypatch, caplog, status, cancel, released
+):
+    """The stop lasts as long as its cause; a run that may still need a worker keeps it."""
+
+    class FencedStore(StubStore):
+        def claim_for_execution(
+            self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+        ):
+            raise RunBindingNewer(
+                run_id=run_id, mode="agent_kernel", bound_contract=3, worker_contract=2
+            )
+
+        def cancel_requested_runs(self, run_ids):
+            return {"run_w1"} if cancel else set()
+
+    class OneThenEmptyQueue(StubQueue):
+        def __init__(self) -> None:
+            super().__init__()
+            self.claims = 0
+
+        async def claim_new(self, *, block_ms, count=1):
+            self.claims += 1
+            return [job()] if self.claims == 1 else []
+
+    store = FencedStore(claim_result=None)
+    store.dispatch_status_value = status
+    queue = OneThenEmptyQueue()
+    loop = make_loop(store, queue, monkeypatch)
+    loop._last_reclaim = float("inf")
+    loop._last_reconcile = float("inf")
+    monkeypatch.setattr("inqtrix.worker.loop._CLAIMS_STOPPED_IDLE_SECONDS", 0.0)
+
+    drive(loop._tick())
+    assert loop._claims_blocked_by == {"run_w1": "default"}
+    with caplog.at_level(logging.INFO, logger="inqtrix.worker.loop"):
+        drive(loop._tick())
+
+    assert (loop._claims_blocked_by == {}) is released
+    assert queue.claims == (2 if released else 1)
+    resumed = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "inqtrix.worker.loop" and record.levelno == logging.INFO
+    ]
+    assert (resumed == [
+        "Worker worker-test: run run_w1 no longer holds this worker's claims "
+        f"({'cancel requested' if cancel else status or 'gone'}).",
+        "Worker worker-test claims runs again.",
+    ]) is released
+
+
+def test_the_claims_stay_stopped_while_one_of_two_blocking_runs_still_waits(monkeypatch):
+    store = StubStore(claim_result=None)
+    queue = StubQueue()
+    loop = make_loop(store, queue, monkeypatch)
+    loop._claims_blocked_by = {"run_a": "default", "run_b": "default"}
+    statuses = {"run_a": "cancelled", "run_b": "queued"}
+    monkeypatch.setattr(
+        store, "dispatch_status", lambda run_id, tenant_id: statuses[run_id]
+    )
+
+    drive(loop._release_ended_blocks())
+
+    assert loop._claims_blocked_by == {"run_b": "default"}
 
 
 def job(delivery_count: int = 1) -> QueuedJob:
@@ -891,10 +1267,17 @@ def claimed(
     )
 
 
+def start_and_drain(loop: WorkerLoop, the_job: QueuedJob, *, takeover: bool) -> None:
+    async def scenario() -> bool:
+        await loop._start(the_job, takeover=takeover)
+        return await loop.drain(timeout=10)
+
+    assert drive(scenario()), "job did not finish in time"
+
+
 def run_one(store, queue, monkeypatch, *, the_job=None) -> WorkerLoop:
     loop = make_loop(store, queue, monkeypatch)
-    loop._start(the_job or job(), takeover=False)
-    assert loop.drain(timeout=10), "job did not finish in time"
+    start_and_drain(loop, the_job or job(), takeover=False)
     return loop
 
 
@@ -1037,8 +1420,7 @@ def test_worker_passes_the_shared_answer_publisher_to_execution(monkeypatch):
         answer_publisher=publisher,
     )
 
-    loop._start(job(), takeover=False)
-    assert loop.drain(timeout=10), "job did not finish in time"
+    start_and_drain(loop, job(), takeover=False)
 
     assert captured == [publisher]
 
@@ -1160,8 +1542,7 @@ def test_redelivered_job_claims_with_takeover(monkeypatch):
     queue = StubQueue()
     loop = make_loop(store, queue, monkeypatch)
 
-    loop._start(job(delivery_count=2), takeover=True)
-    assert loop.drain(timeout=10)
+    start_and_drain(loop, job(delivery_count=2), takeover=True)
 
     assert ("claim", "run_w1", True) in store.calls
 
@@ -1187,7 +1568,7 @@ def test_reconciler_re_enqueues_stale_queued_rows(monkeypatch, stale):
     queue = StubQueue()
     loop = make_loop(store, queue, monkeypatch)
 
-    loop._reconcile()
+    drive(loop._reconcile())
 
     expected = [("enqueue", run_id) for run_id, _tenant in stale]
     assert queue.calls == expected
@@ -1199,8 +1580,8 @@ def test_reconciler_cooldown_suppresses_duplicate_floods(monkeypatch):
     queue = StubQueue()
     loop = make_loop(store, queue, monkeypatch)
 
-    loop._reconcile()
-    loop._reconcile()
+    drive(loop._reconcile())
+    drive(loop._reconcile())
 
     assert queue.calls == [("enqueue", "run_s1")]
 
@@ -1213,10 +1594,9 @@ def test_self_reclaim_of_own_entry_is_never_acked(monkeypatch):
     loop = make_loop(store, queue, monkeypatch)
     from inqtrix.worker.loop import _ActiveJob
 
-    with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
+    loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
 
-    loop._start(job(), takeover=True)  # same message id "1-0"
+    drive(loop._start(job(), takeover=True))  # same message id "1-0"
 
     assert queue.calls == []
     assert "claim" not in store.names()
@@ -1230,8 +1610,7 @@ def test_duplicate_dispatch_for_active_run_is_acked_not_dropped(monkeypatch):
     loop = make_loop(store, queue, monkeypatch)
     from inqtrix.worker.loop import _ActiveJob
 
-    with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
+    loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
 
     duplicate = QueuedJob(
         message_id="2-0",
@@ -1239,7 +1618,7 @@ def test_duplicate_dispatch_for_active_run_is_acked_not_dropped(monkeypatch):
         tenant_id="default",
         delivery_count=1,
     )
-    loop._start(duplicate, takeover=False)
+    drive(loop._start(duplicate, takeover=False))
 
     assert queue.calls == [("ack", "2-0")]
     assert ("dispatch_status", "run_w1", "default") in store.calls
@@ -1254,17 +1633,18 @@ def test_unsegmented_worker_keeps_historical_duplicate_ack(monkeypatch):
         def _entity_id(self, queued: QueuedJob) -> str:
             return queued.run_id
 
-        def _execute(self, queued, claimed_run, cancel_event) -> None:
+        def _execute(self, queued, claimed_run, cancel_event) -> bool:
             del queued, claimed_run, cancel_event
+            return True
 
-        def _stale_dispatch(self):
+        async def _stale_dispatch(self):
             return []
 
-        def _cancel_requested(self, watched):
+        async def _cancel_requested(self, watched):
             del watched
             return set()
 
-        def _enqueue_dispatch(self, entity_id, tenant_id) -> None:
+        async def _enqueue_dispatch(self, entity_id, tenant_id) -> None:
             del entity_id, tenant_id
 
     store = StubStore(claim_result=claimed())
@@ -1277,10 +1657,9 @@ def test_unsegmented_worker_keeps_historical_duplicate_ack(monkeypatch):
         heartbeat_seconds=15,
         claim_idle_seconds=90,
     )
-    with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
+    loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
 
-    loop._start(successor_job(), takeover=False)
+    drive(loop._start(successor_job(), takeover=False))
 
     assert queue.calls == [("ack", "2-0")]
     assert "dispatch_status" not in store.names()
@@ -1298,35 +1677,31 @@ def test_queued_successor_is_held_hearted_and_claimed_after_old_ack(
 
     old = job()
     successor = successor_job()
-    with loop._lock:
-        loop._active[old.run_id] = _ActiveJob(job=old, cancel_event=threading.Event())
+    loop._active[old.run_id] = _ActiveJob(job=old, cancel_event=threading.Event())
 
-    loop._start(successor, takeover=False)
+    drive(loop._start(successor, takeover=False))
 
     assert queue.calls == []
     assert loop._heartbeat_message_ids() == ["1-0", "2-0"]
-    with loop._lock:
-        assert loop._active[old.run_id].successor is successor
+    assert loop._active[old.run_id].successor is successor
 
-    submitted: list[tuple[Any, ...]] = []
+    started: list[tuple[Any, ...]] = []
 
-    def _submit(*args):
-        submitted.append(args)
-        return Future()
+    def _start_segment(*args):
+        started.append(args)
 
-    monkeypatch.setattr(loop._executor, "submit", _submit)
-    loop._finish_active(old, allow_successor=True)
+    monkeypatch.setattr(loop, "_start_segment", _start_segment)
+    drive(loop._finish_active(old, allow_successor=True))
 
     assert ("claim", "run_w1", False) in store.calls
-    assert len(submitted) == 1
-    with loop._lock:
-        active = loop._active[old.run_id]
-        assert active.job is successor
-        assert active.successor is None
-        assert active.handoff_in_progress is False
+    assert len(started) == 1
+    active = loop._active[old.run_id]
+    assert active.job is successor
+    assert active.successor is None
+    assert active.handoff_in_progress is False
     # The placeholder remains capacity/drain-visible until the successor's
-    # executor finally releases it.
-    assert loop.drain(timeout=0) is False
+    # segment releases it.
+    assert drive(loop.drain(timeout=0)) is False
 
 
 def test_second_successor_duplicate_is_acked_while_first_is_held(monkeypatch):
@@ -1336,10 +1711,9 @@ def test_second_successor_duplicate_is_acked_while_first_is_held(monkeypatch):
     loop = make_loop(store, queue, monkeypatch)
     from inqtrix.worker.loop import _ActiveJob
 
-    with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
-    loop._start(successor_job("2-0"), takeover=False)
-    loop._start(successor_job("3-0"), takeover=False)
+    loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
+    drive(loop._start(successor_job("2-0"), takeover=False))
+    drive(loop._start(successor_job("3-0"), takeover=False))
 
     assert queue.calls == [("ack", "3-0")]
     assert store.names().count("dispatch_status") == 1
@@ -1352,15 +1726,13 @@ def test_successor_status_read_error_never_degrades_to_ack(monkeypatch):
     loop = make_loop(store, queue, monkeypatch)
     from inqtrix.worker.loop import _ActiveJob
 
-    with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
+    loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
 
     with pytest.raises(RuntimeError, match="database unavailable"):
-        loop._start(successor_job(), takeover=False)
+        drive(loop._start(successor_job(), takeover=False))
 
     assert queue.calls == []
-    with loop._lock:
-        assert loop._active["run_w1"].successor is None
+    assert loop._active["run_w1"].successor is None
 
 
 def test_successor_stays_unacked_when_old_message_ack_failed(monkeypatch):
@@ -1372,19 +1744,17 @@ def test_successor_stays_unacked_when_old_message_ack_failed(monkeypatch):
 
     old = job()
     successor = successor_job()
-    with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(
-            job=old,
-            cancel_event=threading.Event(),
-            successor=successor,
-        )
+    loop._active["run_w1"] = _ActiveJob(
+        job=old,
+        cancel_event=threading.Event(),
+        successor=successor,
+    )
 
-    loop._finish_active(old, allow_successor=False)
+    drive(loop._finish_active(old, allow_successor=False))
 
     assert queue.calls == []
     assert "claim" not in store.names()
-    with loop._lock:
-        assert "run_w1" not in loop._active
+    assert "run_w1" not in loop._active
 
 
 def test_cancelled_successor_is_acked_without_execution(monkeypatch):
@@ -1396,22 +1766,20 @@ def test_cancelled_successor_is_acked_without_execution(monkeypatch):
 
     old = job()
     successor = successor_job()
-    with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(
-            job=old,
-            cancel_event=threading.Event(),
-            successor=successor,
-        )
+    loop._active["run_w1"] = _ActiveJob(
+        job=old,
+        cancel_event=threading.Event(),
+        successor=successor,
+    )
 
-    loop._finish_active(old, allow_successor=True)
+    drive(loop._finish_active(old, allow_successor=True))
 
     assert queue.calls == [("ack", "2-0")]
     assert ("claim", "run_w1", False) in store.calls
-    with loop._lock:
-        assert "run_w1" not in loop._active
+    assert "run_w1" not in loop._active
 
 
-def test_fast_successor_can_park_again_before_executor_submit_returns(
+def test_fast_successor_can_park_again_as_soon_as_its_segment_starts(
     monkeypatch,
 ):
     """A third segment is not mistaken for a duplicate of its predecessor."""
@@ -1424,29 +1792,32 @@ def test_fast_successor_can_park_again_before_executor_submit_returns(
     old = job()
     second = successor_job("2-0")
     third = successor_job("3-0")
-    with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(
-            job=old,
-            cancel_event=threading.Event(),
-            successor=second,
-        )
+    loop._active["run_w1"] = _ActiveJob(
+        job=old,
+        cancel_event=threading.Event(),
+        successor=second,
+    )
 
-    def _submit(*_args):
-        # ThreadPoolExecutor may run the submitted callable before submit()
-        # returns. Model that exact interleaving: segment 2 already parked and
-        # its row is queued when dispatch 3 reaches the claim loop.
-        loop._start(third, takeover=False)
-        return Future()
+    arrivals: list[asyncio.Future[None]] = []
 
-    monkeypatch.setattr(loop._executor, "submit", _submit)
-    loop._finish_active(old, allow_successor=True)
+    def _start_segment(*_args):
+        # Segment 2 can park at once. Model that exact interleaving: its row
+        # is queued when dispatch 3 reaches the claim loop.
+        arrivals.append(asyncio.ensure_future(loop._start(third, takeover=False)))
+
+    monkeypatch.setattr(loop, "_start_segment", _start_segment)
+
+    async def scenario() -> None:
+        await loop._finish_active(old, allow_successor=True)
+        await asyncio.gather(*arrivals)
+
+    drive(scenario())
 
     assert queue.calls == []
-    with loop._lock:
-        active = loop._active["run_w1"]
-        assert active.job is second
-        assert active.successor is third
-        assert active.handoff_in_progress is False
+    active = loop._active["run_w1"]
+    assert active.job is second
+    assert active.successor is third
+    assert active.handoff_in_progress is False
     assert loop._heartbeat_message_ids() == ["2-0", "3-0"]
 
 
@@ -1458,8 +1829,7 @@ def test_fenced_out_attempt_does_not_ack_the_message(monkeypatch):
     queue = StubQueue()
 
     loop = make_loop(store, queue, monkeypatch)
-    loop._start(job(), takeover=False)
-    assert loop.drain(timeout=10)
+    start_and_drain(loop, job(), takeover=False)
 
     assert ("complete", "run_w1", 1) in store.calls
     assert ("ack", "1-0") not in queue.calls
@@ -1477,11 +1847,11 @@ def test_a_tick_claims_up_to_the_free_capacity_not_one_job(monkeypatch):
     seen: list[int] = []
 
     class CountingQueue(StubQueue):
-        def claim_new(self, *, block_ms, count=1):
+        async def claim_new(self, *, block_ms, count=1):
             seen.append(count)
             return []
 
-        def reclaim(self, *, min_idle_ms, count=10):
+        async def reclaim(self, *, min_idle_ms, count=10):
             return []
 
     queue = CountingQueue()
@@ -1491,13 +1861,34 @@ def test_a_tick_claims_up_to_the_free_capacity_not_one_job(monkeypatch):
     # Skip the reclaim and reconcile branches; the claim is what is under
     # test, and both are exercised by their own tests above.
     loop._last_reclaim = loop._last_reconcile = time.monotonic()
-    loop._tick()
+    drive(loop._tick())
 
     assert seen, "the tick must attempt a claim"
     assert seen[0] == 25, (
         "an idle worker must ask for every slot it can fill; asking for one "
         "makes the ramp to full concurrency scale with the concurrency"
     )
+
+
+def test_a_tick_reclaims_only_what_it_can_start(monkeypatch):
+    """The slot counter is the one limit of a loop, on the takeover path too."""
+    asked: list[int] = []
+
+    class CountingQueue(StubQueue):
+        async def claim_new(self, *, block_ms, count=1):
+            return []
+
+        async def reclaim(self, *, min_idle_ms, count=10):
+            asked.append(count)
+            return []
+
+    loop = make_loop(StubStore(claim_result=None), CountingQueue(), monkeypatch, concurrency=4)
+    loop._last_reconcile = time.monotonic()
+    loop._active.update({"a": object(), "b": object(), "c": object()})
+
+    drive(loop._tick())
+
+    assert asked == [1]
 
 
 def test_a_worker_never_claims_more_than_it_can_start(monkeypatch):
@@ -1510,11 +1901,11 @@ def test_a_worker_never_claims_more_than_it_can_start(monkeypatch):
     seen: list[int] = []
 
     class CountingQueue(StubQueue):
-        def claim_new(self, *, block_ms, count=1):
+        async def claim_new(self, *, block_ms, count=1):
             seen.append(count)
             return []
 
-        def reclaim(self, *, min_idle_ms, count=10):
+        async def reclaim(self, *, min_idle_ms, count=10):
             return []
 
     queue = CountingQueue()
@@ -1526,7 +1917,7 @@ def test_a_worker_never_claims_more_than_it_can_start(monkeypatch):
     loop._last_reclaim = loop._last_reconcile = time.monotonic()
     # Three of four slots already taken.
     loop._active.update({"a": object(), "b": object(), "c": object()})
-    loop._tick()
+    drive(loop._tick())
 
     assert seen == [1], f"expected exactly the one free slot, got {seen}"
 
@@ -1711,3 +2102,243 @@ def test_only_a_cause_that_is_sanitized_by_construction_stays_in_the_chain():
             f"line {node.lineno} chains {chained!r}; a cause that is not "
             "sanitized by construction must not stand in the chain"
         )
+
+
+# --------------------------------------------------------------------- #
+# On the process loop
+# --------------------------------------------------------------------- #
+
+
+def test_a_segment_runs_on_the_transition_lane_with_a_slot_held(monkeypatch):
+    loop = make_loop(StubStore(claim_result=claimed()), StubQueue(), monkeypatch)
+    seen: list[str] = []
+
+    def execute(*_args) -> bool:
+        seen.append(threading.current_thread().name)
+        return True
+
+    monkeypatch.setattr(loop, "_execute", execute)
+
+    start_and_drain(loop, job(), takeover=False)
+
+    assert seen[0].startswith("inqtrix-legacy_segment")
+    assert loop._active == {}
+
+
+def test_a_segment_that_raises_frees_its_slot_and_says_so(monkeypatch, caplog):
+    loop = make_loop(StubStore(claim_result=claimed()), StubQueue(), monkeypatch)
+
+    def execute(*_args) -> bool:
+        raise RuntimeError("the body broke")
+
+    monkeypatch.setattr(loop, "_execute", execute)
+
+    with caplog.at_level(logging.ERROR, logger="inqtrix"):
+        start_and_drain(loop, job(), takeover=False)
+
+    assert loop._active == {}
+    assert "segment for job run_w1 ended with an error" in caplog.text
+
+
+def test_a_failed_ack_keeps_the_held_successor_for_redelivery(monkeypatch):
+    """The successor may start only once the old stream entry is gone."""
+    from inqtrix.worker.loop import _ActiveJob
+
+    class BrokenAck(StubQueue):
+        async def ack(self, message_id):
+            raise RuntimeError("valkey unavailable")
+
+    store = StubStore(claim_result=claimed())
+    loop = make_loop(store, BrokenAck(), monkeypatch)
+    old = job()
+    loop._active[old.run_id] = _ActiveJob(
+        job=old, cancel_event=threading.Event(), successor=successor_job()
+    )
+
+    drive(loop._run_segment(old, claimed(), threading.Event()))
+
+    assert "claim" not in store.names()
+    assert loop._active == {}
+
+
+def test_a_landed_ack_lets_the_held_successor_start(monkeypatch):
+    from inqtrix.worker.loop import _ActiveJob
+
+    store = StubStore(claim_result=claimed())
+    queue = StubQueue()
+    loop = make_loop(store, queue, monkeypatch)
+    old = job()
+    successor = successor_job()
+    loop._active[old.run_id] = _ActiveJob(
+        job=old, cancel_event=threading.Event(), successor=successor
+    )
+    started: list[Any] = []
+    monkeypatch.setattr(loop, "_start_segment", lambda the_job, *_rest: started.append(the_job))
+
+    drive(loop._run_segment(old, claimed(), threading.Event()))
+
+    assert queue.calls == [("ack", "1-0")]
+    assert started == [successor]
+
+
+def test_the_shell_reaches_the_store_through_its_async_names(monkeypatch):
+    """A sync name would wait for the database on the loop, or on a pool thread for the loop."""
+
+    class WatchingStore(StubStore):
+        def __init__(self) -> None:
+            super().__init__(claim_result=claimed())
+            self.reached: set[str] = set()
+
+        async def aclaim_for_execution(
+            self, run_id, tenant_id, *, allow_takeover, workflow_contracts
+        ):
+            self.reached.add("claim")
+            return self.claim_result
+
+        async def afail(self, run_id, message, *, error_type="server_error", fence_attempt=None):
+            self.reached.add("fail")
+            return True
+
+        async def adispatch_status(self, run_id, tenant_id):
+            self.reached.add("dispatch_status")
+            return "running"
+
+        async def astale_queued_runs(self, *, older_than_seconds):
+            self.reached.add("stale")
+            return []
+
+        async def acancel_requested_runs(self, run_ids):
+            self.reached.add("cancel")
+            return set()
+
+        def _refused(self, *args, **kwargs):
+            raise AssertionError("the sync name was used")
+
+        claim_for_execution = fail = dispatch_status = _refused
+        stale_queued_runs = cancel_requested_runs = _refused
+
+    store = WatchingStore()
+    loop = make_loop(store, StubQueue(), monkeypatch)
+
+    async def scenario() -> None:
+        await loop._start(job(delivery_count=99), takeover=False)
+        await loop._is_successor_dispatch(job())
+        await loop._stale_dispatch()
+        await loop._cancel_requested({"run_w1": "default"})
+
+    drive(scenario())
+
+    assert store.reached == {"claim", "fail", "dispatch_status", "stale", "cancel"}
+
+
+def test_heartbeats_go_on_through_the_drain_and_end_with_it(monkeypatch):
+    """A draining job without heartbeats would be taken over and run twice."""
+    from inqtrix.worker.loop import _ActiveJob
+
+    queue = StubQueue()
+    loop = make_loop(StubStore(claim_result=None), queue, monkeypatch)
+    loop._heartbeat_seconds = 0.01
+    loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
+
+    async def scenario() -> None:
+        loop.request_stop()
+        heartbeat = asyncio.create_task(loop._heartbeat_loop())
+        await asyncio.sleep(0.1)
+        assert not heartbeat.done()
+        loop._active.clear()
+        assert await loop.drain(timeout=1)
+        await asyncio.wait_for(heartbeat, timeout=2)
+
+    drive(scenario())
+
+    assert ("heartbeat", ("1-0",)) in queue.calls
+
+
+def test_a_failing_heartbeat_leaves_the_heartbeat_running(monkeypatch, caplog):
+    from inqtrix.worker.loop import _ActiveJob
+
+    class BrokenHeartbeat(StubQueue):
+        beats = 0
+
+        async def heartbeat(self, message_ids):
+            self.beats += 1
+            raise RuntimeError("valkey unavailable")
+
+    queue = BrokenHeartbeat()
+    loop = make_loop(StubStore(claim_result=None), queue, monkeypatch)
+    loop._heartbeat_seconds = 0.01
+    loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
+
+    async def scenario() -> None:
+        heartbeat = asyncio.create_task(loop._heartbeat_loop())
+        await asyncio.sleep(0.1)
+        assert not heartbeat.done()
+        loop._terminated.set()
+        await asyncio.wait_for(heartbeat, timeout=2)
+
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        drive(scenario())
+
+    assert queue.beats > 1
+    assert "heartbeat failed" in caplog.text
+
+
+def test_the_cancel_poll_reaches_a_running_segment(monkeypatch):
+    from inqtrix.worker.loop import _ActiveJob
+
+    class Cancelling(StubStore):
+        def cancel_requested_runs(self, run_ids):
+            return set(run_ids)
+
+    monkeypatch.setattr("inqtrix.worker.loop._CANCEL_POLL_SECONDS", 0.01)
+    loop = make_loop(Cancelling(claim_result=None), StubQueue(), monkeypatch)
+    entry = _ActiveJob(job=job(), cancel_event=threading.Event())
+    loop._active["run_w1"] = entry
+
+    async def scenario() -> None:
+        poll = asyncio.create_task(loop._cancel_loop())
+        await asyncio.sleep(0.1)
+        loop._terminated.set()
+        await asyncio.wait_for(poll, timeout=2)
+
+    drive(scenario())
+
+    assert entry.cancel_event.is_set()
+
+
+def test_stopping_needs_no_claim_to_return_early(monkeypatch):
+    """A stop waits out a claim's block, so a delivered message is never stranded."""
+    closed: list[bool] = []
+
+    class WaitingQueue(StubQueue):
+        async def ensure_group(self):
+            return None
+
+        async def claim_pending(self):
+            return []
+
+        async def reclaim(self, *, min_idle_ms, count=10):
+            return []
+
+        async def claim_new(self, *, block_ms, count=1):
+            try:
+                await asyncio.sleep(0.05)
+                return []
+            finally:
+                closed.append(not asyncio.current_task().cancelling())
+
+    loop = make_loop(StubStore(claim_result=None), WaitingQueue(), monkeypatch)
+    loop._last_reclaim = float("inf")
+    loop._last_reconcile = float("inf")
+
+    async def scenario() -> None:
+        claiming = asyncio.create_task(loop.run_forever())
+        await asyncio.sleep(0.01)
+        loop.request_stop()
+        await asyncio.wait_for(claiming, timeout=2)
+        loop._terminated.set()
+
+    drive(scenario())
+
+    assert closed == [True]
+

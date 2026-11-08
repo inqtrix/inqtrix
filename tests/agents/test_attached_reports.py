@@ -11,6 +11,7 @@ nothing is ever dropped in silence.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -20,9 +21,10 @@ from inqtrix.services.attached_report_resolver import (
     AttachedReportError,
     resolve_attached_reports,
 )
+from tests._store_doubles import BothNames
 
 
-class _Store:
+class _Store(BothNames):
     """A run store with two completed reports and one still running."""
 
     def __init__(self) -> None:
@@ -49,9 +51,9 @@ def test_a_report_is_named_by_its_question():
     """A research report has no title — not one of them carries an H1 —
     so the run's question is what the Research Desk shows and what the
     registry line must use."""
-    resolved = resolve_attached_reports(
+    resolved = asyncio.run(resolve_attached_reports(
         ["run_a"], run_store=_Store(), visible_to=None
-    )
+    ))
     assert resolved == [
         {
             "report_id": "run_a",
@@ -65,9 +67,9 @@ def test_an_invisible_report_refuses_the_submission():
     """Silently dropping it would start a run under inputs the user
     believes are attached."""
     with pytest.raises(AttachedReportError) as excinfo:
-        resolve_attached_reports(
+        asyncio.run(resolve_attached_reports(
             ["run_a", "run_missing"], run_store=_Store(), visible_to=None
-        )
+        ))
     assert "run_missing" in str(excinfo.value)
 
 
@@ -75,9 +77,9 @@ def test_an_unfinished_report_refuses_instead_of_attaching_nothing():
     """A running report has no text at all; attaching it would give the
     model a name it can never read."""
     with pytest.raises(AttachedReportError) as excinfo:
-        resolve_attached_reports(
+        asyncio.run(resolve_attached_reports(
             ["run_live"], run_store=_Store(), visible_to=None
-        )
+        ))
     assert "run_live" in str(excinfo.value)
 
 
@@ -85,18 +87,18 @@ def test_the_cap_is_a_refusal_not_a_trim():
     """No silent caps: attaching a fourth report must not quietly drop
     one of the first three."""
     with pytest.raises(AttachedReportError) as excinfo:
-        resolve_attached_reports(
+        asyncio.run(resolve_attached_reports(
             [f"run_{index}" for index in range(MAX_ATTACHED_REPORTS + 1)],
             run_store=_Store(),
             visible_to=None,
-        )
+        ))
     assert str(MAX_ATTACHED_REPORTS) in str(excinfo.value)
 
 
 def test_the_same_report_twice_is_one_attachment():
-    resolved = resolve_attached_reports(
+    resolved = asyncio.run(resolve_attached_reports(
         ["run_a", "run_a"], run_store=_Store(), visible_to=None
-    )
+    ))
     assert len(resolved) == 1
 
 
@@ -108,9 +110,9 @@ def test_a_store_that_cannot_count_sources_still_attaches():
         def result(self, run_id: str, *, visible_to: Any = None):
             raise RuntimeError("no result access")
 
-    resolved = resolve_attached_reports(
+    resolved = asyncio.run(resolve_attached_reports(
         ["run_a"], run_store=_NoResults(), visible_to=None
-    )
+    ))
     assert resolved[0]["reference_count"] == 0
     assert resolved[0]["title"] == "Batterieverordnung?"
 
@@ -136,7 +138,7 @@ def test_the_registry_line_names_reports_without_inlining_them():
 def test_an_attached_report_reaches_the_kernel_with_the_title_the_user_saw():
     """The kernel takes the attachment's id as the consent and its title as
     the words of a read row, so the row never shows the run id."""
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from types import SimpleNamespace
 
     from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm, _report_args_preview

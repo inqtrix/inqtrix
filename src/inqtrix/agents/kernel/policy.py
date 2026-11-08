@@ -1,6 +1,6 @@
 """Kernel tool-gating policy per autonomy mode.
 
-THE one mapping from the run's autonomy to the deepagents
+THE one mapping from the run's autonomy to the HITL middleware's
 ``interrupt_on`` configuration — the algorithm compiles one graph
 variant per policy (interrupt_on is compile-time, the policy is fixed
 per run). This mapping controls user confirmation; resource authorization

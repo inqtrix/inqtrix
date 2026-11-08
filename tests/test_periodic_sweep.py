@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
+
+import pytest
 
 from inqtrix.periodic_sweep import PeriodicSweep
 
@@ -17,11 +20,12 @@ class _Messages(logging.Handler):
         self.messages.append(record.getMessage())
 
 
-def test_a_sweep_outlives_a_failing_pass_and_restarts_cleanly():
+@pytest.mark.asyncio
+async def test_a_sweep_outlives_a_failing_pass_and_restarts_cleanly():
     calls: list[int] = []
     second = threading.Event()
 
-    def sweep() -> None:
+    async def sweep() -> None:
         calls.append(len(calls) + 1)
         if len(calls) == 1:
             raise RuntimeError("database unreachable")
@@ -42,11 +46,12 @@ def test_a_sweep_outlives_a_failing_pass_and_restarts_cleanly():
         periodic.start()
         assert periodic.running is True
         assert [
-            thread.name for thread in threading.enumerate()
-            if thread.name == "inqtrix-indexing-auto-resume"
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task.get_name() == "inqtrix-indexing-auto-resume"
         ] == ["inqtrix-indexing-auto-resume"]
-        assert second.wait(timeout=5)
-        periodic.close()
+        assert await asyncio.to_thread(second.wait, 5)
+        await periodic.aclose()
     finally:
         logger.removeHandler(messages)
 
@@ -57,5 +62,24 @@ def test_a_sweep_outlives_a_failing_pass_and_restarts_cleanly():
     ]
     periodic.start()
     assert periodic.running is True
-    periodic.close()
+    await periodic.aclose()
     assert periodic.running is False
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_that_can_never_succeed_again_stops_the_clock():
+    calls: list[int] = []
+
+    async def sweep() -> None:
+        calls.append(1)
+        raise KeyError("for good")
+
+    periodic = PeriodicSweep(
+        name="x", label="X", sweep=sweep, interval_seconds=1.0, finished_by=(KeyError,)
+    )
+    periodic.start()
+    assert periodic._task is not None
+    await asyncio.wait_for(periodic._task, timeout=5)
+    assert calls == [1]
+    assert periodic.running is False
+    await periodic.aclose()

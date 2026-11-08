@@ -3,7 +3,7 @@ import { AlertTriangle, FileText, Plus, RotateCcw, Users, XCircle } from '@/comp
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
-import { listKnowledgeDocuments, type ServerDeletionOperation } from '@/api/inqtrixClient'
+import type { ServerDeletionOperation } from '@/api/inqtrixClient'
 import type {
   FileAssetRecord,
   FileGroupRecord,
@@ -25,6 +25,7 @@ import { indexPhaseText } from './indexPhaseText'
 import { allowsRawRebuild } from './pauseNotice'
 import {
   ingestAssetsIntoKnowledgeCollection,
+  listAllCollectionDocuments,
   type KnowledgeSyncOptions,
 } from './knowledgeSync'
 import { carriedErrorText } from '@/api/requestErrorText'
@@ -125,17 +126,7 @@ export async function fetchServerCollectionDocuments(
   if (entry.inFlight) return entry.inFlight
 
   const request = (async () => {
-    const incoming: KnowledgeDocumentInfo[] = []
-    let cursor: string | undefined
-    do {
-      const page = await listKnowledgeDocuments(collectionId, {
-        ...options,
-        cursor,
-        limit: 100,
-      })
-      incoming.push(...page.data)
-      cursor = page.next_cursor ?? undefined
-    } while (cursor)
+    const incoming = await listAllCollectionDocuments(collectionId, options)
     entry.documents = incoming
     return incoming
   })()

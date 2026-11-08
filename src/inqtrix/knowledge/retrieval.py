@@ -8,20 +8,18 @@ as they apply to the debug endpoint.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Sequence
 from typing import Any, Callable
 
+from inqtrix import aio
 from inqtrix.knowledge.stores.ports import (
     KnowledgeProviderContext,
     RetrievalCandidate,
     RetrievalCandidateBatch,
 )
-from inqtrix.providers.base import (
-    observe_provider_retries,
-    provider_cancel_scope,
-)
+from inqtrix.providers.attempts import observe_retries
+from inqtrix.providers.base import provider_cancel_scope
 
 
 def _project_final_batch(
@@ -73,13 +71,13 @@ async def retrieve(
             ahead of the rerank stage; ``None`` uses the configured
             default depth.
         on_provider_retry: Optional observer for rerank-provider retry
-            notices (the shared ``_RetryNoticeMixin`` dict shape).
+            notices (the shared retry notice of ``providers.attempts``).
             Retries would otherwise only reach the server log; callers
             with an event surface forward them there (no silent
             fallbacks). ``None`` keeps the historical behaviour.
-        cancel_probe: Optional run-cancellation probe, re-bound on the
-            embed and rerank worker threads (the provider scope is
-            thread-local and does not travel through ``to_thread``).
+        cancel_probe: Optional run-cancellation probe, bound around the
+            embed and rerank calls (the provider lane runs them in a copy
+            of this context).
             ``None`` keeps the historical behaviour.
     """
     reranker = knowledge.reranker if use_reranker else None
@@ -120,14 +118,13 @@ async def retrieve(
     for embedding_model, scoped_ids in model_scopes.items():
 
         def _embed_scoped(model_name: str = embedding_model) -> Any:
-            # Bind the cancel probe on the worker thread itself — the
-            # provider scope is thread-local.
+            # The caller's probe, for a caller outside a run's cancel scope.
             with provider_cancel_scope(cancel_probe):
                 return knowledge.embeddings.embed_query(
                     query, model=model_name
                 )
 
-        query_embedding = await asyncio.to_thread(_embed_scoped)
+        query_embedding = await aio.run_provider_blocking(_embed_scoped)
         search_started = time.monotonic()
         if getattr(store, "supports_hybrid", False):
             candidates = await store.hybrid_search(
@@ -184,25 +181,14 @@ async def retrieve(
     candidate_texts = [candidate.chunk.text for candidate in batch]
 
     def _rerank_observed() -> list[Any]:
-        # Observer binding, the cancel scope, the call, and the
-        # thread-local cleanup must all run on the SAME thread as the
-        # rerank (the mixin state is threading.local), hence one closure
-        # handed to to_thread.
+        # The cancel scope and the retry log bind in the context the rerank
+        # runs in, on the provider lane.
         with provider_cancel_scope(cancel_probe):
-            with observe_provider_retries(reranker, on_provider_retry):
-                try:
-                    return reranker.rerank(
-                        query, candidate_texts, top_n=top_k
-                    )
-                finally:
-                    consume = getattr(reranker, "consume_retry_notices", None)
-                    if callable(consume):
-                        # Clear leftover notices so a reused executor
-                        # thread cannot bleed them into a later request.
-                        consume()
+            with observe_retries("rerank", on_provider_retry):
+                return reranker.rerank(query, candidate_texts, top_n=top_k)
 
     rerank_started = time.monotonic()
-    results = await asyncio.to_thread(_rerank_observed)
+    results = await aio.run_provider_blocking(_rerank_observed)
     _observe_retrieval_step("rerank", rerank_started)
     return _project_final_batch(
         [

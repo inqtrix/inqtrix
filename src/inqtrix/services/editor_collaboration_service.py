@@ -280,7 +280,6 @@ class EditorCollaborationService:
         if current_lease_token is None:
             stored_lease = await self._store.issue_lease(
                 lease,
-                max_active=self._settings.max_sessions_per_user_document,
                 max_issued_per_window=self._settings.session_rate_per_minute,
                 issued_since=now - 60,
             )
@@ -393,7 +392,6 @@ class EditorCollaborationService:
         if current_lease_token is None:
             stored_lease = await self._store.issue_lease(
                 lease,
-                max_active=self._settings.max_sessions_per_user_document,
                 max_issued_per_window=self._settings.session_rate_per_minute,
                 issued_since=now - 60,
             )

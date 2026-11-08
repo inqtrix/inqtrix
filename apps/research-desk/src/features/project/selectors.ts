@@ -1,5 +1,6 @@
 import { countLabel } from '@/i18n/plural'
 import type { Locale } from '@/i18n/translations'
+import { formatTimeOfDay, intlLocale } from '@/lib/time'
 import type {
   ChatContextReferenceRecord,
   ChatMessageAttachmentRecord,
@@ -105,12 +106,12 @@ export function isResearchDeskRun(run: ResearchRunRecord): boolean {
   return (run.kind ?? 'standard') === 'standard'
 }
 
-export function projectResearchJobs(state: ProjectState): ResearchJob[] {
+export function projectResearchJobs(state: ProjectState, locale: Locale): ResearchJob[] {
   return state.researchRunOrder
     .map((runId) => state.researchRuns[runId])
     .filter((run): run is ResearchRunRecord => Boolean(run))
     .filter(isResearchDeskRun)
-    .map(researchRunToJob)
+    .map((run) => researchRunToJob(run, locale))
 }
 
 export function projectKnowledgeItems(state: ProjectState) {
@@ -1079,7 +1080,7 @@ export function chatAttachmentChipsFromAttachments(
   })
 }
 
-export function researchRunToJob(run: ResearchRunRecord): ResearchJob {
+export function researchRunToJob(run: ResearchRunRecord, locale: Locale): ResearchJob {
   return {
     access: run.access,
     activePhase: run.phaseState.activePhase,
@@ -1089,6 +1090,7 @@ export function researchRunToJob(run: ResearchRunRecord): ResearchJob {
     completedPhases: run.phaseState.completedPhases,
     duration: run.durationSeconds === undefined ? undefined : formatDuration(run.durationSeconds),
     error: run.error,
+    errorCode: run.errorCode,
     events: run.events
       .filter(isDisplayableResearchEvent)
       .map((event) => ({
@@ -1100,7 +1102,7 @@ export function researchRunToJob(run: ResearchRunRecord): ResearchJob {
         kind: event.kind ?? 'progress',
         phase: event.phase,
         severity: event.severity ?? 'info',
-        time: formatTime(event.createdAt),
+        time: formatTimeOfDay(event.createdAt, locale),
         title: text(event.title),
       })),
     id: run.runId,
@@ -1108,17 +1110,17 @@ export function researchRunToJob(run: ResearchRunRecord): ResearchJob {
     phaseVisitCounts: phaseVisitCountsFromEvents(run),
     queueNote: run.summary.queueNote ? text(run.summary.queueNote) : undefined,
     score: run.summary.score,
-    startedAt: run.startedAt ? formatTime(run.startedAt) : undefined,
+    startedAt: run.startedAt ? formatTimeOfDay(run.startedAt, locale) : undefined,
     startedAtIso: run.startedAt,
     status: run.status,
     unavailable: run.unavailable === true ? true : undefined,
-    submittedAt: formatTime(run.submittedAt),
+    submittedAt: formatTimeOfDay(run.submittedAt, locale),
     title: text(run.summary.title),
   }
 }
 
 export function displayDateTime(iso: string, locale: Locale) {
-  return new Intl.DateTimeFormat(locale === 'de' ? 'de-DE' : 'en-US', {
+  return new Intl.DateTimeFormat(intlLocale(locale), {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
@@ -1173,7 +1175,7 @@ export function displayRelativeAge(iso: string, locale: Locale, now = new Date()
 }
 
 function displayTime(value: Date, locale: Locale) {
-  return new Intl.DateTimeFormat(locale === 'de' ? 'de-DE' : 'en-US', {
+  return new Intl.DateTimeFormat(intlLocale(locale), {
     hour: '2-digit',
     minute: '2-digit',
   }).format(value)
@@ -1273,13 +1275,6 @@ function phaseFromEventTitle(title: string): JobPhase | undefined {
   }
 
   return undefined
-}
-
-function formatTime(iso: string) {
-  return new Intl.DateTimeFormat('de-DE', {
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(iso))
 }
 
 function formatDuration(seconds: number) {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 
 import hashlib
@@ -35,10 +36,10 @@ from inqtrix.knowledge.chunking import ChunkSlice
 from inqtrix.knowledge.evidence import UnverifiedKnowledgeEvidence
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
+from inqtrix.providers.attempts import _sleep_before_retry
 from inqtrix.providers.base import (
     LLMResponse,
     StructuredLLMResponse,
-    _sleep_before_retry,
 )
 from inqtrix.services.knowledge_service import KnowledgeService
 from inqtrix.settings import ModelSettings
@@ -412,7 +413,7 @@ def test_provider_retry_backoff_observes_cancel_in_contextualization_thread() ->
     class RetryingLLM:
         def complete_with_metadata(self, *_args: Any, **_kwargs: Any) -> LLMResponse:
             entered_backoff.set()
-            _sleep_before_retry(5.0, time.monotonic() + 10.0)
+            asyncio.run(_sleep_before_retry(5.0, time.monotonic() + 10.0))
             raise AssertionError("cancelled backoff must not finish sleeping")
 
     def cancel_check() -> None:

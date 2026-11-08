@@ -26,6 +26,7 @@ from prometheus_client.parser import text_string_to_metric_families  # noqa: E40
 
 import inqtrix.research.web_research as web_research_module
 import inqtrix.server.metrics as metrics_module
+from inqtrix import aio
 from inqtrix.settings import ServerSettings
 
 from tests.contract._app import (
@@ -172,7 +173,7 @@ def test_call_metrics_feed_from_provider_wrapper(monkeypatch):
 
     from inqtrix.observability import metrics_defs
     from inqtrix.observability.context import bind_feature, reset_feature
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
     from tests.test_provider_tracing import SUMMARY, FakeLLM
 
     registry = CollectorRegistry()
@@ -210,7 +211,7 @@ def test_call_metrics_error_outcome(monkeypatch):
     from prometheus_client import CollectorRegistry, generate_latest
 
     from inqtrix.observability import metrics_defs
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
     from tests.test_provider_tracing import SUMMARY, FakeLLM
 
     registry = CollectorRegistry()
@@ -333,9 +334,9 @@ def test_indexing_pauses_and_automatic_resumes_feed_the_shared_holder(monkeypatc
     labelled by source and kind, never by the raw error type."""
     from prometheus_client import CollectorRegistry, generate_latest
 
-    from inqtrix.indexing_auto_resume import AutoResumePolicy
+    from inqtrix.runs.indexing_auto_resume import AutoResumePolicy
     from inqtrix.observability import metrics_defs
-    from inqtrix.server.indexing import IndexingJobStore
+    from inqtrix.runs.indexing_memory import IndexingJobStore
 
     registry = CollectorRegistry()
     monkeypatch.setattr(
@@ -504,6 +505,67 @@ def test_worker_metrics_bind_failure_stays_off(monkeypatch, caplog):
         blocker.close()
     assert metrics_defs.active_metrics() is None
     assert any("could not bind port" in rec.message for rec in caplog.records)
+
+
+def _pooled_engine(size: int):
+    from inqtrix.storage.db import build_engine
+
+    return build_engine("postgresql+asyncpg://u:p@127.0.0.1:1/db", pool_size=size)
+
+
+def test_the_api_reports_how_full_the_pool_of_its_process_is(monkeypatch):
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    engine = _pooled_engine(7)
+    monkeypatch.setattr(engine.pool, "checkedout", lambda: 3)
+    app = FastAPI()
+    metrics_module.setup_metrics(
+        app,
+        container=SimpleNamespace(database_engine=engine),
+        settings=SimpleNamespace(server=ServerSettings(metrics_enabled=True)),
+    )
+
+    body = TestClient(app).get("/metrics").text
+
+    assert _sample_value(body, "inqtrix_database_pool_size") == 7.0
+    assert _sample_value(body, "inqtrix_database_pool_in_use") == 3.0
+
+
+def test_a_process_without_postgres_reports_no_pool():
+    with make_contract_client(
+        server_settings=ServerSettings(metrics_enabled=True)
+    ) as client:
+        body = client.get("/metrics").text
+
+    assert _sample_value(body, "inqtrix_database_pool_size") is None
+
+
+def test_the_worker_reports_how_full_the_pool_of_its_process_is(monkeypatch):
+    from types import SimpleNamespace
+
+    import prometheus_client
+
+    from inqtrix.worker.metrics import start_worker_metrics
+
+    served = {}
+    monkeypatch.setattr(
+        prometheus_client,
+        "start_http_server",
+        lambda _port, registry: served.update(registry=registry),
+    )
+    settings = SimpleNamespace(
+        queue=SimpleNamespace(worker_metrics_port=9091),
+        server=SimpleNamespace(metrics_enabled=True),
+    )
+
+    assert start_worker_metrics(settings, _pooled_engine(9)) is True
+
+    body = prometheus_client.generate_latest(served["registry"]).decode()
+    assert _sample_value(body, "inqtrix_database_pool_size") == 9.0
+    assert _sample_value(body, "inqtrix_database_pool_in_use") == 0.0
 
 
 def test_metric_model_label_fallback_cap(monkeypatch):
@@ -767,7 +829,6 @@ def test_scrape_split_can_see_a_starved_pool(monkeypatch):
     and requires the split to blame the wait rather than the collection.
     """
     import asyncio
-    from concurrent.futures import ThreadPoolExecutor
 
     import httpx
 
@@ -779,31 +840,40 @@ def test_scrape_split_can_see_a_starved_pool(monkeypatch):
     hold_for = 0.5
 
     async def scenario() -> int:
-        loop = asyncio.get_running_loop()
-        pool = ThreadPoolExecutor(max_workers=1)
-        loop.set_default_executor(pool)
-        occupied = threading.Barrier(2, timeout=10)
-
-        def hold() -> None:
-            occupied.wait()
-            time.sleep(hold_for)
-
-        held = loop.run_in_executor(pool, hold)
-        # Releasing the barrier from here puts the worker inside hold(), so
-        # the single slot is taken for the next hold_for seconds.
-        occupied.wait()
-
+        # Built before the pool is taken: the first app build of a process
+        # takes longer than hold_for and would outlast the hold.
         with make_contract_client(
             server_settings=ServerSettings(metrics_enabled=True)
         ) as client:
             app = client.app
+
+        loop = asyncio.get_running_loop()
+        aio.configure_loop(
+            loop,
+            blocking_workers=1,
+            provider_workers=1,
+            legacy_segment_workers=1,
+            watch=False,
+        )
+
+        def hold() -> None:
+            # The only thread stays taken until the scrape queued behind it, plus hold_for.
+            deadline = time.monotonic() + 10
+            while aio.lane_snapshot(loop)[aio.LEGACY_LANE].waiting == 0:
+                assert time.monotonic() < deadline
+                time.sleep(0.005)
+            time.sleep(hold_for)
+
+        held = asyncio.ensure_future(aio.run_legacy_segment(hold))
+        await asyncio.sleep(0)
+
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://metrics.test"
         ) as request_client:
             response = await request_client.get("/metrics")
         await held
-        pool.shutdown(wait=False)
+        aio.close_loop(loop)
         return response.status_code
 
     try:

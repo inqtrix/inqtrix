@@ -22,7 +22,7 @@ from inqtrix.observability.otel import (
 )
 from inqtrix.project.agent_sessions_ports import AgentSessionNotFound
 from inqtrix.project.chat_ports import ThreadNotFound
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.quota.models import QuotaDimension
 from inqtrix.server.routers import quota_admission, stack_error_response
 from inqtrix.services.agent_context import StackResolutionError

@@ -19,11 +19,10 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.i18n import t, t_count
+from inqtrix.harness.contracts.events import NARRATION_EVENT
 
 if TYPE_CHECKING:
     from inqtrix.agents.phase_models import DiscoveryResult
-
-NARRATION_EVENT = "inqtrix.agent.narration"
 
 
 def emit_narration(

@@ -13,8 +13,8 @@ purposes and should not be confused.
 
 | Layer | Command | Real provider calls | What it covers | Prerequisites |
 |-------|---------|---------------------|----------------|---------------|
-| Automated local test suite | `uv run pytest tests/ -v` or `python -m pytest tests/ -v` | No | Unit tests, replay tests, streaming, config, server routes, provider normalisation. Use collect-only for the current count. | Editable install with dev extras. |
-| Infrastructure-bound proof (mandatory before a release) | `INQTRIX_TEST_REQUIRE_INTEGRATION=1 uv run pytest tests/storage tests/test_qdrant_store.py tests/test_qdrant_vector_index_live.py tests/test_qdrant_bm25_parity_live.py` | No | Persistence, RLS and tenant isolation, fencing, sequence assignment, migration cutover. These tests are marked `postgres`/`qdrant` and are skipped in the run above. | Disposable Postgres in `INQTRIX_TEST_DATABASE_URL` and Qdrant in `INQTRIX_TEST_QDRANT_URL`, see [Local infrastructure](local-infrastructure.md). |
+| Automated local test suite | `uv run pytest tests/ -v` or `python -m pytest tests/ -v` | No | Unit tests, replay tests, streaming, config, server routes, provider normalisation. Use collect-only for the current count. | Every extra installed (`uv sync --all-extras`); a missing one fails `tests/architecture/test_required_extras.py`, because tests that skip on it would otherwise never run. |
+| Infrastructure-bound proof (mandatory before a release) | `INQTRIX_TEST_REQUIRE_INTEGRATION=1 uv run pytest tests/storage tests/test_qdrant_store.py tests/test_qdrant_vector_index_live.py tests/test_qdrant_bm25_parity_live.py tests/test_aio.py tests/worker` | No | Persistence, RLS and tenant isolation, fencing, sequence assignment, migration cutover, the job queue on a real server. These tests are marked `postgres`/`qdrant`/`valkey` and are skipped in the run above. | Disposable Postgres in `INQTRIX_TEST_DATABASE_URL`, Qdrant in `INQTRIX_TEST_QDRANT_URL` and Valkey in `INQTRIX_TEST_VALKEY_URL`, see [Local infrastructure](local-infrastructure.md). |
 | Replay-only | `uv run pytest tests/replay/ -v` or `python -m pytest tests/replay/ -v` | No | Provider replay with VCR cassettes and `botocore.Stubber`. Offline. | Editable install with dev extras. |
 | Parity asset validation | `inqtrix-parity contract` | No | Canonical question set and local parity asset structure under `tests/integration/`. | Editable install plus a local `tests/integration/questions.json`; that directory is git-ignored and absent from a fresh clone, see [Parity tooling](parity-tooling.md). |
 | Local parity run against the HTTP test endpoint | `inqtrix-parity run --endpoint http://127.0.0.1:5100` | Yes | Runs canonical questions against a running server via `/v1/test/run`. | Running server, valid provider config, `TESTING_MODE=true`. |
@@ -131,6 +131,7 @@ npm run verify:load-smoke
 npm run verify:load-soak
 npm run verify:load-ramp
 npm run verify:load-capacity -- --fixture /protected/load-fixture.json
+INQTRIX_RUN_LOAD_STAGE=smoke npm run verify:run-load
 npm run verify:edge -- --container-engine podman
 # or select docker explicitly
 npm run verify:edge -- --container-engine docker
@@ -138,8 +139,8 @@ npm run verify:edge -- --container-engine docker
 
 `verify:list` and `verify:tooling` are not profiles: the first prints the
 inventory, the second runs the orchestrator's own unit tests. `owner-setup`
-requires one explicit `--browser` target; `load-soak` and `load-ramp` pin
-`--container-engine podman` in the npm script itself.
+requires one explicit `--browser` target; `load-soak`, `load-ramp` and `run-load`
+pin `--container-engine podman` in the npm script itself.
 
 [Shared verification
 profiles](testing-strategy.md#shared-verification-profiles) lists every
@@ -152,6 +153,10 @@ preconditions bite at the command line:
   recreate it without that variable after the run.
 - `load-smoke` provisions its own Run-ID-bound users, document, shares, and
   session fixture; `--fixture` is intentionally not accepted.
+- `run-load` needs a running stack whose models are the provider stand-in, and it
+  starts nothing itself. It refuses a target it cannot prove to be wired to the
+  stand-in before it creates anything. Stack command, inputs, and report are in
+  [`tests/load/README.md`](../../tests/load/README.md#run-load).
 
 Result semantics, the machine-readable Run ID, and the redacted report path
 are specified under [Shared verification

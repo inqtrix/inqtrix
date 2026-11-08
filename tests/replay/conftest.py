@@ -61,9 +61,6 @@ _PROVIDER_ENV_VARS: tuple[str, ...] = (
     "AZURE_OPENAI_DEPLOYMENT_NAME",
     "AZURE_AI_PROJECT_API_KEY",
     "AZURE_AI_PROJECT_ENDPOINT",
-    "AZURE_TENANT_ID",
-    "AZURE_CLIENT_ID",
-    "AZURE_CLIENT_SECRET",
     "WEB_SEARCH_AGENT_NAME",
     # ServerSettings fields. Not used by any current replay test, but
     # stripped defensively so a future test cannot accidentally pull a

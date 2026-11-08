@@ -86,6 +86,14 @@ export type RunEventChannelDeps = {
   pollIntervalMs?: number
   /** Polls between background SSE retry attempts (default 10). */
   pollsPerSseRetry?: number
+  /** Failed polls in a row the channel rides out before it rejects
+   * (default 6). A network cut, a timeout or an overloaded edge (408, 429,
+   * 5xx) is retried with a doubling wait, so a few seconds without network
+   * do not turn a running run into an error; an outage that outlasts the
+   * budget, or an answer no retry can change, still rejects loudly. */
+  maxOutagePolls?: number
+  /** Longest wait between two retried polls (default 30000 ms). */
+  outageBackoffMaxMs?: number
   /** Maximum wait for the first SSE bytes (default 15000 ms). */
   firstActivityTimeoutMs?: number
   /** Maximum quiet period after SSE became live (default 30000 ms). */
@@ -109,11 +117,21 @@ function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
+/** A poll failure that a later poll can outlive: no HTTP answer at all
+ * (network cut, timeout), a request timeout, a rate limit or a server-side
+ * failure. Every other answer stays the same however often it is asked. */
+function isOutagePollFailure(status: number | undefined): boolean {
+  return status === undefined || status === 408 || status === 429 || status >= 500
+}
+
 /**
  * Subscribe until a terminal event or abort. Never rejects after the
  * first successful delivery path — transport errors degrade instead.
- * The initial SSE open failure ALSO degrades (the poller then reports
- * a genuine outage loudly by throwing once polling fails too).
+ * The initial SSE open failure ALSO degrades. A failed poll is an outage
+ * the channel rides out for a bounded number of polls (see
+ * `maxOutagePolls`), on the visible polling hint; only an outage that
+ * outlasts that budget, or an answer no retry can change, is reported
+ * loudly by throwing.
  */
 export async function subscribeRunEventsWithFallback(
   deps: RunEventChannelDeps,
@@ -128,6 +146,8 @@ export async function subscribeRunEventsWithFallback(
     firstActivityTimeoutMs = 15_000,
     inactivityTimeoutMs = 30_000,
     parkedPollIntervalMs = 15_000,
+    maxOutagePolls = 6,
+    outageBackoffMaxMs = 30_000,
     sleep = defaultSleep,
   } = deps
   /** A parked run polls; everything else streams. */
@@ -273,6 +293,7 @@ export async function subscribeRunEventsWithFallback(
     // the stream was down); later pages arrive on cadence and count as live.
     // Decided here in the transport — no timestamp heuristics, no clock skew.
     let firstPollPage = true
+    let failedPolls = 0
     for (;;) {
       if (signal.aborted) return
       let page: RunEventsPage
@@ -287,8 +308,27 @@ export async function subscribeRunEventsWithFallback(
           deps.onUnavailable?.(status)
           return
         }
-        throw error
+        if (!isOutagePollFailure(status) || failedPolls >= maxOutagePolls) {
+          throw error
+        }
+        // A few seconds without network must not end the subscription of a
+        // running run, or its row shows an error until a reload although the
+        // run goes on. Meanwhile the polling hint shows the outage, for a
+        // parked run too.
+        failedPolls += 1
+        reportTransport('polling')
+        console.warn(
+          `Inqtrix run event poll failed (${failedPolls}/${maxOutagePolls}); retrying.`,
+          error,
+        )
+        await sleep(
+          Math.min(outageBackoffMaxMs, pollIntervalMs * 2 ** (failedPolls - 1)),
+          signal,
+        )
+        continue
       }
+      if (failedPolls > 0) reportTransport(parked ? 'parked' : 'polling')
+      failedPolls = 0
       if (firstPollPage) {
         firstPollPage = false
         deliverHistory(page.events)

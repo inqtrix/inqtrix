@@ -117,6 +117,7 @@ async def terminalization_database() -> AsyncIterator[
 
 
 @pytest.mark.asyncio
+@pytest.mark.two_connections_on_purpose
 async def test_v02_cutover_lock_fails_nowait_when_a_table_is_in_use(
     terminalization_database: tuple[AsyncEngine, str],
 ) -> None:

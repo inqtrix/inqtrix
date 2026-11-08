@@ -37,6 +37,7 @@ import {
   createVectorIndexCollectionOnServer,
   isAbortError,
   KnowledgeReindexPartialError,
+  listCollectionDocuments,
   type IngestProgress,
   type KnowledgeReindexResult,
   type KnowledgeSyncOptions,
@@ -61,7 +62,11 @@ import { IndexBar, knowledgeUnavailableLabel } from './IndexBar'
 import { AddDocsPanel } from './AddDocsPanel'
 import { FileCard, FileRow } from './FileItem'
 import { FilePreviewPanel } from './FilePreviewPanel'
-import { indexingJobDisposition } from './indexingTypes'
+import {
+  documentJobsView,
+  indexesWithListablePendingMembers,
+  listedMembersView,
+} from './indexingTypes'
 import {
   cancelIndexingJob,
   hasHttpStatus,
@@ -462,6 +467,44 @@ export function FileLibraryWorkspace({
     completedIndexDeletionIdsRef.current.clear()
     completedKnowledgeDeletionIdsRef.current.clear()
   }, [deletionScopeKey])
+
+  // After a reload the job list remembers a finished document job only an
+  // hour and at most ten per collection, while the index stored its members
+  // as pending during the run. The collection's document list keeps what was
+  // embedded: each server-backed index with pending members reads it once per
+  // sign-in and workspace. A failed listing leaves the members as they are.
+  const listedIndexIdsRef = useRef(new Set<string>())
+  const listingScope = `${knowledgeSync?.apiKey ?? ''}|${knowledgeSync?.workspaceId ?? ''}`
+  useEffect(() => {
+    listedIndexIdsRef.current = new Set()
+  }, [listingScope])
+  useEffect(() => {
+    if (!knowledgeSync) return
+    const listed = listedIndexIdsRef.current
+    for (const index of indexesWithListablePendingMembers(state.vectorIndexes, listed)) {
+      listed.add(index.id)
+      const collectionId = index.serverCollectionId as string
+      listCollectionDocuments(collectionId, knowledgeSync).then(
+        (documents) => {
+          const current = stateRef.current.vectorIndexes[index.id]
+          if (listedIndexIdsRef.current !== listed || current?.serverCollectionId !== collectionId) return
+          const { embeddedFileIds, serverDocumentIds } = listedMembersView(current.members, documents)
+          if (embeddedFileIds.length === 0) return
+          dispatch({
+            embeddedFileIds,
+            failureMessage: null,
+            indexId: index.id,
+            serverDocumentIds,
+            type: 'reconcileVectorIndexDocumentJobs',
+          })
+        },
+        (error: unknown) => {
+          // Not retried on every state change: opening the view again reads it.
+          console.warn('Inqtrix: reading the documents of a knowledge collection failed.', error)
+        },
+      )
+    }
+  }, [dispatch, knowledgeSync, state.vectorIndexes])
 
   useEffect(() => {
     const allOperations = Object.values(deletionApi.operations)
@@ -1226,6 +1269,29 @@ export function FileLibraryWorkspace({
         const completedFileId = current?.members.find(
           (member) => member.serverDocumentId === summary.document_id,
         )?.fileId
+        if (!live) {
+          // The run is over already, a sibling failed: this outcome still counts.
+          dispatch({
+            embeddedFileIds: completedFileId ? [completedFileId] : [],
+            failureMessage: null,
+            indexId,
+            type: 'reconcileVectorIndexDocumentJobs',
+          })
+          return
+        }
+        const stillRunning = (live.runningFileIds ?? []).filter((fileId) => fileId !== completedFileId)
+        if (stillRunning.length > 0) {
+          dispatch({
+            completedDocuments: live.completedDocuments + 1,
+            embedded: true,
+            fileId: completedFileId,
+            indexId,
+            runningFileIds: stillRunning,
+            totalDocuments: live.totalDocuments,
+            type: 'markVectorIndexProgress',
+          })
+          return
+        }
         const embeddedFileIds = [
           ...new Set([
             ...(current?.members
@@ -1325,6 +1391,33 @@ export function FileLibraryWorkspace({
       if (indexId) dispatch({ indexId, queuePosition, type: 'markVectorIndexQueued' })
     },
     onPaused: (collectionId, pause) => {
+      if (pause.documentId) {
+        const documentIndexId = localIndexIdForCollection(collectionId)
+        const member = documentIndexId
+          ? stateRef.current.vectorIndexes[documentIndexId]?.members.find(
+              (candidate) => candidate.serverDocumentId === pause.documentId,
+            )
+          : null
+        if (!documentIndexId || !member) return
+        dispatch({
+          autoResume: pause.autoResume,
+          currentBatch: pause.currentBatch,
+          errorType: pause.errorType,
+          fileId: member.fileId,
+          indexId: documentIndexId,
+          jobId: pause.jobId,
+          phase: pause.phase,
+          status: pause.status,
+          totalBatches: pause.totalBatches,
+          type: 'markVectorIndexMemberProgress',
+        })
+        const live = stateRef.current.indexingJobs[documentIndexId]
+        const stillRunning = (live?.runningFileIds ?? []).filter((fileId) => fileId !== member.fileId)
+        if (stillRunning.length === 0) {
+          dispatch({ indexId: documentIndexId, status: pause.status, type: 'markVectorIndexRunPaused' })
+        }
+        return
+      }
       setServerJobs((current) => ({
         ...current,
         [collectionId]: {
@@ -1353,34 +1446,48 @@ export function FileLibraryWorkspace({
         type: 'markVectorIndexPaused',
       })
     },
-    onPausedDocuments: (collectionId, jobs) => {
+    onDocumentJobs: (collectionId, jobs) => {
       const indexId = localIndexIdForCollection(collectionId)
       const index = indexId ? stateRef.current.vectorIndexes[indexId] : null
-      if (!indexId || !index) return
+      if (!indexId || !index) return []
       // A run in flight owns the index's live state; it may be the very
       // continuation that is resuming these jobs right now.
       const live = stateRef.current.indexingJobs[indexId]
-      if (live && live.status !== 'paused_dependency' && live.status !== 'paused_validation') return
-      const paused = jobs.flatMap((summary) => {
-        const member = index.members.find(
-          (candidate) => candidate.serverDocumentId === summary.document_id,
-        )
-        const disposition = indexingJobDisposition(summary.status)
-        return member && disposition.kind === 'paused'
-          ? [{ fileId: member.fileId, status: disposition.status, summary }]
-          : []
+      if (live && live.status !== 'paused_dependency' && live.status !== 'paused_validation') return []
+      const { active, embeddedFileIds, failed, paused } = documentJobsView(jobs, index.members)
+      const nothingWorking = active.length === 0 && paused.length === 0
+      dispatch({
+        embeddedFileIds,
+        failureMessage: nothingWorking && failed
+          ? carriedErrorText(failed.error, readerTexts().fileLibrary.indexingFailed)
+            ?? readerTexts().fileLibrary.indexingFailed
+          : null,
+        indexId,
+        type: 'reconcileVectorIndexDocumentJobs',
       })
-      if (paused.length === 0) return
+      if (nothingWorking) return []
       dispatch({
         indexId,
-        jobId: `paused-${collectionId}`,
+        jobId: `documents-${collectionId}`,
         queuedFileIds: [],
-        runningFileIds: [],
+        runningFileIds: active.map((job) => job.fileId),
         source: 'build',
-        status: pausedRunStatus(paused),
-        totalDocuments: paused.length,
+        status: active.length > 0 ? 'running' : pausedRunStatus(paused),
+        totalDocuments: active.length + paused.length,
         type: 'startVectorIndexReindex',
       })
+      for (const job of active) {
+        dispatch({
+          currentBatch: job.summary.current_batch,
+          fileId: job.fileId,
+          indexId,
+          jobId: job.summary.job_id,
+          phase: job.summary.phase,
+          status: job.status,
+          totalBatches: job.summary.total_batches,
+          type: 'markVectorIndexMemberProgress',
+        })
+      }
       for (const job of paused) {
         dispatch({
           currentBatch: job.summary.current_batch,
@@ -1395,11 +1502,14 @@ export function FileLibraryWorkspace({
           type: 'markVectorIndexMemberProgress',
         })
       }
-      dispatch({
-        indexId,
-        status: pausedRunStatus(paused),
-        type: 'markVectorIndexRunPaused',
-      })
+      if (active.length === 0) {
+        dispatch({
+          indexId,
+          status: pausedRunStatus(paused),
+          type: 'markVectorIndexRunPaused',
+        })
+      }
+      return active.map((job) => job.summary)
     },
     onReadyRaw: (collectionId, jobId) => {
       clearServerJob(collectionId, jobId)
@@ -1435,7 +1545,7 @@ export function FileLibraryWorkspace({
         dispatch({ indexId, totalDocuments, type: 'markVectorIndexResumed' })
       }
     },
-    onStart: (collectionId, jobId, totalDocuments, status, summary) => {
+    onStart: (collectionId, jobId, totalDocuments, status) => {
       setServerJobs((current) => ({
         ...current,
         [collectionId]: current[collectionId]?.jobId === jobId
@@ -1453,18 +1563,11 @@ export function FileLibraryWorkspace({
       }))
       const indexId = localIndexIdForCollection(collectionId)
       const index = indexId ? stateRef.current.vectorIndexes[indexId] : null
-      const documentFileId = summary.operation_kind === 'document_revision'
-        ? index?.members.find(
-            (member) => member.serverDocumentId === summary.document_id,
-          )?.fileId
-        : undefined
       if (indexId) dispatch({
         indexId,
         jobId,
-        queuedFileIds: documentFileId
-          ? [documentFileId]
-          : index?.members.map((member) => member.fileId),
-        runningFileIds: documentFileId ? [documentFileId] : [],
+        queuedFileIds: index?.members.map((member) => member.fileId),
+        runningFileIds: [],
         source: 'server',
         status,
         totalDocuments,
@@ -1480,6 +1583,9 @@ export function FileLibraryWorkspace({
       }
     },
     refreshToken: serverCollectionsRefreshToken,
+    // The indexes arrive on their own request: once a collection is known, its
+    // jobs can be matched to it.
+    knownCollections: indexes.flatMap((index) => index.serverCollectionId ?? []).sort().join(),
     workspaceId: knowledgeSync?.workspaceId ?? '',
   })
 
@@ -1636,6 +1742,27 @@ export function FileLibraryWorkspace({
       const onMemberFailed: MemberFailed = ({ fileId }) => {
         inFlight.delete(fileId)
       }
+      // The server identity of the run goes onto the record right away, so a
+      // reload finds the run's jobs whether or not this page lives to the end.
+      const onCollectionCreated: NonNullable<IngestProgress['onCollectionCreated']> = (
+        { collectionId, model },
+      ) => {
+        dispatch({
+          indexId,
+          serverCollectionId: collectionId,
+          serverCollectionModel: model,
+          type: 'adoptVectorIndexIdentity',
+        })
+      }
+      const onMemberDocument: NonNullable<IngestProgress['onMemberDocument']> = (
+        { documentId, fileId },
+      ) => {
+        dispatch({
+          indexId,
+          member: { fileId, serverDocumentId: documentId },
+          type: 'adoptVectorIndexIdentity',
+        })
+      }
       const onMemberDone: MemberProgress = ({ fileId, done, total, embedded }) => {
         inFlight.delete(fileId)
         dispatch({
@@ -1665,6 +1792,8 @@ export function FileLibraryWorkspace({
               }))
             : assets
           const result = await ingest(resolved, {
+            onCollectionCreated,
+            onMemberDocument,
             onMemberDone,
             onMemberFailed,
             onMemberJobProgress,
@@ -2017,12 +2146,15 @@ export function FileLibraryWorkspace({
       controller.abort()
       return
     }
-    // A paused client run still holds its paused jobs on the server: cancel
-    // each there, or a reload would bring them back as a paused run.
-    const pausedJobIds = [...pausedRunJobs(job, 'resume').values()].map(({ jobId }) => jobId)
-    if (knowledgeSync && pausedJobIds.length > 0) {
+    // A run without a controller is a paused one or one a reload found: its
+    // jobs are on the server. Cancel each there, or the next reload would bring
+    // them back.
+    const memberJobIds = [...new Set(
+      Object.values(job.memberProgress ?? {}).flatMap((progress) => progress.jobId ?? []),
+    )]
+    if (knowledgeSync && memberJobIds.length > 0) {
       const options = { apiKey: knowledgeSync.apiKey, workspaceId: knowledgeSync.workspaceId }
-      void Promise.all(pausedJobIds.map((jobId) => cancelIndexingJob(jobId, options)))
+      void Promise.all(memberJobIds.map((jobId) => cancelIndexingJob(jobId, options)))
         .then(() => dispatch({ indexId, type: 'markVectorIndexCancelled' }))
         .catch((error: unknown) => {
           setIndexActionError({

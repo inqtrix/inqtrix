@@ -47,10 +47,14 @@ class AgentAlgorithm(Protocol):
     Attributes:
         id: Stable identifier; doubles as the public ``mode`` value.
         display_name: Human-readable name for capability manifests.
+        contract_version: Version of the workflow contract, at least 1. Every
+            run of this mode is stamped with it on acceptance; a change that
+            breaks resuming a stored run raises it.
     """
 
     id: str
     display_name: str
+    contract_version: int
 
     def capabilities(self) -> dict:
         """Describe what this algorithm needs and produces.
@@ -106,10 +110,16 @@ class AlgorithmRegistry:
         Raises:
             ValueError: When an algorithm with the same id is already
                 registered — duplicate registration is always a
-                composition bug, never something to resolve silently.
+                composition bug, never something to resolve silently —
+                or when it names no workflow contract of at least 1, which
+                every run of its mode is stamped with.
         """
         if algorithm.id in self._items:
             raise ValueError(f"Algorithm already registered: {algorithm.id}")
+        contract_version = getattr(algorithm, "contract_version", None)
+        # An exact type check: ``True`` is an int, but no version.
+        if type(contract_version) is not int or contract_version < 1:
+            raise ValueError(f"Algorithm {algorithm.id} names no workflow contract")
         self._items[algorithm.id] = algorithm
 
     def get(self, algorithm_id: str) -> AgentAlgorithm:
@@ -136,6 +146,17 @@ class AlgorithmRegistry:
     def ids(self) -> tuple[str, ...]:
         """Registered algorithm ids in registration order."""
         return tuple(self._items)
+
+    def workflow_contracts(self) -> dict[str, int]:
+        """The workflow contract each registered mode carries.
+
+        A claim compares a run's binding with this map; a mode missing from
+        it is one this process cannot run.
+        """
+        return {
+            algorithm_id: algorithm.contract_version
+            for algorithm_id, algorithm in self._items.items()
+        }
 
     def manifest(self) -> list[dict]:
         """Capability manifest entries in registration order."""

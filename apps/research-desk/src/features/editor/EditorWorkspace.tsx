@@ -304,6 +304,7 @@ import type {
   EditorDocumentPushOutcome,
 } from './useEditorHistoryApi'
 import { readerError } from '@/api/requestErrorText'
+import { formatTimeOfDay } from '@/lib/time'
 
 type EditorWorkspaceProps = {
   apiKey?: string
@@ -3640,7 +3641,7 @@ export function EditorTopBar({
     try {
       const { exportMarkdownToDocx } = await import('./export/docxExport')
       const markdown = await onExportWordMarkdown()
-      await exportMarkdownToDocx(markdown, document.title)
+      await exportMarkdownToDocx(markdown, document.title, locale)
     } catch (error) {
       setExportError(error instanceof Error ? error.message : copy.exportWordFailed)
       console.error('Inqtrix Word export failed.', error)
@@ -3684,8 +3685,8 @@ export function EditorTopBar({
         : null
     : null
   const documentStatusText = provenanceLabel
-    ? `${provenanceLabel} ${document.sourceRunId} · ${copy.updated} ${formatEditorTime(document.updatedAt)}`
-    : `${copy.updated} ${formatEditorTime(document.updatedAt)}`
+    ? `${provenanceLabel} ${document.sourceRunId} · ${copy.updated} ${formatTimeOfDay(document.updatedAt, locale)}`
+    : `${copy.updated} ${formatTimeOfDay(document.updatedAt, locale)}`
   const shareDisabled = editorDocumentShareDisabled({
     canFlushForShare,
     document,
@@ -4288,7 +4289,9 @@ export function EditorAssistantComposer({
           </p>
         ) : null}
         <AnimatePresence initial={false}>
-          {isAttachActive ? (
+          {/* Notes collected one by one on their cards count as attached as
+              well, so the input lists them, not only for "attach all". */}
+          {isAttachActive || attachedComments.length > 0 ? (
             <motion.div
               animate={{ height: 'auto', opacity: 1 }}
               className="mb-2 overflow-hidden rounded-md border border-brand/30 bg-brand-subtle/30"
@@ -4298,7 +4301,7 @@ export function EditorAssistantComposer({
             >
               <div className="flex items-center gap-1.5 px-3 pb-1 pt-2 t-meta-sm font-semibold text-brand">
                 <MessagesSquare className="size-3.5" />
-                {attachedComments.length} {copy.attachedComments}
+                {countLabel(attachedComments.length, copy.attachedCommentsOne, copy.attachedComments)}
               </div>
               <div className="flex flex-wrap gap-1.5 px-3 pb-2.5">
                 <AnimatePresence initial={false}>
@@ -4823,6 +4826,7 @@ function EditorCommentCard({
   suggestionError?: string
   suggestionPublishDisabledReason: string | null
 }) {
+  const { locale } = useLocale()
   const isResolved = comment.status === 'resolved'
   const [isEditing, setIsEditing] = useState(false)
   const [editDraft, setEditDraft] = useState(comment.commentMarkdown)
@@ -4865,7 +4869,7 @@ function EditorCommentCard({
           {commentNumber}
         </span>
         <span className="t-hint shrink-0 text-muted-foreground/70">
-          {formatEditorTime(comment.updatedAt)}
+          {formatTimeOfDay(comment.updatedAt, locale)}
         </span>
         <div className={cn(
           'ml-auto flex items-center gap-0.5 transition-opacity',
@@ -5253,12 +5257,6 @@ function TooltipButton({
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
   )
-}
-
-function formatEditorTime(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
 function confirmProjectionFallbackExport(

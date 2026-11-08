@@ -1,35 +1,27 @@
 """Azure AI Foundry Web Search adapter for the SearchProvider interface.
 
-Queries a pre-created Azure AI Foundry agent through the Responses API.
-API-key deployments use the OpenAI data-plane client directly with the
-``api-key`` header. Entra ID deployments use
-``AIProjectClient.get_openai_client()`` to mint and refresh bearer tokens.
-Both paths reference the configured agent per request through
+Queries a pre-created Azure AI Foundry agent through the Responses API,
+with the async OpenAI client against the project's ``/openai/v1`` endpoint.
+It authenticates with the Foundry project key, sent in the ``api-key``
+header, and references the configured agent per request through
 ``extra_body["agent_reference"]`` so the optional agent version is pinned.
 
 The agent must be created beforehand (via Azure Portal or CLI). Pass its
-``agent_name`` (and optionally ``agent_version``) and the project endpoint
-to the constructor.
-
-Four auth modes are supported (resolved in this order):
-
-1. **Project API key** — pass ``api_key``; sent in the ``api-key`` header.
-2. An explicit ``credential`` object.
-3. **Service Principal** — ``tenant_id`` + ``client_id`` + ``client_secret``.
-4. ``DefaultAzureCredential`` — fallback (``az login``, Managed Identity,
-   VS Code sign-in, etc.).
+``agent_name`` (and optionally ``agent_version``), the project endpoint
+and the project key to the constructor.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-import threading
 import time
+import weakref
 from dataclasses import replace
-from typing import Any
+from typing import Any, Mapping
 
-from openai import APIStatusError, OpenAI, OpenAIError, RateLimitError
+from openai import APIStatusError, AsyncOpenAI, OpenAIError, RateLimitError
 
 from inqtrix.exceptions import (
     AgentCancelled,
@@ -38,25 +30,24 @@ from inqtrix.exceptions import (
     AgentTimeout,
 )
 from inqtrix.constants import SEARCH_TIMEOUT
-from inqtrix.providers._azure_common import (
-    extract_azure_api_error_details,
-    resolve_azure_credential,
+from inqtrix.providers._azure_common import extract_azure_api_error_details
+from inqtrix.providers.attempts import (
+    AsyncNativeSearchProvider,
+    call_with_retries,
+    estimate_request_tokens,
 )
+from inqtrix.providers import _openai_resources  # noqa: F401  (resources at import)
 from inqtrix.providers.base import (
-    SearchProvider,
-    _NonFatalNoticeMixin,
-    _RetryNoticeMixin,
     _apply_domain_filters,
     _bounded_timeout,
     _build_recency_language_hints,
-    _call_openai_chat_completion_with_retries,
     _check_deadline,
     _check_provider_operation_deadline,
     _operation_deadline,
     responses_usage_details,
     response_raw_payload,
 )
-from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource
+from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource, ProviderNotice
 from inqtrix.urls import (
     CredentialBearingUrlError,
     extract_urls,
@@ -72,7 +63,24 @@ def _annotation_offset(value: Any) -> int | None:
     return value if isinstance(value, int) and value >= 0 else None
 
 
-class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
+def _incomplete_reason(response: Any) -> str | None:
+    """Why the agent stopped before its answer was finished; ``None`` when it finished.
+
+    The Responses API marks such an answer ``status: incomplete`` and names the
+    cause in ``incomplete_details.reason`` (``content_filter``,
+    ``max_output_tokens``).
+    """
+    if str(getattr(response, "status", "") or "").lower() != "incomplete":
+        return None
+    details = getattr(response, "incomplete_details", None)
+    reason = (
+        details.get("reason") if isinstance(details, Mapping)
+        else getattr(details, "reason", None)
+    )
+    return str(reason or "unknown")
+
+
+class AzureFoundryWebSearch(AsyncNativeSearchProvider):
     """Query the web via an Azure AI Foundry agent and the Responses API.
 
     Use this provider when search should run through a pre-created Foundry
@@ -85,8 +93,8 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
         _agent_name (str): Foundry agent name referenced through the SDK.
         _agent_version (str): Optional agent version, shown to operators.
         _timeout (float): Per-call timeout budget before deadline clamping.
-        _client: Authenticated OpenAI client from
-            ``AIProjectClient.get_openai_client``.
+        _clients (WeakKeyDictionary): One ``AsyncOpenAI`` client per event
+            loop, built on first use from ``_client_kwargs``.
     """
 
     supported_search_parameters = frozenset({
@@ -101,13 +109,10 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
         agent_name: str,
         agent_version: str = "",
         api_key: str | None = None,
-        credential: Any | None = None,
-        tenant_id: str | None = None,
-        client_id: str | None = None,
-        client_secret: str | None = None,
         timeout: float = SEARCH_TIMEOUT,
         max_concurrency: int = 6,
-        # Internal: accept a pre-built OpenAI client from tests.
+        default_headers: Mapping[str, str] | None = None,
+        # Internal: accept a pre-built async OpenAI client from tests.
         _client: Any | None = None,
     ) -> None:
         """Initialize the Azure AI Foundry Web Search provider.
@@ -119,31 +124,28 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             agent_version: Optional version label, surfaced in
                 ``search_model``. The SDK routes by agent name to the
                 agent's deployed version.
-            api_key: Optional static Foundry project key. When supplied it
-                wins over all credential modes and is sent in the
-                ``api-key`` header.
-            credential: Optional pre-built Azure token credential. When
-                supplied it wins over the Service Principal fields.
-            tenant_id: Optional Entra tenant id for Service Principal auth.
-            client_id: Optional Entra client id for Service Principal auth.
-            client_secret: Optional Entra client secret for Service
-                Principal auth.
+            api_key: Foundry project key, sent in the ``api-key`` header.
+                Required unless a prebuilt client is given.
             timeout: Default per-call timeout budget in seconds.
             max_concurrency: Maximum simultaneous calls on this provider
                 instance. Research and Agent Desk callers share this gate.
-            _client: Optional prebuilt OpenAI client used by tests.
+            default_headers: Optional headers sent with every request, for
+                example the subscription header of an API gateway. The
+                project key's ``api-key`` header always wins.
+            _client: Optional prebuilt async OpenAI client used by tests on
+                every loop.
 
         Raises:
-            ValueError: If ``project_endpoint`` or ``agent_name`` is empty.
+            ValueError: If ``project_endpoint``, ``agent_name`` or
+                ``api_key`` is empty.
 
         Example:
             >>> from inqtrix import AzureFoundryWebSearch
-            >>> from azure.identity import DefaultAzureCredential
             >>> search = AzureFoundryWebSearch(
             ...     project_endpoint="https://ex.services.ai.azure.com/api/projects/demo",
             ...     agent_name="web-search-agent",
             ...     agent_version="2",
-            ...     credential=DefaultAzureCredential(),
+            ...     api_key="project-key",
             ... )
             >>> search.is_available()
             True
@@ -154,53 +156,56 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             raise ValueError("agent_name is required")
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
+        if _client is None and not (api_key or "").strip():
+            raise ValueError("api_key is required: the Foundry project key")
 
         self._project_endpoint = project_endpoint.rstrip("/")
         self._agent_name = agent_name
         self._agent_version = agent_version
         self._timeout = timeout
         self.max_search_concurrency = int(max_concurrency)
-        self._concurrency_gate = threading.BoundedSemaphore(
-            self.max_search_concurrency
-        )
+        # One gate per loop: an asyncio semaphore belongs to the loop it waits on.
+        self._gates: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, asyncio.Semaphore
+        ] = weakref.WeakKeyDictionary()
 
-        if _client is not None:
-            self._client = _client
-        elif api_key:
-            # Static Foundry project key: the agent's data-plane endpoint
-            # (``/openai/v1``) authenticates via the ``api-key`` header, so the
-            # OpenAI client is built directly against it. AIProjectClient is the
-            # control-plane SDK (Entra ID only) and is not used for key auth.
-            # The agent (and its version) is selected per call via
-            # ``agent_reference`` in :meth:`_call_responses`.
-            self._client = OpenAI(
-                base_url=f"{self._project_endpoint}/openai/v1/",
-                api_key=api_key,
-                default_headers={"api-key": api_key},
-                timeout=timeout,
-                max_retries=0,
-            )
-        else:
-            # Entra ID token credential: AIProjectClient.get_openai_client()
-            # mints and auto-refreshes the bearer token. No ``agent_name`` is
-            # bound at the client; the agent is referenced per call instead.
-            from azure.ai.projects import AIProjectClient
+        self._prebuilt_client = _client
+        self._client_kwargs: dict[str, Any] = {
+            "base_url": f"{self._project_endpoint}/openai/v1/",
+            "api_key": api_key,
+            "default_headers": {
+                **{
+                    name: value
+                    for name, value in (default_headers or {}).items()
+                    if name.lower() != "api-key"
+                },
+                "api-key": api_key,
+            },
+        } if api_key else {}
+        self._client_kwargs.update(timeout=timeout, max_retries=0)
+        self._clients: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, AsyncOpenAI
+        ] = weakref.WeakKeyDictionary()
 
-            credential = resolve_azure_credential(
-                credential=credential,
-                tenant_id=tenant_id,
-                client_id=client_id,
-                client_secret=client_secret,
-            )
-            project_client = AIProjectClient(
-                endpoint=self._project_endpoint,
-                credential=credential,
-                allow_preview=True,
-            )
-            self._client = project_client.get_openai_client().with_options(
-                max_retries=0,
-                timeout=timeout,
-            )
+    def _async_client(self) -> Any:
+        """The SDK client of the running loop: one per provider and loop, built on first use."""
+        if self._prebuilt_client is not None:
+            return self._prebuilt_client
+        loop = asyncio.get_running_loop()
+        client = self._clients.get(loop)
+        if client is None:
+            client = AsyncOpenAI(**self._client_kwargs)
+            self._clients[loop] = client
+        return client
+
+    def _gate(self) -> asyncio.Semaphore:
+        """The concurrency gate of the running loop, ``max_search_concurrency`` wide."""
+        loop = asyncio.get_running_loop()
+        gate = self._gates.get(loop)
+        if gate is None:
+            gate = asyncio.Semaphore(self.max_search_concurrency)
+            self._gates[loop] = gate
+        return gate
 
     _extract_api_error_details = staticmethod(extract_azure_api_error_details)
 
@@ -208,7 +213,7 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
     # SearchProvider interface
     # ------------------------------------------------------------------
 
-    def search(
+    async def asearch(
         self,
         query: str,
         *,
@@ -222,8 +227,11 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
     ) -> GroundedSearchResult:
         """Execute one deadline-bounded search through the shared gate."""
         operation_deadline = _operation_deadline(self._timeout, deadline)
-        remaining = max(0.0, operation_deadline - time.monotonic())
-        if not self._concurrency_gate.acquire(timeout=remaining):
+        gate = self._gate()
+        try:
+            async with asyncio.timeout(max(0.0, operation_deadline - time.monotonic())):
+                await gate.acquire()
+        except TimeoutError:
             _check_provider_operation_deadline(
                 operation_deadline,
                 deadline,
@@ -232,9 +240,9 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             raise AgentProviderTimeout(
                 ("Azure Foundry web search reached the operation deadline while waiting "
                 "for a concurrency slot.")
-            )
+            ) from None
         try:
-            return self._search_with_slot(
+            return await self._asearch_with_slot(
                 query,
                 search_context_size=search_context_size,
                 recency_filter=recency_filter,
@@ -246,9 +254,9 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                 outer_deadline=deadline,
             )
         finally:
-            self._concurrency_gate.release()
+            gate.release()
 
-    def _search_with_slot(
+    async def _asearch_with_slot(
         self,
         query: str,
         *,
@@ -285,9 +293,6 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             AgentTimeout: If the global deadline has already elapsed.
             AgentRateLimited: If the backend surfaces a fatal rate limit.
         """
-        self._clear_nonfatal_notice()
-        self._clear_retry_notices()
-
         if deadline is not None:
             _check_deadline(deadline)
 
@@ -302,8 +307,14 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
         agent_ref: dict[str, str] = {"type": "agent_reference", "name": self._agent_name}
         if self._agent_version:
             agent_ref["version"] = self._agent_version
+        client = self._async_client()
         try:
-            response = _call_openai_chat_completion_with_retries(
+            response = await call_with_retries(
+                lambda: client.responses.create(
+                    input=[{"role": "user", "content": user_content}],
+                    extra_body={"agent_reference": agent_ref},
+                    timeout=_bounded_timeout(self._timeout, deadline),
+                ),
                 provider_label=type(self).__name__,
                 model=self.search_model,
                 operation="web_search",
@@ -311,12 +322,8 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                 outer_deadline=outer_deadline,
                 timeout_label="Azure-Foundry-WebSearch",
                 configured_timeout_seconds=self._timeout,
-                create=lambda: self._client.responses.create(
-                    input=[{"role": "user", "content": user_content}],
-                    extra_body={"agent_reference": agent_ref},
-                    timeout=_bounded_timeout(self._timeout, deadline),
-                ),
-                append_retry_notice=self._append_retry_notice,
+                kind="search",
+                estimated_input_tokens=estimate_request_tokens(user_content),
             )
         except RateLimitError as exc:
             raise AgentRateLimited(self._agent_name, exc) from exc
@@ -330,7 +337,7 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                 status_code,
                 type(exc).__name__,
             )
-            self._set_nonfatal_notice(
+            return GroundedSearchResult(notices=(ProviderNotice(
                 "Azure-Foundry-WebSearch failed; the empty result remains "
                 "a visible evidence gap.",
                 code=(
@@ -343,8 +350,7 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                     )
                 ),
                 http_status=status_code,
-            )
-            return GroundedSearchResult()
+            ),))
         except AgentTimeout:
             raise
         except OpenAIError as exc:
@@ -357,13 +363,12 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                 "Azure-Foundry-WebSearch failed (type=%s)",
                 type(exc).__name__,
             )
-            self._set_nonfatal_notice(
+            return GroundedSearchResult(notices=(ProviderNotice(
                 "Azure-Foundry-WebSearch failed; the empty result remains "
                 "a visible evidence gap.",
                 code="temporary_transport",
                 http_status=503,
-            )
-            return GroundedSearchResult()
+            ),))
         except AgentCancelled:
             # Run cancellation is not a provider failure: it must unwind
             # into the run's cancelled terminal state, never degrade into
@@ -374,19 +379,34 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                 "Azure-Foundry-WebSearch failed (type=%s)",
                 type(exc).__name__,
             )
-            self._set_nonfatal_notice(
+            return GroundedSearchResult(notices=(ProviderNotice(
                 "Azure-Foundry-WebSearch failed; the empty result remains "
                 "a visible evidence gap.",
                 code="provider_error",
                 http_status=502,
-            )
-            return GroundedSearchResult()
+            ),))
 
         result = self._parse_response(response)
-        if not result.answer:
-            self._set_nonfatal_notice(
-                "Azure-Foundry-WebSearch returned no answer text."
+        reason = _incomplete_reason(response)
+        if reason is not None:
+            # An unfinished answer (``status: incomplete``) is no grounded
+            # answer: a content filter leaves a refusal, a budget a cut text.
+            # The call is billed, so its usage stays.
+            log.warning(
+                "Azure-Foundry-WebSearch stopped before the answer was finished "
+                "(reason=%s); the answer is not used.",
+                reason,
             )
+            return replace(result, answer="", sources=[], notices=(ProviderNotice(
+                "Azure-Foundry-WebSearch stopped before the answer was finished "
+                f"({reason}); the empty result remains a visible evidence gap.",
+                code="content_filter" if reason == "content_filter" else "incomplete_answer",
+                http_status=502,
+            ),))
+        if not result.answer:
+            result = replace(result, notices=(ProviderNotice(
+                "Azure-Foundry-WebSearch returned no answer text."
+            ),))
         return result
 
     # ------------------------------------------------------------------

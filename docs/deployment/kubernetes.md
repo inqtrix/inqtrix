@@ -532,15 +532,16 @@ initialized role password, so use a real database-role rotation procedure.
 | `INQTRIX_S3_ACCESS_KEY`, `INQTRIX_S3_SECRET_KEY`, optional `INQTRIX_S3_SESSION_TOKEN` | object store `s3`, static auth | S3 credentials. Auto-wired from `s3.accessKey`/`s3.secretKey` only for bundled MinIO. Omit all three with `INQTRIX_S3_AUTH_MODE=default`. |
 | `INQTRIX_BUNDLED_VALKEY_PASSWORD` | bundled Valkey with `secret.existingSecret` | Raw password used by the Valkey container; it must match the password represented in `INQTRIX_VALKEY_URL`. |
 | `INQTRIX_QDRANT_API_KEY` | bundled Qdrant or external Qdrant with auth | Required for bundled Qdrant and shared by the Qdrant pod and application. |
-| Provider, search, embedding and reranker keys | the providers and features you selected | Named as in every other deployment mode (`LITELLM_API_KEY`, `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `PERPLEXITY_API_KEY`, `AZURE_AI_PROJECT_API_KEY`, `INQTRIX_EMBEDDING_API_KEY`, `INQTRIX_RERANKER_API_KEY`, AWS credentials for `bedrock`). Defaults, fallback chains and the Azure service-principal alternative: [Settings and env](../configuration/settings-and-env.md), [Provider recipes](../getting-started/provider-recipes.md). |
+| Provider, search, embedding and reranker keys | the providers and features you selected | Named as in every other deployment mode (`LITELLM_API_KEY`, `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `PERPLEXITY_API_KEY`, `AZURE_AI_PROJECT_API_KEY`, `INQTRIX_EMBEDDING_API_KEY`, `INQTRIX_RERANKER_API_KEY`, for `bedrock` the Bedrock API key `AWS_BEARER_TOKEN_BEDROCK` or AWS credentials). Defaults and fallback chains: [Settings and env](../configuration/settings-and-env.md), [Provider recipes](../getting-started/provider-recipes.md). |
+| `INQTRIX_LLM_EXTRA_HEADERS`, `INQTRIX_SEARCH_EXTRA_HEADERS`, `INQTRIX_EMBEDDING_EXTRA_HEADERS`, `INQTRIX_RERANKER_EXTRA_HEADERS` | an API gateway in front of a provider that expects headers of its own | JSON object of header names to text values, without quotes around it; the values may be keys. See [Extra headers](../configuration/providers.md#extra-headers-for-an-api-gateway). |
 | `INQTRIX_SERVER_API_KEY` | auth `apikey` | Static Bearer key gating the server. |
 
 Set only the keys your selected providers/features use. The exhaustive, always-current
 list of every secret field is [Settings and env](../configuration/settings-and-env.md).
 Provider endpoints, deployment names, model names, bucket names and auth
 issuer/client ids are usually non-secret and belong under `config`, for example
-`AZURE_OPENAI_ENDPOINT`, `AZURE_AI_PROJECT_ENDPOINT`, `AZURE_CLIENT_ID`,
-`AZURE_TENANT_ID`, `INQTRIX_S3_ENDPOINT_URL` and `INQTRIX_S3_BUCKET`.
+`AZURE_OPENAI_ENDPOINT`, `AZURE_AI_PROJECT_ENDPOINT`, `INQTRIX_OIDC_ISSUER`,
+`INQTRIX_OIDC_CLIENT_ID`, `INQTRIX_S3_ENDPOINT_URL` and `INQTRIX_S3_BUCKET`.
 
 Generate the random secrets once:
 
@@ -731,7 +732,7 @@ reference. The knobs you will reach for most:
 | `valkey.engine` | `valkey` | Engine of the bundled broker (`valkey` or `redis`); selects the server/CLI binaries. A foreign engine must bring its own pinned `valkey.image`. See [Queue broker](#queue-broker). |
 | `postgres.enabled` (side effect) | `false` | Also **derives** `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY`: `true` renders `bundled_legacy` (the image's superuser login), `false` renders `restricted` (your own unprivileged login). With an external database, `postgres.auth.*` is ignored entirely. See [Bundled versus external databases](database-migrations.md#bundled-versus-external-databases). |
 | `api.resources`, `worker.resources` | `250m` / `768Mi` request, `2` / `2Gi` limit | Memory is sized for the shipped run cap; lower `MAX_CONCURRENT` / `RUN_MAX_CONCURRENT` before lowering it. The CPU request is a starting point: with `collaboration.enabled`, request `1` core per API replica. See [Sizing rules](#sizing-rules) and [`values.yaml`](../../deploy/helm/inqtrix/values.yaml). |
-| `web.maxUpstreamConnections` | *(unset)* | Per-worker ceiling for the gateway's pooled backend connections (`INQTRIX_MAX_UPSTREAM_CONNECTIONS`). Unset keeps the gateway's built-in default. A typed value because the web pod has **no** `envFrom`: `config:`/`extraConfig:` never reach it. Values below `1` fail the render. Every open SSE stream holds one upstream connection for its whole duration; exhaustion is a `503` naming the variable. |
+| `web.maxUpstreamConnections` | *(unset)* | Per-worker ceiling for the gateway's pooled backend connections (`INQTRIX_MAX_UPSTREAM_CONNECTIONS`). Unset keeps the gateway's built-in default. A typed value because the web pod has **no** `envFrom`: `config:`/`extraConfig:` never reach it. Values below `1` fail the render. Every open SSE stream holds one upstream connection for its whole duration; exhaustion is a `503` naming the variable. Each stream needs two open files, and collaboration WebSockets and idle browser connections come on top: the gateway raises its soft limit to the hard limit of the container runtime at start (Kubernetes sets no limit per pod), and its log says when that is below what the streams alone need. |
 | `pgbouncer.enabled` | `false` | Transaction-mode PgBouncer in front of the **bundled** Postgres (it requires `postgres.enabled`; the render fails otherwise). The derived `INQTRIX_DATABASE_URL` then points at the pooler with `?prepared_statement_cache_size=0`, while the migrate hook keeps the direct Postgres URL, and `migrations.maintenanceConfirmed=true` quiesces the pooler along with API, worker and Collaboration. Reach for it instead of raising `postgres.maxConnections` when many replicas each carry their own pool. An explicit `secret.data.INQTRIX_DATABASE_URL` always wins, so an external database runs its own pooler. See [Database migrations](database-migrations.md). |
 | `postgres.maxConnections` | `300` | Bundled demo database only, rendered as `-c max_connections=...`. Every connection costs memory, and `postgres.resources` is sized for this value — raise them together. A value below `1` fails the render rather than the container start. Ignored with an external database — that ceiling belongs to whoever runs it. How the 300 was derived: [`values.yaml`](../../deploy/helm/inqtrix/values.yaml). |
 | `postgres.auth.username`, `postgres.auth.database` | `inqtrix` | Bundled demo database only. The username becomes the image's `POSTGRES_USER`, which PostgreSQL creates as a superuser owning every object; the chart builds `INQTRIX_DATABASE_URL` from it. |
@@ -962,7 +963,7 @@ installation before you rely on any of them.
 | API | `api.replicaCount` (default 1) or `api.autoscaling`; more than one requires the worker | One process with one event loop per pod. Every browser request that the web gateway forwards; every server-sent event (SSE) stream: one per open tab for user events, one per open run view, and the chat answer stream while it is written; chat answers themselves, which are computed in the API process; editor AI calls; uploads; the relay of every collaboration WebSocket (one upstream connection to the collaboration service per browser socket); and the collaboration service's internal persistence calls, about one per persisted update, which reach the API through its Service. |
 | Worker | `worker.replicaCount` (default 1) | Research and agent runs with their child runs, knowledge indexing, upload recovery, bulk deletions, the retention jobs for audit, usage and traces, and the sweep of orphaned objects. Each pod executes up to `INQTRIX_WORKER_CONCURRENCY` (default 100) jobs at once. |
 | Collaboration service | exactly 1, `Recreate` | The live state of every open document, the validation of every update, and snapshots. One Node process with one JavaScript thread. |
-| Web gateway | `web.replicaCount` (default 1) or `web.autoscaling` | The static interface and the proxy for HTTP, SSE and WebSocket traffic. One process per pod by default, each with its own pool of upstream connections to the API (`web.maxUpstreamConnections`, default 512). |
+| Web gateway | `web.replicaCount` (default 1) or `web.autoscaling` | The static interface and the proxy for HTTP, SSE and WebSocket traffic. One process per pod by default, each with its own pool of upstream connections to the API (`web.maxUpstreamConnections`, default 4096). |
 | PostgreSQL, Valkey, object store | bundled: 1 each | All durable state; dispatch messages only (the run row in PostgreSQL stays the source of truth); files. |
 
 ### How connections reach the API pods
@@ -991,12 +992,14 @@ installation before you rely on any of them.
 | Symptom | Value | Notes |
 |---|---|---|
 | API pods close to one core each, slow responses | `api.replicaCount` or `api.autoscaling` | Requires the worker. One process uses at most about one core, so add replicas instead of raising the CPU limit. An HPA target is a percentage of `api.resources.requests.cpu`. |
-| Many open tabs or streams; a `503` naming `INQTRIX_MAX_UPSTREAM_CONNECTIONS` | `web.maxUpstreamConnections`, `web.replicaCount`, `api.replicaCount` | Every open SSE stream holds one gateway connection for its whole duration. |
+| Many open tabs or streams; a `503` "Upstream connection pool exhausted" and a gateway WARNING naming `INQTRIX_MAX_UPSTREAM_CONNECTIONS` | `web.maxUpstreamConnections`, `web.replicaCount`, `api.replicaCount` | Every open SSE stream holds one gateway connection for its whole duration. At the ceiling every request through that process waits up to 10 seconds and then fails, page loads included. |
 | Runs wait in `queued` | `worker.replicaCount`, `INQTRIX_WORKER_CONCURRENCY`, `worker.resources` | Size the worker CPU from the number of runs that write reports at the same time. |
 | Collaboration memory, or long pauses while typing in long documents | `collaboration.resources` | See [Collaboration service](#collaboration-service). There is no horizontal knob. |
 | Collaboration CPU | none horizontal | The cost per update grows with the document size. |
 | Web gateway CPU | `web.replicaCount`, `web.autoscaling` | |
-| PostgreSQL connections | `pgbouncer.enabled` (bundled database), `postgres.maxConnections`, or an external pooler | Every API and worker process logs its worst-case connection budget at startup. |
+| PostgreSQL connections | `INQTRIX_DATABASE_POOL_SIZE`, `pgbouncer.enabled` (bundled database), `postgres.maxConnections`, or an external pooler | Each process keeps one pool for all its stores, 15 connections by default, plus up to 4 for the agent checkpointer: 19 per process, and pods run one process. Connections stay open once used, so the number you see at rest is the peak so far. Every API and worker process logs its budget at startup. No pooler is required for this limit. |
+| A full pool: `inqtrix_database_pool_in_use` at `inqtrix_database_pool_size` | Event-loop lag rising: `api.replicaCount`. Loop healthy: the database first, then `INQTRIX_DATABASE_POOL_SIZE` | See [Database pool](../observability/metrics.md#database-pool-api-and-worker) and the [PostgreSQL](#postgresql) rules below. |
+| Requests fail with `QueuePool limit` in the log, or jobs fail with it | `INQTRIX_DATABASE_POOL_SIZE`, more replicas | A process ran out of connections for `INQTRIX_DATABASE_POOL_TIMEOUT_SECONDS`. The error names the limit. |
 
 Failed-login counters live in each API process, so every API replica adds a
 full attempt budget per account and client address. Throttle the login
@@ -1018,8 +1021,12 @@ across replicas.
 - Each persisted collaboration update, about 6 ms of API CPU at light load and
   about 13 ms under sustained typing, for documents of two to three pages
   (derived).
-- A sign-in wave of 22 people within 28 seconds ran the API at 0.88 cores and
-  opened about 25 new PostgreSQL sessions per second (measured).
+- A sign-in wave of 22 people within 28 seconds ran the API at 0.88 cores
+  (measured).
+- A load test with 600 open tabs and 100 runs in flight brought one API
+  process to the end of its core, with an event-loop lag p99 of about 90 ms,
+  while its database pool was full only during bursts. Four replicas carried
+  the same load with a lag below 4 ms (measured).
 - Chat answers are computed in the API process; their cost depends on the
   provider and the answer and was not isolated.
 - Starting point: the default request of 250m without collaboration, and
@@ -1029,6 +1036,11 @@ across replicas.
 
 #### Worker
 
+- One process with one event loop per pod, like the API. Claims, heartbeats and
+  the cancel poll are tasks on that loop; a job's body runs on a thread of its own
+  until its engine is async, one thread per claim slot. A pod that stops gets up to
+  90 s to finish its jobs and then exits without cancelling them; another worker
+  takes them over through heartbeat silence.
 - A compact research run used about 0.05 cores on average and about 0.3 cores
   while writing its report; two runs writing reports at once used 0.53 to 0.67
   cores (measured in total, per run derived).
@@ -1084,12 +1096,32 @@ across replicas.
 
 #### PostgreSQL
 
-- 56 to 67 of 300 connections were in use with one API, one worker and the
-  collaboration service under mixed load (measured, single reading). Each
-  additional API or worker replica brings its own pool.
-- Several request paths open about one new connection per user request
-  (measured), so the connection rate grows with open tabs and clicks rather
-  than with typing.
+- Each API and worker replica brings its own pool, and the database needs
+  room for all of them: under the load test above, one API and two worker
+  replicas peaked at 47 connections, four API and two worker replicas at 91
+  (measured). Keep `postgres.maxConnections` above the sum of all pools plus
+  room for migrations and administration.
+- Connections stay open in the pool and are replaced after 30 minutes or
+  after a failure, so the connection rate does not grow with requests.
+- A database checkout holds its connection for about 4 ms with the database
+  on the same host and about 17 ms at 3 ms round trip (measured); each
+  further millisecond of round trip adds about 5 ms (derived). Connections
+  in use are checkouts per second times that time. A fully loaded API process
+  makes about 850 to 1,000 checkouts per second (measured), so the default
+  pool of 15 covers a round trip of up to about 3 ms. Further away, a process
+  needs about 23 connections at 5 ms and about 40 at 10 ms (derived): raise
+  `INQTRIX_DATABASE_POOL_SIZE`, or add API replicas so that each carries
+  less, and read the pool together with the event loop as described in
+  [Database pool](../observability/metrics.md#database-pool-api-and-worker).
+- The writes to one collaboration document wait for each other: a persisted
+  update holds the document for about five round trips to the database. At
+  3 ms round trip, one document took about 65 to 75 updates per second, with
+  the database on the same host about 240 to 340 (measured with 100
+  connections that each sent the next update as soon as the last one was
+  saved, one to four API replicas). A person typing steadily sends about
+  three to four updates per second, so at 3 ms about 20 people can type into
+  one document at the same moment; beyond that, their text reaches the others
+  later. Reading along costs no writes.
 - Each persisted collaboration update writes about 2 to 2.4 kB of WAL and
   grows the tables by about 1.2 kB (measured). Update payloads that a
   snapshot covers may be pruned after 24 hours
@@ -1134,9 +1166,9 @@ stay open without activity.
   that writes its report at the same time.
 - Collaboration service: size the memory with the rule above from your
   document lengths, not from the number of users.
-- PostgreSQL: about 70 to 80 connections, plus about 17 to 30 per further API
-  replica; about 6 to 7 new connections per second on average; WAL about
-  130 kB per second during working hours.
+- PostgreSQL: up to 19 connections per API and per worker replica (15 in
+  the shared pool, 4 in the agent checkpointer's), so about 60 to 80 for this setup; WAL about 130 kB per second
+  during working hours.
 
 This guide gives no throughput ceiling for the editor path. Size from the
 per-unit costs above and confirm with a load test on your installation.
@@ -1152,6 +1184,13 @@ pages; the collaboration service's memory, and its CPU per update for 20- and
 Each figure comes from a single run. Because browsers and servers shared the
 host, latencies from this setup are upper bounds.
 
+The load test with 600 open tabs, and the PostgreSQL connection, checkout and
+per-document figures, come from a second setup: one VM with 12 virtual CPUs,
+a provider stand-in instead of real models, 100 runs in flight, a reload of
+every open tab in the middle of the run and collaboration on one document in
+the same run, one to four API replicas and two workers, the database on the
+same host and, in a second series, with 3 ms added to every round trip to it.
+
 ### The single-pod variant
 
 `worker.enabled=false` runs every job in the API process and needs only
@@ -1160,7 +1199,7 @@ allows exactly one API replica, which may use the local object store. The API
 pod keeps itself honest: an active run whose executing thread is gone (crash,
 storage outage mid-write) is failed as `execution_lost` within about a minute
 of the next read, a run that never finds an executor fails as `queued_timeout` after
-24 hours, and a last-resort failsafe fails anything still non-terminal after 7
+two hours in the queue, and a last-resort failsafe fails anything still non-terminal after 7
 days. No run stays "running" forever and no run silently disappears. The
 limits: a restart mid-run surfaces as a visible failure rather than resuming
 (crash resume needs the worker), the variant supports exactly one API replica,

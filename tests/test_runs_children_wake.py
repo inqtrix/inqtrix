@@ -19,7 +19,8 @@ from typing import Any, Callable
 import pytest
 
 from inqtrix.auth.principal import Principal, UserContext
-from inqtrix.server.runs import RunStatus, RunStore
+from inqtrix.runs.memory_store import RunStore
+from inqtrix.runs.records import RunStatus
 
 
 USER_A = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
@@ -57,6 +58,8 @@ def _submit_child(
     created_by_user_id: uuid.UUID | None = None,
 ) -> str:
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Kind-Recherche",
         stack_name="default",
         work=work,
@@ -134,6 +137,8 @@ def test_children_run_through_a_single_slot_without_deadlock() -> None:
 
     parent = _SegmentedParent(store, [child_work])
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent-Auftrag",
         stack_name="default",
         work=parent,
@@ -168,6 +173,8 @@ def test_parent_wakes_only_after_the_last_child() -> None:
 
     parent = _SegmentedParent(store, [child_one, child_two])
     parent.run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent-Auftrag",
         stack_name="default",
         work=parent,
@@ -200,6 +207,8 @@ def test_park_self_heals_when_children_finished_first() -> None:
 
     parent = _SegmentedParent(store, [child_work], park_gate=park_gate)
     parent.run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent-Auftrag",
         stack_name="default",
         work=parent,
@@ -233,6 +242,8 @@ def test_cancel_of_parked_parent_cascades_and_never_resumes() -> None:
 
     parent = _SegmentedParent(store, [child_work])
     parent.run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent-Auftrag",
         stack_name="default",
         work=parent,
@@ -266,6 +277,8 @@ def test_children_wait_ttl_cancels_with_children_timeout_reason() -> None:
 
     parent = _SegmentedParent(store, [child_work])
     parent.run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Agent-Auftrag",
         stack_name="default",
         work=parent,
@@ -295,7 +308,7 @@ def test_per_user_cap_bounds_only_the_noisy_subject() -> None:
 
     Waiting (parked) runs hold no slot and must not eat the budget.
     """
-    from inqtrix.server.runs import RunPerUserLimit
+    from inqtrix.runs.records import RunPerUserLimit
 
     store = _store(max_concurrent=1, max_concurrent_per_user=2)
     hold = threading.Event()
@@ -306,6 +319,8 @@ def test_per_user_cap_bounds_only_the_noisy_subject() -> None:
 
     def submit(user_id: uuid.UUID):
         return store.submit(
+            mode="research",
+            workflow_contract=1,
             question="F",
             stack_name="default",
             work=slow_work,
@@ -321,6 +336,8 @@ def test_per_user_cap_bounds_only_the_noisy_subject() -> None:
         submit(USER_B)
         # Anonymous submissions are never capped.
         store.submit(
+            mode="research",
+            workflow_contract=1,
             question="F", stack_name="default", work=slow_work
         )
     finally:
@@ -337,7 +354,7 @@ def test_per_user_cap_ignores_parked_runs() -> None:
     if the parked parent still counted it would be 2>=2 and rejected.
     A third run then trips the cap, and finishing the tree frees it.
     """
-    from inqtrix.server.runs import RunPerUserLimit
+    from inqtrix.runs.records import RunPerUserLimit
 
     store = _store(max_concurrent=3, max_concurrent_per_user=2)
     hold_child = threading.Event()
@@ -353,6 +370,8 @@ def test_per_user_cap_ignores_parked_runs() -> None:
 
     def submit_filler():
         return store.submit(
+            mode="research",
+            workflow_contract=1,
             question="F",
             stack_name="default",
             work=filler_work,
@@ -362,17 +381,19 @@ def test_per_user_cap_ignores_parked_runs() -> None:
 
     parent = _SegmentedParent(store, [child_work], child_sub=USER_A)
     try:
-        store.submit(
+        parent_run_id = store.submit(
+            mode="research",
+            workflow_contract=1,
             question="Agent",
             stack_name="default",
             work=parent,
             kind="agent",
             created_by_user_id=USER_A,
             created_by_tenant_id="default",
-        )
+        )["run_id"]
         _wait_until(
             lambda: store.get(
-                parent.run_id, visible_to=_visible_to(USER_A)
+                parent_run_id, visible_to=_visible_to(USER_A)
             )["status"]
             == "waiting_for_children"
         )
@@ -391,6 +412,8 @@ def test_per_user_cap_ignores_parked_runs() -> None:
             )["status"] == "completed"
         )
         store.submit(
+            mode="research",
+            workflow_contract=1,
             question="F",
             stack_name="default",
             work=lambda handle: handle.complete(
@@ -412,7 +435,7 @@ def test_per_user_cap_excludes_agent_parents() -> None:
     (self-starvation). Only slot-occupying standard runs + agent children
     count, so a RUNNING agent parent leaves the full cap free.
     """
-    from inqtrix.server.runs import RunPerUserLimit
+    from inqtrix.runs.records import RunPerUserLimit
 
     store = _store(max_concurrent=4, max_concurrent_per_user=2)
     hold = threading.Event()
@@ -424,6 +447,8 @@ def test_per_user_cap_excludes_agent_parents() -> None:
     try:
         # A RUNNING agent parent (kind='agent') owned by user-a.
         store.submit(
+            mode="research",
+            workflow_contract=1,
             question="Agent",
             stack_name="default",
             work=blocking,
@@ -433,16 +458,22 @@ def test_per_user_cap_excludes_agent_parents() -> None:
         # The parent does NOT consume user-a's budget: both standard runs
         # are admitted despite the parent running.
         store.submit(
+            mode="research",
+            workflow_contract=1,
             question="F", stack_name="default", work=blocking,
             created_by_user_id=USER_A,
         )
         store.submit(
+            mode="research",
+            workflow_contract=1,
             question="F", stack_name="default", work=blocking,
             created_by_user_id=USER_A,
         )
         # Now 2 standard runs = cap: the third trips it (parent still free).
         with pytest.raises(RunPerUserLimit):
             store.submit(
+                mode="research",
+                workflow_contract=1,
                 question="F", stack_name="default", work=blocking,
                 created_by_user_id=USER_A,
             )

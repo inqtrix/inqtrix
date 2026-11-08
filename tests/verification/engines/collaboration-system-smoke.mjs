@@ -22,6 +22,7 @@ import {
   createCollaborationDocument,
   deleteCollaborationDocument,
 } from '../fixtures/documents.mjs'
+import { attemptCleanup } from '../fixtures/cleanup-step.mjs'
 import { createApiSessionFixtures } from '../fixtures/api-sessions.mjs'
 import {
   VerificationLifecycleClient,
@@ -31,6 +32,7 @@ import {
 } from '../fixtures/project-documents.mjs'
 import { assertVerificationRunId } from '../fixtures/run-scope.mjs'
 import { grantAndAccept } from '../fixtures/shares.mjs'
+import { httpsErrorsIgnored } from '../fixtures/https-errors.mjs'
 
 const runId = requiredEnvironment('INQTRIX_VERIFICATION_RUN_ID')
 const reportDirectory = requiredEnvironment('INQTRIX_VERIFICATION_REPORT_DIR')
@@ -41,10 +43,9 @@ const adminEmail = requiredEnvironment('INQTRIX_E2E_ADMIN_EMAIL')
 const adminPassword = requiredEnvironment('INQTRIX_E2E_ADMIN_PASSWORD')
 const userPassword = requiredEnvironment('INQTRIX_E2E_USER_PASSWORD')
 const baseURL = normalizeSystemSmokeBaseURL(
-  process.env.INQTRIX_E2E_BASE_URL ?? 'http://127.0.0.1:8080',
+  process.env.INQTRIX_E2E_BASE_URL ?? 'http://localhost:8080',
 )
-const ignoreHTTPSErrors =
-  process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1'
+const ignoreHTTPSErrors = httpsErrorsIgnored()
 
 assertVerificationRunId(runId)
 
@@ -251,32 +252,30 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 500))
   if (admin) {
     for (const document of [...documents].reverse()) {
-      await deleteCollaborationDocument({
+      await attemptCleanup('document', () => deleteCollaborationDocument({
         document,
         lifecycle,
         owner: admin,
-      }).catch(() => undefined)
+      }))
     }
   }
   if (collaborator && collaboratorProjectCleanup) {
-    try {
+    // On failure both the project and user handles stay live. The parent
+    // orchestrator can re-authenticate the still-enabled Run-ID account after
+    // this child exits and finish cleanup even after a browser or engine failure.
+    await attemptCleanup('collaborator project', async () => {
       await clearOwnedProjectDocuments(collaborator)
       await lifecycle.complete(collaboratorProjectCleanup)
       collaboratorProjectCleanup = null
-    } catch {
-      // Keep both the project and user handles live. The parent orchestrator
-      // can re-authenticate the still-enabled Run-ID account after this child
-      // exits and finish cleanup even after a browser or engine failure.
-    }
+    })
   }
   if (collaborator) {
-    await sessions.logoutActor(collaborator).catch(() => undefined)
+    await attemptCleanup('collaborator logout', () => sessions.logoutActor(collaborator))
   }
   if (admin && temporaryUser && !collaboratorProjectCleanup) {
-    await eraseTemporaryUser(admin, temporaryUser, lifecycle)
-      .catch(() => undefined)
+    await attemptCleanup('temporary account', () => eraseTemporaryUser(admin, temporaryUser, lifecycle))
   }
-  if (admin) await sessions.logoutActor(admin).catch(() => undefined)
+  if (admin) await attemptCleanup('admin logout', () => sessions.logoutActor(admin))
   await sessions.closeAll()
   lifecycle.close()
 }

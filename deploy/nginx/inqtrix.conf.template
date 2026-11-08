@@ -18,7 +18,7 @@ map $http_connection $inqtrix_invalid_connection_options {
 }
 
 log_format inqtrix_safe
-    '$remote_addr [$time_iso8601] '
+    '[$time_iso8601] '
     '"$request_method $inqtrix_log_path $server_protocol" '
     '$status $body_bytes_sent ${request_time}s';
 
@@ -43,6 +43,11 @@ server {
     set $inqtrix_hsts "${INQTRIX_HSTS_HEADER}";
     add_header Strict-Transport-Security $inqtrix_hsts always;
     client_max_body_size ${INQTRIX_PROXY_MAX_BODY_BYTES};
+    # The request head both edges accept however its bytes arrive, 32 KiB
+    # (src/inqtrix_web_gateway/settings.py, _REQUEST_HEAD_MAX_BYTES): a header
+    # line may fill a whole buffer, and every head of that size fits. nginx
+    # requires at least two buffers.
+    large_client_header_buffers 2 32k;
 
     set $inqtrix_backend "${INQTRIX_BACKEND_URL}";
     set $inqtrix_forwarded_scheme "${INQTRIX_FORWARDED_SCHEME}";

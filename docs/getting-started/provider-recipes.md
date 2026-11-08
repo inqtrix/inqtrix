@@ -106,15 +106,12 @@ Python equivalent: [`examples/webserver_stacks/anthropic_perplexity.py`](../../e
 
 ### Azure OpenAI + Perplexity
 
-GPT models on Azure (the model name is the **deployment** name) + Perplexity search. Authenticate with an API key **or** an Entra Service Principal (all three SP variables together).
+GPT models on Azure (the model name is the **deployment** name) + Perplexity search. Azure authenticates with the resource's API key.
 
 ```dotenv
 # Visible configuration
 INQTRIX_LLM_PROVIDER=azure
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-# Optional Service Principal identity instead of an API key:
-# AZURE_TENANT_ID=your-tenant-id
-# AZURE_CLIENT_ID=your-client-id
 INQTRIX_SEARCH_PROVIDER=perplexity
 REASONING_MODEL=gpt-5.4
 TIER_HIGH_MODEL=gpt-5.4
@@ -123,10 +120,8 @@ INQTRIX_SELECTABLE_CHAT_MODELS=gpt-5.4,gpt-5.4-mini
 ```
 
 ```dotenv
-# Credentials: use the Azure API key OR the client secret belonging to the
-# visible tenant/client identity above.
+# Credentials
 AZURE_OPENAI_API_KEY=...
-# AZURE_CLIENT_SECRET=...
 PERPLEXITY_API_KEY=pplx-...
 ```
 
@@ -134,7 +129,7 @@ Python equivalent: [`examples/webserver_stacks/azure_openai_perplexity.py`](../.
 
 ### Azure OpenAI + Azure Foundry Web Search (all-Azure)
 
-GPT models on Azure + the Azure AI Foundry Web Search agent. The cleanest enterprise combo: one Entra Service Principal authenticates **both** axes.
+GPT models on Azure + the Azure AI Foundry Web Search agent. Each axis authenticates with its own key: the Azure OpenAI resource key and the Foundry project key.
 
 ```dotenv
 # Visible configuration
@@ -144,26 +139,21 @@ INQTRIX_SEARCH_PROVIDER=azure_foundry
 AZURE_AI_PROJECT_ENDPOINT=https://your-project.services.ai.azure.com/api/projects/your-project
 WEB_SEARCH_AGENT_NAME=web-search-agent
 # WEB_SEARCH_AGENT_VERSION=2          # optional pin
-# Shared Service Principal identity (authenticates both axes):
-AZURE_TENANT_ID=...
-AZURE_CLIENT_ID=...
 REASONING_MODEL=gpt-5.4
 INQTRIX_SELECTABLE_CHAT_MODELS=gpt-5.4,gpt-5.4-mini
 ```
 
 ```dotenv
-# Credentials: use the shared Service Principal secret ...
-AZURE_CLIENT_SECRET=...
-# ... or omit it and use per-axis API keys instead:
-# AZURE_OPENAI_API_KEY=...
-# AZURE_AI_PROJECT_API_KEY=...
+# Credentials
+AZURE_OPENAI_API_KEY=...
+AZURE_AI_PROJECT_API_KEY=...
 ```
 
 Python equivalent: [`examples/webserver_stacks/azure_foundry_web_search.py`](../../examples/webserver_stacks/azure_foundry_web_search.py).
 
 ### Bedrock + Perplexity
 
-Claude models on AWS Bedrock (credentials via the standard AWS chain — named profile, env vars, or instance role) + Perplexity search.
+Claude models on AWS Bedrock (a Bedrock API key, or the standard AWS credential chain: named profile, env vars, or instance role) + Perplexity search.
 
 ```dotenv
 # Visible configuration
@@ -179,7 +169,8 @@ INQTRIX_SELECTABLE_CHAT_MODELS=eu.anthropic.claude-opus-4-8-v1,eu.anthropic.clau
 ```
 
 ```dotenv
-# Credentials. Bedrock itself uses the normal AWS credential chain.
+# Credentials. A Bedrock API key, or leave it out and Bedrock uses the normal AWS credential chain.
+AWS_BEARER_TOKEN_BEDROCK=ABSK...   # optional; AWS_PROFILE is then not used
 PERPLEXITY_API_KEY=pplx-...
 ```
 

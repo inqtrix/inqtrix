@@ -612,7 +612,6 @@ export type ResearchRunStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
-  | 'expired'
 
 export type ResearchRunSnapshot = {
   current_node?: string

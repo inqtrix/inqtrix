@@ -87,3 +87,24 @@ describe('ResearchJobCard unavailable lock', () => {
     expect(markup).not.toContain('Nicht mehr verfügbar')
   })
 })
+
+describe('ResearchJobCard failure details', () => {
+  // The card names a failure in the reader's language; the provider's raw
+  // text must stay reachable without a pointer, so it sits in a disclosure
+  // a keyboard or a touch reaches, not only in a hover title.
+  const raw = "Rate limit reached for model 'web-search-agent': Error code: 429"
+
+  it('offers the raw text of a mapped failure in the expanded card', () => {
+    const markup = renderCard(job({ error: raw, errorCode: 'rate_limited', status: 'failed' }), { expanded: true })
+    expect(markup).toContain('ausgelastet')
+    expect(markup).toContain('<details')
+    expect(markup).toContain('Fehlerdetails')
+    expect(markup).toContain('Error code: 429')
+  })
+
+  it('offers no details when the shown text is the raw text itself', () => {
+    const markup = renderCard(job({ error: 'Die Quelle war nicht lesbar.', status: 'failed' }), { expanded: true })
+    expect(markup).toContain('Die Quelle war nicht lesbar.')
+    expect(markup).not.toContain('<details')
+  })
+})

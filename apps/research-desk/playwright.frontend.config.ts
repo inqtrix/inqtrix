@@ -1,7 +1,10 @@
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { defineConfig, devices } from '@playwright/test'
+
+import { fixtureWorkers } from '../../e2e/fixture-workers.ts'
 
 const port = 5187
 const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH
@@ -12,6 +15,7 @@ const listOnly = process.argv.includes('--list')
 
 export default defineConfig({
   fullyParallel: false,
+  workers: fixtureWorkers(os.totalmem(), os.cpus().length),
   outputDir: path.join(
     repositoryRoot,
     'e2e',

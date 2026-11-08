@@ -4784,3 +4784,18 @@ def test_a_label_two_references_carry_stands_for_neither():
         {"label": "W2", "url": "https://example.org/drei"},
     ]
     assert list(label_bases(references)) == ["W2"]
+
+
+def test_a_review_prompt_holds_the_providers_input_limit_and_otherwise_the_window():
+    """GPT-6 takes at most 922,000 input tokens of its 1,050,000-token window; Claude counts input plus output."""
+    from inqtrix.agents.kernel.review_edits import review_context_fits
+
+    llm = SimpleNamespace(default_max_tokens=4_096)
+
+    def fits(model: str, tokens: int) -> bool:
+        return review_context_fits(llm, model=model, prompt="x" * (tokens * 4), schema="", fallback_window=128_000)
+
+    assert fits("gpt-6.1-terra", 920_000)
+    assert not fits("gpt-6.1-terra", 925_000)
+    assert fits("claude-opus-4-8", 900_000)
+    assert not fits("claude-opus-4-8", 1_000_000)

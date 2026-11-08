@@ -1,0 +1,7 @@
+[
+ {
+  "content": "STATUS: SUFFICIENT\nCONFIDENCE: 9\nGAPS: Keine.\nCONTRADICTIONS: No\nCOVERED_ASPECTS: [1, 2]\nEVIDENCE_CONSISTENCY: 9\nEVIDENCE_SUFFICIENCY: 9",
+  "prompt_tokens": 120,
+  "completion_tokens": 40
+ }
+]

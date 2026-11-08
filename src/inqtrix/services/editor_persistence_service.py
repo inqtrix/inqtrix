@@ -51,7 +51,7 @@ from inqtrix.project.editor_ports import (
     SuggestionDraftRevisionConflict,
     suggestion_draft_payload,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 if TYPE_CHECKING:
     from inqtrix.auth.permissions import AuthorizationService

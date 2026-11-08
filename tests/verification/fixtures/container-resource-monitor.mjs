@@ -6,6 +6,10 @@ import { requireContainerControlCommand } from './container-control.mjs'
 const COMPOSE_FILES = 'com.docker.compose.project.config_files'
 const COMPOSE_PROJECT = 'com.docker.compose.project'
 const COMPOSE_SERVICE = 'com.docker.compose.service'
+const COMPOSE_NUMBER = 'com.docker.compose.container-number'
+// The processes a deployment scales. The monitor reads one database and counts
+// the sockets of one web and one collaboration container.
+const REPLICATED_SERVICES = new Set(['api', 'worker'])
 const HEADROOM_MEMORY_PERCENT = 75
 const HEADROOM_CPU_PERCENT_PER_CPU = 80
 const HEADROOM_DATABASE_PERCENT = 80
@@ -38,12 +42,12 @@ export class PodmanResourceMonitor {
 
   async initialize() {
     if (this.#baseline) throw new Error('Resource monitoring is already initialized.')
-    const [machineResult, inventoryResult] = await Promise.all([
+    const [hostResult, inventoryResult] = await Promise.all([
       this.#execute(
         'podman',
-        ['machine', 'inspect'],
+        ['info', '--format', 'json'],
         this.#repositoryRoot,
-        'Inspecting Podman machine capacity',
+        'Inspecting Podman host capacity',
       ),
       this.#execute(
         'podman',
@@ -56,7 +60,7 @@ export class PodmanResourceMonitor {
         'Resolving canonical Compose resources',
       ),
     ])
-    this.#machine = parseMachineCapacity(machineResult.stdout)
+    this.#machine = parseHostCapacity(hostResult.stdout)
     this.#containers = parseComposeContainers(
       inventoryResult.stdout,
       this.#project,
@@ -176,20 +180,15 @@ export class PodmanResourceMonitor {
   }
 }
 
-export function parseMachineCapacity(value) {
-  const rows = parseJson(value, 'Podman machine inventory')
-  if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.State !== 'running') {
-    throw new Error('Resource monitoring requires exactly one running Podman machine.')
+/** What the containers run on: the VM of a Podman machine, or the host itself on Linux. */
+export function parseHostCapacity(value) {
+  const host = parseJson(value, 'Podman host information')?.host
+  const cpus = Number(host?.cpus)
+  const memoryBytes = Number(host?.memTotal)
+  if (!Number.isSafeInteger(cpus) || cpus < 1 || !Number.isSafeInteger(memoryBytes) || memoryBytes <= 0) {
+    throw new Error('Podman host capacity is invalid.')
   }
-  const cpus = Number(rows[0]?.Resources?.CPUs)
-  const memoryMiB = Number(rows[0]?.Resources?.Memory)
-  if (!Number.isSafeInteger(cpus) || cpus < 1 || !Number.isFinite(memoryMiB) || memoryMiB <= 0) {
-    throw new Error('Podman machine capacity is invalid.')
-  }
-  return {
-    cpus,
-    memoryBytes: memoryMiB * 1024 * 1024,
-  }
+  return { cpus, memoryBytes }
 }
 
 export function parseComposeContainers(value, project, canonicalCompose) {
@@ -211,7 +210,12 @@ export function parseComposeContainers(value, project, canonicalCompose) {
       || typeof service !== 'string'
       || !service
     ) throw new Error('Compose container identity is invalid.')
-    return { id, service }
+    const number = Number(labels[COMPOSE_NUMBER] ?? 1)
+    if (number === 1) return { id, service }
+    if (!REPLICATED_SERVICES.has(service)) {
+      throw new Error(`Resource monitoring requires one ${service} container.`)
+    }
+    return { id, service: `${service}-${number}` }
   })
   const services = new Set(containers.map((container) => container.service))
   for (const required of ['api', 'collaboration', 'postgres', 'web']) {

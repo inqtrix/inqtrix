@@ -751,6 +751,52 @@ async def test_client_disconnect_while_awaiting_upstream_aborts_upstream(
 
 
 @pytest.mark.asyncio
+async def test_client_disconnect_while_its_body_is_relayed_is_an_abort(
+    fake_dist: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A browser that leaves in the middle of its request body (a closed tab,
+    an aborted upload) ends the upstream exchange with a 499 and an INFO line,
+    never with an unhandled exception in the gateway log."""
+    transport = _HangingTransport()
+    app = gateway_app.build_app(
+        fake_dist, "http://backend.invalid", transport=transport
+    )
+    scope = _disconnect_scope(
+        "POST",
+        [(b"content-type", b"application/octet-stream"),
+         (b"content-length", b"1048576")],
+    )
+    messages = [
+        {"type": "http.request", "body": b"first part", "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        if messages:
+            return messages.pop(0)
+        await asyncio.sleep(30)
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    with caplog.at_level(logging.INFO, logger="inqtrix.web_gateway"):
+        await asyncio.wait_for(app(scope, receive, send), timeout=5)
+
+    assert not transport.started.is_set()
+    assert not transport.completed.is_set()
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 499
+    (aborted,) = [
+        record for record in caplog.records
+        if "Client disconnected while sending the request body" in record.getMessage()
+    ]
+    assert aborted.levelno == logging.INFO
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
 async def test_aborted_upstream_connection_is_never_reused(
     fake_dist: Path,
 ) -> None:

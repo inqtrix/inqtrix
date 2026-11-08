@@ -15,6 +15,7 @@ from uvicorn.config import SSL_PROTOCOL_VERSION, create_ssl_context
 from . import app as gateway_app
 from . import settings
 from .logging import configure_logging, gateway_log_config
+from .open_files import ensure_open_file_limit
 
 log = logging.getLogger("inqtrix.web_gateway")
 
@@ -35,6 +36,8 @@ class _ServerOptions(TypedDict, total=False):
     timeout_graceful_shutdown: int
     ws_max_size: int
     ws_max_queue: int
+    http: str
+    h11_max_incomplete_event_size: int
     workers: int
     access_log: bool
     proxy_headers: bool
@@ -88,6 +91,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     arguments = _argument_parser().parse_args(argv)
     _apply_cli_overrides(arguments)
     configure_logging()
+    # Before uvicorn starts: its worker processes inherit the raised limit.
+    ensure_open_file_limit(settings._resolve_max_upstream_connections())
     workers = settings._resolve_worker_count()
     web_concurrency = os.getenv("WEB_CONCURRENCY", "").strip()
     if web_concurrency and web_concurrency != str(workers):
@@ -114,6 +119,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_SECONDS,
         ws_max_size=collaboration_settings.max_frame_bytes,
         ws_max_queue=collaboration_settings.max_queued_frames,
+        # The head limit is h11's; httptools, which a full install also
+        # brings, has none. The image carries only h11, and so does every
+        # other start of the gateway.
+        http="h11",
+        # h11 holds an incomplete request head up to this size; without it a
+        # head above 16 KiB passed or failed depending on how its bytes arrived.
+        h11_max_incomplete_event_size=settings._REQUEST_HEAD_MAX_BYTES,
         workers=workers,
         access_log=False,
         # The gateway reads forwarding headers itself; uvicorn must not

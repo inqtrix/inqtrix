@@ -4,9 +4,29 @@ import { describe, expect, it } from 'vitest'
 
 import {
   ChatMessagesLoadError,
+  RetryEffortChoices,
   chatStructuralPhaseForState,
   shouldClearAcceptedChatDraft,
 } from './ChatWorkspace'
+
+describe('retry effort choices', () => {
+  it('names the levels the way the model picker does', () => {
+    const html = renderToString(createElement(RetryEffortChoices, {
+      defaultLabel: 'Default effort',
+      heading: 'Reasoning',
+      levels: ['none', 'medium', 'xhigh', 'max'],
+      onEffortChange: () => undefined,
+      selectedEffort: 'xhigh',
+    }))
+
+    for (const label of ['Off', 'Med', 'XHigh', 'Max', 'Default effort']) {
+      expect(html).toContain(`>${label}</button>`)
+    }
+    for (const token of ['none', 'medium', 'xhigh', 'max']) {
+      expect(html).not.toContain(`>${token}</button>`)
+    }
+  })
+})
 
 describe('chat draft submission ownership', () => {
   it('preserves text and pills until preflight accepts the exact snapshot', () => {

@@ -359,6 +359,7 @@ def test_the_projection_reads_the_markers_its_producers_write():
         CLARIFICATION_MARKER,
         MODEL_TURN_MARKERS,
         USER_TURN_MARKERS,
+        user_authored_text,
     )
     from inqtrix.agents.kernel import tools
     from inqtrix.services import request_parsing
@@ -367,8 +368,28 @@ def test_the_projection_reads_the_markers_its_producers_write():
     assert 'f"User: {question}"' in turn
     assert 'f"Agent: {body}"' in turn
     assert f'f"{CLARIFICATION_MARKER}{{prompt}}{CLARIFICATION_ANSWER_MARKER}{{answer}}"' in turn
-    roles = inspect.getsource(request_parsing.format_history)
-    assert '"user": "Nutzer"' in roles and '"assistant": "Assistent"' in roles
+    # The chat history is pinned by its output: every line it writes for
+    # someone other than the user (an answer, a tool result, the line that
+    # stands for left-out turns) ends the user's turn.
+    with_tool = request_parsing.format_history([
+        {"role": "user", "content": "Vergleiche kd_nutzer."},
+        {"role": "tool", "content": "kd_werkzeug"},
+        {"role": "assistant", "content": "kd_antwort"},
+        {"role": "user", "content": "Weiter."},
+    ])
+    with_gap = request_parsing.format_history([
+        {"role": "user", "content": "Und kd_zweite?"},
+        {"role": "assistant", "content": "kd_alt"},
+        {"role": "user", "content": "Noch etwas."},
+        {"role": "assistant", "content": "A" * request_parsing.HISTORY_CHAR_BUDGET},
+        {"role": "user", "content": "Weiter."},
+    ])
+    assert with_tool.splitlines()[1] == "Tool: kd_werkzeug"
+    assert with_gap.splitlines()[1] == "[... 1 earlier message omitted]"
+    text = user_authored_text(history=f"{with_tool}\n{with_gap}")
+    assert "kd_nutzer" in text and "kd_zweite" in text
+    for theirs in ("kd_werkzeug", "kd_antwort", "kd_alt", "omitted", "AAAA"):
+        assert theirs not in text, theirs
     assert "Nutzer: " in USER_TURN_MARKERS and "User: " in USER_TURN_MARKERS
     assert "Agent: " in MODEL_TURN_MARKERS and "Assistent: " in MODEL_TURN_MARKERS
     assert "User's answer: " in inspect.getsource(tools)

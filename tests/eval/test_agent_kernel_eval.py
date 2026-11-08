@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

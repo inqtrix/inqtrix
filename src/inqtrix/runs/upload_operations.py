@@ -20,8 +20,8 @@ from inqtrix.project.asset_records_ports import (
     AssetNotFound,
     AssetUploadConflict,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
-from inqtrix.sync_bridge import run_coro_sync
+from inqtrix.runs.shared import finish_inline, inline_on_loop
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 if TYPE_CHECKING:
     from inqtrix.project.asset_records_ports import AssetRecord, AssetStore
@@ -318,7 +318,7 @@ class MemoryUploadOperationStore:
                         attempt=existing.attempt,
                         already_ready=True,
                     )
-                run_coro_sync(
+                finish_inline(
                     self._assets.set_asset_upload_state(
                         asset.id,
                         scope=ResourceScope.from_record(asset),
@@ -360,7 +360,7 @@ class MemoryUploadOperationStore:
                 # operation becomes discoverable in this store.  A deletion
                 # fence therefore leaves neither a detached operation nor a
                 # writable reservation behind.
-                run_coro_sync(
+                finish_inline(
                     self._assets.set_asset_upload_state(
                         asset.id,
                         scope=ResourceScope.from_record(asset),
@@ -490,8 +490,8 @@ class MemoryUploadOperationStore:
                 UploadStage.QUOTA_BOOKED,
             }:
                 try:
-                    asset = run_coro_sync(self._assets.get_asset(record.asset_id))
-                    run_coro_sync(
+                    asset = finish_inline(self._assets.get_asset(record.asset_id))
+                    finish_inline(
                         self._assets.set_asset_upload_state(
                             record.asset_id,
                             scope=ResourceScope.from_record(asset),
@@ -557,7 +557,7 @@ class MemoryUploadOperationStore:
                 if record.status != UploadOperationStatus.READY:
                     continue
                 try:
-                    asset = run_coro_sync(self._assets.get_asset(record.asset_id))
+                    asset = finish_inline(self._assets.get_asset(record.asset_id))
                 except AssetNotFound:
                     continue
                 if (
@@ -568,7 +568,7 @@ class MemoryUploadOperationStore:
                     or asset.parse_status == "error"
                 ):
                     continue
-                run_coro_sync(
+                finish_inline(
                     self._assets.set_asset_upload_state(
                         record.asset_id,
                         scope=ResourceScope.from_record(asset),
@@ -608,8 +608,8 @@ class MemoryUploadOperationStore:
                 or record.stage != UploadStage.QUOTA_BOOKED
             ):
                 return False
-            asset = run_coro_sync(self._assets.get_asset(record.asset_id))
-            run_coro_sync(
+            asset = finish_inline(self._assets.get_asset(record.asset_id))
+            finish_inline(
                 self._assets.set_asset_upload_state(
                     record.asset_id,
                     scope=ResourceScope.from_record(asset),
@@ -660,8 +660,8 @@ class MemoryUploadOperationStore:
             record.finished_at = now
             record.error = {"message": message, "type": error_type}
             try:
-                asset = run_coro_sync(self._assets.get_asset(record.asset_id))
-                run_coro_sync(
+                asset = finish_inline(self._assets.get_asset(record.asset_id))
+                finish_inline(
                     self._assets.set_asset_upload_state(
                         record.asset_id,
                         scope=ResourceScope.from_record(asset),
@@ -713,8 +713,8 @@ class MemoryUploadOperationStore:
             record.updated_at = time.time()
             record.error = {"message": message, "type": error_type}
             try:
-                asset = run_coro_sync(self._assets.get_asset(record.asset_id))
-                run_coro_sync(
+                asset = finish_inline(self._assets.get_asset(record.asset_id))
+                finish_inline(
                     self._assets.set_asset_upload_state(
                         record.asset_id,
                         scope=ResourceScope.from_record(asset),
@@ -796,5 +796,18 @@ class MemoryUploadOperationStore:
         record.updated_at = time.time()
         return build_upload_summary(record)
 
-    def close(self) -> None:
-        return None
+    astart_or_resume = inline_on_loop(start_or_resume)
+    aget_record = inline_on_loop(get_record)
+    aget = inline_on_loop(get)
+    alist_operations = inline_on_loop(list_operations)
+    ais_attempt_current = inline_on_loop(is_attempt_current)
+    aheartbeat = inline_on_loop(heartbeat)
+    acheckpoint = inline_on_loop(checkpoint)
+    aqueue_continuation = inline_on_loop(queue_continuation)
+    aqueue_missing_preparations = inline_on_loop(queue_missing_preparations)
+    acomplete = inline_on_loop(complete)
+    afail = inline_on_loop(fail)
+    aqueue_retry = inline_on_loop(queue_retry)
+    aclaim_for_execution = inline_on_loop(claim_for_execution)
+    astale_dispatches = inline_on_loop(stale_dispatches)
+    aretry = inline_on_loop(retry)

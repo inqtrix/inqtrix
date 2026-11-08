@@ -36,18 +36,18 @@ from inqtrix.quota.models import (
     QuotaAdjustmentConflict,
     QuotaDimension,
     QuotaSubject,
-    estimate_tokens,
 )
+from inqtrix.text import estimate_tokens
 from inqtrix.runs.indexing_postgres import PostgresIndexingJobStore
-from inqtrix.server.indexing import (
+from inqtrix.runs.indexing_memory import IndexingJobStore
+from inqtrix.runs.indexing_records import (
     IndexingJobConflict,
     IndexingJobHandle,
     IndexingJobNotFound,
-    IndexingJobStore,
     IndexingQueueFull,
     IndexingResumeUnavailable,
-    format_sse_event,
 )
+from inqtrix.runs.shared import format_sse_event
 from inqtrix.services.indexing_service import (
     IndexingService,
     ReindexUnsupported,
@@ -357,6 +357,99 @@ def test_terminal_revision_failure_and_cancel_release_retry_slot() -> None:
     )
     assert after_cancel["job_id"] != cancelling["job_id"]
     _wait_until(lambda: store.get(after_cancel["job_id"])["status"] == "completed")
+
+
+class _PauseThenHold:
+    """Work whose first attempt pauses and holds; ``after_hold`` ends that attempt."""
+
+    def __init__(self, after_hold: Callable[[], None] = lambda: None) -> None:
+        self.after_hold = after_hold
+        self.attempts = 0
+        self.release_first = threading.Event()
+        self.second_started = threading.Event()
+        self.release_second = threading.Event()
+
+    def __call__(self, handle: IndexingJobHandle) -> None:
+        self.attempts += 1
+        handle.begin(0)
+        if self.attempts == 1:
+            handle.pause_dependency("provider unavailable")
+            self.release_first.wait(timeout=5)
+            self.after_hold()
+            return
+        self.second_started.set()
+        self.release_second.wait(timeout=5)
+
+
+def test_a_resume_with_no_free_slot_runs_the_job_after_the_paused_attempt() -> None:
+    store = _store(max_concurrent=1)
+    work = _PauseThenHold()
+    work.release_second.set()
+    job_id = _submit(store, collection_id="kc_resume_queued", work=work)["job_id"]
+    _wait_until(lambda: store.get(job_id)["status"] == "paused_dependency")
+
+    assert store.resume(job_id)["status"] == "queued"
+    work.release_first.set()
+
+    _wait_until(lambda: store.get(job_id)["status"] == "completed")
+    assert work.attempts == 2
+
+
+def test_the_paused_attempt_does_not_end_the_job_the_next_attempt_runs() -> None:
+    store = _store(max_concurrent=2)
+    work = _PauseThenHold()
+    job_id = _submit(store, collection_id="kc_resume_running", work=work)["job_id"]
+    _wait_until(lambda: store.get(job_id)["status"] == "paused_dependency")
+
+    store.resume(job_id)
+    _wait_until(work.second_started.is_set)
+    work.release_first.set()
+    _wait_until(lambda: store._running_count == 1)
+
+    assert store.get(job_id)["status"] == "running"
+    work.release_second.set()
+    _wait_until(lambda: store.get(job_id)["status"] == "completed")
+
+
+def test_a_late_failure_of_the_paused_attempt_leaves_the_job_to_the_next_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def fail() -> None:
+        raise RuntimeError("late failure of the paused attempt")
+
+    store = _store(max_concurrent=2)
+    work = _PauseThenHold(after_hold=fail)
+    job_id = _submit(store, collection_id="kc_resume_late", work=work)["job_id"]
+    _wait_until(lambda: store.get(job_id)["status"] == "paused_dependency")
+
+    store.resume(job_id)
+    _wait_until(work.second_started.is_set)
+    with caplog.at_level("WARNING", logger="inqtrix.runs.indexing_memory"):
+        work.release_first.set()
+        _wait_until(lambda: store._running_count == 1)
+
+    assert store.get(job_id)["status"] == "running"
+    assert "a paused attempt failed after its resume" in caplog.text
+    work.release_second.set()
+    _wait_until(lambda: store.get(job_id)["status"] == "completed")
+
+
+def test_a_failure_of_an_attempt_whose_job_is_gone_stays_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store()
+
+    def work(handle: IndexingJobHandle) -> None:
+        with store._lock:
+            del store._records[handle.job_id]
+        raise RuntimeError("late failure")
+
+    with caplog.at_level("ERROR", logger="inqtrix.runs.indexing_memory"):
+        _submit(store, collection_id="kc_gone", work=work)
+        _wait_until(lambda: store._running_count == 0)
+
+    assert "failed (error_type=RuntimeError)" in caplog.text
+    assert "after its resume" not in caplog.text
 
 
 def test_paused_generation_resumes_alongside_active_document_delta() -> None:
@@ -704,19 +797,16 @@ def test_document_revision_lost_response_retry_reuses_revision_and_job() -> None
 
 
 def test_document_revision_submission_keeps_request_loop_responsive() -> None:
-    """The synchronous job-store bridge must never occupy the request loop."""
-
-    release_submit = threading.Event()
-    submit_entered = threading.Event()
+    """A submission waiting for the job store must never occupy the request loop."""
 
     class YieldDependentStore(IndexingJobStore):
-        def submit(self, **kwargs):
-            submit_entered.set()
-            if not release_submit.wait(timeout=1):
-                raise AssertionError(
-                    "the request loop could not run while job submission waited"
-                )
-            return super().submit(**kwargs)
+        release_submit: asyncio.Event
+        submit_entered: asyncio.Event
+
+        async def asubmit(self, **kwargs):
+            self.submit_entered.set()
+            await asyncio.wait_for(self.release_submit.wait(), timeout=1)
+            return self.submit(**kwargs)
 
     service = make_service(make_knowledge_context())
     jobs = YieldDependentStore(
@@ -730,10 +820,12 @@ def test_document_revision_submission_keeps_request_loop_responsive() -> None:
     collection = asyncio.run(service.create_collection(name="C"))
 
     async def scenario() -> dict:
+        jobs.release_submit = asyncio.Event()
+        jobs.submit_entered = asyncio.Event()
+
         async def release_after_submit_enters() -> None:
-            await asyncio.to_thread(submit_entered.wait, 1)
-            await asyncio.sleep(0)
-            release_submit.set()
+            await jobs.submit_entered.wait()
+            jobs.release_submit.set()
 
         release_task = asyncio.create_task(release_after_submit_enters())
         summary = await indexing.submit_document_revision(
@@ -1022,6 +1114,29 @@ def test_cancel_running_job_is_observed_by_worker() -> None:
     summary = _submit(store, collection_id="kcA", work=cooperative)
     _wait_until(started.is_set)
     store.cancel(summary["job_id"])
+    _wait_until(lambda: store.get(summary["job_id"])["status"] == "cancelled")
+
+
+def test_closing_the_store_asks_a_running_job_to_stop() -> None:
+    """The lane's thread keeps the process alive until the body has ended."""
+    started = threading.Event()
+
+    def cooperative(handle: IndexingJobHandle) -> None:
+        handle.begin(3)
+        started.set()
+        for _ in range(1000):
+            if handle.cancelled:
+                handle.cancel("client_requested_cancel")
+                return
+            time.sleep(0.005)
+        handle.complete()
+
+    store = _store(max_concurrent=1)
+    summary = _submit(store, collection_id="kcA", work=cooperative)
+    _wait_until(started.is_set)
+
+    asyncio.run(store.aclose())
+
     _wait_until(lambda: store.get(summary["job_id"])["status"] == "cancelled")
 
 

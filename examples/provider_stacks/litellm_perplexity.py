@@ -136,9 +136,9 @@ def main() -> None:
         # classify/claim_extract -> fast. A per-node <node>_model arg
         # overrides the tier.
         #
-        # NOTE: LiteLLM currently IGNORES per-tier effort (tier_*_effort is
-        # accepted but not mapped yet); tier MODEL routing still applies.
-        # Use Anthropic/Bedrock/Azure for reasoning control.
+        # tier_*_effort goes out as the OpenAI-compatible reasoning_effort
+        # field; whether it takes effect depends on the model behind the
+        # gateway.
         # See docs/architecture/websearch/nodes.md
         # Fallback + the reasoning_model identity shown on /health and
         # /v1/stacks (= high tier); the tiers below are the active routing.

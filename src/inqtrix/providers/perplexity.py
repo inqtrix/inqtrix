@@ -12,39 +12,43 @@ to avoid redundant API calls within one research run.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import dataclasses
 import hashlib
 import logging
 import threading
-from typing import Any
+import weakref
+from typing import Any, Mapping
 
 from cachetools import TTLCache
 from perplexity import (
     APIError,
     APIStatusError,
     APITimeoutError,
-    Perplexity,
+    AsyncPerplexity,
     RateLimitError,
 )
 
 from inqtrix.constants import SEARCH_TIMEOUT
 from inqtrix.exceptions import AgentRateLimited
+from inqtrix.providers.attempts import (
+    AsyncNativeSearchProvider,
+    call_with_retries,
+    estimate_request_tokens,
+)
 from inqtrix.providers.base import (
-    SearchProvider,
-    _NonFatalNoticeMixin,
-    _RetryNoticeMixin,
     _apply_domain_filters,
     _bounded_timeout,
     _build_recency_language_hints,
-    _call_openai_chat_completion_with_retries,
     _operation_deadline,
 )
-from inqtrix.search_result import GroundedSearchResult, GroundedSource
+from inqtrix.search_result import GroundedSearchResult, GroundedSource, ProviderNotice
 
 log = logging.getLogger(__name__)
 
 
-class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
+class PerplexitySearch(AsyncNativeSearchProvider):
     """Query the Perplexity Agent API and normalize the grounded result.
 
     Use this provider when web search should come from Perplexity's Agent
@@ -54,7 +58,8 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
     synthesis in a single round trip.
 
     Attributes:
-        _client (Perplexity): Native Perplexity SDK client.
+        _clients (WeakKeyDictionary): One ``AsyncPerplexity`` client per
+            event loop, built on first use from ``_client_kwargs``.
         _model (str): Agent reasoning model (e.g. ``"sonar"``).
         _preset (str | None): Optional Agent preset (e.g. a fast-search
             preset) selected instead of an explicit model.
@@ -79,8 +84,9 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
         cache_ttl: int = 3600,
         request_params: dict[str, Any] | None = None,
         timeout: float = SEARCH_TIMEOUT,
-        # Internal: accept a pre-built client from provider factories/tests.
-        _client: Perplexity | None = None,
+        default_headers: Mapping[str, str] | None = None,
+        # Internal: accept a pre-built async client from tests.
+        _client: AsyncPerplexity | None = None,
     ) -> None:
         """Initialize the Perplexity Agent API provider.
 
@@ -105,8 +111,10 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
                 ``responses.create`` call after reserved keys are filtered.
             timeout: Budget in seconds for one complete logical search,
                 including every visible retry and backoff.
-            _client: Optional prebuilt SDK client used internally by the
-                provider factory, config bridge, and tests.
+            default_headers: Optional headers sent with every request,
+                for example the subscription header of an API gateway.
+            _client: Optional prebuilt async SDK client used by tests on
+                every loop.
 
         Example:
             >>> from inqtrix import PerplexitySearch
@@ -114,16 +122,18 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
             >>> search.is_available()
             True
         """
-        if _client is not None:
-            self._client = _client
-        else:
-            client_kwargs: dict[str, Any] = {
-                "api_key": api_key,
-                "max_retries": 0,
-            }
-            if base_url:
-                client_kwargs["base_url"] = base_url
-            self._client = Perplexity(**client_kwargs)
+        self._prebuilt_client = _client
+        self._client_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "max_retries": 0,
+        }
+        if base_url:
+            self._client_kwargs["base_url"] = base_url
+        if default_headers:
+            self._client_kwargs["default_headers"] = dict(default_headers)
+        self._clients: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, AsyncPerplexity
+        ] = weakref.WeakKeyDictionary()
         self._model = model
         self._preset = preset
         self._instructions = instructions
@@ -132,9 +142,20 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
         self._request_params = dict(request_params or {})
         self._timeout = float(timeout)
 
+    def _async_client(self) -> AsyncPerplexity:
+        """The SDK client of the running loop: one per provider and loop, built on first use."""
+        if self._prebuilt_client is not None:
+            return self._prebuilt_client
+        loop = asyncio.get_running_loop()
+        client = self._clients.get(loop)
+        if client is None:
+            client = AsyncPerplexity(**self._client_kwargs)
+            self._clients[loop] = client
+        return client
+
     # -- public interface --------------------------------------------------
 
-    def search(
+    async def asearch(
         self,
         query: str,
         *,
@@ -171,8 +192,6 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
             AgentRateLimited: If the backend returns HTTP 429 or the SDK
                 raises ``RateLimitError``.
         """
-        self._clear_nonfatal_notice()
-        self._clear_retry_notices()
         cache_parts = [
             query,
             str(recency_filter),
@@ -210,16 +229,10 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
                 continue
             create_kwargs[param_key] = param_val
 
+        client = self._async_client()
         try:
-            response = _call_openai_chat_completion_with_retries(
-                provider_label=type(self).__name__,
-                model=self.search_model,
-                operation="web_search",
-                deadline=operation_deadline,
-                outer_deadline=deadline,
-                timeout_label="Perplexity-WebSearch",
-                configured_timeout_seconds=self._timeout,
-                create=lambda: self._client.responses.create(
+            response = await call_with_retries(
+                lambda: client.responses.create(
                     **{
                         **create_kwargs,
                         "timeout": _bounded_timeout(
@@ -227,7 +240,16 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
                         ),
                     }
                 ),
-                append_retry_notice=self._append_retry_notice,
+                provider_label=type(self).__name__,
+                model=self.search_model,
+                operation="web_search",
+                deadline=operation_deadline,
+                outer_deadline=deadline,
+                timeout_label="Perplexity-WebSearch",
+                configured_timeout_seconds=self._timeout,
+                kind="search",
+                estimated_input_tokens=estimate_request_tokens(create_kwargs),
+                max_output_tokens=int(create_kwargs.get("max_output_tokens") or 0) or None,
             )
         except RateLimitError as exc:
             log.error("FATAL Rate-Limit in Perplexity-WebSearch")
@@ -241,7 +263,7 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
                 exc.status_code,
                 type(exc).__name__,
             )
-            self._set_nonfatal_notice(
+            return GroundedSearchResult(notices=(ProviderNotice(
                 "Perplexity-WebSearch failed; the empty result remains "
                 "a visible evidence gap.",
                 code=(
@@ -254,39 +276,37 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
                     )
                 ),
                 http_status=exc.status_code,
-            )
-            return GroundedSearchResult()
+            ),))
         except APITimeoutError:
             log.error("Perplexity-WebSearch reached the provider timeout")
-            self._set_nonfatal_notice(
+            return GroundedSearchResult(notices=(ProviderNotice(
                 "Perplexity-WebSearch reached the provider timeout; "
                 "the empty result remains a visible evidence gap.",
                 code="provider_timeout",
                 http_status=504,
-            )
-            return GroundedSearchResult()
+            ),))
         except APIError as exc:
             log.error(
                 "Perplexity-WebSearch failed (type=%s)",
                 type(exc).__name__,
             )
-            self._set_nonfatal_notice(
+            return GroundedSearchResult(notices=(ProviderNotice(
                 "Perplexity-WebSearch failed; the empty result remains "
                 "a visible evidence gap.",
                 code="temporary_transport",
                 http_status=503,
-            )
-            return GroundedSearchResult()
+            ),))
 
         result = self._parse_response(response)
-        if not result.answer and not result.sources:
-            self._set_nonfatal_notice(
-                "Perplexity-WebSearch returned neither answer text nor sources."
-            )
-
+        # The cache keeps the result only: a later hit is no new empty answer.
         with self._cache_lock:
             self._cache[key] = result
-        return copy.deepcopy(result)
+        result = copy.deepcopy(result)
+        if not result.answer and not result.sources:
+            result = dataclasses.replace(result, notices=(ProviderNotice(
+                "Perplexity-WebSearch returned neither answer text nor sources."
+            ),))
+        return result
 
     @staticmethod
     def _parse_response(response: Any) -> GroundedSearchResult:
@@ -339,9 +359,10 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
         """Report whether the provider is configured to attempt requests.
 
         Returns:
-            bool: ``True`` when the internal SDK client was constructed.
+            bool: ``True`` when a client is given or its configuration was
+            resolved; the client itself is built per loop on first use.
         """
-        return self._client is not None
+        return self._prebuilt_client is not None or bool(self._client_kwargs)
 
     @property
     def search_model(self) -> str:

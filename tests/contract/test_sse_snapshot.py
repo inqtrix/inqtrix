@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 
 import inqtrix.research.web_research as web_research_module
-from inqtrix.server.runs import format_sse_event
+from inqtrix.runs.shared import format_sse_event
 
 from tests.contract._app import (
     make_contract_client,

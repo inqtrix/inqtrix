@@ -11,6 +11,7 @@ scanning here.
 
 from __future__ import annotations
 
+from inqtrix import aio
 from inqtrix.capabilities.contracts import (
     CapabilityContext,
     CapabilityDefinition,
@@ -108,9 +109,10 @@ class CapabilityRegistry:
                     + (f": {loc}" if loc else ""),
                     http_status=400,
                 ) from exc
+        # The check is sync code that reaches back to this loop.
         if context.authority_check is not None:
-            context.authority_check()
+            await aio.run_legacy_segment(context.authority_check)
         result = await definition.handler(model, context)
         if context.authority_check is not None:
-            context.authority_check()
+            await aio.run_legacy_segment(context.authority_check)
         return result

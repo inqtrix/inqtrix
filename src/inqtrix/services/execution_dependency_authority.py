@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from inqtrix import aio
 from inqtrix.execution_authority import AuthorizationRevoked
-from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:
     from inqtrix.auth.directory import MirroredUser, UserDirectory
@@ -46,9 +46,8 @@ class ExecutionDependencyAuthorizer:
         self._skill_service = skill_service
         self._user_lookup = user_lookup
         """Live actor directory. Owned here rather than by each caller so
-        the actor probe rides the same safepoint pass and event loop as
-        the permission resolve instead of a separate per-call loop of its
-        own."""
+        the actor probe rides the same safepoint pass as the permission
+        resolve."""
 
     def check(
         self,
@@ -56,7 +55,7 @@ class ExecutionDependencyAuthorizer:
         principal: "Principal | None",
     ) -> None:
         """Synchronously fail when the actor or any pinned dependency is gone."""
-        run_coro_sync(self._check_async(request, principal))
+        aio.call_from_thread(self._check_async(request, principal))
 
     async def _check_async(
         self,
@@ -152,7 +151,7 @@ class CollectionEditAuthorizer:
         principal: "Principal | None",
     ) -> None:
         """Fail closed if requester or current collection edit access is gone."""
-        run_coro_sync(self._check_async(collection_id, principal))
+        aio.call_from_thread(self._check_async(collection_id, principal))
 
     async def _check_async(
         self,

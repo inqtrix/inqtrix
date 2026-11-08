@@ -18,7 +18,8 @@ from inqtrix.runs.shared import (
     question_was_clipped,
 )
 from inqtrix.server.container import build_run_store
-from inqtrix.server.runs import RunStore
+from inqtrix.storage.db import build_process_engine
+from inqtrix.runs.memory_store import RunStore
 from inqtrix.settings import (
     QueueSettings,
     ServerSettings,
@@ -132,7 +133,7 @@ def test_valkey_queue_without_url_fails_loudly():
 def test_postgres_storage_without_url_fails_loudly():
     settings = Settings(storage=StorageSettings(backend="postgres"))
     with pytest.raises(RuntimeError, match="INQTRIX_DATABASE_URL"):
-        build_run_store(settings)
+        build_process_engine(settings.storage)
 
 
 def test_postgres_storage_selects_the_durable_store():
@@ -144,7 +145,7 @@ def test_postgres_storage_selects_the_durable_store():
             database_url="postgresql+asyncpg://x:y@127.0.0.1:1/inqtrix",
         )
     )
-    store = build_run_store(settings)
+    store = build_run_store(settings, build_process_engine(settings.storage))
     assert isinstance(store, PostgresRunStore)
 
 
@@ -168,7 +169,7 @@ def test_postgres_store_uses_durable_retention_not_replay_ttl():
             database_url="postgresql+asyncpg://x:y@127.0.0.1:1/inqtrix",
         ),
     )
-    store = build_run_store(settings)
+    store = build_run_store(settings, build_process_engine(settings.storage))
     assert isinstance(store, PostgresRunStore)
     assert store._completed_ttl_seconds == 7_776_000
 
@@ -196,7 +197,7 @@ def test_a_dispatching_store_carries_its_own_slot_count():
             database_url="postgresql+asyncpg://x:y@127.0.0.1:1/inqtrix",
         ),
     )
-    store = build_run_store(settings)
+    store = build_run_store(settings, build_process_engine(settings.storage))
     assert isinstance(store, PostgresRunStore)
     assert store._max_concurrent == 7, (
         "the run store must size itself from the operator's run cap; an "

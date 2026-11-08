@@ -52,11 +52,15 @@ type ResearchWorkspaceProps = {
   onToggleJob: (jobId: string) => void
   /** Load a finished run's report again after its result failed to load. */
   onRetryReportResult?: (runId: string) => void
+  /** Load the stored steps of a finished run whose step log is opened. */
+  onRequestRunSteps?: (runId: string) => void
   onUseReportInChat: (runId: string) => void
   reduceMotion: boolean | null
   reportPanelSize: number
   selectedJobId: string | null
   selectedRun: ResearchRunRecord | null
+  /** Where loading the selected run's stored steps stands. */
+  selectedRunStepsLoad?: 'done' | 'loading'
   selectedStack: string
   shareCountByRunId?: Record<string, number>
 }
@@ -89,11 +93,13 @@ export function ResearchWorkspace({
   onShareJob,
   onToggleJob,
   onRetryReportResult,
+  onRequestRunSteps,
   onUseReportInChat,
   reduceMotion,
   reportPanelSize,
   selectedJobId,
   selectedRun,
+  selectedRunStepsLoad,
   selectedStack,
   shareCountByRunId,
 }: ResearchWorkspaceProps) {
@@ -211,10 +217,12 @@ export function ResearchWorkspace({
               <AnimatedPanelBody expanded={isReportVisible} side="right">
                 <ReportPanel
                   onHide={handleDesktopReportHide}
+                  onRequestSteps={onRequestRunSteps}
                   onSetReportAutocomplete={onSetReportAutocomplete}
                   onRetryResult={onRetryReportResult}
                   onUseReportInChat={onUseReportInChat}
                   selectedRun={selectedRun}
+                  stepsLoad={selectedRunStepsLoad}
                 />
               </AnimatedPanelBody>
             </ResizablePanel>
@@ -233,10 +241,12 @@ export function ResearchWorkspace({
         >
           <ReportPanel
             onHide={handleMobileReportHide}
+            onRequestSteps={onRequestRunSteps}
             onSetReportAutocomplete={onSetReportAutocomplete}
             onRetryResult={onRetryReportResult}
             onUseReportInChat={onUseReportInChat}
             selectedRun={selectedRun}
+            stepsLoad={selectedRunStepsLoad}
           />
         </ResponsiveSidePanel>
       )}

@@ -514,7 +514,7 @@ agent = ResearchAgent(AgentConfig(llm=llm, search=search))
 result = agent.research("Was ist der aktuelle Stand der GKV-Reform?")
 ```
 
-LLM providers: `LiteLLM`, `AnthropicLLM`, `AzureOpenAILLM`, `BedrockLLM`. Search providers: `PerplexitySearch`, `AzureFoundryWebSearch`. `AgentConfig` carries *behaviour* (`max_rounds`, `confidence_stop`, `report_profile`, ...); `.stream(...)` yields live progress then answer chunks. The returned `ResearchResult` exposes `answer`, `metrics` (`confidence`, `total_citations`, `rounds`, ...), `top_sources`, `references`, and `top_claims`.
+LLM providers: `LiteLLM`, `AnthropicLLM`, `AzureOpenAILLM`, `BedrockLLM`. Search providers: `PerplexitySearch`, `AzureFoundryWebSearch`. `AgentConfig` carries *behaviour* (`max_rounds`, `confidence_stop`, `report_profile`, ...); `.stream(...)` yields live progress then answer chunks. From async code and notebooks, `await agent.aresearch(...)` and `async for chunk in agent.astream(...)` do the same without blocking the event loop. The returned `ResearchResult` exposes `answer`, `metrics` (`confidence`, `total_citations`, `rounds`, ...), `top_sources`, `references`, and `top_claims`.
 
 **Deeper:** [Library mode](docs/deployment/library-mode.md) (Option A vs B, model tiers, streaming) · [Agent config](docs/configuration/agent-config.md) (every field) · [Public API](docs/architecture/library-api.md).
 

@@ -27,7 +27,7 @@ never logs in at all.
 
 | Identity | Where it is available | Required properties |
 |---|---|---|
-| Application role (`inqtrix_app`) | Nowhere — entered with `SET LOCAL ROLE` | `NOLOGIN NOSUPERUSER NOBYPASSRLS`, schema `USAGE` without database/schema `CREATE`, cannot own, inherit or assume an object-owner/BYPASS role, always tenant-scoped. |
+| Application role (`inqtrix_app`) | Nowhere — entered for each transaction with `set_config('role', ..., true)`, the function form of `SET LOCAL ROLE` | `NOLOGIN NOSUPERUSER NOBYPASSRLS`, schema `USAGE` without database/schema `CREATE`, cannot own, inherit or assume an object-owner/BYPASS role, always tenant-scoped. |
 | Runtime login (`inqtrix_runtime`) | API and worker only | `LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`, can `SET ROLE` to the application role, holds no schema `CREATE`, owns no RLS table and can assume no owner/BYPASS role. |
 | Migration login (`inqtrix_migrate`) | One-shot migration job only | A direct PostgreSQL connection, `USAGE` **and** `CREATE` on the active schema, ownership (direct or inherited) of every managed table, the tenant-policy function and both identity sequences, and `ADMIN OPTION` on the application role. Either the `bypass` or `owner` authority described below. Never expose it through API/worker env, Collaboration, PgBouncer transaction pooling, or the browser. |
 

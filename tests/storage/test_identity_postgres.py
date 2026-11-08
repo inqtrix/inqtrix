@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import Table, func, insert, select, text, update
+from sqlalchemy import Table, event, func, insert, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -509,6 +509,37 @@ async def test_rls_catalog_covers_current_identity_metadata(
         rls, forced, policy = catalog[table_name]
         assert rls and forced and policy, (
             f"{table_name}: ENABLE={rls} FORCE={forced} policy={policy}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_transaction_enters_role_and_tenant_in_one_statement_and_leaves_both(
+    engine: AsyncEngine,
+    session_factory: SessionFactory,
+) -> None:
+    statements: list[str] = []
+
+    def note(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", note)
+    try:
+        async with scoped(session_factory) as session:
+            entered = list(statements)
+            assert await session.scalar(text("SELECT current_user")) == APP_ROLE
+            assert (
+                await session.scalar(text("SELECT current_setting('inqtrix.tenant_id')"))
+                == TENANT_ID
+            )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", note)
+
+    assert len(entered) == 1
+    assert engine.pool.checkedout() == 0
+    async with session_factory() as session:
+        assert await session.scalar(text("SELECT current_user")) != APP_ROLE
+        assert not await session.scalar(
+            text("SELECT current_setting('inqtrix.tenant_id', true)")
         )
 
 
@@ -1419,6 +1450,7 @@ async def test_second_shared_workspace_preserves_direct_share(
 
 
 @pytest.mark.asyncio
+@pytest.mark.two_connections_on_purpose
 async def test_targeted_reconcile_does_not_lock_unrelated_share_resources(
     session_factory: SessionFactory,
 ) -> None:

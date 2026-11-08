@@ -61,6 +61,7 @@ async def _until_waiting_for_a_lock(factory, pid: int) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.two_connections_on_purpose
 async def test_an_invalidation_takes_the_account_row_before_the_generation() -> None:
     engine = build_engine(TEST_DATABASE_URL, null_pool=True)
     factory = build_session_factory(engine)

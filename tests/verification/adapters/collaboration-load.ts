@@ -60,6 +60,14 @@ async function podmanClockPreflight(
       },
     )
     const hostAfterEpochMs = Date.now()
+    // Without a Podman machine the containers run on the host clock.
+    if (result.exitCode !== 0 && /VM does not exist/.test(result.stderr)) {
+      return passed(
+        ENGINE,
+        'load-podman-clock',
+        'This host has no Podman VM, so the containers use the host clock.',
+      )
+    }
     const output = result.stdout.trim()
     if (
       result.exitCode !== 0
@@ -132,7 +140,7 @@ export const collaborationLoadAdapter: VerificationAdapter = {
     try {
       normalizeLoadSmokeBaseURL(
         context.environment.INQTRIX_E2E_BASE_URL
-          ?? 'http://127.0.0.1:8080',
+          ?? 'http://localhost:8080',
       )
       baseURLCheck = passed(
         ENGINE,

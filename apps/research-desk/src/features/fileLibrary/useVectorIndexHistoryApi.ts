@@ -19,7 +19,7 @@
  * SERVER HOLDS so a local-newer index is pushed up rather than stranded.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch } from 'react'
 
 import {
@@ -28,11 +28,14 @@ import {
   saveVectorIndex,
 } from '@/api/inqtrixClient'
 import {
-  autosaveDelayForVectorIndexes,
+  autosaveDelayAfterConfirmation,
+  memberOnServerFor,
   serverVectorIndexPayload,
+  unconfirmedMemberKey,
   vectorIndexChanged,
   vectorIndexFingerprint,
   vectorIndexRecordFromServer,
+  type MemberOnServer,
   type VectorIndexFingerprint,
 } from '@/features/fileLibrary/vectorIndexSync'
 import { deleteTolerant404, syncCollection } from '@/features/project/syncCollection'
@@ -41,7 +44,7 @@ import {
   useSyncScope,
   type SyncLifecycleToken,
 } from '@/features/project/useProjectSyncLifecycle'
-import type { VectorIndexRecord } from '@/features/project/types'
+import type { FileAssetRecord, VectorIndexRecord } from '@/features/project/types'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import { messageFromError } from '@/api/requestErrorText'
 
@@ -51,6 +54,8 @@ const PAGE_LIMIT = 200
 type UseVectorIndexHistoryApiOptions = {
   apiKey: string | undefined
   dispatch: Dispatch<ResearchDeskAction>
+  /** The file assets, to name a member only once the server holds its file. */
+  fileAssets: Record<string, FileAssetRecord>
   vectorIndexes: Record<string, VectorIndexRecord>
   /** In-session load counter (bumped on every wholesale project replace). Part
    * of the lifecycle identity so a switch to another synced project re-hydrates
@@ -72,6 +77,7 @@ export type VectorIndexHistoryApiHandle = {
 export function useVectorIndexHistoryApi({
   apiKey,
   dispatch,
+  fileAssets,
   vectorIndexes,
   projectEpoch,
   syncActive,
@@ -84,6 +90,14 @@ export function useVectorIndexHistoryApi({
   const autosavePrevIndexesRef = useRef(vectorIndexes)
   const indexesRef = useRef(vectorIndexes)
   indexesRef.current = vectorIndexes
+  const assetsRef = useRef(fileAssets)
+  assetsRef.current = fileAssets
+  // Read at write time, so a write names exactly the members whose files the
+  // server holds at that moment.
+  const onServer = useCallback<MemberOnServer>(
+    (fileId) => memberOnServerFor(assetsRef.current)(fileId),
+    [],
+  )
   const optionsRef = useRef({ apiKey, workspaceId })
   optionsRef.current = { apiKey, workspaceId }
 
@@ -97,8 +111,8 @@ export function useVectorIndexHistoryApi({
   const bindSyncPass = useSyncScope(syncActive, syncIdentity)
 
   const pushIndex = useCallback(async (index: VectorIndexRecord) => {
-    await saveVectorIndex(index.id, serverVectorIndexPayload(index), optionsRef.current)
-  }, [])
+    await saveVectorIndex(index.id, serverVectorIndexPayload(index, onServer), optionsRef.current)
+  }, [onServer])
 
   const acknowledgeServerDeletion = useCallback((indexId: string) => {
     syncedRef.current.delete(indexId)
@@ -117,7 +131,7 @@ export function useVectorIndexHistoryApi({
         inScope,
         current: indexesRef.current,
         synced: syncedRef.current,
-        fingerprintOf: vectorIndexFingerprint,
+        fingerprintOf: (record) => vectorIndexFingerprint(record, onServer),
         changed: vectorIndexChanged,
         pushOne: pushIndex,
         deleteOne: (id) =>
@@ -135,7 +149,7 @@ export function useVectorIndexHistoryApi({
         void flush()
       }
     }
-  }, [bindSyncPass, pushIndex])
+  }, [bindSyncPass, onServer, pushIndex])
 
   // -- reset + hydrate lifecycle (re-armed on project identity) ---------- #
 
@@ -166,7 +180,7 @@ export function useVectorIndexHistoryApi({
         // then differs and the first autosave pushes it (unless mid-reindex,
         // which vectorIndexChanged defers until it reaches a terminal status).
         for (const record of records) {
-          syncedRef.current.set(record.id, vectorIndexFingerprint(record))
+          syncedRef.current.set(record.id, vectorIndexFingerprint(record, onServer))
         }
         hydratedRef.current = true
         setHydrated(true)
@@ -175,7 +189,7 @@ export function useVectorIndexHistoryApi({
         if (!token.cancelled) setError(messageFromError(caught))
       }
     })()
-  }, [dispatch])
+  }, [dispatch, onServer])
 
   useProjectSyncLifecycle({
     active: syncActive,
@@ -186,15 +200,31 @@ export function useVectorIndexHistoryApi({
 
   // -- debounced autosave trigger --------------------------------------- #
 
+  // Members whose upload reservation is still out: the autosave runs again
+  // the moment one is confirmed, not at the next unrelated edit.
+  const unconfirmed = useMemo(
+    () => unconfirmedMemberKey(vectorIndexes, memberOnServerFor(fileAssets)),
+    [vectorIndexes, fileAssets],
+  )
+  const autosavePrevUnconfirmedRef = useRef(unconfirmed)
+
   useEffect(() => {
     const previous = autosavePrevIndexesRef.current
     autosavePrevIndexesRef.current = vectorIndexes
+    const previousUnconfirmed = autosavePrevUnconfirmedRef.current
+    autosavePrevUnconfirmedRef.current = unconfirmed
     if (!syncActive || !hydrated) return
     const timer = setTimeout(() => {
       void flush()
-    }, autosaveDelayForVectorIndexes(previous, vectorIndexes, AUTOSAVE_DEBOUNCE_MS))
+    }, autosaveDelayAfterConfirmation(
+      previous,
+      vectorIndexes,
+      previousUnconfirmed,
+      unconfirmed,
+      AUTOSAVE_DEBOUNCE_MS,
+    ))
     return () => clearTimeout(timer)
-  }, [vectorIndexes, syncActive, hydrated, flush])
+  }, [vectorIndexes, unconfirmed, syncActive, hydrated, flush])
 
   return { acknowledgeServerDeletion, error }
 }

@@ -38,7 +38,7 @@ class AttachedReportError(Exception):
         super().__init__("; ".join(self.messages))
 
 
-def resolve_attached_reports(
+async def resolve_attached_reports(
     report_ids: "Sequence[str]",
     *,
     run_store: Any,
@@ -76,7 +76,7 @@ def resolve_attached_reports(
     unfinished: list[str] = []
     for report_id in wanted:
         try:
-            summary = run_store.get(report_id, visible_to=visible_to)
+            summary = await run_store.aget(report_id, visible_to=visible_to)
         except Exception:  # noqa: BLE001 — every failure is "not visible"
             unknown.append(report_id)
             continue
@@ -87,7 +87,7 @@ def resolve_attached_reports(
             {
                 "report_id": report_id,
                 "title": str(summary.get("question") or report_id).strip(),
-                "reference_count": _reference_count(
+                "reference_count": await _reference_count(
                     run_store, report_id, visible_to
                 ),
             }
@@ -106,7 +106,7 @@ def resolve_attached_reports(
     return resolved
 
 
-def _reference_count(
+async def _reference_count(
     run_store: Any, report_id: str, visible_to: "UserContext | None"
 ) -> int:
     """How many sources the report carries, for the registry line.
@@ -115,7 +115,7 @@ def _reference_count(
     cannot answer costs the hint, never the attachment.
     """
     try:
-        payload = run_store.result(report_id, visible_to=visible_to)
+        payload = await run_store.aresult(report_id, visible_to=visible_to)
     except Exception:  # noqa: BLE001
         return 0
     references = payload.get("references") or []

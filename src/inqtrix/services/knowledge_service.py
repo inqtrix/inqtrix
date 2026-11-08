@@ -17,16 +17,16 @@ the indistinct :class:`CollectionNotFound`/:class:`DocumentNotFound`
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from inqtrix import aio
 from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
 from inqtrix.embedding_cards import resolve_embedding_card
@@ -40,8 +40,8 @@ from inqtrix.knowledge.embedding_batches import embed_in_slices
 from inqtrix.knowledge.page_mapping import infer_chunk_pages
 from inqtrix.knowledge.parsing import extract_file, extraction_facts
 from inqtrix.knowledge.source_cleanup import SourceCleanupPlan
-from inqtrix.quota.models import estimate_tokens
-from inqtrix.source_authority import SourceDeletionPermit
+from inqtrix.storage.source_authority import SourceDeletionPermit
+from inqtrix.text import estimate_tokens
 
 log = logging.getLogger(__name__)
 from inqtrix.knowledge.retrieval import retrieve
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from inqtrix.knowledge.errors import KnowledgeError
     from inqtrix.auth.permissions import AuthorizationService
     from inqtrix.auth.principal import Principal, UserContext
-    from inqtrix.source_authority import SourceScope
+    from inqtrix.storage.source_authority import SourceScope
     from inqtrix.user_events import ResourceInvalidator
     from inqtrix.knowledge.parsing import DocumentParser
 from inqtrix.knowledge.stores.ports import (
@@ -268,9 +268,9 @@ class KnowledgeService:
         self._generation_rollback_retention_seconds = max(
             0, generation_rollback_retention_seconds
         )
-        self._maintenance_active_check: Callable[[str], bool] | None = None
-        self._collection_deletion_active_check: Callable[[str], bool] | None = None
-        self._document_deletion_active_check: Callable[[str], bool] | None = None
+        self._maintenance_active_check: Callable[[str], Awaitable[bool]] | None = None
+        self._collection_deletion_active_check: Callable[[str], Awaitable[bool]] | None = None
+        self._document_deletion_active_check: Callable[[str], Awaitable[bool]] | None = None
 
     async def collection_access(
         self,
@@ -330,7 +330,7 @@ class KnowledgeService:
     def bind_collection_maintenance(
         self,
         *,
-        active_check: Callable[[str], bool],
+        active_check: Callable[[str], Awaitable[bool]],
     ) -> None:
         """Bind the aggregate indexing-maintenance boundary after composition.
 
@@ -342,12 +342,12 @@ class KnowledgeService:
         """
         self._maintenance_active_check = active_check
 
-    def bind_collection_deletion(self, *, active_check: Callable[[str], bool]) -> None:
+    def bind_collection_deletion(self, *, active_check: Callable[[str], Awaitable[bool]]) -> None:
         """Hide a backing collection while its durable deletion is unresolved."""
 
         self._collection_deletion_active_check = active_check
 
-    def bind_document_deletion(self, *, active_check: Callable[[str], bool]) -> None:
+    def bind_document_deletion(self, *, active_check: Callable[[str], Awaitable[bool]]) -> None:
         """Hide a document while its durable deletion is unresolved."""
 
         self._document_deletion_active_check = active_check
@@ -355,24 +355,29 @@ class KnowledgeService:
     async def _collection_deletion_active(self, collection_id: str) -> bool:
         if self._collection_deletion_active_check is None:
             return False
-        return bool(
-            await asyncio.to_thread(
-                self._collection_deletion_active_check, collection_id
-            )
-        )
+        return bool(await self._collection_deletion_active_check(collection_id))
 
     async def _document_deletion_active(self, document_id: str) -> bool:
         if self._document_deletion_active_check is None:
             return False
-        return bool(
-            await asyncio.to_thread(self._document_deletion_active_check, document_id)
+        return bool(await self._document_deletion_active_check(document_id))
+
+    def _generation_document_validation(
+        self, document: Any, revision_id: str
+    ) -> GenerationDocumentValidation:
+        """What a staged generation must prove about one document; pure computation."""
+        slices = chunk_text_slices(document.text, max_chars=self._chunk_max_chars)
+        return GenerationDocumentValidation(
+            revision_id=revision_id,
+            content_hash=hashlib.sha256(document.text.encode("utf-8")).hexdigest(),
+            source_spans=tuple(item.utf8_span(document.text) for item in slices),
         )
 
     async def _require_collection_mutable(self, collection_id: str) -> None:
         """Protect destructive collection teardown from an active worker."""
         if self._maintenance_active_check is None:
             return
-        active = await asyncio.to_thread(self._maintenance_active_check, collection_id)
+        active = await self._maintenance_active_check(collection_id)
         if active:
             raise CollectionMaintenanceActive(collection_id)
 
@@ -484,7 +489,7 @@ class KnowledgeService:
         if card is not None:
             dimension = card.dims
         else:
-            probe = await asyncio.to_thread(
+            probe = await aio.run_provider_blocking(
                 self._knowledge.embeddings.embed_query,
                 "dimension probe",
                 model=model,
@@ -710,9 +715,11 @@ class KnowledgeService:
             source_id = f"document:{uuid.uuid4().hex}"
         else:
             document_metadata["source_id"] = source_id
-        source_slices = chunk_text_slices(clean_text, max_chars=self._chunk_max_chars)
-        page_numbers = infer_chunk_pages(
-            [item.text for item in source_slices], page_texts
+        source_slices = await aio.run_blocking(
+            chunk_text_slices, clean_text, max_chars=self._chunk_max_chars
+        )
+        page_numbers = await aio.run_blocking(
+            infer_chunk_pages, [item.text for item in source_slices], page_texts
         )
         if any(page is not None for page in page_numbers):
             document_metadata["_chunk_pages"] = page_numbers
@@ -789,7 +796,7 @@ class KnowledgeService:
     ) -> PreparedDocumentRevision:
         """Run provider work without publishing chunks or revision pointers."""
         if authority_check is not None:
-            authority_check()
+            await aio.run_legacy_segment(authority_check)
         reserved = await self._knowledge.store.load_reserved_document_revision(
             document_id=document_id,
             revision_id=revision_id,
@@ -824,7 +831,7 @@ class KnowledgeService:
             contextualize=contextualize,
         )
         if authority_check is not None:
-            authority_check()
+            await aio.run_legacy_segment(authority_check)
         document_metadata = dict(revision.metadata)
         if prepared.contextualization_marker is not None:
             # The marker travels with the document so degraded
@@ -884,7 +891,7 @@ class KnowledgeService:
         mutation boundary around this call.
         """
         if authority_check is not None:
-            authority_check()
+            await aio.run_legacy_segment(authority_check)
         if prepared.already_published is not None:
             return prepared.already_published
         embedded = prepared.embedded
@@ -899,7 +906,7 @@ class KnowledgeService:
             embeddings=embedded.embeddings,
             source_chunks=embedded.source_texts,
             retrieval_contexts=embedded.retrieval_contexts,
-            source_spans=embedded.spans_for(prepared.text),
+            source_spans=await aio.run_blocking(embedded.spans_for, prepared.text),
             page_numbers=prepared.page_numbers,
             generation_id=None,
             fence_job_id=fence_job_id,
@@ -941,7 +948,9 @@ class KnowledgeService:
         separate from source evidence; only ``embedding_texts`` are sent to the
         embedding provider.
         """
-        source_slices = chunk_text_slices(text, max_chars=self._chunk_max_chars)
+        source_slices = await aio.run_blocking(
+            chunk_text_slices, text, max_chars=self._chunk_max_chars
+        )
         embedding_texts = [item.text for item in source_slices]
         retrieval_contexts: list[str | None] = [None] * len(source_slices)
         marker: str | None = None
@@ -949,17 +958,20 @@ class KnowledgeService:
         omitted_chunks = 0
         contextualizer = self._knowledge.contextualizer
         if contextualize and contextualizer is not None:
-            # Sync LLM call → off the event loop so a long
-            # contextualization pass never stalls concurrent requests.
-            contextualized = await asyncio.to_thread(
-                contextualizer.contextualize,
-                document_title=title,
-                document_text=text,
-                chunks=source_slices,
-                on_batch_completed=on_context_batch,
-                on_batch_checkpoint=on_context_checkpoint,
-                completed_batches=context_checkpoints,
-                cancel_check=cancel_check,
+            # A whole document of sync LLM calls, whose progress callbacks reach
+            # the job's store: on the transition lane, not on the short-work
+            # lane and not on the lane of single provider calls.
+            contextualized = await aio.run_legacy_segment(
+                functools.partial(
+                    contextualizer.contextualize,
+                    document_title=title,
+                    document_text=text,
+                    chunks=source_slices,
+                    on_batch_completed=on_context_batch,
+                    on_batch_checkpoint=on_context_checkpoint,
+                    completed_batches=context_checkpoints,
+                    cancel_check=cancel_check,
+                )
             )
             embedding_texts = contextualized.texts
             # A chunk whose batch the content filter blocked has no context.
@@ -970,7 +982,7 @@ class KnowledgeService:
             batch_count = contextualized.batch_count
             omitted_chunks = contextualized.omitted_chunks
         if on_embedding_started is not None:
-            on_embedding_started()
+            await aio.run_legacy_segment(on_embedding_started)
         if cancel_check is not None:
             cancel_check()
         # Sliced under a character budget so one huge document can never
@@ -1042,7 +1054,7 @@ class KnowledgeService:
                 into a partially re-embedded document.
         """
         if authority_check is not None:
-            authority_check()
+            await aio.run_legacy_segment(authority_check)
         prepared = await self._embed_text(
             title=document.title,
             text=document.text,
@@ -1057,7 +1069,7 @@ class KnowledgeService:
             contextualize=contextualize,
         )
         if authority_check is not None:
-            authority_check()
+            await aio.run_legacy_segment(authority_check)
         # Re-embed re-chunks the unchanged canonical text with the deterministic
         # chunker, so the chunk set is identical and page numbers captured at
         # first ingest re-align by index — carry them forward (no original file
@@ -1089,7 +1101,7 @@ class KnowledgeService:
             embeddings=prepared.embeddings,
             source_chunks=prepared.source_texts,
             retrieval_contexts=prepared.retrieval_contexts,
-            source_spans=prepared.spans_for(document.text),
+            source_spans=await aio.run_blocking(prepared.spans_for, document.text),
             document_content_hash=prepared.content_hash,
             revision_id=revision_id,
             generation_id=generation_id or collection.active_generation_id,
@@ -1099,7 +1111,7 @@ class KnowledgeService:
             actor_user_id=actor_user_id,
         )
         if authority_check is not None:
-            authority_check()
+            await aio.run_legacy_segment(authority_check)
         return ReembeddedDocument(
             document=updated,
             work_receipt=prepared.work_receipt,
@@ -1168,12 +1180,10 @@ class KnowledgeService:
             )
         validation_documents: dict[str, GenerationDocumentValidation] = {}
         for document_id, revision_id in expected.items():
-            document = documents_by_id[document_id]
-            slices = chunk_text_slices(document.text, max_chars=self._chunk_max_chars)
-            validation_documents[document_id] = GenerationDocumentValidation(
-                revision_id=revision_id,
-                content_hash=hashlib.sha256(document.text.encode("utf-8")).hexdigest(),
-                source_spans=tuple(item.utf8_span(document.text) for item in slices),
+            validation_documents[document_id] = await aio.run_blocking(
+                self._generation_document_validation,
+                documents_by_id[document_id],
+                revision_id,
             )
         collection = await self._knowledge.store.get_collection(collection_id)
         expected_validation = GenerationBuildValidation(
@@ -1352,8 +1362,11 @@ class KnowledgeService:
             raise KnowledgeValidationError(
                 "File ingestion is disabled (INQTRIX_DOCUMENT_PARSER=none)"
             )
-        extraction = await asyncio.to_thread(
-            extract_file, self._parser, file_name=file_name, content=content
+        # May compute for minutes, so not on the short-work lane.
+        extraction = await aio.run_legacy_segment(
+            functools.partial(
+                extract_file, self._parser, file_name=file_name, content=content
+            )
         )
         document_metadata = dict(metadata or {})
         document_metadata["parser"] = extraction.parser_id

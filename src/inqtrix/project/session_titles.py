@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from sqlalchemy import and_, case, or_, select, update
 
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 TitleSource = Literal["initial", "generated", "manual"]
 

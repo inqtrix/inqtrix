@@ -162,8 +162,11 @@ flowchart TD
     subgraph "HTTP Layer"
         app["server/app.py"]
         routes["server/routes.py"]
-        runs["server/runs.py"]
         streaming["server/streaming.py"]
+    end
+
+    subgraph "Run domain"
+        runs["runs/memory_store.py"]
     end
 
     subgraph "Utilities"
@@ -225,13 +228,52 @@ Key takeaways:
   step implementations.
 - Providers and strategies are injected into nodes, so the default algorithm can
   use different backends without changing graph wiring.
-- Native browser clients use the run store (`server/runs.py` in-memory by default; `runs/postgres_store.py` + Valkey worker dispatch opt-in) as queue and event
+- Native browser clients use the run store (`runs/memory_store.py` in-memory by default; `runs/postgres_store.py` + Valkey worker dispatch opt-in) as queue and event
   registry around the same `graph.run()` path; OpenAI-compatible chat clients
   continue to use `server/streaming.py`.
 
 **Key property.** No circular dependencies. The dependency direction flows
 strictly downward: Public API → Orchestration → Providers/Strategies →
 Utilities.
+
+## Layers
+
+Every module under `src/inqtrix` belongs to one layer, and `tests/architecture/test_import_boundaries.py` holds every import to this table, the ones inside functions and under `TYPE_CHECKING` included. Only the database migrations stay outside it.
+
+| Layer | Holds | May import |
+|---|---|---|
+| Kernel contracts | `harness/contracts/` | only itself |
+| Kernel | the rest of `harness/` | the kernel contracts and the kernel layers below it |
+| Base | small shared modules such as `aio`, `constants`, `exceptions`, `i18n`, `model_cards`, `settings`, `version`, also `observability/semconv.py` | base |
+| Observability | `observability/`, `logging_config`, `runtime_logging`, `execution_failures` | base, observability, `auth` |
+| Engines | the research modules (`graph`, `nodes`, `evidence`), `knowledge/`, `providers/` (with the measuring wrappers in `providers/tracing.py`) | base, observability, its own engine, `providers/`; `knowledge/stores/` also `storage/` and `auth/` |
+| Plugins | `plugins/`, `capabilities/` | base, observability, engines, its own plugin |
+| Agents | `agents/` | base, observability, engines, agents, `content/` |
+| Application | `services/`, `project/`, `auth/`, `content/`, `core/`, `quota/`, `usage/`, `execution_authority` | base, observability, engines, agents, application, infrastructure |
+| Infrastructure | `runs/`, `storage/`, `user_events` | base, observability, infrastructure, `auth/`, and the port and record modules named in `APP_PORT_MODULES`, whose adapters these stores are |
+| Composition | `server/`, `worker/`, `deploy/`, `agent`, `periodic_sweep`, the package root | everything |
+
+Every layer may import the kernel contracts. Plugins, agents and the application reach the rest of the kernel through the `inqtrix.harness` facade only; composition reaches all of it.
+
+`tests/architecture/boundary_exceptions.py` lists the imports that do not follow the table yet. A new violation fails the test until someone lists it, where a reviewer sees it, and an entry whose import is gone fails as well. `tests/architecture/test_async_discipline.py` does the same for the async rules that a parse of the source can check, such as one event loop per process and no known blocking call inside `async def`, with exact counts per module in `async_exceptions.py`. A lock held inside `async def` is not among them: the in-memory stores hold theirs briefly on purpose.
+
+## One event loop per process
+
+Each API and worker process has one event loop: the API runs on uvicorn's, the worker's entry point owns its own. `aio.py` is the only thread bridge. Whatever must not block that loop leaves it through a lane, and the lanes stay apart because a job on one waits for the others.
+
+| Lane | For | Threads |
+|---|---|---|
+| `aio.run_blocking` | short blocking or CPU-heavy work; it is also the loop's default executor, so `asyncio.to_thread` lands here | `INQTRIX_BLOCKING_POOL_SIZE` |
+| `aio.run_provider_blocking` | long synchronous provider calls, so that a slow provider never queues in front of short work | `INQTRIX_PROVIDER_POOL_SIZE` |
+| `aio.run_legacy_segment`, `aio.start_legacy_segment` | a whole synchronous engine or job body, until that engine is async, and short synchronous services an async caller needs | one per job slot of the process, plus `INQTRIX_BLOCKING_POOL_SIZE` for those short services |
+
+Synchronous code reaches the loop through `aio.call_from_thread`. It raises on a loop thread, which would wait for itself, on a `run_blocking` thread, whose pool could end up waiting for itself. Without a configured loop it starts the library's own background loop, as a script or notebook needs; a process owner therefore configures its loop before anything reaches the bridge.
+
+In the worker, claiming, heartbeats and the cancel poll are tasks on that loop, and the job queue uses the asyncio client. A blocking call on the loop therefore holds up every run and request of the process, in a worker their heartbeats too; `worker_claim_idle_seconds` has to stay at least six times `worker_heartbeat_seconds`, so that a short stall does not hand healthy runs to another worker. `inqtrix_event_loop_lag_milliseconds` shows such a stall, a watchdog logs the function behind one of more than 2 s, and `inqtrix_thread_lane_jobs` shows a full lane, which neither of the two can see. See [Metrics](../observability/metrics.md).
+
+A process has one database engine, built by `storage/db.py::build_process_engine` when the process is composed and handed to every store. No store disposes it; the one who composed the process does, after everything that uses it has stopped. Its limit, `INQTRIX_DATABASE_POOL_SIZE`, is therefore the limit of the process. A task holds one connection at a time, so tasks cannot wait for each other's second one.
+
+Each operation of a job store in `runs/` has two names, in the memory and the Postgres tier alike: `aget` for a coroutine, `get` for synchronous code on a lane. Both run the one implementation; the Postgres one on the process loop, the memory one where it is called. A sync name on the loop raises, because it would wait for itself. Nothing holds a store's thread lock across such a bridge or an `await`, because the loop needs that lock too. A job body gets a context of its own, so its log fields and its usage subject end with it.
 
 ## Where to change what
 
@@ -251,7 +293,7 @@ Utilities.
 | Change prompt templates | `prompts.py` | [Nodes](websearch/nodes.md) |
 | Add new state fields | `state.py` (add to `AgentState` TypedDict) | [Nodes](websearch/nodes.md) |
 | Add a new HTTP endpoint | `server/routes.py`, `server/app.py` | [Web server mode](../deployment/webserver-mode.md) |
-| Change native run queue or events | `server/runs.py`, `server/routes.py`, `state.py`, `graph.py` | [Runs API](../extending/runs-api.md), [Web server mode](../deployment/webserver-mode.md) |
+| Change native run queue or events | `runs/memory_store.py`, `runs/records.py`, `server/routes.py`, `state.py`, `graph.py` | [Runs API](../extending/runs-api.md), [Web server mode](../deployment/webserver-mode.md) |
 | Change timeouts or thresholds | `constants.py` (defaults), `settings.py` (env) | [Settings and env](../configuration/settings-and-env.md), [Timeouts and errors](../observability/forensic-cookbook.md#timeouts-and-errors) |
 | Change request history or state initialisation | `state.py`, `graph.py`, `server/routes.py` | [Web server mode](../deployment/webserver-mode.md) |
 | Add an organisation's trust list | a custom `SourceTieringStrategy` (the default keeps no site lists) | [Source tiering](websearch/evidence.md) |

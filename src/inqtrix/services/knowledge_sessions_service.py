@@ -20,7 +20,7 @@ from inqtrix.project.knowledge_sessions_ports import (
     KnowledgeSessionNotFound,
     KnowledgeSessionStore,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.services.workspace_guard import deny_cross_workspace
 
 if TYPE_CHECKING:
@@ -236,9 +236,9 @@ class KnowledgeSessionsService:
     ) -> dict[str, int]:
         # The registry tombstone remains until the operation receipt commits.
         del scope
-        counter = getattr(self._run_store, "knowledge_session_residuals", None)
+        counter = getattr(self._run_store, "aknowledge_session_residuals", None)
         run_residuals = (
-            counter(
+            await counter(
                 session_id,
                 tenant_id=tenant_id,
                 requester_user_id=owner_user_id,

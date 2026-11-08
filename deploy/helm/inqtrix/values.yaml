@@ -51,20 +51,20 @@ config:
   # s3.enabled bundles MinIO (see configmap.yaml). Set it here explicitly ONLY to point
   # at an external S3 endpoint (an explicit config value still wins over the derived one).
   INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
-  # Pooled-engine connection budget. Every process counts the pooled engines
-  # it actually builds and logs the worst case at startup, so the number
-  # never has to be reconstructed from a list here. Worst case per process =
-  # pooled_engines x (POOL_SIZE + MAX_OVERFLOW), plus the agent checkpointer's
-  # own pool where the workspace agent runs. Size the sum over ALL replicas
-  # below Postgres max_connections, raise that ceiling on the BUNDLED server
-  # with postgres.maxConnections, or front the database with a transaction
-  # pooler (pgbouncer.enabled below); a process whose own budget exceeds the
-  # server limit says so at startup. Defaults: 5 / 10 / 30.
-  # INQTRIX_DATABASE_POOL_SIZE: "5"
-  # INQTRIX_DATABASE_POOL_MAX_OVERFLOW: "10"
+  # Connection budget. Every API and worker process keeps one pool for all its
+  # stores and logs its limit at startup: POOL_SIZE + MAX_OVERFLOW, plus the
+  # agent checkpointer's own pool where the workspace agent runs. Size the sum
+  # over ALL replicas below Postgres max_connections, raise that ceiling on the
+  # BUNDLED server with postgres.maxConnections, or front the database with a
+  # transaction pooler (pgbouncer.enabled below); a process whose own budget
+  # exceeds the server limit says so at startup. Connections above POOL_SIZE
+  # close when they return, so keep MAX_OVERFLOW at 0 and raise POOL_SIZE.
+  # Defaults: 15 / 0 / 30.
+  # INQTRIX_DATABASE_POOL_SIZE: "15"
+  # INQTRIX_DATABASE_POOL_MAX_OVERFLOW: "0"
   # INQTRIX_DATABASE_POOL_TIMEOUT_SECONDS: "30"
-  # Per-statement ceiling on pooled engines (seconds, 0 disables); bounds
-  # in-flight statements on dead connections. Default 120.
+  # Per-statement ceiling of that pool (seconds, 0 disables); bounds in-flight
+  # statements on dead connections. Default 120.
   # INQTRIX_DATABASE_COMMAND_TIMEOUT_SECONDS: "120"
 # -- Free-form extra non-secret env merged into the ConfigMap (provider models,
 # feature flags, OIDC issuer/client-id, tuning -- anything non-secret).

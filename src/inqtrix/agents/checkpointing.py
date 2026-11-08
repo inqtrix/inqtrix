@@ -21,12 +21,19 @@ The volatile escape (``INQTRIX_AGENT_ALLOW_VOLATILE``) uses langgraph's
 ``InMemorySaver``: interrupted runs then die with the process — the
 container logs a WARNING and capabilities report
 ``workspace_agent_durable: false`` so nothing degrades silently.
+
+Both savers load only LangGraph's safe types plus :data:`CHECKPOINT_TYPES`,
+whatever ``LANGGRAPH_STRICT_MSGPACK`` says. Anything else loads as raw data,
+is logged and counted, and the kernel stops a run whose checkpoint held it.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -44,6 +51,80 @@ so they must not survive the scheme swap. The bundled pgbouncer URL
 appends ``prepared_statement_cache_size=0`` — asyncpg's transaction-
 pooling mitigation; the psycopg pool gets the equivalent through its
 ``prepare_threshold=0`` connect kwarg instead."""
+
+
+CHECKPOINT_TYPES: frozenset[tuple[str, str]] = frozenset()
+"""Types beyond LangGraph's safe set (``SAFE_MSGPACK_TYPES``) a checkpoint may hold.
+
+Empty: both workflows that share the checkpointer keep plain data and
+LangChain messages in their state, and every checkpoint their tests write
+and the stored ones read back with nothing outside the safe set. The list
+is part of the workflow fingerprint; changing it is a contract break."""
+
+_blocked_types: ContextVar[list[tuple[str, str]] | None] = ContextVar(
+    "inqtrix_blocked_checkpoint_types", default=None
+)
+_watch_lock = threading.Lock()
+_watching = False
+
+
+class CheckpointTypeBlocked(RuntimeError):
+    """A run's checkpoint held types outside the allowed list.
+
+    They loaded as raw data, so the run would continue on altered state; it
+    stops instead, before any node runs. The serializer's listener has
+    already named each type in a WARNING.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The run's stored state holds data the server does not load; the run "
+            "stops instead of resuming on altered data."
+        )
+
+
+def _on_serde_event(event: Any) -> None:
+    kind = event.get("kind")
+    if kind not in ("msgpack_blocked", "msgpack_method_blocked"):
+        return
+    module, name = str(event.get("module", "")), str(event.get("name", ""))
+    log.warning(
+        "A checkpoint holds the type %r.%r outside the allowed list; it loads as raw data.",
+        module,
+        name,
+    )
+    from inqtrix.observability.metrics_defs import active_metrics
+
+    metrics = active_metrics()
+    if metrics is not None:
+        metrics.count_blocked_checkpoint_type("method" if kind == "msgpack_method_blocked" else "type")
+    collector = _blocked_types.get()
+    if collector is not None:
+        collector.append((module, name))
+
+
+def checkpoint_serializer() -> Any:
+    """The serializer of both savers: the safe types plus :data:`CHECKPOINT_TYPES`."""
+    from langgraph.checkpoint.serde.event_hooks import register_serde_event_listener
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    global _watching
+    with _watch_lock:
+        if not _watching:
+            register_serde_event_listener(_on_serde_event)
+            _watching = True
+    return JsonPlusSerializer(allowed_msgpack_modules=sorted(CHECKPOINT_TYPES))
+
+
+@contextmanager
+def blocked_checkpoint_types() -> Iterator[list[tuple[str, str]]]:
+    """Collect the types a checkpoint load in this context left as raw data."""
+    collector: list[tuple[str, str]] = []
+    token = _blocked_types.set(collector)
+    try:
+        yield collector
+    finally:
+        _blocked_types.reset(token)
 
 
 def _psycopg_conninfo(database_url: str) -> str:
@@ -120,7 +201,7 @@ class CheckpointerHandle:
                     "(INQTRIX_AGENT_ALLOW_VOLATILE); interrupted runs do not survive a "
                     "restart."
                 )
-                self._saver = InMemorySaver()
+                self._saver = InMemorySaver(serde=checkpoint_serializer())
                 return self._saver
             from langgraph.checkpoint.postgres import PostgresSaver
             from psycopg_pool import ConnectionPool
@@ -137,7 +218,7 @@ class CheckpointerHandle:
                 open=True,
                 kwargs={"autocommit": True, "prepare_threshold": 0},
             )
-            saver = PostgresSaver(self._pool)
+            saver = PostgresSaver(self._pool, serde=checkpoint_serializer())
             saver.setup()
             self._saver = saver
             return self._saver

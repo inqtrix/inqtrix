@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from inqtrix.source_authority import (
+from inqtrix.storage.source_authority import (
     MemorySourceLifecycleAuthority,
     SourceLifecycleConflict,
     SourceScope,

@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Download, type Page } from '@playwright/test'
 import JSZip from 'jszip'
 
 const fixturePath = '/browser-tests/fixtures/editor-lifecycle.html'
@@ -27,7 +27,7 @@ async function chooseTemplate(page: Page, name: string, buffer: Buffer) {
   await (await chooser).setFiles({ buffer, mimeType: DOCX_TYPE, name })
 }
 
-async function downloadedDocument(download: Awaited<ReturnType<Page['waitForEvent']>>): Promise<string> {
+async function downloadedDocument(download: Download): Promise<string> {
   const file = download as unknown as { path: () => Promise<string>; suggestedFilename: () => string }
   expect(file.suggestedFilename()).toMatch(/\.docx$/)
   const zip = await JSZip.loadAsync(await readFile(await file.path()))

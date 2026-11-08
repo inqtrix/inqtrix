@@ -423,6 +423,8 @@ def test_child_events_and_polling_enforce_inherited_workspace() -> None:
     with make_contract_client() as client:
         store = client.app.state.container.run_store
         parent = store.submit(
+            mode="research",
+            workflow_contract=1,
             question="Agent",
             stack_name="default",
             workspace_id="workspace-a",
@@ -432,6 +434,8 @@ def test_child_events_and_polling_enforce_inherited_workspace() -> None:
         assert parent_started.wait(timeout=2)
         try:
             child = store.submit(
+                mode="research",
+                workflow_contract=1,
                 question="Child",
                 stack_name="default",
                 workspace_id="workspace-a",

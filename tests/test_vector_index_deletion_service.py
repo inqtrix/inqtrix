@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from types import SimpleNamespace
@@ -114,15 +115,15 @@ async def _harness(*, server_collection_id: str | None = "kc_1"):
     return service, indexes, knowledge, jobs, principal, visible
 
 
-def _terminal(service, operation_id, principal, expected):
+async def _terminal(service, operation_id, principal, expected):
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
-        summary = service.get(
+        summary = await service.get(
             operation_id, principal=principal, workspace_id="ws-1"
         )
         if summary["status"] == expected:
             return summary
-        time.sleep(0.01)
+        await asyncio.sleep(0.01)
     raise AssertionError(f"operation did not reach {expected}")
 
 
@@ -135,7 +136,7 @@ async def test_vector_index_delete_fences_search_job_and_verifies_zero_residue()
         visible_to=visible,
         workspace_id="ws-1",
     )
-    terminal = _terminal(service, started["operation_id"], principal, "deleted")
+    terminal = await _terminal(service, started["operation_id"], principal, "deleted")
 
     assert terminal["completed_items"] == terminal["total_items"] == 4
     assert jobs.fence_calls == 1
@@ -154,7 +155,7 @@ async def test_retry_after_collection_delete_uses_persisted_recovery_context():
         visible_to=visible,
         workspace_id="ws-1",
     )
-    _terminal(service, started["operation_id"], principal, "delete_failed")
+    await _terminal(service, started["operation_id"], principal, "delete_failed")
     record = service.operation_store.get_record(
         started["operation_id"],
         tenant_id="default",
@@ -169,7 +170,7 @@ async def test_retry_after_collection_delete_uses_persisted_recovery_context():
     retried = await service.retry(
         started["operation_id"], principal=principal, workspace_id="ws-1"
     )
-    _terminal(service, retried["operation_id"], principal, "deleted")
+    await _terminal(service, retried["operation_id"], principal, "deleted")
     assert knowledge.delete_calls == 2
 
 
@@ -185,7 +186,7 @@ async def test_delete_uses_authorized_client_retained_collection_identity():
         workspace_id="ws-1",
         server_collection_id_hint="kc_1",
     )
-    terminal = _terminal(service, started["operation_id"], principal, "deleted")
+    terminal = await _terminal(service, started["operation_id"], principal, "deleted")
     record = service.operation_store.get_record(
         started["operation_id"],
         tenant_id="default",
@@ -230,7 +231,7 @@ async def test_residual_collection_data_keeps_retry_pointer_visible():
         visible_to=visible,
         workspace_id="ws-1",
     )
-    failed = _terminal(
+    failed = await _terminal(
         service, started["operation_id"], principal, "delete_failed"
     )
     assert failed["retryable"] is True

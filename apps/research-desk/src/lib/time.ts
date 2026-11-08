@@ -47,6 +47,34 @@ export function formatDurationMsShort(ms: number): string {
 // length for a result that only ever depends on the locale. Keyed by
 // locale so alternating languages in one list cannot bleed into each
 // other, and module-level so the instances survive re-renders.
+/** The Intl locale of a desk language. The one mapping point, so every date,
+ * time and number on the desk follows the interface language, never the
+ * browser's (a German desk in an English browser would show "10:59 PM"). */
+export function intlLocale(locale: string): 'de-DE' | 'en-US' {
+  return locale === 'de' ? 'de-DE' : 'en-US'
+}
+
+/** The clock time of a moment in the desk language (`17:49`, `5:49 PM`), with
+ * seconds on request; an unreadable string comes back unchanged. */
+export function formatTimeOfDay(
+  value: Date | string | number,
+  locale: string,
+  options: { seconds?: boolean } = {},
+): string {
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return typeof value === 'string' ? value : ''
+  return new Intl.DateTimeFormat(intlLocale(locale), {
+    hour: locale === 'de' ? '2-digit' : 'numeric',
+    minute: '2-digit',
+    ...(options.seconds ? { second: '2-digit' as const } : {}),
+  }).format(date)
+}
+
+/** A count in the desk language (`1.234`, `1,234`). */
+export function formatCount(value: number, locale: string): string {
+  return new Intl.NumberFormat(intlLocale(locale)).format(value)
+}
+
 const messageTimestampFormatters = new Map<
   string,
   { date: Intl.DateTimeFormat; time: Intl.DateTimeFormat }
@@ -58,7 +86,7 @@ function messageTimestampFormatter(locale: string): {
 } {
   const cached = messageTimestampFormatters.get(locale)
   if (cached) return cached
-  const formatterLocale = locale === 'de' ? 'de-DE' : 'en-US'
+  const formatterLocale = intlLocale(locale)
   const created = {
     date: new Intl.DateTimeFormat(formatterLocale, locale === 'de'
       ? {

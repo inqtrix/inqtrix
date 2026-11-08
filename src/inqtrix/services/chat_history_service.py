@@ -31,7 +31,7 @@ from inqtrix.project.chat_ports import (
     ThreadNotFound,
 )
 from inqtrix.project.session_titles import TitleSource
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 if TYPE_CHECKING:
     from inqtrix.auth.principal import UserContext

@@ -15,7 +15,7 @@ export const ownerSetupLiveAdapter: VerificationAdapter = {
   profiles: ['owner-setup'],
   async preflight(context) {
     const baseURL = context.environment.INQTRIX_E2E_BASE_URL
-      ?? 'http://127.0.0.1:8080'
+      ?? 'http://localhost:8080'
     const parsedBaseURL = parseLoopbackBaseURL(baseURL)
     const baseURLCheck = parsedBaseURL
       ? passed(

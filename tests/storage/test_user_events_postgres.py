@@ -346,9 +346,10 @@ def test_an_event_wakes_only_the_streams_of_its_user_within_two_intervals() -> N
             store = _poll_store(engine, poll_seconds=0.1)
             loop = asyncio.get_running_loop()
             woken: dict[str, float] = {}
+            came: dict[str, bool] = {}
 
             async def wait(name: str, user: uuid.UUID) -> None:
-                await store.wait_for_change(
+                came[name] = await store.wait_for_change(
                     tenant_id=TENANT_A, target_user_id=user, cursor=0, timeout=1.5
                 )
                 woken[name] = loop.time()
@@ -368,6 +369,7 @@ def test_an_event_wakes_only_the_streams_of_its_user_within_two_intervals() -> N
             assert woken["first tab"] - appended_at <= 0.2 + 0.1
             assert woken["second tab"] - appended_at <= 0.2 + 0.1
             assert woken["other user"] - appended_at >= 1.0
+            assert came == {"first tab": True, "second tab": True, "other user": False}
         finally:
             await engine.dispose()
             await _wipe_events()

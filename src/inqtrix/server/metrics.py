@@ -1,4 +1,4 @@
-"""Optional Prometheus ``/metrics`` endpoint (scaling measure 2.5).
+"""Optional Prometheus ``/metrics`` endpoint.
 
 Off by default (``INQTRIX_METRICS_ENABLED``). Only ``prometheus-client``
 is required — it ships in the optional ``metrics`` extra; when the flag
@@ -33,13 +33,13 @@ construction in tests never trips prometheus' duplicate-timeseries guard.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Any
 
 from fastapi import Request, Response
 
+from inqtrix import aio
 from inqtrix.auth.api_key import build_bearer_guard
 
 if TYPE_CHECKING:
@@ -53,8 +53,8 @@ log = logging.getLogger(__name__)
 # The reasons a run/quota admission is rejected BEFORE any cost is paid.
 # Pre-initialised to 0 so the series exist for rate() from the first
 # scrape. Kept in sync with the call sites of record_admission_rejected;
-# "draining" is intentionally absent until the graceful-drain measure
-# (2.4) introduces that rejection path.
+# "draining" is intentionally absent until a graceful drain introduces that
+# rejection path.
 _ADMISSION_REASONS = (
     "queue_full",
     "per_user_limit",
@@ -228,6 +228,11 @@ def setup_metrics(
     run_store = getattr(container, "run_store", None)
     if run_store is not None:
         registry.register(_RunStoreCollector(run_store, GaugeMetricFamily))
+    database_engine = getattr(container, "database_engine", None)
+    if database_engine is not None:
+        from inqtrix.storage.db import DatabasePoolCollector
+
+        registry.register(DatabasePoolCollector(database_engine))
 
     # Shared call metrics: the provider wrappers, retrieval
     # timers, and indexing counters reach these instruments through the
@@ -285,7 +290,8 @@ def setup_metrics(
             started.append(time.monotonic())
             return generate_latest(registry)
 
-        payload = await asyncio.to_thread(_collect)
+        # Collectors read stores through their sync names, which reach this loop.
+        payload = await aio.run_legacy_segment(_collect)
         finished = time.monotonic()
         entered = started[0] if started else finished
         waited, worked = entered - submitted, finished - entered

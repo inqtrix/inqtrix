@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from inqtrix import aio
 from inqtrix.auth.credentials import hash_password, verify_password
 from inqtrix.auth.principal import Principal
 from inqtrix.auth.guest_ratelimit import GuestLinkRateLimiter
@@ -206,7 +207,7 @@ class EditorGuestLinkService:
                 label=label,
                 permission=permission,
                 token_digest=self._digest(token, purpose="link"),
-                password_hash=hash_password(password),
+                password_hash=await aio.run_blocking(hash_password, password),
                 created_by_user_id=actor_user_id,
                 revision=1,
                 expires_at=now + ttl,
@@ -320,7 +321,7 @@ class EditorGuestLinkService:
             actor_user_id=self._owner(principal),
             permission=None,
             expires_at=None,
-            password_hash=hash_password(password),
+            password_hash=await aio.run_blocking(hash_password, password),
             token_digest=None,
             expected_revision=expected_revision,
             command_id=command_id,
@@ -435,9 +436,11 @@ class EditorGuestLinkService:
                 token_digest=self._digest(token, purpose="link"),
                 now=now,
             )
-            password_valid = verify_password(link.password_hash, password)
+            password_valid = await aio.run_blocking(
+                verify_password, link.password_hash, password
+            )
         except (EditorGuestLinkNotFound, EditorGuestLinkExpired):
-            verify_password(self._dummy_password_hash, password)
+            await aio.run_blocking(verify_password, self._dummy_password_hash, password)
             await self._rate_limiter.record_failure(throttle_key)
             raise EditorGuestLinkNotFound() from None
         if not password_valid:

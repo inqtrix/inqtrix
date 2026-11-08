@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi.responses import JSONResponse
 
@@ -29,12 +29,18 @@ from inqtrix.settings import AgentSettings
 from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
+    from concurrent.futures import Executor
+
     from inqtrix.auth.principal import Principal
     from inqtrix.core.algorithms import AlgorithmRegistry
-    from inqtrix.server.execution import ExecutionLanes
 
 log = logging.getLogger(__name__)
 
+
+class ChatLanes(Protocol):
+    """The lane a chat turn runs its provider call on."""
+
+    ai: "Executor"
 
 
 class ChatService:
@@ -65,7 +71,7 @@ class ChatService:
         resolved: ResolvedAgentContext,
         chat_agent_settings: AgentSettings,
         semaphore: asyncio.Semaphore,
-        lanes: "ExecutionLanes",
+        lanes: ChatLanes,
         principal: "Principal | None" = None,
         cancel_event: "threading.Event | None" = None,
         incognito: bool = False,
@@ -188,8 +194,9 @@ class ChatService:
                     )
                 log.warning(
                     "Chat request cancelled after client disconnect; response "
-                    "discarded. Tokens already consumed by this request are not charged"
-                    " to the quota; the usage ledger records them."
+                    "discarded. Tokens of calls this request finished are not charged"
+                    " to the quota; the usage ledger records them. A call cut off by the"
+                    " disconnect reports none."
                 )
                 return JSONResponse(
                     status_code=499,

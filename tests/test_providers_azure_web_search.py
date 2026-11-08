@@ -1,18 +1,21 @@
-"""Tests for the Azure AI Foundry Web Search provider (azure-ai-projects)."""
+"""Tests for the Azure AI Foundry Web Search provider."""
 
 from __future__ import annotations
+
+import asyncio
 
 import logging
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 from openai import APIStatusError, APITimeoutError, OpenAIError, RateLimitError
 
+from inqtrix.providers.attempts import observe_retries
 from inqtrix.exceptions import (
     AgentProviderTimeout,
     AgentRateLimited,
@@ -24,6 +27,8 @@ from inqtrix.evidence import build_web_search_ledger
 from inqtrix.providers.azure_web_search import AzureFoundryWebSearch
 from inqtrix.runtime_logging import normalize_source_provenance
 from inqtrix.search_result import CitationSpan
+from inqtrix import aio
+from tests._sdk_doubles import async_responses_sdk
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +70,7 @@ def _provider(client, **kwargs):
     params = {
         "project_endpoint": "https://test.ai.azure.com/api/projects/p",
         "agent_name": "web-search-agent",
-        "_client": client,
+        "_client": async_responses_sdk(client),
     }
     params.update(kwargs)
     return AzureFoundryWebSearch(**params)
@@ -77,12 +82,12 @@ def test_foundry_receipt_reaches_trace_without_losing_model_or_tool_usage(captur
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
     from inqtrix.observability.content import ContentCapturePolicy
-    from inqtrix.observability.provider_tracing import instrument_search
+    from inqtrix.providers.tracing import instrument_search
     import json
 
     response = _response("A sourced answer", [_url_citation("https://example.com/source")], 20, 7)
     recorded_usage = []
-    monkeypatch.setattr("inqtrix.usage.recorder.record_provider_call", lambda **row: recorded_usage.append(row))
+    monkeypatch.setattr("inqtrix.providers.tracing._usage_sink", lambda **row: recorded_usage.append(row))
     response.model = "gpt-5.4"
     response.usage.input_tokens_details = SimpleNamespace(cached_tokens=5, cache_write_tokens=2)
     response.usage.output_tokens_details = SimpleNamespace(reasoning_tokens=3)
@@ -144,35 +149,46 @@ def test_is_available_when_configured():
     assert _provider(MagicMock()).is_available()
 
 
-def test_shared_provider_gate_caps_all_callers() -> None:
-    """The instance gate, not each caller's thread pool, owns concurrency."""
-    lock = threading.Lock()
-    release = threading.Event()
+def test_shared_provider_gate_caps_all_callers_and_leaves_the_loop_free() -> None:
+    """The instance gate, not each caller's thread pool, owns concurrency.
+
+    Four callers, two slots: two requests run, two callers wait for a slot,
+    and the process loop keeps serving other work while they wait.
+    """
+    release = asyncio.Event()
     two_started = threading.Event()
     active = 0
     peak = 0
 
-    def _create(**_kwargs):
+    async def _create(**_kwargs):
         nonlocal active, peak
-        with lock:
-            active += 1
-            peak = max(peak, active)
-            if active == 2:
-                two_started.set()
-        release.wait(timeout=2)
-        with lock:
-            active -= 1
+        active += 1
+        peak = max(peak, active)
+        if active == 2:
+            two_started.set()
+        await release.wait()
+        active -= 1
         return _response("ok")
+
+    async def free() -> str:
+        return "free"
+
+    async def open_the_gate() -> None:
+        release.set()
 
     client = MagicMock()
     client.responses.create.side_effect = _create
     provider = _provider(client, max_concurrency=2)
+    loop = aio.default_loop()
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(provider.search, f"q{index}") for index in range(4)]
-        assert two_started.wait(timeout=1)
-        assert peak == 2
-        release.set()
-        assert [future.result(timeout=2).answer for future in futures] == [
+        try:
+            assert two_started.wait(timeout=2)
+            assert asyncio.run_coroutine_threadsafe(free(), loop).result(timeout=1) == "free"
+            assert peak == 2
+        finally:
+            asyncio.run_coroutine_threadsafe(open_the_gate(), loop).result(timeout=5)
+        assert [future.result(timeout=5).answer for future in futures] == [
             "ok",
             "ok",
             "ok",
@@ -181,55 +197,29 @@ def test_shared_provider_gate_caps_all_callers() -> None:
     assert peak == 2
 
 
-def test_construction_entra_uses_project_client_without_agent_name():
-    """Entra ID auth builds via AIProjectClient.get_openai_client() (no agent_name).
-
-    The agent is referenced per call via ``agent_reference``, not bound at the
-    client, so the documented version-pinning path stays available.
-    """
-    configured_openai_client = MagicMock()
-    openai_client = MagicMock()
-    openai_client.with_options.return_value = configured_openai_client
-    project_client = MagicMock()
-    project_client.get_openai_client.return_value = openai_client
-    custom_cred = MagicMock()
-    with patch(
-        "azure.ai.projects.AIProjectClient", return_value=project_client
-    ) as mock_proj:
-        provider = AzureFoundryWebSearch(
-            project_endpoint="https://test.ai.azure.com/api/projects/p/",
+@pytest.mark.parametrize("api_key", [None, "", "   "])
+def test_construction_without_a_project_key_is_refused(api_key):
+    """The Foundry search is reached with the project key only."""
+    with pytest.raises(ValueError, match="api_key is required"):
+        AzureFoundryWebSearch(
+            project_endpoint="https://test.ai.azure.com/api/projects/p",
             agent_name="web-search-agent",
-            credential=custom_cred,
+            api_key=api_key,
         )
-    assert mock_proj.call_args.kwargs["endpoint"] == "https://test.ai.azure.com/api/projects/p"
-    assert mock_proj.call_args.kwargs["credential"] is custom_cred
-    assert mock_proj.call_args.kwargs["allow_preview"] is True
-    project_client.get_openai_client.assert_called_once_with()
-    openai_client.with_options.assert_called_once_with(max_retries=0, timeout=600)
-    assert provider._client is configured_openai_client
 
 
 def test_construction_with_project_api_key_uses_data_plane_client():
-    """A static project key builds the OpenAI client directly on the data-plane.
-
-    AIProjectClient is the control-plane SDK (Entra only); key auth talks to the
-    ``/openai/v1`` endpoint with the ``api-key`` header instead.
-    """
-    openai_client = MagicMock()
-    with patch(
-        "inqtrix.providers.azure_web_search.OpenAI", return_value=openai_client
-    ) as mock_openai:
-        provider = AzureFoundryWebSearch(
-            project_endpoint="https://test.ai.azure.com/api/projects/p",
-            agent_name="web-search-agent",
-            api_key="proj-key-123",
-        )
-    call = mock_openai.call_args
-    assert call.kwargs["base_url"] == "https://test.ai.azure.com/api/projects/p/openai/v1/"
-    assert call.kwargs["api_key"] == "proj-key-123"
-    assert call.kwargs["default_headers"] == {"api-key": "proj-key-123"}
-    assert call.kwargs["max_retries"] == 0
-    assert provider._client is openai_client
+    """A static project key talks to the ``/openai/v1`` endpoint with the ``api-key`` header."""
+    provider = AzureFoundryWebSearch(
+        project_endpoint="https://test.ai.azure.com/api/projects/p",
+        agent_name="web-search-agent",
+        api_key="proj-key-123",
+    )
+    kwargs = provider._client_kwargs
+    assert kwargs["base_url"] == "https://test.ai.azure.com/api/projects/p/openai/v1/"
+    assert kwargs["api_key"] == "proj-key-123"
+    assert kwargs["default_headers"] == {"api-key": "proj-key-123"}
+    assert kwargs["max_retries"] == 0
 
 
 def test_search_model_includes_agent_and_version():
@@ -390,7 +380,49 @@ def test_search_empty_response_sets_notice():
     result = provider.search("Empty")
     assert result.answer == ""
     assert result.sources == []
-    assert provider.consume_nonfatal_notice() is not None
+    assert result.notices and result.notices[0].message
+
+
+@pytest.mark.parametrize(
+    ("reason", "code"),
+    [("content_filter", "content_filter"), ("max_output_tokens", "incomplete_answer")],
+)
+def test_an_unfinished_answer_is_an_empty_result_with_a_notice(reason, code, caplog):
+    # A content filter can stop the agent; its refusal text must not count
+    # as a search result.
+    query = "private-unfinished-query-sentinel-51873"
+    response = _response(
+        "I'm sorry, but I cannot assist with that request.",
+        [_url_citation("https://example.com/cut")],
+        input_tokens=8338,
+        output_tokens=209,
+    )
+    response.status = "incomplete"
+    response.incomplete_details = SimpleNamespace(reason=reason)
+    client = MagicMock()
+    client.responses.create.return_value = response
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        result = _provider(client).search(query)
+
+    assert (result.answer, result.sources) == ("", [])
+    (notice,) = result.notices
+    assert (notice.code, notice.http_status) == (code, 502)
+    assert reason in notice.message
+    # The call is billed: its usage reaches the ledger all the same.
+    assert (result.prompt_tokens, result.completion_tokens) == (8338, 209)
+    assert f"reason={reason}" in caplog.text
+    assert query not in caplog.text
+
+
+def test_a_finished_answer_keeps_its_text():
+    response = _response("A sourced answer", [_url_citation("https://example.com/a")])
+    response.status = "completed"
+    response.incomplete_details = None
+    client = MagicMock()
+    client.responses.create.return_value = response
+    result = _provider(client).search("Question")
+    assert result.answer == "A sourced answer"
+    assert result.notices == ()
 
 
 def test_failure_does_not_copy_query_or_provider_error_to_logs(caplog):
@@ -400,9 +432,9 @@ def test_failure_does_not_copy_query_or_provider_error_to_logs(caplog):
     client.responses.create.side_effect = OpenAIError(provider_secret)
     provider = _provider(client)
     with caplog.at_level(logging.ERROR, logger="inqtrix"):
-        provider.search(query_secret)
+        result = provider.search(query_secret)
 
-    notice = provider.consume_nonfatal_notice()
+    notice = next((item.message for item in result.notices), None)
     assert query_secret not in caplog.text
     assert provider_secret not in caplog.text
     assert notice is not None
@@ -598,7 +630,7 @@ def test_generic_exception_returns_empty_with_notice():
     provider = _provider(client)
     result = provider.search("Test")
     assert result.answer == ""
-    notice = provider.consume_nonfatal_notice()
+    notice = next((item.message for item in result.notices), None)
     assert notice == (
         "Azure-Foundry-WebSearch failed; the empty result remains "
         "a visible evidence gap."
@@ -620,23 +652,23 @@ def test_status_429_escalated_to_rate_limited():
 
 
 def test_non_429_status_error_degrades_to_empty(monkeypatch):
-    monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt, retry_after=None: 0.0)
     client = MagicMock()
     client.responses.create.side_effect = _http_error(APIStatusError, 503)
     provider = _provider(client)
     result = provider.search("Test")
     assert result.answer == ""
-    assert provider.consume_nonfatal_notice() is not None
+    assert result.notices and result.notices[0].message
 
 
 def test_status_408_keeps_provider_timeout_notice(monkeypatch):
-    monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt, retry_after=None: 0.0)
     client = MagicMock()
     client.responses.create.side_effect = _http_error(APIStatusError, 408)
     provider = _provider(client)
 
     result = provider.search("Test")
-    notice = provider.consume_nonfatal_notice_detail()
+    notice = next((item.as_detail() for item in result.notices), None)
 
     assert result.sources == []
     assert notice is not None
@@ -645,7 +677,7 @@ def test_status_408_keeps_provider_timeout_notice(monkeypatch):
 
 
 def test_transient_timeout_retry_emits_notice(monkeypatch):
-    monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt, retry_after=None: 0.0)
     request = httpx.Request("POST", "https://test.ai.azure.com/responses")
     client = MagicMock()
     client.responses.create.side_effect = [
@@ -655,7 +687,7 @@ def test_transient_timeout_retry_emits_notice(monkeypatch):
     provider = _provider(client)
     notices = []
 
-    with provider.observe_retries(lambda notice: notices.append(notice)):
+    with observe_retries("search", lambda notice: notices.append(notice)):
         result = provider.search("Test")
 
     assert result.answer == "ok"

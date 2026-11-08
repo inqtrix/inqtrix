@@ -8,13 +8,13 @@ from inqtrix.contextualization_circuit import (
     ContextualizationCircuitState,
     ContextualizationCircuitView,
 )
-from inqtrix.indexing_auto_resume import (
+from inqtrix.runs.indexing_auto_resume import (
     AutoResumePolicy,
     DueResume,
     plan_pause,
     sweep_due_resumes,
 )
-from inqtrix.server.indexing import (
+from inqtrix.runs.indexing_records import (
     IndexingJobConflict,
     IndexingJobNotFound,
     IndexingResumeUnavailable,

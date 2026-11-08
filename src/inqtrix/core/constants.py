@@ -26,14 +26,6 @@ runs router whitelists (unknown directive = 400) and the planner/kernel
 prompt honors. Both the wire admission and the prompt injection read
 THIS tuple."""
 
-"""One-shot Agent Desk execution routes admitted by ``POST /v1/runs``.
-
-Unlike :data:`AGENT_TOOL_DIRECTIVES`, these are server-enforced routes,
-not prompt hints.  Keeping the vocabulary here makes HTTP admission,
-durable worker replay, capability discovery, and the algorithms consume
-one source of truth.
-"""
-
 AGENT_SOURCE_IDS = ("web", "knowledge")
 """Source controls published by the Agent Desk capability manifest."""
 

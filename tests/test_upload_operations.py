@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -17,7 +17,7 @@ from inqtrix.content.memory import MemoryFileRegistry
 from inqtrix.knowledge.parsing import DocumentParseError
 from inqtrix.logging_config import InqtrixLogFilter
 from inqtrix.project.asset_records_memory import MemoryAssetStore
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.quota.models import QuotaDimension, StockLifecycleState
 from inqtrix.server.uploads import (
     MemoryUploadOperationStore,
@@ -32,10 +32,10 @@ from inqtrix.services.upload_operation_service import (
     UploadBytesRequired,
     UploadExecutionDeferred,
     UploadOperationService,
-    UploadReconciler,
 )
-from inqtrix.source_authority import MemorySourceLifecycleAuthority, SourceScope
+from inqtrix.storage.source_authority import MemorySourceLifecycleAuthority, SourceScope
 from inqtrix.storage.object_store import LocalFSObjectStore
+from tests._process_loop import run_on_configured_loop
 
 USER = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 PAYLOAD = b"durable upload evidence\n" * 32
@@ -801,39 +801,46 @@ def test_file_lifecycle_cleanup_removes_blob_without_registry_row(
     asyncio.run(scenario())
 
 
-def test_reconciler_stops_on_schema_head_mismatch_instead_of_retrying(caplog):
+def test_reconciler_stops_on_schema_head_mismatch_instead_of_retrying(caplog, tmp_path: Path):
     """A fence hit is fatal for THIS process's reconciler, not a warning.
 
     The expected schema head is a code constant, so a mismatch can never
     heal for the running process; retrying every pass would downgrade a
-    fatal state to warning spam (the no-silent-fallback rule). ``_run``
-    must return on the first fence hit -- with ``stop`` never set, a
-    swallowed mismatch would keep this call looping forever.
+    fatal state to warning spam (the no-silent-fallback rule). The clock
+    must end on the first fence hit -- a swallowed mismatch would keep
+    it passing forever.
     """
-    import threading
-
-    from inqtrix.services.upload_operation_service import UploadReconciler
+    from inqtrix.periodic_sweep import PeriodicSweep
     from inqtrix.storage.migration_contract import SchemaHeadMismatch
 
     calls: list[float] = []
-    stop = threading.Event()
 
     class FencedOperations:
-        def stale_dispatches(self, *, older_than_seconds):
+        async def aqueue_missing_preparations(self, *, limit):
+            return []
+
+        async def astale_dispatches(self, *, older_than_seconds):
             calls.append(older_than_seconds)
-            if len(calls) >= 3:
-                # Regression guard: a swallowed mismatch would loop forever
-                # (no timeout plugin runs in this suite). Bound it so the
-                # test FAILS on the call count instead of hanging.
-                stop.set()
             raise SchemaHeadMismatch(installed="0079", expected="0078")
 
-    service = Mock()
-    service.operations = FencedOperations()
-    reconciler = UploadReconciler(service=service, interval_seconds=1.0)
+    async def scenario() -> None:
+        harness = await _build_harness(tmp_path)
+        harness.upload.operations = FencedOperations()
+        reconciler = PeriodicSweep(
+            name="upload-reconciler",
+            label="Upload reconciler",
+            sweep=harness.upload.reconcile,
+            interval_seconds=1.0,
+            finished_by=(SchemaHeadMismatch,),
+        )
+        # Bounded: a swallowed mismatch would loop forever, and no timeout plugin
+        # runs in this suite. The test fails on the call count instead of hanging.
+        try:
+            await asyncio.wait_for(reconciler._run(asyncio.Event()), timeout=3.5)
+        except TimeoutError:
+            pass
 
-    # Direct call on this thread: returns promptly on the fence hit.
-    reconciler._run(stop)
+    run_on_configured_loop(scenario())
 
     assert calls == [30.0], "exactly one pass, then a hard stop"
     # After the log filter, which shows an exception only by its type.
@@ -890,13 +897,13 @@ def test_a_preparation_skipped_without_a_parser_is_made_once_a_parser_exists(
     async def scenario() -> None:
         harness = await _build_harness(tmp_path)
         operation_id = await _upload_without_parser(harness)
-        assert harness.upload.queue_missing_preparations() == []
+        assert await harness.upload.aqueue_missing_preparations() == []
 
         parser = _Parser()
         later = _with_parser(harness, parser, tmp_path)
         later._audit_uploaded = AsyncMock()
-        assert later.queue_missing_preparations() == [(operation_id, "default")]
-        assert later.queue_missing_preparations() == []
+        assert await later.aqueue_missing_preparations() == [(operation_id, "default")]
+        assert await later.aqueue_missing_preparations() == []
         pending = await harness.assets.get_asset(
             "asset-upload", visible_to=harness.visible_to
         )
@@ -917,7 +924,7 @@ def test_a_preparation_skipped_without_a_parser_is_made_once_a_parser_exists(
         assert parser.calls == 1
         # Preparing a stored file again is not another upload.
         later._audit_uploaded.assert_not_awaited()
-        assert later.queue_missing_preparations() == []
+        assert await later.aqueue_missing_preparations() == []
 
     asyncio.run(scenario())
 
@@ -927,7 +934,7 @@ def test_a_file_the_parser_cannot_read_is_not_queued_again(tmp_path: Path) -> No
         harness = await _build_harness(tmp_path)
         operation_id = await _upload_without_parser(harness)
         later = _with_parser(harness, _Parser(fail=True), tmp_path)
-        assert later.queue_missing_preparations() == [(operation_id, "default")]
+        assert await later.aqueue_missing_preparations() == [(operation_id, "default")]
         claimed = harness.operations.claim_for_execution(
             operation_id, "default", allow_takeover=False
         )
@@ -938,7 +945,7 @@ def test_a_file_the_parser_cannot_read_is_not_queued_again(tmp_path: Path) -> No
 
         assert summary["status"] == "ready"
         assert asset.parse_status == "error"
-        assert later.queue_missing_preparations() == []
+        assert await later.aqueue_missing_preparations() == []
 
     asyncio.run(scenario())
 
@@ -958,7 +965,7 @@ def test_a_file_being_deleted_is_never_queued_for_preparation(tmp_path: Path) ->
         )
 
         later = _with_parser(harness, _Parser(), tmp_path)
-        assert later.queue_missing_preparations() == []
+        assert await later.aqueue_missing_preparations() == []
 
     asyncio.run(scenario())
 
@@ -970,16 +977,8 @@ def test_the_reconciler_prepares_a_skipped_upload_in_its_next_pass(
         harness = await _build_harness(tmp_path)
         await _upload_without_parser(harness)
         later = _with_parser(harness, _Parser(), tmp_path)
-        stop = threading.Event()
-        stale = harness.operations.stale_dispatches
 
-        def one_pass(*, older_than_seconds):
-            stop.set()
-            return stale(older_than_seconds=older_than_seconds)
-
-        harness.operations.stale_dispatches = one_pass
-        reconciler = UploadReconciler(service=later, interval_seconds=1.0)
-        await asyncio.to_thread(reconciler._run, stop)
+        await later.reconcile()
 
         asset = await harness.assets.get_asset(
             "asset-upload", visible_to=harness.visible_to
@@ -987,34 +986,52 @@ def test_the_reconciler_prepares_a_skipped_upload_in_its_next_pass(
         assert asset.upload_status == "ready"
         assert asset.prepared_text == PAYLOAD.decode("utf-8").strip()
 
-    asyncio.run(scenario())
+    run_on_configured_loop(scenario())
 
 
 def test_a_failing_preparation_pass_never_blocks_the_reconcilers_stale_pass(
-    caplog,
+    caplog, tmp_path: Path
 ) -> None:
-    stop = threading.Event()
     passes: list[float] = []
 
     class Operations:
-        def stale_dispatches(self, *, older_than_seconds):
+        async def aqueue_missing_preparations(self, *, limit):
+            raise RuntimeError("database unavailable")
+
+        async def astale_dispatches(self, *, older_than_seconds):
             passes.append(older_than_seconds)
-            stop.set()
             return []
 
-    service = Mock()
-    service.operations = Operations()
-    service.queue_missing_preparations.side_effect = RuntimeError("database unavailable")
-    reconciler = UploadReconciler(service=service, interval_seconds=1.0)
+    async def scenario() -> None:
+        harness = await _build_harness(tmp_path)
+        later = _with_parser(harness, _Parser(), tmp_path)
+        later.operations = Operations()
+        await later.reconcile()
 
     with caplog.at_level("WARNING"):
-        # Bounded: a pass that never reaches the stale dispatches would loop
-        # until stopped here, and must fail rather than hang.
-        worker = threading.Thread(target=reconciler._run, args=(stop,))
-        worker.start()
-        worker.join(timeout=5)
-        stop.set()
-        worker.join(timeout=5)
+        run_on_configured_loop(scenario())
 
     assert passes == [30.0]
     assert "Missing upload preparations could not be queued" in caplog.text
+
+
+def test_a_parser_runs_on_the_transition_lane(tmp_path: Path) -> None:
+    """It may compute for minutes, which would hold the lane of short work."""
+    import threading
+
+    seen: list[str] = []
+
+    class WatchedParser(_Parser):
+        def parse(self, *args: Any, **kwargs: Any) -> Any:
+            seen.append(threading.current_thread().name)
+            return super().parse(*args, **kwargs)
+
+    async def scenario() -> None:
+        harness = await _build_harness(tmp_path)
+        await _upload_without_parser(harness)
+        later = _with_parser(harness, WatchedParser(), tmp_path)
+        await later.reconcile()
+
+    run_on_configured_loop(scenario())
+
+    assert seen and seen[0].startswith("inqtrix-legacy_segment")

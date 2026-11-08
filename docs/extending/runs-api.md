@@ -2,7 +2,7 @@
 
 > Files: `src/inqtrix/server/routers/runs.py`,
 > `src/inqtrix/server/routers/agent_runs.py`, `src/inqtrix/runs/shared.py`,
-> `src/inqtrix/server/runs.py`, `src/inqtrix/state.py`, `src/inqtrix/graph.py`,
+> `src/inqtrix/runs/records.py`, `src/inqtrix/runs/memory_store.py`, `src/inqtrix/state.py`, `src/inqtrix/graph.py`,
 > `src/inqtrix/agents/`
 
 ## Scope
@@ -65,7 +65,7 @@ Native runs are short-lived server resources addressed by an opaque `run_id`:
 |---|---|---|
 | `/v1/runs` | POST | Create a queued research run. Accepts either `question` or OpenAI-style `messages`. Agent runs additionally accept `response_form` (`"auto"`\|`"chat"`\|`"canvas"`) and `source_policy`; see below. A `mode: knowledge` ask accepts `"incognito": true` (only `true` or `false`, and never together with `session_id`; 400 otherwise): its spans carry no content whatever `INQTRIX_TRACE_CONTENT` says, and the run is deleted `RUN_INCOGNITO_RETENTION_SECONDS` after it ended. A `mode: knowledge` ask also accepts `"ui_language"` (`"de"` or `"en"`; 400 for any other value and for any other mode): the interface language, which the answer and every server text of the run use only where the question's own language is unclear; a question with a clear language is answered in it. Returns HTTP 202 with the run summary. `knowledge_filters` carries either explicit `collection_ids` (chips) or `scope: "all"` (the session knowledge switch: every collection the signed-in caller may see, resolved and pinned at submission; an unscoped principal keeps its tenant-wide view; 400 for any other `scope` value, and 400 for a `collection_ids` list with a non-string or empty entry — chips win over the switch, and the persisted filters then carry no `scope`); the run's execution snapshot reports the choice as `knowledge_scope` (`all`, `pinned`, `inherited`) plus `knowledge_collection_count`. A request that pins knowledge collections, uses `scope: "all"` or is a `mode: knowledge` ask is refused with HTTP 503 `knowledge_store_unavailable` (`reason`: `operator_disabled` or `store_unreachable`) while the knowledge store is not configured or does not answer the availability probe. |
 | `/v1/runs` | GET | List visible queued, running, waiting, and retained terminal runs from the configured run store. |
-| `/v1/runs/import` | POST | Persist a COMPLETED report carried in from a loaded project file — a terminal-run snapshot with no server-side execution, so it costs no run quota. `source_run_id` is required, but is provenance and an owner-scoped idempotency key only; the server always allocates the public `run_id`. Returns 200 with the run summary. |
+| `/v1/runs/import` | POST | Persist a COMPLETED report carried in from a loaded project file — a terminal-run snapshot with no server-side execution, so it costs no run quota. `source_run_id` is required, but is provenance and an owner-scoped idempotency key only; the server always allocates the public `run_id`. `mode` names the kind of report and is `research` when the file leaves it out. Returns 200 with the run summary. |
 | `/v1/runs/{run_id}` | GET | Fetch the current run summary. |
 | `/v1/runs/{run_id}/events` | GET | Stream buffered and live events as Server-Sent Events. The server sends periodic SSE comment heartbeats (`: keepalive`) without allocating event sequences. The optional `?after=<sequence>` query parameter filters the REPLAY to events with a higher sequence (reconnect support); the live tail is unaffected. A non-integer value returns 400. With `?format=json` the SAME replay buffer returns immediately as a JSON page `{"object": "list", "data": [...], "terminal": bool}` instead of a stream — the polling fallback for clients behind SSE-buffering proxies. |
 | `/v1/runs/{run_id}/children` | GET | List an agent run's direct child runs, newest first, as `{"object": "list", "data": [...]}`. Access is decided on the parent (a view share suffices); the children's own URLs stay owner-scoped. Standard runs return an empty list. |
@@ -317,8 +317,35 @@ serialises the wave instead of deadlocking it. For every waiting status a
 cancel ends the run (reason `cancelled_while_waiting`), or the waiting TTL
 expires (default seven days) and the store auto-cancels it with the visible
 reason `approval_timeout` (human waits) or `children_timeout` (children wait).
-Waiting runs are excluded from orphan/stuck sweeps. Agent runs also carry
-additive summary keys — `kind` (`agent` or `agent_child`), `children_url`,
+Waiting runs are excluded from orphan/stuck sweeps.
+
+A run that ends other than by completing takes its live children along, in
+the same transaction: a failed run (also one a restart or a lost worker
+failed, or one whose execution authority is gone) cancels them with the
+reason `parent_failed`, a cancelled run (also one whose wait timed out, or one
+that stopped on its own) with `parent_cancelled`. Queued and waiting children
+end at once, a running child is asked to stop. Cancelling a run asks its whole
+tree to stop; a child that was already asked keeps its own request. A running
+run that was asked to stop ends with the reason of the latest request
+(`client_requested_cancel`, `cancelled_by_admin`, `parent_failed`,
+`parent_cancelled`, `session_deleting`), also when it was about to park.
+
+Every run is bound to its mode and to the workflow contract that mode
+carried when the run was accepted. A worker runs it only under that
+contract: a run that has not started yet takes the worker's contract, while
+a run that already ran under an older contract (or whose mode was taken
+out) ends as `cancelled` with the reason `workflow_contract_changed` (or
+`workflow_retired`) and loses its stored agent state. A parked run of that
+kind does not wait for its next claim: the worker ends it when it starts
+and then once a minute, so nobody answers an approval for a run that can no
+longer continue. A run that ends this way cancels its active children with
+the reason `parent_cancelled`, and a child that ends this way wakes its
+waiting parent as any ended child does. A run bound to a newer contract, or
+of a mode the worker has not registered, waits for a worker that carries it;
+a worker that cannot run it stops claiming runs until the run is cancelled,
+ends or parks, and then claims again by itself.
+
+Agent runs also carry additive summary keys — `kind` (`agent` or `agent_child`), `children_url`,
 `parent_run_id`, `root_run_id`, `session_id`, `last_event_sequence` — emitted
 only when non-default, so standard run summaries keep the exact historical key
 set.
@@ -504,8 +531,8 @@ Event payloads are sanitized through the same recursive drop-list used by runtim
 | `inqtrix.answer.interrupted` | Publication stopped before completion. | `artifact_id`, `publication_id`, `offset`, `status=interrupted`, `stage` (`staging` / `streaming` / `finalizing` / `publishing_ready`) |
 | `inqtrix.run.completed` | Result payload was stored. `metrics.prompt_tokens`/`completion_tokens` are run-cumulative across parked and resumed segments (failed planner attempts included). | `metrics`, `result_url`, `snapshot` |
 | `inqtrix.run.waiting` | Agent run parked itself for an approval, user input, or its running children. | `status` (`waiting_for_approval` / `waiting_for_input` / `waiting_for_children`), `snapshot` |
-| `inqtrix.run.cancel_requested` | Client requested cancellation while running. | `status`, `reason` |
-| `inqtrix.run.cancelled` | Run is terminal cancelled. | `status`, `reason` (`cancelled_while_waiting` / `approval_timeout` / `children_timeout` for parked runs), `snapshot` |
+| `inqtrix.run.cancel_requested` | Cancellation was requested while running. | `status`, `reason` (`client_requested_cancel`, also for a running child when its parent's tree is cancelled; `cancelled_by_admin` when an instance admin cancelled runs this server cannot run; `parent_failed` / `parent_cancelled` for a running child of a run that failed / ended in another way than by cancelling its tree; `session_deleting` while its session is deleted) |
+| `inqtrix.run.cancelled` | Run is terminal cancelled. | `status`, `reason` (`cancelled_while_waiting` / `approval_timeout` / `children_timeout` for parked runs; `workflow_contract_changed` / `workflow_retired` for a run its workflow binding ended, which also carries `bound_contract` and, when the worker carries the mode, `worker_contract`; `cancelled_by_admin` for a run an instance admin cancelled because this server cannot run its binding; `parent_failed` / `parent_cancelled` for each active child of a run that failed / ended in another way than by cancelling its tree, while a cancelled tree gives each child the reason of its own state (`cancelled_before_start`, `cancelled_while_waiting`, or after a request `client_requested_cancel`); `session_deleting` for a run of a deleted session; a run that was asked to stop ends with the reason of its latest request), `snapshot` |
 | `inqtrix.run.failed` | Worker failed. | `status`, `error`, `snapshot` |
 
 A resumed run first emits another `inqtrix.run.queued` event with
@@ -1136,7 +1163,9 @@ Background knowledge indexing operations use the same endpoint and event model
 on a parallel surface: `GET
 /v1/knowledge/indexing-jobs/{job_id}/events`. The operation summary identifies
 `operation_kind` as `collection_generation` or `document_revision`; both use
-the shared durable queue, checkpoint, cancellation, and replay contract. The
+the shared durable queue, checkpoint, cancellation, and replay contract, and
+`GET /v1/knowledge/indexing-jobs` lists both unless `?operation_kind=` narrows
+it. The
 stream includes `inqtrix.index.{queued,started,progress,document_started,
 document_progress,document_completed,raw_rebuild_requested,cancel_requested,
 paused_dependency,paused_validation,resumed,completed,ready_raw_by_user_choice,

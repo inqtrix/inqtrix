@@ -44,7 +44,7 @@ from inqtrix.prompt_language import (
 from inqtrix.observability.context import bind_purpose
 
 from inqtrix.observability.otel import operation_span
-from inqtrix.providers.base import ProviderContext
+from inqtrix.providers.base import ProviderContext, provider_cancel_scope
 from inqtrix.result import ResearchResult, ResearchResultExportOptions
 from inqtrix.runtime_logging import log_run_end, log_run_start
 from inqtrix.scoring import claim_assessments
@@ -74,6 +74,33 @@ _DECISION_ATTRIBUTES: tuple[tuple[str, str], ...] = (
     ("evidence_contract_status", semconv.INQTRIX_EVIDENCE_CONTRACT_STATUS),
 )
 """State keys (string decisions) exported verbatim onto every node span."""
+
+
+def _attach_reached_state(exc: Exception, state: AgentState, node_name: str) -> None:
+    """Let *exc* carry the state its node reached.
+
+    The graph runner only holds its input, which knows neither the phase nor
+    the round nor the provider usage of the run. A failure that left a node
+    without its state therefore stored the start values as the run's
+    snapshot and booked the spent tokens as none. The innermost node that
+    saw the failure wins.
+    """
+    if getattr(exc, "partial_state", None) is not None:
+        return
+    try:
+        exc.partial_state = state  # type: ignore[attr-defined]
+    except AttributeError:
+        log.warning(
+            "The failure of node %s cannot carry its state (%s); the run reports its start values.",
+            node_name,
+            type(exc).__name__,
+        )
+
+
+def _reached_state(state: AgentState, exc: Exception) -> AgentState:
+    """The state the run reached when *exc* left a node, else *state*."""
+    reached = getattr(exc, "partial_state", None)
+    return dict(reached) if reached is not None else state
 
 
 def _set_node_span_attributes(
@@ -194,8 +221,7 @@ def default_graph_config(
                         settings=settings,
                     )
             except Exception as exc:
-                if isinstance(exc, AgentCancelled) and exc.partial_state is None:
-                    exc.partial_state = s
+                _attach_reached_state(exc, s, node_name)
                 emit_run_event(
                     s,
                     "inqtrix.node.failed",
@@ -435,6 +461,7 @@ def _run_direct_chat(
         # both a late client cancel and the server-owned token ceiling.
         check_cancel_event(state)
     except AgentCancelled as exc:
+        state = _reached_state(state, exc)
         log.info(
             "Chat-only run stopped (error_type=%s)",
             type(exc).__name__,
@@ -462,6 +489,7 @@ def _run_direct_chat(
             "result_state": state,
         }
     except AgentRateLimited as exc:
+        state = _reached_state(state, exc)
         emit_progress(state, t(state, "run_aborted", exc=exc))
         log.error(
             "ABORT (chat-only, error_type=%s)",
@@ -488,6 +516,7 @@ def _run_direct_chat(
             "result_state": state,
         }
     except Exception as exc:
+        state = _reached_state(state, exc)
         emit_progress(state, t(state, "chat_mode_failed", exc=exc))
         log_run_end(
             run_id=state.get("_run_id"),
@@ -569,7 +598,43 @@ def run(
     Returns
     -------
     dict with keys ``answer``, ``usage``, ``result_state``.
+
+    The run's cancel probe is bound here, once for every provider call of
+    the run: the graph's nodes, their fan-out threads (which copy this
+    context) and the chat-only path. A cancelled run therefore ends the
+    provider call it waits for, wherever that call is made.
     """
+    with provider_cancel_scope(cancel_event.is_set if cancel_event is not None else None):
+        return _run(
+            question,
+            history,
+            progress_queue,
+            providers=providers,
+            strategies=strategies,
+            settings=settings,
+            cancel_event=cancel_event,
+            run_id=run_id,
+            run_event_sink=run_event_sink,
+            token_budget=token_budget,
+            web_recency=web_recency,
+        )
+
+
+def _run(
+    question: str,
+    history: str,
+    progress_queue: Queue | None,
+    *,
+    providers: ProviderContext,
+    strategies: StrategyContext,
+    settings: AgentSettings,
+    cancel_event: threading.Event | None,
+    run_id: str | None,
+    run_event_sink: Callable[[str, dict[str, Any]], None] | None,
+    token_budget: int,
+    web_recency: WebRecency | None,
+) -> dict[str, Any]:
+    """The research run behind :func:`run`, inside the run's cancel scope."""
     if len(question) > settings.max_question_length:
         return {
             "answer": (
@@ -636,8 +701,7 @@ def run(
         # the streaming layer set the event, and the next node-boundary
         # probe raised. Return a marked-cancelled state instead of
         # propagating; the streaming generator already stopped emitting.
-        if exc.partial_state is not None:
-            state = dict(exc.partial_state)
+        state = _reached_state(state, exc)
         log.info("Run stopped (error_type=%s)", type(exc).__name__)
         state["cancelled"] = True
         state["cancel_reason"] = (
@@ -662,7 +726,8 @@ def run(
             "result_state": state,
         }
     except AgentRateLimited as exc:
-        emit_progress(state, t(state, "run_aborted", exc=exc))
+        state = _reached_state(state, exc)
+        emit_progress(state, t(state, "run_rate_limited"))
         log.error("ABORT (error_type=%s)", type(exc).__name__)
         state["_terminal_failure"] = {
             "type": "rate_limited",
@@ -685,6 +750,7 @@ def run(
             "result_state": state,
         }
     except Exception as exc:
+        state = _reached_state(state, exc)
         emit_progress(state, t(state, "run_failed", exc=exc))
         log_run_end(
             run_id=state.get("_run_id"),
@@ -845,6 +911,7 @@ def run_test(
     try:
         result = agent.invoke(state)
     except AgentRateLimited as exc:
+        state = _reached_state(state, exc)
         log.error("ABORT (test, error_type=%s)", type(exc).__name__)
         elapsed = time.monotonic() - t0
         log_run_end(

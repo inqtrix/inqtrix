@@ -155,16 +155,15 @@ stack is registered only when its required vars are present, so
 | `ANTHROPIC_API_KEY` | anthropic_perplexity, multi_stack | yes (for anthropic) | – |
 | `PERPLEXITY_API_KEY` | anthropic_/bedrock_/azure_openai_perplexity, multi_stack | yes (for any perplexity stack) | – |
 | `AWS_PROFILE` | bedrock_perplexity, multi_stack | no | AWS default |
+| `AWS_BEARER_TOKEN_BEDROCK` | bedrock_perplexity, multi_stack | no (a Bedrock API key; boto3 signs with it instead of the profile) | – |
 | `AWS_REGION` | bedrock_perplexity, multi_stack | no | `eu-central-1` |
-| `AZURE_OPENAI_API_KEY` | every azure_* script, multi_stack | yes (Option A, for any azure stack) | – |
+| `AZURE_OPENAI_API_KEY` | every azure_* script, multi_stack | yes (for any azure stack) | – |
 | `AZURE_OPENAI_ENDPOINT` | every azure_* script, multi_stack | yes (for any azure stack) | – |
-| `AZURE_OPENAI_DEPLOYMENT_NAME` | every azure_* script, multi_stack | yes (for any azure stack) | – |
-| `AZURE_OPENAI_CLAIM_EXTRACT_DEPLOYMENT_NAME` | every azure_* script, multi_stack | no | `""` (falls back to default deployment) |
+| `AZURE_OPENAI_CONTEXT_WINDOW_TOKENS` | azure_foundry_web_search | no | `128000` |
 | `AZURE_AI_PROJECT_ENDPOINT` | azure_foundry_web_search, multi_stack | yes (for foundry stack) | – |
-| `AZURE_AI_PROJECT_API_KEY` | azure_foundry_web_search, multi_stack | no | – |
+| `AZURE_AI_PROJECT_API_KEY` | azure_foundry_web_search, multi_stack | yes (for foundry stack) | – |
 | `WEB_SEARCH_AGENT_NAME` | azure_foundry_web_search, multi_stack | yes (for foundry stack) | – |
 | `WEB_SEARCH_AGENT_VERSION` | azure_foundry_web_search, multi_stack | no | latest/default |
-| `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | every azure_* script (Option B/C), multi_stack | no | – |
 
 ### Cross-cutting (all stacks)
 
@@ -394,9 +393,8 @@ Scaling notes:
 
 ## Lifecycle
 
-- **Provider singleton**: `_build_providers()` runs exactly once per server process (inside `build_app()`); the LLM/search providers are then reused process-wide. This matches the caching behaviour of the OpenAI / boto3 / Azure SDKs. In `multi_stack.py` the same applies per stack — every registered stack constructs its providers once and keeps them for the process lifetime.
+- **Provider singleton**: `_build_providers()` runs exactly once per server process (inside `build_app()`); the LLM/search providers are then reused process-wide. This matches the caching behaviour of the OpenAI / boto3 SDKs. In `multi_stack.py` the same applies per stack — every registered stack constructs its providers once and keeps them for the process lifetime.
 - **Lazy SDK init**: Some providers (notably `BedrockLLM`) materialise their boto3 session only on the first call. The `/health` probe does not necessarily trigger that path.
-- **Foundry token caveat**: `AzureFoundryWebSearch` mints its bearer in the constructor (~60–75 min lifetime, auto-refresh through `azure.identity`). Edge case: within the last 10 s before expiry the cache may hand out a stale token and the next call sees a transient 401 — restart the process to mitigate. Multi-key rotation and a refresh endpoint are explicitly out of scope.
 - **Graceful shutdown**: The ASGI `lifespan` handler emits an `Inqtrix server stopping` log line on stop. Uvicorn drains in-flight streams on `SIGTERM`; `--timeout-graceful-shutdown` controls how long uvicorn waits for in-flight responses.
 - **Health probe**: `GET /health` calls `is_available()` on both providers and returns `200` (all ready) or `503` (degraded). Suitable for a Kubernetes liveness probe; splitting liveness from readiness is a follow-up task.
 - **Multi-stack discovery cache**: `GET /v1/stacks` caches its rendered payload for ~5 seconds before re-probing each stack's `is_available()`. A polling client calling the endpoint every second therefore triggers at most one provider-readiness probe per 5 s.
@@ -459,8 +457,8 @@ configured:
 - **openai SDK**: only contacts the `base_url` you set (e.g. the
   Azure endpoint or the Perplexity API). Optional usage data
   uploads to `api.openai.com` are off unless you opt in.
-- **Anthropic / Bedrock / Azure Identity**: only the documented
-  service endpoints, no telemetry.
+- **Anthropic / Bedrock**: only the documented service endpoints,
+  no telemetry.
 - **LangGraph**: stays local. The optional **LangSmith** trace
   uploader is only active when `LANGCHAIN_TRACING_V2=true` and
   `LANGCHAIN_API_KEY` are set in the environment — leave both

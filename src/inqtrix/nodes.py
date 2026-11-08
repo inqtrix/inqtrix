@@ -19,15 +19,12 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from threading import Lock
-from typing import Any, Callable, Iterator, NamedTuple, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple, Sequence, TypeVar
 
 from openai import OpenAIError
 
 from inqtrix.agents.markdown import normalize_agent_markdown
-from inqtrix.constants import (
-    CONTEXT_WINDOW_SAFETY_TOKENS,
-    DEFAULT_LLM_MAX_OUTPUT_TOKENS,
-)
+from inqtrix.constants import CONTEXT_WINDOW_SAFETY_TOKENS
 from inqtrix.domains import (
     MODEL_REASON_PREFIX,
     PLACEMENT_FIELDS,
@@ -97,6 +94,11 @@ from inqtrix.runtime_logging import (
     normalize_source_provenance,
     sanitize_grounded_search_result,
 )
+from inqtrix.model_cards import (
+    estimate_required_context_tokens,
+    llm_context_window_tokens,
+    llm_default_output_tokens,
+)
 from inqtrix.model_routing import describe_resolution, describe_unresolved_resolution
 from inqtrix.scoring import SUPPORTED_STATUSES, append_score_snapshot, claim_assessments
 from inqtrix.settings import AgentSettings
@@ -126,6 +128,13 @@ from inqtrix.urls import (
     scrub_credential_urls,
     today,
 )
+from inqtrix.harness.contracts.events import (
+    RESEARCH_QUERY_FINISHED_EVENT,
+    RESEARCH_QUERY_STARTED_EVENT,
+)
+
+if TYPE_CHECKING:
+    from inqtrix.providers.attempts import RetryKind, RetryLog
 
 log = logging.getLogger(__name__)
 
@@ -248,7 +257,6 @@ def _claim_extraction_text(
         citation_records,
         max_sources=max_sources,
     )
-
 
 
 def _claim_provider_refs(citation_records: list[dict[str, Any]]) -> list[ProviderCitationRef]:
@@ -968,38 +976,8 @@ def _blocking_algorithm_failures(s: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _llm_context_window_tokens(llm: Any) -> int | None:
-    """Return a positive configured context window from an LLM provider."""
-    value = getattr(llm, "context_window_tokens", None)
-    if callable(value):
-        value = value()
-    if isinstance(value, int) and value > 0:
-        return value
-    raw = getattr(llm, "_context_window_tokens", None)
-    return raw if isinstance(raw, int) and raw > 0 else None
-
-
-def _llm_default_output_tokens(llm: Any) -> int:
-    """Return the provider's configured reasoning output budget."""
-    raw = getattr(llm, "_default_max_tokens", None)
-    return raw if isinstance(raw, int) and raw > 0 else DEFAULT_LLM_MAX_OUTPUT_TOKENS
-
-
-def _estimate_required_context_tokens(
-    *,
-    system: str | None,
-    prompt: str,
-    requested_output_tokens: int,
-) -> tuple[int, int]:
-    """Estimate input and total token capacity for one LLM call."""
-    char_count = len(system or "") + len(prompt or "")
-    estimated_input_tokens = max(1, (char_count + 3) // 4)
-    estimated_required_tokens = (
-        estimated_input_tokens
-        + max(0, int(requested_output_tokens or 0))
-        + CONTEXT_WINDOW_SAFETY_TOKENS
-    )
-    return estimated_input_tokens, estimated_required_tokens
+class _RecordedCapacityError(AgentModelCapacityError):
+    """A capacity failure the check before the call has already recorded."""
 
 
 def _check_llm_context_capacity(
@@ -1015,14 +993,14 @@ def _check_llm_context_capacity(
     requested_output_tokens: int,
 ) -> dict[str, int | str | bool | None]:
     """Warn or fail before sending prompts that exceed configured capacity."""
-    estimated_input_tokens, estimated_required_tokens = _estimate_required_context_tokens(
+    estimated_input_tokens, estimated_required_tokens = estimate_required_context_tokens(
         system=system,
         prompt=prompt,
         requested_output_tokens=requested_output_tokens,
     )
     required_floor = int(getattr(settings, "required_context_window_tokens", 0) or 0)
     required_tokens = max(required_floor, estimated_required_tokens)
-    context_window_tokens = _llm_context_window_tokens(providers.llm)
+    context_window_tokens = llm_context_window_tokens(providers.llm)
     details: dict[str, int | str | bool | None] = {
         "phase": phase,
         "model": model,
@@ -1095,7 +1073,7 @@ def _check_llm_context_capacity(
             blocking=True,
             details=details,
         )
-        raise AgentModelCapacityError(model or "", phase, message)
+        raise _RecordedCapacityError(model or "", phase, message)
 
     return details
 
@@ -1246,6 +1224,7 @@ def _extract_evidence_labels(text: str) -> set[str]:
 
 
 def _expand_bare_evidence_label_links(
+    s: dict[str, Any],
     answer_text: str,
     label_urls: dict[str, str],
 ) -> tuple[str, int]:
@@ -1263,7 +1242,7 @@ def _expand_bare_evidence_label_links(
         label = match.group(1)
         url = label_urls.get(label)
         if not url:
-            return f"[{label}: nicht zugeordnet]"
+            return t(s, "answer_evidence_label_unassigned", label=label)
         expanded += 1
         return f"[{label}]({url})"
 
@@ -1365,22 +1344,19 @@ def _provider_retry_progress_context(
     provider: object,
     s: dict[str, Any],
     *,
+    kind: "RetryKind",
     operation_label: str,
     testing_mode: bool = False,
-) -> Iterator[object]:
-    """Bind retry progress and run cancellation to one provider call.
+) -> Iterator["RetryLog"]:
+    """Report the retries of one provider call as live progress.
 
-    Two thread-local scopes are entered together: retry attempts become
-    live warning progress events, and the run's ``_cancel_event`` (when
-    present) becomes a provider-level cancel probe so in-flight retry
-    ladders and backoff sleeps stop promptly after a cancel request.
-    Entering here — inside fan-out worker functions — puts both bindings
-    on the thread that actually performs the provider call.
+    Retry attempts of *kind* become warning progress events. Entering here,
+    inside fan-out worker functions, scopes the report to the work of that
+    worker. The yielded log holds the retries it took. Cancellation needs no
+    binding here: ``graph.run`` binds the run's cancel probe once for every
+    provider call of the run, and fan-out threads copy that context.
     """
-    from inqtrix.providers.base import (
-        observe_provider_retries,
-        provider_cancel_scope,
-    )
+    from inqtrix.providers.attempts import observe_retries
 
     def _on_retry(notice: dict[str, Any]) -> None:
         provider_label = str(notice.get("provider") or type(provider).__name__)
@@ -1423,18 +1399,14 @@ def _provider_retry_progress_context(
                 "effective_timeout_seconds": notice.get(
                     "effective_timeout_seconds"
                 ),
-                "transport_timeout_seconds": notice.get(
-                    "transport_timeout_seconds"
-                ),
             },
             testing_mode=testing_mode,
         )
 
-    cancel_event = s.get("_cancel_event")
-    probe = cancel_event.is_set if cancel_event is not None else None
-    with provider_cancel_scope(probe):
-        with observe_provider_retries(provider, _on_retry) as bound:
-            yield bound
+    # The run's cancel probe is bound once where the run starts
+    # (``graph.run``); this context only reports the retries.
+    with observe_retries(kind, _on_retry) as retry_log:
+        yield retry_log
 
 
 _FanoutItem = TypeVar("_FanoutItem")
@@ -1463,8 +1435,8 @@ def _map_cancellable(
     returns: queued items are cancelled, the abandonment is made visible
     on all three channels (log, warning progress event, iteration-log
     marker ``cancel_abandoned_work``), the still-running calls are awaited
-    (they stop early through the provider cancel probe bound inside the
-    worker) and :class:`AgentCancelled` is raised.
+    (they stop early through the run's provider cancel probe, which each
+    item's copied context carries) and :class:`AgentCancelled` is raised.
 
     Args:
         s: Agent state; read for ``_cancel_event`` and used for progress
@@ -1772,7 +1744,7 @@ def _compose_answer_sections(
                 heading=section_heading,
             ),
         )
-        provider_output_budget = _llm_default_output_tokens(providers.llm)
+        provider_output_budget = llm_default_output_tokens(providers.llm)
         focus_records = select_section_evidence_records(
             evidence_ledger,
             section_key=section_spec.key,
@@ -1828,6 +1800,7 @@ def _compose_answer_sections(
         with _provider_retry_progress_context(
             providers.llm,
             s,
+            kind="model",
             operation_label=(
                 f"{t(s, 'retry_operation_answer_synthesis')}: "
                 f"{section_heading}"
@@ -2693,7 +2666,6 @@ def _event_mode(s: dict[str, Any]) -> bool:
     )
 
 
-
 def _set_answer_language(s: dict, *, classified: str | None, stage: str) -> None:
     """Resolve and record the answer language of the run.
 
@@ -2791,6 +2763,7 @@ def classify(
         with _provider_retry_progress_context(
             providers.llm,
             s,
+            kind="model",
             operation_label=t(s, "retry_operation_classify"),
             testing_mode=settings.testing_mode,
         ):
@@ -2798,19 +2771,28 @@ def classify(
                 f"{date_line(today())}\n\n"
                 f"Analyse this question in TWO parts:\n\n"
                 f"=== PART 1: CLASSIFICATION ===\n"
-                f"1. Does it need a current web search? "
-                f"(current events, prices, statistics, new technologies, "
-                f"changeable facts → ALWAYS search)\n"
+                f"1. Does it need a web search? SEARCH whenever the answer states facts that "
+                f"sources should back: laws, rules and their obligations, deadlines and "
+                f"exceptions, figures, products, people, events, anything that can change "
+                f"(→ ALWAYS search). DIRECT only for what needs no source at all: greetings, "
+                f"arithmetic, rewording or translating a given text.\n"
                 f"2. In which language is the question written?\n"
                 f"3. In which language are the best search results found? "
                 f"(e.g. programming/tech/science → often English, "
                 f"local topics/politics/law → the language of the question)\n"
-                f"4. How current must the results be?\n"
-                f"   - NONE: timeless facts (mathematics, history, definitions)\n"
-                f"   - MONTH: current developments, latest versions\n"
+                f"4. How recent must the sources be? Decide by what the question asks for, "
+                f"not by the dates it names:\n"
+                f"   - NONE: the question does not ask for the latest state: definitions, history, "
+                f"explanations, and what laws, rules or standards require (obligations, deadlines, "
+                f"exceptions), also from a future date\n"
+                f"   - MONTH: developments or changes of the last weeks, the current status of an "
+                f"ongoing procedure (a bill, a negotiation), the latest version of something that "
+                f"changes often\n"
                 f"   - WEEK: news of the last days, current events\n"
                 f"   - DAY: breaking news, live data, today's events\n"
                 f"   - HOUR: real-time events, breaking news happening right now\n"
+                f"   A date in the question (e.g. 'from 2027') names the period the answer is about, "
+                f"not how recent the sources must be.\n"
                 f"5. Which search type fits best?\n"
                 f"   - GENERAL: standard web search\n"
                 f"   - ACADEMIC: scientific questions, studies, papers\n"
@@ -3339,6 +3321,7 @@ def plan(
         with _provider_retry_progress_context(
             providers.llm,
             s,
+            kind="model",
             operation_label=t(s, "retry_operation_plan"),
             testing_mode=settings.testing_mode,
         ):
@@ -3703,15 +3686,6 @@ def search(
             return consumer()
         return None
 
-    def _consume_retry_notices(obj: object) -> list[dict[str, Any]]:
-        consumer = getattr(obj, "consume_retry_notices", None)
-        if not callable(consumer):
-            return []
-        notices = consumer()
-        if not isinstance(notices, list):
-            return []
-        return [dict(item) for item in notices if isinstance(item, dict)]
-
     def _emit_retry_progress(
         notices: list[dict[str, Any]],
         *,
@@ -3811,7 +3785,7 @@ def search(
         )
         emit_run_event(
             s,
-            "inqtrix.research.query.started",
+            RESEARCH_QUERY_STARTED_EVENT,
             {
                 key: query_record[key]
                 for key in (
@@ -3884,7 +3858,7 @@ def search(
             )
             emit_run_event(
                 s,
-                "inqtrix.research.query.finished",
+                RESEARCH_QUERY_FINISHED_EVENT,
                 {
                     key: record[key]
                     for key in (
@@ -3914,6 +3888,7 @@ def search(
             with _provider_retry_progress_context(
                 providers.search,
                 s,
+                kind="search",
                 operation_label=operation_label,
                 testing_mode=settings.testing_mode,
             ):
@@ -3926,7 +3901,9 @@ def search(
                 raise TypeError(
                     "SearchProvider.search() must return GroundedSearchResult"
                 )
-            notice = _consume_nonfatal_notice(providers.search)
+            notice = next(
+                (item.message for item in result.notices if item.message), None
+            )
             _finalize_query_record(
                 query_index,
                 # An empty provider result is still a successfully completed
@@ -4209,9 +4186,10 @@ def search(
             with bind_purpose("claim_extract"), _provider_retry_progress_context(
                 providers.llm,
                 s,
+                kind="model",
                 operation_label=t(s, "retry_operation_claim_extraction"),
                 testing_mode=settings.testing_mode,
-            ):
+            ) as retry_log:
                 result_tuple = strategies.claim_extraction.extract(
                     text,
                     citations,
@@ -4232,7 +4210,7 @@ def search(
                 result_tuple,
                 _consume_nonfatal_notice(strategies.claim_extraction),
                 metadata if isinstance(metadata, dict) else {},
-                _consume_retry_notices(providers.llm),
+                retry_log.notices(),
                 roles if isinstance(roles, list) else [],
             )
 
@@ -5542,6 +5520,7 @@ def evaluate(
         with _provider_retry_progress_context(
             providers.llm,
             s,
+            kind="model",
             operation_label=t(s, "retry_operation_evaluate"),
             testing_mode=settings.testing_mode,
         ):
@@ -6291,6 +6270,28 @@ def answer(
             return "provider_limit"
         return "answer_synthesis"
 
+    def _answer_with_failure_report(finish_reason: str) -> _AnswerCompositionResult:
+        failures = _blocking_algorithm_failures(s)
+        emit_progress(
+            s,
+            t(s, "algorithm_failure_report_blocked", count=len(failures)),
+        )
+        s["final_confidence"] = min(int(s.get("final_confidence", 0) or 0) or 3, 3)
+        s["answer"] = _build_algorithm_failure_report(
+            s,
+            failures=failures,
+            evidence_record_count=len(evidence_ledger),
+            citation_count=len(s.get("source_records", {}) or {}),
+        )
+        return _AnswerCompositionResult(
+            answer=s["answer"],
+            finish_reason=finish_reason,
+            section_logs=[],
+            composition_aborted=True,
+            sections_planned=len(settings.report_tuning.answer_sections),
+            sections_attempted=0,
+        )
+
     def _build_answer_algorithm_failure(
         *,
         exc: BaseException,
@@ -6309,47 +6310,23 @@ def answer(
             blocking=True,
             details=details,
         )
-        failures = _blocking_algorithm_failures(s)
-        emit_progress(
-            s,
-            t(s, "algorithm_failure_report_blocked", count=len(failures)),
-        )
-        s["final_confidence"] = min(int(s.get("final_confidence", 0) or 0) or 3, 3)
-        s["answer"] = _build_algorithm_failure_report(
-            s,
-            failures=failures,
-            evidence_record_count=len(evidence_ledger),
-            citation_count=len(s.get("source_records", {}) or {}),
-        )
-        return _AnswerCompositionResult(
-            answer=s["answer"],
-            finish_reason=phase,
-            section_logs=[],
-            composition_aborted=True,
-            sections_planned=len(settings.report_tuning.answer_sections),
-            sections_attempted=0,
+        return _answer_with_failure_report(phase)
+
+    def _model_capacity_failure(exc: AgentModelCapacityError) -> _AnswerCompositionResult:
+        """Report a capacity failure, whichever model and whichever check found it."""
+        if isinstance(exc, _RecordedCapacityError):
+            return _answer_with_failure_report("model_capacity")
+        return _build_answer_algorithm_failure(
+            exc=exc,
+            phase="model_capacity",
+            details={
+                "model": getattr(exc, "model", ""),
+                "capacity_phase": getattr(exc, "phase", ""),
+            },
         )
 
     if algorithm_report_blocked:
-        emit_progress(
-            s,
-            t(s, "algorithm_failure_report_blocked", count=len(blocking_algorithm_failures)),
-        )
-        s["final_confidence"] = min(int(s.get("final_confidence", 0) or 0) or 3, 3)
-        s["answer"] = _build_algorithm_failure_report(
-            s,
-            failures=blocking_algorithm_failures,
-            evidence_record_count=len(evidence_ledger),
-            citation_count=len(s.get("source_records", {}) or {}),
-        )
-        composition_result = _AnswerCompositionResult(
-            answer=s["answer"],
-            finish_reason="algorithm_failure",
-            section_logs=[],
-            composition_aborted=True,
-            sections_planned=len(settings.report_tuning.answer_sections),
-            sections_attempted=0,
-        )
+        composition_result = _answer_with_failure_report("algorithm_failure")
     else:
         try:
             composition_result = _compose_answer_sections(
@@ -6362,39 +6339,7 @@ def answer(
             )
             s["answer"] = composition_result.answer
         except AgentModelCapacityError as exc_capacity:
-            _record_algorithm_failure(
-                s,
-                settings,
-                node="answer",
-                phase="model_capacity",
-                reason=type(exc_capacity).__name__,
-                message=str(exc_capacity),
-                blocking=True,
-                details={
-                    "model": getattr(exc_capacity, "model", ""),
-                    "capacity_phase": getattr(exc_capacity, "phase", ""),
-                },
-            )
-            blocking_algorithm_failures = _blocking_algorithm_failures(s)
-            emit_progress(
-                s,
-                t(s, "algorithm_failure_report_blocked", count=len(blocking_algorithm_failures)),
-            )
-            s["final_confidence"] = min(int(s.get("final_confidence", 0) or 0) or 3, 3)
-            s["answer"] = _build_algorithm_failure_report(
-                s,
-                failures=blocking_algorithm_failures,
-                evidence_record_count=len(evidence_ledger),
-                citation_count=len(s.get("source_records", {}) or {}),
-            )
-            composition_result = _AnswerCompositionResult(
-                answer=s["answer"],
-                finish_reason="model_capacity",
-                section_logs=[],
-                composition_aborted=True,
-                sections_planned=len(settings.report_tuning.answer_sections),
-                sections_attempted=0,
-            )
+            composition_result = _model_capacity_failure(exc_capacity)
         except AgentTimeout as exc_timeout:
             if strict_algorithm_mode:
                 composition_result = _build_answer_algorithm_failure(
@@ -6472,6 +6417,8 @@ def answer(
                     )
                     s["answer"] = composition_result.answer
                     fallback_succeeded = True
+                except AgentModelCapacityError as exc_capacity:
+                    composition_result = _model_capacity_failure(exc_capacity)
                 except (
                     OpenAIError,
                     AgentTimeout,
@@ -6482,10 +6429,12 @@ def answer(
                 ) as e2:
                     fallback_error_label = f"{type(e2).__name__}: {e2}"[:240]
                     answer_fallback_kind = "fallback_model_failed"
-                    answer_fallback_reason = (
-                        f"Primaeres Antwort-Modell fehlgeschlagen ({provider_error_label}); "
-                        f"Fallback-Modell `{fallback_model}` ebenfalls fehlgeschlagen "
-                        f"({fallback_error_label})."
+                    answer_fallback_reason = t(
+                        s,
+                        "research_answer_failed_fallback_failed_body",
+                        error=provider_error_label,
+                        model=fallback_model,
+                        fallback_error=fallback_error_label,
                     )
                     log.warning(
                         "TRACE answer fallback (fallback_model_failed model=%s error_code=%s)",
@@ -6528,7 +6477,8 @@ def answer(
                     no_context_message=t(s, "research_no_context_provider"),
                 )
 
-    algorithm_report_blocked = bool(_blocking_algorithm_failures(s))
+    blocking_algorithm_failures = _blocking_algorithm_failures(s)
+    algorithm_report_blocked = bool(blocking_algorithm_failures)
     finish_reason = str(composition_result.finish_reason or "")
     section_logs = list(composition_result.section_logs)
     s["answer_finish_reason"] = finish_reason
@@ -6548,6 +6498,7 @@ def answer(
         )
 
     s["answer"], expanded_evidence_label_links = _expand_bare_evidence_label_links(
+        s,
         s.get("answer", ""),
         state_data.get("evidence_label_urls", {}) or {},
     )

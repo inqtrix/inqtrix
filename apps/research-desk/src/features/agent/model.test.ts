@@ -76,7 +76,6 @@ describe('agent run status predicates', () => {
     completed: { active: false, gate: false },
     failed: { active: false, gate: false },
     cancelled: { active: false, gate: false },
-    expired: { active: false, gate: false },
   }
 
   it('classifies every status exactly once', () => {

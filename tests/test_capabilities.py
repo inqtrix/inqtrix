@@ -11,13 +11,12 @@ strict-collections semantics for the agent search path.
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 from dataclasses import replace
-import threading
 import uuid
 
 import pytest
 
+from inqtrix.providers.attempts import report_retry
 from inqtrix.capabilities import (
     CapabilityContext,
     CapabilityError,
@@ -36,7 +35,7 @@ from inqtrix.knowledge.stores.ports import (
     KnowledgeProviderContext,
     RetrievalDegradation,
 )
-from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource
+from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource, ProviderNotice
 from inqtrix.services.knowledge_service import KnowledgeService, SearchOutcome
 from pydantic import BaseModel
 
@@ -88,30 +87,17 @@ class _StubSearch:
 
 
 class _FallbackSearch(_StubSearch):
-    """Provider-style fallback exposed from the same search thread."""
+    """Provider-style fallback: an empty result that says why."""
+
+    notice = ProviderNotice("Upstream search unavailable.", code="upstream_5xx", http_status=503)
 
     def search(self, query: str, **kwargs: object) -> GroundedSearchResult:
         del query, kwargs
-        self._search_thread = threading.get_ident()
-        return GroundedSearchResult()
-
-    def consume_nonfatal_notice_detail(self) -> dict[str, object]:
-        assert threading.get_ident() == self._search_thread
-        return {
-            "code": "upstream_5xx",
-            "message": "Upstream search unavailable.",
-            "http_status": 503,
-        }
+        return GroundedSearchResult(notices=(self.notice,))
 
 
 class _ProviderTimeoutFallbackSearch(_FallbackSearch):
-    def consume_nonfatal_notice_detail(self) -> dict[str, object]:
-        assert threading.get_ident() == self._search_thread
-        return {
-            "code": "provider_timeout",
-            "message": "Upstream search timed out.",
-            "http_status": 504,
-        }
+    notice = ProviderNotice("Upstream search timed out.", code="provider_timeout", http_status=504)
 
 
 _ANON_PRINCIPAL = Principal(user_id=None, kind="anonymous")
@@ -714,19 +700,8 @@ def test_web_instant_forwards_provider_retry_notice_with_query_context():
     notices: list[dict[str, object]] = []
 
     class RetryingSearch(_StubSearch):
-        retry_callback = None
-
-        @contextmanager
-        def observe_retries(self, callback):
-            self.retry_callback = callback
-            try:
-                yield self
-            finally:
-                self.retry_callback = None
-
         def search(self, query, **kwargs):
-            assert self.retry_callback is not None
-            self.retry_callback({
+            report_retry("search", {
                 "attempt": 1,
                 "max_attempts": 3,
                 "delay_seconds": 1.0,
@@ -754,6 +729,7 @@ def test_web_instant_forwards_provider_retry_notice_with_query_context():
             "max_attempts": 3,
             "delay_seconds": 1.0,
             "error_code": "upstream_5xx",
+            "progress_emitted": True,
             "operation": "web.search.instant",
             "query": "Current market evidence",
         }

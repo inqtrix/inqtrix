@@ -5,7 +5,7 @@ dispatches the resolved mode through
 the registry, translates the algorithm result into the export payload,
 and drives the run-handle lifecycle (events, answer deltas, snapshot,
 completion). Read-side operations stay on the
-:class:`~inqtrix.server.runs.RunStore` and are called directly by the
+:class:`~inqtrix.runs.memory_store.RunStore` and are called directly by the
 runs router — the store already is the in-memory repository.
 """
 
@@ -30,12 +30,14 @@ from inqtrix.result import ResearchResult, reported_usage
 from inqtrix.services.agent_answer_publisher import AgentAnswerPublisher
 from inqtrix.services.agent_context import ResolvedAgentContext
 from inqtrix.state import build_run_snapshot
+from inqtrix.harness.contracts.events import RUN_TRACE_EVENT
 
 if TYPE_CHECKING:
     from inqtrix.agents.control_ports import AgentControlStore
     from inqtrix.auth.principal import Principal
     from inqtrix.core.algorithms import AgentAlgorithm, AlgorithmRegistry
-    from inqtrix.server.runs import RunHandle, RunStore
+    from inqtrix.runs.memory_store import RunStore
+    from inqtrix.runs.records import RunHandle
     from inqtrix.services.execution_dependency_authority import (
         ExecutionDependencyAuthorizer,
     )
@@ -202,8 +204,8 @@ def _execute_run_segment(
         }
     # Metrics feature label + ledger subject for every provider call
     # inside this segment (token counters per product feature; raw
-    # booking identity for llm_usage rows). The executing loop clears
-    # both vars in its finally — worker threads are reused.
+    # booking identity for llm_usage rows). Both end with the segment,
+    # which runs in a context of its own.
     from inqtrix.observability.context import (
         bind_feature,
         bind_usage_subject,
@@ -246,7 +248,7 @@ def _execute_run_segment(
     trace_id_hex = current_trace_id_hex()
     emit_event = getattr(handle, "emit", None)
     if trace_id_hex is not None and callable(emit_event):
-        emit_event("inqtrix.run.trace", {"trace_id": trace_id_hex})
+        emit_event(RUN_TRACE_EVENT, {"trace_id": trace_id_hex})
 
     providers = resolved.providers
     if authority_check is not None:
@@ -718,7 +720,7 @@ class RunService:
                 when set; empty for every other run.
 
         Raises:
-            inqtrix.server.runs.RunQueueFull: When the waiting queue
+            inqtrix.runs.records.RunQueueFull: When the waiting queue
                 has no free slot (the router maps this to HTTP 429).
         """
         algorithm = self._registry.get(resolved.mode)
@@ -949,6 +951,7 @@ class RunService:
                 ),
             },
             mode=resolved.mode,
+            workflow_contract=algorithm.contract_version,
             workspace_id=workspace_id,
             created_by_user_id=principal.user_id if principal is not None else None,
             created_by_tenant_id=(

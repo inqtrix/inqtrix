@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextvars
 import hashlib
 import logging
 from typing import Annotated, Any, NotRequired
@@ -12,15 +11,25 @@ from langchain.agents.middleware.types import AgentState, ExtendedModelResponse,
 from langchain_core.messages import AIMessage, HumanMessage
 
 from inqtrix.agents.prompts import HARNESS_NOTE_PREFIX, POST_MISSION_EVIDENCE_GUIDANCE
-from inqtrix.agents.kernel.chat_bridge import KERNEL_USAGE_STATE, collect_model_usage
+from inqtrix.agents.kernel.chat_bridge import (
+    KERNEL_USAGE_STATE,
+    collect_model_usage,
+    counted_usage_of_message,
+)
 from inqtrix.agents.narration import emit_narration
 from inqtrix.i18n import t
 from inqtrix.prompt_language import resolve_answer_language
 from inqtrix.untrusted_content import untrusted_fence
+from inqtrix.harness.contracts.events import (
+    ACTIVITY_EVENT,
+    CHILD_BATCH_GUARDED_EVENT,
+    CLARIFICATION_REQUESTED_EVENT,
+    SUFFICIENCY_JUDGED_EVENT,
+    TOOL_LIMIT_REACHED_EVENT,
+)
 
 log = logging.getLogger(__name__)
 
-TOOL_LIMIT_REACHED_EVENT = "inqtrix.agent.tool_limit.reached"
 SKILL_INPUTS_RESOLVED_MARKER = "[skill_inputs_resolved]"
 
 
@@ -149,7 +158,7 @@ def resolve_kernel_skill_inputs(
                 )
             )
             deps.emit(
-                "inqtrix.agent.clarification.requested",
+                CLARIFICATION_REQUESTED_EVENT,
                 {
                     "clarification_id": record.clarification_id,
                     "question": record.question,
@@ -327,10 +336,7 @@ class KernelSufficiencyMiddleware(AgentMiddleware):
             # This evidence state was already judged — a park/resume
             # replay or a turn without new source evidence.
             return None
-        from inqtrix.agents.kernel.cognition import (
-            SUFFICIENCY_JUDGED_EVENT,
-            judge_kernel_sufficiency,
-        )
+        from inqtrix.agents.kernel.cognition import judge_kernel_sufficiency
         from inqtrix.exceptions import AgentCancelled
 
         from inqtrix.observability import semconv
@@ -538,8 +544,6 @@ class KernelToolBudgetMiddleware(AgentMiddleware):
         )
 
 
-
-ACTIVITY_EVENT = "inqtrix.agent.activity"
 MODEL_TURN_OPERATION = "agent.model.turn"
 MODEL_TURN_ACTIVITY_ID = "model-turn"
 
@@ -586,6 +590,16 @@ class KernelModelTurnMiddleware(AgentMiddleware):
             )
 
         emit("started")
+        from inqtrix.agents.kernel.chat_bridge import THREAD_CALL_IDS, used_call_ids
+
+        # The bridge sees the model's view, which a compaction narrows; the
+        # tool-call ids it must not repeat are those of the whole thread.
+        request = request.override(
+            model_settings={
+                **(request.model_settings or {}),
+                THREAD_CALL_IDS: frozenset(used_call_ids(request.state.get("messages") or [])),
+            }
+        )
         try:
             with collect_model_usage() as generated:
                 response = handler(request)
@@ -597,9 +611,9 @@ class KernelModelTurnMiddleware(AgentMiddleware):
             runtime_usage = deps.run_usage() if deps is not None else {}
             receipts = {key: 0 for key in prior}
             for message in response.result:
-                meta = getattr(message, "usage_metadata", None) or {}
-                receipts["prompt_tokens"] += int(meta.get("input_tokens", 0))
-                receipts["completion_tokens"] += int(meta.get("output_tokens", 0))
+                input_tokens, output_tokens = counted_usage_of_message(message)
+                receipts["prompt_tokens"] += input_tokens
+                receipts["completion_tokens"] += output_tokens
             # Both values cover overlapping calls. Runtime accounting additionally
             # includes work in other kernel nodes; never add the two totals.
             usage = {
@@ -858,8 +872,6 @@ class KernelToolSpanMiddleware(AgentMiddleware):
         )
 
 
-CONTEXT_COMPACTED_EVENT = "inqtrix.agent.context.compacted"
-
 KERNEL_SUMMARY_PROMPT = (
     "Summarise the following older conversation of a research agent "
     "compactly. MANDATORY: carry over every reference_id value (ref_...), "
@@ -877,41 +889,11 @@ citation TRUTH — this prompt additionally keeps the citation TOKENS in
 the summarized transcript so the model keeps citing correctly.
 
 The conversation it condenses is fenced as data: it holds tool outputs
-and source text, and the SDK serializes it as XML, which escapes the
+and source text, and ``summary_request`` serializes it as XML, which escapes the
 fences those outputs carried — without this fence the summary model
 would read source text on the same footing as its instructions. The
 serialization escapes ``<`` inside every message, so nothing in the
 conversation can close this fence."""
-
-current_compaction_todos: contextvars.ContextVar[Any] = contextvars.ContextVar(
-    "inqtrix_kernel_compaction_todos", default=None
-)
-"""The write_todos state of the segment currently inside wrap_model_call.
-
-A ContextVar (not middleware instance state): the compiled graph — and
-thus the middleware instance — is shared across concurrent runs, while
-the todo recitation must come from THE run being compacted."""
-
-current_compaction_assignment: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "inqtrix_kernel_compaction_assignment", default=""
-)
-"""The assignment of the run currently inside wrap_model_call, verbatim.
-
-Same reason for a ContextVar as the todos. A compaction condenses
-everything before its cutoff, the run's first messages included, and the
-summary goes back fenced as data — so the assignment travels next to it,
-verbatim and outside the fence, or compaction would turn the run's
-instructions into data."""
-
-SUMMARY_CHARS_KEY = "inqtrix_summary_chars"
-SUMMARY_FAILED_KEY = "inqtrix_summary_failed"
-"""Facts about the condensed summary itself, set on the summary message.
-
-The message carries more than the summary (the assignment, the archive
-pointer, the todo state), so its length is not the summary's length, and
-an assignment quoting the SDK's error text must not read as a failed
-summary."""
-
 
 def run_assignment(messages: Any) -> str:
     """The run's assignment: its thread's leading messages, verbatim.
@@ -960,84 +942,10 @@ def message_text(message: Any) -> str:
     return str(content or "")
 
 
-def emit_compaction_event(before: Any, after: dict[str, Any]) -> None:
-    """Emit the visible compaction event + narration (No Silent Fallbacks).
-
-    Called by the harness summarization middleware after a compaction
-    landed. ``before``/``after`` are ``_summarization_event`` dicts; the
-    narration id is a content hash of the summary, so replayed segments
-    emit the identical id (replay-safe events).
-    """
-    from inqtrix.agents.kernel.deps import kernel_deps
-
-    try:
-        deps = kernel_deps()
-    except RuntimeError:
-        return
-    prior_cutoff = (
-        int(before.get("cutoff_index") or 0) if isinstance(before, dict) else 0
-    )
-    cutoff = int(after.get("cutoff_index") or 0)
-    summary_message = after.get("summary_message")
-    summary_text = message_text(summary_message)
-    facts = getattr(summary_message, "additional_kwargs", None) or {}
-    archive_id = str(after.get("file_path") or "")
-    # deepagents swallows summary-model failures into a literal error
-    # string used AS the summary — a compaction that lost its summary
-    # must not report success (No Silent Fallbacks); the archive pointer
-    # keeps the evicted history recoverable either way. Read from the
-    # summary itself, never from the message around it.
-    summary_failed = bool(facts[SUMMARY_FAILED_KEY])
-    payload = {
-        "archive_artifact_id": archive_id,
-        "messages_summarized": max(0, cutoff - prior_cutoff),
-        "summary_chars": int(facts[SUMMARY_CHARS_KEY]),
-        "trigger_tokens": deps.context_trigger_tokens,
-        "summary_failed": summary_failed,
-    }
-    if summary_failed:
-        log.warning(
-            "Kernel context compacted WITHOUT a summary after a provider error in the "
-            "summary call; archive %s is complete.",
-            archive_id or "-",
-        )
-    else:
-        log.info(
-            "Kernel context compacted: %d messages summarized (archive %s, trigger %d "
-            "tokens).",
-            payload["messages_summarized"],
-            archive_id or "-",
-            deps.context_trigger_tokens,
-        )
-    deps.emit(CONTEXT_COMPACTED_EVENT, payload)
-    digest = hashlib.sha1(summary_text.encode("utf-8")).hexdigest()[:8]
-    # The narration is the USER surface of No-Silent-Fallbacks: a
-    # compaction that lost its summary must say so here too, not only
-    # in the structured event flag.
-    narration_text = t(
-        {"language": resolve_answer_language(deps.question).code},
-        "kernel_context_compacted_without_summary"
-        if summary_failed
-        else "kernel_context_compacted",
-    )
-    # Content-hash id: a replayed segment emits the identical narration
-    # id (replay-safe events).
-    emit_narration(
-        deps.emit,
-        narration_id=f"ctx_{digest}",
-        kind="status",
-        text=narration_text,
-        phase="execution",
-        guard=deps.guard_reader_text,
-    )
-
-
 CHILD_TOOL_NAMES = frozenset(
     {"run_web_research", "run_deep_mission", "delegate_batch"}
 )
 """Kernel tools that submit child runs and interrupt inside their body."""
-
-CHILD_BATCH_GUARDED_EVENT = "inqtrix.agent.child_batch.guarded"
 
 
 INTERRUPTING_TOOL_NAMES: frozenset[str] = frozenset({"ask_user"})

@@ -220,6 +220,7 @@ export function AgentComposer({
   documents = [],
   draftDoc = null,
   draftQuestion,
+  focusRequest = 0,
   onDraftDocChange,
   depthMode = 'normal',
   depthSelectable = false,
@@ -330,6 +331,8 @@ export function AgentComposer({
    * the user put them. */
   draftDoc?: JSONContent | null
   draftQuestion: string
+  /** Each new value moves the focus into the input (a restart filled it). */
+  focusRequest?: number
   /** Every edit of the document, for the desk to hold. */
   onDraftDocChange?: (doc: JSONContent) => void
   /** Thoroughness; caller-owned like `autonomy`. */
@@ -429,6 +432,9 @@ export function AgentComposer({
     questionRef.current = question
     onDraftQuestionChange(question)
   }, [question, onDraftQuestionChange])
+  useEffect(() => {
+    if (focusRequest > 0) inputRef.current?.focus()
+  }, [focusRequest])
 
   const selectedCollections = collections.filter((collection) =>
     selectedCollectionIds.includes(collection.id))

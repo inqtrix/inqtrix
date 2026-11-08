@@ -225,8 +225,8 @@ def run_editor_suggest(
         the ``state`` accumulator (:func:`inqtrix.state.track_tokens`).
         This includes any reasoning tokens the char estimate would miss.
         The cancel probe binds on THIS executor thread; providers
-        consult it at retry-attempt boundaries and backoff sleeps, so a
-        client abort stops the ladder after the in-flight attempt. The
+        consult it before each attempt, in backoff sleeps and while the
+        call waits, so a client abort ends the waiting call at once. The
         result is fitted to the text after the passage BEFORE validation:
         a rewrite that only repeated the mark that follows the passage is
         no change at all.

@@ -24,20 +24,7 @@ SURFACE_ORDER = {
     "node-dev": 5,
 }
 
-PYTHON_LICENSE_OVERRIDES: dict[str, tuple[str, str]] = {
-    "azure-ai-projects": (
-        "MIT",
-        "manual override: Azure SDK for Python repository license",
-    ),
-    "azure-core": (
-        "MIT",
-        "manual override: Azure SDK for Python repository license",
-    ),
-    "azure-identity": (
-        "MIT",
-        "manual override: Azure SDK for Python repository license",
-    ),
-}
+PYTHON_LICENSE_OVERRIDES: dict[str, tuple[str, str]] = {}
 
 # JavaScript packages that ship a LICENSE file but omit the `license` field from
 # package-lock.json, so the npm metadata carries no SPDX id and the automatic

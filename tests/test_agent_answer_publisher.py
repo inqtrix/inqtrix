@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from typing import Any
 
@@ -10,12 +11,11 @@ import pytest
 from inqtrix.agents.control_memory import MemoryAgentControlStore
 from inqtrix.agents.control_ports import ArtifactRevisionConflict
 from inqtrix.execution_failures import RunExecutionFailure
-from inqtrix.server.runs import RunHandle
+from inqtrix.runs.records import RunHandle
 from inqtrix.services.agent_answer_publisher import (
     AgentAnswerPublisher,
     answer_artifact_id,
 )
-from inqtrix.sync_bridge import run_coro_sync
 from inqtrix.worker.loop import FencedRunHandle
 
 
@@ -37,7 +37,7 @@ class _EventStore:
         self.events.append((event_type, dict(payload)))
         artifact_id = str(payload.get("artifact_id") or "")
         if artifact_id:
-            artifact, _revisions = run_coro_sync(
+            artifact, _revisions = asyncio.run(
                 self.control.get_artifact(_run_id, artifact_id)
             )
             self.snapshots.append(
@@ -100,7 +100,7 @@ def test_answer_body_is_hidden_until_final_revision_precedes_ready() -> None:
     )
     assert ready[1:] == ("ready", "Belastbare Antwort [W2].", 2)
 
-    artifact, _revisions = run_coro_sync(
+    artifact, _revisions = asyncio.run(
         control.get_artifact(handle.run_id, events.events[0][1]["artifact_id"])
     )
     assert list(artifact.refs) == references
@@ -122,7 +122,7 @@ def test_redelivery_clears_previous_body_before_restreaming() -> None:
         if snapshot[0] == "inqtrix.answer.started"
     )
     assert started[1:] == ("writing", "", 3)
-    artifact, _revisions = run_coro_sync(
+    artifact, _revisions = asyncio.run(
         control.get_artifact(
             retry.run_id, retry_events.events[0][1]["artifact_id"]
         )
@@ -157,7 +157,7 @@ def test_finalize_conflict_interrupts_stream_and_never_emits_ready() -> None:
         event_type == "inqtrix.answer.ready"
         for event_type, _payload in events.events
     )
-    artifact, _revisions = run_coro_sync(
+    artifact, _revisions = asyncio.run(
         control.get_artifact(
             handle.run_id, events.events[0][1]["artifact_id"]
         )
@@ -348,7 +348,7 @@ def test_the_answer_row_is_named_by_the_rule_the_run_answers_by(
 
     publisher.publish(handle, "Die Antwort.", references=[], question=question)
 
-    artifact, _revisions = run_coro_sync(
+    artifact, _revisions = asyncio.run(
         control.get_artifact(
             "run_answer_language", answer_artifact_id("run_answer_language")
         )

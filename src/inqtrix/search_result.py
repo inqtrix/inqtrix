@@ -26,6 +26,28 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderNotice:
+    """A non-fatal fact about one provider call, carried in its result.
+
+    A search that degrades to an empty result says why here instead of in a slot
+    of the thread that ran it, so the fact reaches the caller wherever the call
+    ran.
+    """
+
+    message: str
+    code: str = ""
+    http_status: int | None = None
+
+    def as_detail(self) -> dict[str, Any]:
+        """The notice as one plain record: ``message``, and ``code`` and ``http_status`` when set."""
+        return {
+            "message": self.message,
+            **({"code": self.code} if self.code else {}),
+            **({"http_status": int(self.http_status)} if self.http_status is not None else {}),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CitationSpan:
     """One place of the provider answer that cites a source: provider-native
     offsets into that answer (``end`` exclusive), never into the linked
@@ -108,6 +130,8 @@ class GroundedSearchResult:
     """Reported web-tool calls, not an assertion about billable transactions."""
     raw: dict[str, Any] | None = field(default=None, repr=False)
     """Provider response for protected trace content; not evidence prose."""
+    notices: tuple[ProviderNotice, ...] = ()
+    """Why this call degraded, for example to an empty result after a provider failure."""
 
     @property
     def citation_urls(self) -> list[str]:

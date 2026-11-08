@@ -1,176 +1,351 @@
 {
   "operations": {
-    "agent_kernel.chat.llm": {
-      "calls_per_run_median": 4,
-      "completion_tokens_median": 327,
+    "agent_kernel.agent_deep_review.DeepReviewVerdict.llm": {
+      "calls_per_run_median": 1.0,
+      "completion_tokens_median": 1785,
       "latency_seconds": {
-        "max": 187.654,
-        "p50": 5.657,
-        "p95": 160.763
+        "max": 71.674,
+        "p50": 15.248,
+        "p95": 60.802
       },
       "models": [
         "gpt-5.4"
       ],
-      "prompt_tokens_median": 6536,
-      "samples": 25
+      "prompt_tokens_median": 7140,
+      "samples": 14
     },
-    "agent_kernel.kernel.judge.llm": {
-      "calls_per_run_median": 1,
-      "completion_tokens_median": 195,
+    "agent_kernel.agent_deep_review.RevisionCheckVerdict.llm": {
+      "calls_per_run_median": 2,
+      "completion_tokens_median": 2215,
       "latency_seconds": {
-        "max": 2.546,
-        "p50": 2.546,
-        "p95": 2.546
+        "max": 69.706,
+        "p50": 21.457,
+        "p95": 62.025
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 4889,
+      "samples": 12
+    },
+    "agent_kernel.agent_deep_review.llm": {
+      "calls_per_run_median": 3,
+      "completion_tokens_median": 586,
+      "latency_seconds": {
+        "max": 81.307,
+        "p50": 5.108,
+        "p95": 64.341
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 15278,
+      "samples": 35
+    },
+    "agent_kernel.agent_kernel.DeepRevisionBundle.llm": {
+      "calls_per_run_median": 1.0,
+      "completion_tokens_median": 555,
+      "latency_seconds": {
+        "max": 34.427,
+        "p50": 6.248,
+        "p95": 26.771
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 11199,
+      "samples": 12
+    },
+    "agent_kernel.agent_kernel.llm": {
+      "calls_per_run_median": 4.0,
+      "completion_tokens_median": 417,
+      "latency_seconds": {
+        "max": 41.288,
+        "p50": 4.376,
+        "p95": 25.449
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 14765,
+      "samples": 127
+    },
+    "agent_kernel.agent_sufficiency.SufficiencyJudgement.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 66,
+      "latency_seconds": {
+        "max": 2.008,
+        "p50": 1.567,
+        "p95": 2.008
       },
       "models": [
         "gpt-5.4-mini"
       ],
-      "prompt_tokens_median": 1049,
+      "prompt_tokens_median": 677,
+      "samples": 8
+    },
+    "agent_kernel.agent_synthesis.llm": {
+      "calls_per_run_median": 4,
+      "completion_tokens_median": 392,
+      "latency_seconds": {
+        "max": 8.286,
+        "p50": 5.638,
+        "p95": 8.286
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 23632,
+      "samples": 4
+    },
+    "agent_kernel.web_search.web_search": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 2411,
+      "latency_seconds": {
+        "max": 26.143,
+        "p50": 26.143,
+        "p95": 26.143
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 16559,
       "samples": 1
     },
-    "knowledge.knowledge.contextualize.llm": {
+    "direct_llm.direct_chat.llm": {
       "calls_per_run_median": 1,
-      "completion_tokens_median": 39,
+      "completion_tokens_median": 163,
       "latency_seconds": {
-        "max": 2.165,
-        "p50": 1.87,
-        "p95": 2.165
-      },
-      "models": [
-        "gpt-5.4-mini"
-      ],
-      "prompt_tokens_median": 658,
-      "samples": 5
-    },
-    "knowledge.knowledge.decompose.llm": {
-      "calls_per_run_median": 1,
-      "completion_tokens_median": 74,
-      "latency_seconds": {
-        "max": 1.465,
-        "p50": 1.377,
-        "p95": 1.465
-      },
-      "models": [
-        "gpt-5.4-mini"
-      ],
-      "prompt_tokens_median": 197,
-      "samples": 5
-    },
-    "knowledge.knowledge.gate.llm": {
-      "calls_per_run_median": 1,
-      "completion_tokens_median": 93,
-      "latency_seconds": {
-        "max": 1.731,
-        "p50": 1.563,
-        "p95": 1.731
-      },
-      "models": [
-        "gpt-5.4-mini"
-      ],
-      "prompt_tokens_median": 4855,
-      "samples": 5
-    },
-    "knowledge.text_completion.llm": {
-      "calls_per_run_median": 1,
-      "completion_tokens_median": 7322,
-      "latency_seconds": {
-        "max": 97.906,
-        "p50": 70.569,
-        "p95": 97.906
+        "max": 22.659,
+        "p50": 2.676,
+        "p95": 22.659
       },
       "models": [
         "gpt-5.4"
       ],
-      "prompt_tokens_median": 5621,
+      "prompt_tokens_median": 1008,
+      "samples": 3
+    },
+    "knowledge.knowledge_answer.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 2010,
+      "latency_seconds": {
+        "max": 28.191,
+        "p50": 15.008,
+        "p95": 28.191
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 2696,
+      "samples": 5
+    },
+    "knowledge.knowledge_decompose.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 34,
+      "latency_seconds": {
+        "max": 1.2,
+        "p50": 1.2,
+        "p95": 1.2
+      },
+      "models": [
+        "gpt-5.4-mini"
+      ],
+      "prompt_tokens_median": 266,
+      "samples": 1
+    },
+    "knowledge.knowledge_gate.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 60,
+      "latency_seconds": {
+        "max": 1.548,
+        "p50": 1.283,
+        "p95": 1.548
+      },
+      "models": [
+        "gpt-5.4-mini"
+      ],
+      "prompt_tokens_median": 2032,
       "samples": 5
     },
     "research.answer.llm": {
-      "calls_per_run_median": 6.0,
-      "completion_tokens_median": 3731,
+      "calls_per_run_median": 2.0,
+      "completion_tokens_median": 2937,
       "latency_seconds": {
-        "max": 96.403,
-        "p50": 43.213,
-        "p95": 84.351
+        "max": 171.073,
+        "p50": 52.716,
+        "p95": 127.161
       },
       "models": [
         "gpt-5.4"
       ],
-      "prompt_tokens_median": 37218,
-      "samples": 36
+      "prompt_tokens_median": 16563,
+      "samples": 48
+    },
+    "research.claim_extract.inqtrix_claim_extraction_v2.llm": {
+      "calls_per_run_median": 6.0,
+      "completion_tokens_median": 607,
+      "latency_seconds": {
+        "max": 139.845,
+        "p50": 4.363,
+        "p95": 7.096
+      },
+      "models": [
+        "gpt-5.4-mini"
+      ],
+      "prompt_tokens_median": 3000,
+      "samples": 126
     },
     "research.classify.llm": {
       "calls_per_run_median": 1.0,
-      "completion_tokens_median": 105,
+      "completion_tokens_median": 120,
       "latency_seconds": {
-        "max": 2.761,
-        "p50": 1.902,
-        "p95": 2.761
+        "max": 2.035,
+        "p50": 1.548,
+        "p95": 1.986
       },
       "models": [
         "gpt-5.4-mini"
       ],
-      "prompt_tokens_median": 541,
-      "samples": 10
+      "prompt_tokens_median": 914,
+      "samples": 16
     },
     "research.evaluate.llm": {
-      "calls_per_run_median": 3,
-      "completion_tokens_median": 173,
+      "calls_per_run_median": 1.0,
+      "completion_tokens_median": 185,
       "latency_seconds": {
-        "max": 4.9,
-        "p50": 3.262,
-        "p95": 4.794
+        "max": 7.022,
+        "p50": 2.873,
+        "p95": 3.24
       },
       "models": [
         "gpt-5.4"
       ],
-      "prompt_tokens_median": 10455,
-      "samples": 20
+      "prompt_tokens_median": 6756,
+      "samples": 21
     },
     "research.plan.llm": {
-      "calls_per_run_median": 3,
-      "completion_tokens_median": 208,
+      "calls_per_run_median": 1.0,
+      "completion_tokens_median": 187,
       "latency_seconds": {
-        "max": 6.297,
-        "p50": 3.454,
-        "p95": 5.74
+        "max": 3.774,
+        "p50": 2.599,
+        "p95": 3.468
       },
       "models": [
         "gpt-5.4"
       ],
-      "prompt_tokens_median": 2088,
-      "samples": 22
+      "prompt_tokens_median": 1272,
+      "samples": 21
     },
-    "research.search.llm": {
-      "calls_per_run_median": 22,
-      "completion_tokens_median": 881,
+    "research.web_search.web_search": {
+      "calls_per_run_median": 6.0,
+      "completion_tokens_median": 1275,
       "latency_seconds": {
-        "max": 9.188,
-        "p50": 4.694,
-        "p95": 8.104
+        "max": 42.289,
+        "p50": 18.45,
+        "p95": 28.103
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 8621,
+      "samples": 126
+    },
+    "workspace_agent.agent_deep_review.RevisionCheckVerdict.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 2308,
+      "latency_seconds": {
+        "max": 21.104,
+        "p50": 21.104,
+        "p95": 21.104
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 9089,
+      "samples": 1
+    },
+    "workspace_agent.agent_intake.AssignmentProfile.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 364,
+      "latency_seconds": {
+        "max": 3.776,
+        "p50": 3.776,
+        "p95": 3.776
       },
       "models": [
         "gpt-5.4-mini"
       ],
-      "prompt_tokens_median": 2280,
-      "samples": 140
+      "prompt_tokens_median": 1968,
+      "samples": 1
     },
-    "research.web_search.web_search": {
-      "calls_per_run_median": 22,
-      "completion_tokens_median": 0,
+    "workspace_agent.agent_plan.ExecutionPlanModel.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 3828,
       "latency_seconds": {
-        "max": 56.881,
-        "p50": 23.413,
-        "p95": 46.755
+        "max": 28.26,
+        "p50": 28.26,
+        "p95": 28.26
       },
-      "models": [],
-      "prompt_tokens_median": 0,
-      "samples": 140
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 1821,
+      "samples": 1
+    },
+    "workspace_agent.agent_synthesis.DeepRevisionBundle.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 473,
+      "latency_seconds": {
+        "max": 4.644,
+        "p50": 4.644,
+        "p95": 4.644
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 5075,
+      "samples": 1
+    },
+    "workspace_agent.agent_synthesis.ReportOutline.llm": {
+      "calls_per_run_median": 1,
+      "completion_tokens_median": 3234,
+      "latency_seconds": {
+        "max": 36.791,
+        "p50": 36.791,
+        "p95": 36.791
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 31971,
+      "samples": 1
+    },
+    "workspace_agent.agent_synthesis.SectionText.llm": {
+      "calls_per_run_median": 3,
+      "completion_tokens_median": 2380,
+      "latency_seconds": {
+        "max": 46.254,
+        "p50": 23.555,
+        "p95": 46.254
+      },
+      "models": [
+        "gpt-5.4"
+      ],
+      "prompt_tokens_median": 14951,
+      "samples": 3
     }
   },
   "provenance": {
-    "derived_from": "run trace export (GET /v1/admin/runs/{run_id}/trace/export)",
-    "operations": 12,
-    "provider_call_samples": 414,
-    "traces_read": 20
+    "conversation_operations": [
+      "agent_kernel.agent_deep_review.llm",
+      "agent_kernel.agent_kernel.llm"
+    ],
+    "derived_from": "run trace exports (GET /v1/admin/runs/{run_id}/trace/export) and, because direct chats have no run, their traces in the same form",
+    "merged_signatures": 3,
+    "operations": 24,
+    "provider_call_samples": 593,
+    "traces_read": 41
   }
 }

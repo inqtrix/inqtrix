@@ -5,6 +5,7 @@ Lines carry the mode, a status, durations, ids and codes; never content.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from types import SimpleNamespace
@@ -111,18 +112,23 @@ def test_an_upload_retry_is_logged_once_it_landed(caplog: pytest.LogCaptureFixtu
     record = SimpleNamespace(
         operation_id="op_1", tenant_id="t", created_by_user_id="u", workspace_id="w"
     )
-    operations = SimpleNamespace(
-        queue_retry=lambda *args, **kwargs: True,
-        get=lambda *args, **kwargs: record,
-    )
+    class Operations:
+        async def aqueue_retry(self, *args: Any, **kwargs: Any) -> bool:
+            return True
+
+        async def aget(self, *args: Any, **kwargs: Any) -> Any:
+            return record
+
     service = UploadOperationService.__new__(UploadOperationService)
-    service.operations = operations
+    service.operations = Operations()
     service._max_attempts = 3
 
     with caplog.at_level(logging.WARNING, logger="inqtrix"):
         with pytest.raises(UploadExecutionDeferred):
-            service._defer_dependency_failure(
-                record, 1, RuntimeError(MARKER), error_type="dependency_unavailable"
+            asyncio.run(
+                service._defer_dependency_failure(
+                    record, 1, RuntimeError(MARKER), error_type="dependency_unavailable"
+                )
             )
 
     (line,) = _messages(caplog, "op_1")
@@ -144,16 +150,20 @@ def test_an_upload_retry_that_did_not_land_is_not_logged(
         operation_id="op_1", tenant_id="t", created_by_user_id="u", workspace_id="w"
     )
     service = UploadOperationService.__new__(UploadOperationService)
-    service.operations = SimpleNamespace(
-        queue_retry=lambda *args, **kwargs: False,
-        get=lambda *args, **kwargs: record,
-    )
+
+    class Operations:
+        async def aqueue_retry(self, *args: Any, **kwargs: Any) -> bool:
+            return False
+
+    service.operations = Operations()
     service._max_attempts = 3
 
     with caplog.at_level(logging.WARNING, logger="inqtrix"):
         with pytest.raises(UploadAttemptSuperseded):
-            service._defer_dependency_failure(
-                record, 1, RuntimeError(MARKER), error_type="dependency_unavailable"
+            asyncio.run(
+                service._defer_dependency_failure(
+                    record, 1, RuntimeError(MARKER), error_type="dependency_unavailable"
+                )
             )
 
     assert not _messages(caplog, "op_1")
@@ -164,7 +174,11 @@ def test_an_upload_retry_that_did_not_land_is_not_logged(
 # --------------------------------------------------------------------- #
 
 
-def test_the_upload_loop_binds_and_resets_the_job_context() -> None:
+async def _acknowledged(message_id: str) -> None:
+    del message_id
+
+
+def test_the_upload_loop_binds_the_job_context() -> None:
     from inqtrix.worker.upload_loop import UploadWorkerLoop
 
     seen: dict[str, str] = {}
@@ -175,8 +189,7 @@ def test_the_upload_loop_binds_and_resets_the_job_context() -> None:
     loop = UploadWorkerLoop.__new__(UploadWorkerLoop)
     loop._service = SimpleNamespace(execute_claimed=_execute_claimed)
     loop._store = SimpleNamespace(is_attempt_current=lambda *args, **kwargs: False)
-    loop._queue = SimpleNamespace(ack=lambda message_id: None)
-    loop._lock = threading.Lock()
+    loop._queue = SimpleNamespace(ack=_acknowledged)
     loop._active = {}
     job = SimpleNamespace(message_id="m1", operation_id="upl_1", tenant_id="tenant-a")
 
@@ -184,10 +197,9 @@ def test_the_upload_loop_binds_and_resets_the_job_context() -> None:
 
     assert seen.get("run_id") == "upl_1"
     assert seen.get("tenant") == "tenant-a"
-    assert "run_id" not in current_log_context()
 
 
-def test_the_deletion_loop_binds_and_resets_the_job_context(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_deletion_loop_binds_the_job_context(monkeypatch: pytest.MonkeyPatch) -> None:
     from inqtrix.worker import deletion_loop
     from inqtrix.worker.deletion_loop import DeletionWorkerLoop
 
@@ -201,8 +213,7 @@ def test_the_deletion_loop_binds_and_resets_the_job_context(monkeypatch: pytest.
     loop = DeletionWorkerLoop.__new__(DeletionWorkerLoop)
     loop._service = SimpleNamespace()
     loop._store = SimpleNamespace(worker_id="w1")
-    loop._queue = SimpleNamespace(ack=lambda message_id: None)
-    loop._lock = threading.Lock()
+    loop._queue = SimpleNamespace(ack=_acknowledged)
     loop._active = {}
     job = SimpleNamespace(message_id="m1", operation_id="del_1", tenant_id="tenant-a")
 
@@ -210,7 +221,6 @@ def test_the_deletion_loop_binds_and_resets_the_job_context(monkeypatch: pytest.
 
     assert seen.get("run_id") == "del_1"
     assert seen.get("tenant") == "tenant-a"
-    assert "run_id" not in current_log_context()
 
 
 # --------------------------------------------------------------------- #
@@ -223,7 +233,7 @@ def test_a_loop_stop_request_is_not_an_info_line(caplog: pytest.LogCaptureFixtur
 
     loop = BaseWorkerLoop.__new__(BaseWorkerLoop)
     loop._store = SimpleNamespace(worker_id="w1")
-    loop._stop = threading.Event()
+    loop._stop = asyncio.Event()
 
     with caplog.at_level(logging.INFO, logger="inqtrix"):
         loop.request_stop()

@@ -1,7 +1,7 @@
 import process from 'node:process'
-import { chmod, rename, writeFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 
+import { writeScenarioSidecar } from '../verification/fixtures/scenario-sidecar.mjs'
 import {
   API_DEGRADATION_LIMIT_PERCENT,
   API_P95_LIMIT_MS,
@@ -355,8 +355,6 @@ export async function writeScenarioResults(
   environment,
   supplemental = {},
 ) {
-  const path = environment.INQTRIX_VERIFICATION_SCENARIO_RESULTS_PATH
-  if (!path) return
   const latencyPassed = (
     gates.visibleUpdatePassed
     && gates.durableAckPassed
@@ -427,20 +425,7 @@ export async function writeScenarioResults(
           status: reconstruction.passed ? 'passed' : 'failed',
         },
       ]
-  await writeScenarioSidecar(path, scenarios)
-}
-
-/** Atomic 0600 sidecar in the canonical {schemaVersion, scenarios} shape.
- * Shared so aggregating engines write exactly the same contract. */
-export async function writeScenarioSidecar(path, scenarios) {
-  if (!path) return
-  const temporaryPath = `${path}.tmp`
-  await writeFile(temporaryPath, `${JSON.stringify({
-    scenarios,
-    schemaVersion: 1,
-  }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-  await rename(temporaryPath, path)
-  await chmod(path, 0o600)
+  await writeScenarioSidecar(scenarios, environment)
 }
 
 function printHelp() {

@@ -2,19 +2,18 @@
 
 :class:`~inqtrix.runs.postgres_store.PostgresRunStore` and
 :class:`~inqtrix.runs.indexing_postgres.PostgresIndexingJobStore` are
-two durable stores over the same shape: a sync public surface (routers
-and job handles call from worker threads) over an async asyncpg layer.
+two durable stores over the same shape: one async implementation per operation
+on the process loop, and a sync name for job bodies on threads.
 The schema-agnostic plumbing is genuinely identical between them, so it
 lives here once, the same way
 :class:`~inqtrix.runs.stream_queue.StreamJobQueue` and
 :class:`~inqtrix.worker.loop.BaseWorkerLoop` share the queue and
 worker-loop mechanics:
 
-* the dedicated background event loop + ``_call`` sync->async bridge +
-  ``close``/``_session`` (asyncpg pools are event-loop-affine, so each
-  store owns ONE loop and funnels every DB op through it);
-* the no-queue in-process dispatch loop (``_dispatch_locked`` /
-  ``_run_worker``), a template method whose claim, handle, and
+* ``_call``, the name sync code on a thread uses for an async operation,
+  plus ``aclose``/``_session``;
+* the no-queue in-process dispatch (``_dispatch_pending`` /
+  ``_run_segment``), a template method whose claim, handle, and
   terminal-on-success steps are subclass hooks;
 * :class:`PollingJobSubscription`, the DB-polling SSE tail, parameterized
   by the terminal-event set and a thread label.
@@ -27,14 +26,17 @@ store's history-cap / active-collection / progress semantics.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from functools import partial
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Coroutine
 
+from inqtrix import aio
 from inqtrix.observability.metrics_defs import active_metrics
 from inqtrix.storage.db import build_session_factory, tenant_session
 from inqtrix.urls import sanitize_error
@@ -185,12 +187,12 @@ class PollingJobSubscription:
         block.  Joining there would turn a slow database read into a global
         API event-loop stall.  The poller remains registered until its
         ``finally`` block runs, so a simultaneous store shutdown still finds
-        and drains it before disposing the engine.
+        and drains it before the engine goes.
         """
         self._stop.set()
 
     def _drain_for_store_close(self) -> None:
-        """Stop and join this poller before its store disposes the engine."""
+        """Stop and join this poller before its store closes."""
 
         self._stop.set()
         thread = self._thread
@@ -218,16 +220,15 @@ def resolve_orphan_sweep(queue: Any, recover_orphans: bool | None) -> bool:
 class DurableJobStoreBase:
     """The schema-agnostic half of a durable Postgres job store.
 
-    Subclasses set three class attributes (``_loop_thread_name``,
-    ``_dispatch_thread_prefix``, ``_job_kind``) and implement the
-    schema-bearing hooks (``_claim_db``, ``_make_handle``,
-    ``_auto_complete``, plus the public ``fail`` the no-queue worker
-    calls). The ``__init__`` here owns the engine, session factory,
-    background loop, and the in-process dispatch bookkeeping; subclasses
-    add their own sizing/retention/audit state after calling ``super()``.
+    Subclasses set two class attributes (``_dispatch_thread_prefix``,
+    ``_job_kind``) and implement the schema-bearing hooks (``_claim_db``,
+    ``_make_handle``, ``_auto_complete``, plus the public ``fail`` the
+    no-queue worker calls). The ``__init__`` here builds the session factory on
+    the engine of the process and owns the in-process dispatch bookkeeping;
+    subclasses add their own sizing/retention/audit state after calling
+    ``super()``.
     """
 
-    _loop_thread_name: str = "inqtrix-jobs-db"
     _dispatch_thread_prefix: str = "inqtrix-job"
     _job_kind: str = "Durable job"
 
@@ -251,27 +252,23 @@ class DurableJobStoreBase:
         queue: Any,
         recover_orphans: bool | None = None,
     ) -> None:
-        self._engine = engine
         self._session_factory = build_session_factory(engine)
         self._app_role = app_role
         self._worker_id = worker_id
         self._queue = queue
+        # Guards the registry below for moments only, so the loop may take it:
+        # nothing holds it across a bridge or an await.
         self._lock = threading.RLock()
-        self._close_lock = threading.Lock()
         self._local: dict[str, _LocalJob] = {}
         self._pending: deque[str] = deque()
         self._running_count = 0
-        self._worker_threads: set[threading.Thread] = set()
+        self._dispatcher: asyncio.Task[None] | None = None
+        self._segments: set[asyncio.Task[None]] = set()
+        self._segment_threads: set[threading.Thread] = set()
         self._subscriptions: set[PollingJobSubscription] = set()
         self._closing = False
         self._closed = False
-        self._loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(
-            target=self._loop.run_forever,
-            name=self._loop_thread_name,
-            daemon=True,
-        )
-        self._loop_thread.start()
+        self._close_task: asyncio.Task[None] | None = None
         # In-process execution: queued/running rows from a previous
         # process are unrecoverable orphans (their work closures died
         # with it). Swept lazily on the first database touch; queue-mode
@@ -300,63 +297,83 @@ class DurableJobStoreBase:
         return self._worker_id
 
     def _call(self, coro: Coroutine[Any, Any, Any]) -> Any:
-        """Run one coroutine on the store's loop and wait for it."""
-        if self._loop.is_closed() or not self._loop_thread.is_alive():
+        """Run one operation on the process loop and wait for it, from a thread."""
+        if self._closed:
             coro.close()
             raise RuntimeError(f"{self._job_kind} store is closed")
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+        if self._lock._is_owned():
+            coro.close()
+            raise RuntimeError(f"{self._job_kind} store lock held across the bridge")
+        return aio.call_from_thread(coro)
 
-    def close(self) -> None:
-        """Drain local workers before disposing their database event loop.
+    async def astart(self) -> None:
+        """The work a store does once when its process starts serving."""
 
-        A no-queue store executes work on threads that synchronously bridge
-        back into this store's private event loop for every checkpoint and
-        terminal write. Stopping that loop while a worker is still alive
-        strands its durable write and can leave the checked-out transaction
-        blocking unrelated cleanup. Shutdown therefore fences new local
-        dispatch, requests cooperative cancellation, and waits for every
-        already-running worker before disposing the engine. There is no
+    async def aclose(self) -> None:
+        """Drain local segments before the engine they write through goes.
+
+        A no-queue store executes work on threads that reach the process loop
+        for every checkpoint and terminal write. Losing the engine while
+        such a body is still alive strands its durable write and can leave
+        the checked-out transaction blocking unrelated cleanup. Shutdown
+        therefore fences new local dispatch, requests cooperative
+        cancellation, and waits for every body already running. There is no
         hidden drain timeout: an uncooperative dependency remains an explicit
         shutdown failure instead of being reported as safely closed.
         """
-        with self._close_lock:
-            if self._closed:
-                return
-            current = threading.current_thread()
-            with self._lock:
-                if current in self._worker_threads:
-                    raise RuntimeError(
-                        f"{self._job_kind} store cannot close from its worker thread"
-                    )
-                self._closing = True
-                for local in self._local.values():
-                    local.cancel_event.set()
-                subscriptions = tuple(self._subscriptions)
+        if self._close_task is None:
+            self._close_task = asyncio.get_running_loop().create_task(
+                self._close_now(),
+                name=f"{self._dispatch_thread_prefix}-close",
+            )
+        await asyncio.shield(self._close_task)
 
-            # Stop database pollers while the event loop and engine are still
-            # alive. Otherwise an unclosed SSE subscription can retain an
-            # idle transaction that blocks schema maintenance indefinitely.
-            for subscription in subscriptions:
-                subscription._drain_for_store_close()
+    def close(self) -> None:
+        """Close from a thread; a job body cannot wait for itself to end."""
+        if self._closed:
+            return
+        with self._lock:
+            if threading.current_thread() in self._segment_threads:
+                raise RuntimeError(
+                    f"{self._job_kind} store cannot close from its worker thread"
+                )
+        self._call(self.aclose())
 
-            while True:
-                with self._lock:
-                    workers = tuple(self._worker_threads)
-                if not workers:
-                    break
-                for worker in workers:
-                    worker.join()
+    async def _close_now(self) -> None:
+        with self._lock:
+            self._closing = True
+            for local in self._local.values():
+                local.cancel_event.set()
+            subscriptions = tuple(self._subscriptions)
 
-            if not self._loop.is_closed() and self._loop_thread.is_alive():
-                self._call(self._engine.dispose())
-                self._loop.call_soon_threadsafe(self._loop.stop)
-                self._loop_thread.join(timeout=5)
-                if self._loop_thread.is_alive():
-                    raise RuntimeError(
-                        f"{self._job_kind} database event loop did not stop"
-                    )
-                self._loop.close()
-            self._closed = True
+        # Stop database pollers while the engine is still alive. Otherwise an
+        # unclosed SSE subscription can retain an idle transaction that blocks
+        # schema maintenance indefinitely. Joining happens off the loop, which
+        # a poller may still need.
+        for subscription in subscriptions:
+            await aio.run_blocking(subscription._drain_for_store_close)
+        # A claim in flight still starts its segment, with the cancel set above.
+        if self._dispatcher is not None:
+            await asyncio.wait({self._dispatcher})
+        while self._segments:
+            await asyncio.wait(set(self._segments))
+        await self._close_queue_client()
+        self._closed = True
+
+    async def _close_queue_client(self) -> None:
+        """Close what the queue opened on this loop; it cannot outlive the loop."""
+        queue = getattr(self, "_dispatch_queue", self._queue)
+        close = getattr(queue, "aclose", None)
+        if close is None:
+            return
+        try:
+            await close()
+        except Exception as exc:  # noqa: BLE001 - shutdown goes on, visibly
+            log.warning(
+                "%s store could not close its queue client (error_type=%s).",
+                self._job_kind,
+                type(exc).__name__,
+            )
 
     def _start_subscription(
         self,
@@ -411,18 +428,45 @@ class DurableJobStoreBase:
 
     # -- in-process execution (no-queue mode) ----------------------------- #
 
-    def _dispatch_locked(self) -> None:
-        if self._closing:
-            return
-        while self._running_count < self._max_concurrent and self._pending:
-            entity_id = self._pending.popleft()
-            local = self._local.get(entity_id)
-            if local is None or local.work is None:
-                continue
+    def _kick_dispatch(self) -> "asyncio.Task[None]":
+        """The one task that claims and starts what waits on this store.
+
+        Nothing else drives it, so the cancelled request of one caller never
+        leaves another caller's job claimed with nobody executing it.
+        """
+        task = self._dispatcher
+        if task is None or task.done():
+            # Whoever happens to start it lends it no request id and no user.
+            task = asyncio.get_running_loop().create_task(
+                self._dispatch_pending(),
+                name=f"{self._dispatch_thread_prefix}-dispatch",
+                context=contextvars.Context(),
+            )
+            self._dispatcher = task
+        return task
+
+    async def _dispatch_now(self) -> None:
+        """Return once what waits has started; a cancelled caller leaves it running."""
+        await asyncio.shield(self._kick_dispatch())
+
+    async def _dispatch_pending(self) -> None:
+        while True:
+            with self._lock:
+                if (
+                    self._closing
+                    or self._running_count >= self._max_concurrent
+                    or not self._pending
+                ):
+                    return
+                entity_id = self._pending.popleft()
+                local = self._local.get(entity_id)
+                if local is None or local.work is None:
+                    continue
+                work, cancel_event = local.work, local.cancel_event
+                # Reserved across the claim, so the ceiling holds while it waits.
+                self._running_count += 1
             try:
-                claimed = self._call(
-                    self._claim_db(entity_id, DEFAULT_TENANT, allow_takeover=False)
-                )
+                claimed = await self._claim_local_db(entity_id)
             except Exception:  # noqa: BLE001 — keep dispatch draining
                 # The claim did not commit (or its outcome is unknown):
                 # drop local ownership so the row converges through the
@@ -430,7 +474,7 @@ class DurableJobStoreBase:
                 # dead registry entry, and keep draining — stopping here
                 # would strand the remaining pending ids with no future
                 # dispatch trigger on an idle process.
-                self._local.pop(entity_id, None)
+                self._forget_unclaimed(entity_id)
                 log.exception(
                     "%s %s could not be claimed; local execution discarded, and the row"
                     " will be terminated as lost.",
@@ -439,22 +483,39 @@ class DurableJobStoreBase:
                 )
                 continue
             if claimed is None:
-                self._local.pop(entity_id, None)
+                self._forget_unclaimed(entity_id)
                 continue
-            self._running_count += 1
-            thread = threading.Thread(
-                target=self._run_worker,
-                args=(entity_id, local.work, local.cancel_event, claimed),
+            task = asyncio.get_running_loop().create_task(
+                self._run_segment(entity_id, work, cancel_event, claimed),
                 name=f"{self._dispatch_thread_prefix}-{entity_id}",
-                daemon=True,
             )
-            self._worker_threads.add(thread)
-            try:
-                thread.start()
-            except BaseException:
-                self._worker_threads.discard(thread)
-                self._running_count = max(0, self._running_count - 1)
-                raise
+            self._segments.add(task)
+            task.add_done_callback(self._segments.discard)
+
+    def _forget_unclaimed(self, entity_id: str) -> None:
+        with self._lock:
+            self._local.pop(entity_id, None)
+            self._running_count = max(0, self._running_count - 1)
+
+    async def _run_segment(
+        self,
+        entity_id: str,
+        work: Any,
+        cancel_event: threading.Event,
+        claimed: Any,
+    ) -> None:
+        """One job body on the transition lane, then the handoff on the loop."""
+        crashed = True
+        try:
+            crashed = await asyncio.wrap_future(
+                aio.start_legacy_segment(
+                    partial(self._run_local, entity_id, work, cancel_event, claimed)
+                )
+            )
+        finally:
+            with self._lock:
+                self._release_local(entity_id, crashed=crashed)
+            self._kick_dispatch()
 
     def _enter_execution_telemetry(
         self, stack: Any, entity_id: str, claimed: Any
@@ -513,14 +574,12 @@ class DurableJobStoreBase:
 
     # -- lost-execution fence (no-queue mode) ----------------------------- #
 
-    def _expire_lost_executions(self) -> bool:
+    async def _expire_lost_executions(self) -> bool:
         """Terminalize active rows this process should execute but does not.
 
         No-queue mode only (queue mode: workers own the rows and stream
         reclaim recovers them); read-triggered and throttled, so quiet
-        deployments pay nothing. Runs entirely on the sync side — the
-        registry snapshot needs ``self._lock``, which store-loop
-        coroutines must never take. Rows in ``self._local`` are owned
+        deployments pay nothing. Rows in ``self._local`` are owned
         (running, parked, or pending dispatch) and never touched; the
         per-candidate status CAS in the terminal write makes a lost race
         harmless. A thread that is alive but stuck keeps its registry
@@ -544,8 +603,8 @@ class DurableJobStoreBase:
             ):
                 return False
             self._last_execution_lost_check = now
-        candidates = self._call(
-            self._lost_execution_candidates_db(_EXECUTION_LOST_GRACE_SECONDS)
+        candidates = await self._lost_execution_candidates_db(
+            _EXECUTION_LOST_GRACE_SECONDS
         )
         if not candidates:
             return False
@@ -556,7 +615,7 @@ class DurableJobStoreBase:
         ]
         if not lost:
             return False
-        return bool(self._call(self._expire_lost_executions_db(lost)))
+        return bool(await self._expire_lost_executions_db(lost))
 
     async def _lost_execution_candidates_db(
         self, grace_seconds: float
@@ -569,20 +628,24 @@ class DurableJobStoreBase:
 
         Returns ``True`` when an expiry pass ran over the candidates —
         the per-row status CAS inside absorbs races, so the return value
-        only tells the sync driver that post-commit handoffs may need
+        only tells the caller that post-commit handoffs may need
         draining, not that every candidate changed.
         """
         raise NotImplementedError
 
-    def _run_worker(
+    def _run_local(
         self,
         entity_id: str,
         work: Any,
         cancel_event: threading.Event,
         claimed: Any,
-    ) -> None:
+    ) -> bool:
+        """Execute one job body in this thread; whether it crashed."""
         from contextlib import ExitStack
 
+        current = threading.current_thread()
+        with self._lock:
+            self._segment_threads.add(current)
         handle = self._make_claimed_handle(entity_id, cancel_event, claimed)
         crashed = False
         telemetry_stack = ExitStack()
@@ -628,16 +691,6 @@ class DurableJobStoreBase:
             # the retained closure be dispatched again (a resume that
             # arrived earlier parked its request in ``resume_requested``
             # and is honored now).
-            from inqtrix.observability.context import (
-                clear_feature,
-                clear_usage_subject,
-            )
-
-            # The segment bound both (execute_run_request); this thread
-            # may be reused, and a stale ledger subject would book the
-            # next segment's provider calls to the previous user.
-            clear_feature()
-            clear_usage_subject()
             try:
                 telemetry_stack.close()
             except Exception:  # noqa: BLE001 — never skip the lock block
@@ -648,20 +701,23 @@ class DurableJobStoreBase:
                     exc_info=True,
                 )
             with self._lock:
-                local = self._local.get(entity_id)
-                if local is not None and local.parked and not crashed:
-                    local.park_in_flight = False
-                    if local.resume_requested:
-                        local.resume_requested = False
-                        local.parked = False
-                        self._pending.append(entity_id)
-                else:
-                    self._local.pop(entity_id, None)
-                    if local is not None:
-                        local.work = None
-                self._running_count = max(0, self._running_count - 1)
-                self._worker_threads.discard(threading.current_thread())
-                self._dispatch_locked()
+                self._segment_threads.discard(current)
+        return crashed
+
+    def _release_local(self, entity_id: str, *, crashed: bool) -> None:
+        """The park handoff of one finished body; the caller holds the lock."""
+        local = self._local.get(entity_id)
+        if local is not None and local.parked and not crashed:
+            local.park_in_flight = False
+            if local.resume_requested:
+                local.resume_requested = False
+                local.parked = False
+                self._pending.append(entity_id)
+        else:
+            self._local.pop(entity_id, None)
+            if local is not None:
+                local.work = None
+        self._running_count = max(0, self._running_count - 1)
 
     # -- schema-bearing hooks (subclasses implement) ---------------------- #
 
@@ -680,6 +736,10 @@ class DurableJobStoreBase:
     def _claim_db(self, entity_id: str, tenant_id: str, *, allow_takeover: bool):
         """Async CAS claim (queued -> running, attempt + 1)."""
         raise NotImplementedError
+
+    async def _claim_local_db(self, entity_id: str) -> Any:
+        """Claim work this process registered for in-process execution."""
+        return await self._claim_db(entity_id, DEFAULT_TENANT, allow_takeover=False)
 
     def _make_handle(self, entity_id: str, cancel_event: threading.Event) -> Any:
         """Build the in-process (non-fenced) job handle."""

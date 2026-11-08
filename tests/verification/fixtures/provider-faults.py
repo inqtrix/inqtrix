@@ -76,7 +76,7 @@ class ProviderFaults:
 
     def dispatch(self, original, kwargs):
         purpose = current_purpose()
-        if purpose is None or purpose.purpose not in {"agent_kernel", "agent_context_projection"}:
+        if purpose is None or purpose.purpose != "agent_kernel":
             return original(**kwargs)
         from inqtrix.agents.kernel.deps import kernel_deps
 
@@ -165,8 +165,6 @@ class ProviderFaults:
                 }), call_id="fixture_archive_catalogue_read")
             return original(**kwargs)
         if case == "context":
-            if purpose.purpose == "agent_context_projection":
-                return original(**kwargs)
             if count == 1:
                 prompt = "\n".join(m.get("content") or "" for m in messages if m.get("role") == "user")
                 match = re.search(r"artifact_id[ =']+(art_[a-zA-Z0-9_-]+)", prompt)

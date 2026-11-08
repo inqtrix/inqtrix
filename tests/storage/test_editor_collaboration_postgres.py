@@ -251,6 +251,66 @@ async def test_current_policy_cursor_is_tenant_scoped(
     ) == int(tenant_b_cursor)
 
 
+async def _append_policy_event(database: _DatabaseHarness, resource_id: str) -> int:
+    async with database.session_factory() as session:
+        async with session.begin():
+            return int(
+                (
+                    await session.execute(
+                        insert(user_events)
+                        .values(
+                            tenant_id=TENANT_A,
+                            target_user_id=OWNER_A,
+                            scope="share:accepted",
+                            resource_type="editor_document",
+                            resource_id=resource_id,
+                        )
+                        .returning(user_events.c.id)
+                    )
+                ).scalar_one()
+            )
+
+
+@pytest.mark.asyncio
+async def test_an_event_committed_during_a_policy_read_waits_for_the_next_page(
+    database: _DatabaseHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page never carries an event above the cursor it reports, and loses none."""
+    first = await _append_policy_event(database, "ed_policy_first")
+    execute = AsyncSession.execute
+    armed = [True]
+    late: list[int] = []
+
+    async def commit_an_event_after_the_first_read(
+        self: AsyncSession, statement: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        result = await execute(self, statement, *args, **kwargs)
+        if armed[0] and "user_events" in str(statement):
+            armed[0] = False
+            # Another writer, so on a task and a connection of its own.
+            late.append(
+                await asyncio.create_task(
+                    _append_policy_event(database, "ed_policy_late")
+                )
+            )
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", commit_an_event_after_the_first_read)
+    page = await database.store.policy_events_after(
+        tenant_id=TENANT_A, cursor=first - 1, limit=500
+    )
+    monkeypatch.undo()
+
+    assert late and late[0] > first
+    assert [event.id for event in page.events] == [first]
+    assert page.current_cursor == first
+    following = await database.store.policy_events_after(
+        tenant_id=TENANT_A, cursor=page.current_cursor, limit=500
+    )
+    assert [event.id for event in following.events] == late
+
+
 def _snapshot(
     *,
     tenant_id: str,
@@ -414,7 +474,6 @@ async def _authorize_writer(
     )
     await database.store.issue_lease(
         lease,
-        max_active=5,
         max_issued_per_window=30,
         issued_since=database.now - 60.0,
     )
@@ -2948,6 +3007,7 @@ async def test_update_in_flight_across_a_concurrent_rotation_uses_the_successor(
 
 
 @pytest.mark.asyncio
+@pytest.mark.two_connections_on_purpose
 async def test_a_replayed_rotation_and_an_update_under_the_rotated_lease_do_not_deadlock(
     database: _DatabaseHarness,
 ) -> None:
@@ -3678,7 +3738,6 @@ async def test_session_rate_limit_serializes_one_user_across_documents(
         *(
             database.store.issue_lease(
                 lease,
-                max_active=5,
                 max_issued_per_window=1,
                 issued_since=database.now - 60.0,
             )
@@ -3777,7 +3836,6 @@ async def test_issuing_a_lease_sweeps_only_the_actors_stale_rows(
             expires_at=database.now + 3_600.0,
             last_validated_at=database.now,
         ),
-        max_active=5,
         max_issued_per_window=30,
         issued_since=database.now - 60.0,
     )
@@ -4931,7 +4989,6 @@ async def test_updates_of_one_document_still_serialize_on_its_row(
     )
     await database.store.issue_lease(
         second_lease,
-        max_active=5,
         max_issued_per_window=30,
         issued_since=database.now - 60.0,
     )
@@ -5667,7 +5724,6 @@ async def _authorize_guest(
     )
     await database.store.issue_lease(
         lease,
-        max_active=5,
         max_issued_per_window=30,
         issued_since=now - 60.0,
     )
@@ -6837,6 +6893,7 @@ async def test_revoking_a_guest_link_waits_for_an_update_that_holds_its_lease(
 
 
 @pytest.mark.asyncio
+@pytest.mark.two_connections_on_purpose
 async def test_deleting_a_document_waits_for_a_member_rotation(
     database: _DatabaseHarness,
 ) -> None:
@@ -6969,6 +7026,7 @@ async def test_deleting_a_document_waits_for_a_guest_rotation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.two_connections_on_purpose
 async def test_an_update_and_a_rotation_of_its_lease_do_not_deadlock(
     database: _DatabaseHarness,
 ) -> None:
@@ -7429,7 +7487,6 @@ async def _issue_guest_edit_lease(
     )
     await database.store.issue_lease(
         lease,
-        max_active=5,
         max_issued_per_window=30,
         issued_since=now - 60.0,
     )
@@ -7838,6 +7895,171 @@ async def _interleave(
         outcomes = await _settle(held_task, other_task)
     held, other = outcomes
     return held, other
+
+
+# Signing out deletes the account session, and the foreign key cascade then
+# writes every lease bound to it. A rotation or a lease issue needs the same
+# session row for the foreign key of its new lease. The tests below hold that
+# call before each of its statements, with every lock taken so far, and let the
+# sign-out run until it finishes or PostgreSQL reports it waiting. Whichever
+# side comes first, the other waits, neither is aborted as a deadlock, and no
+# lease of the session outlives it.
+_SIGN_OUT_HOLDS = range(1, 16)
+
+
+async def _sign_out(database: _DatabaseHarness, session_id: str | None) -> None:
+    async with database.session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                auth_sessions.delete().where(auth_sessions.c.id == session_id)
+            )
+
+
+async def _leases_of_session(
+    database: _DatabaseHarness, session_id: str | None
+) -> int:
+    async with database.session_factory() as session:
+        return int(
+            await session.scalar(
+                select(func.count())
+                .select_from(editor_collaboration_leases)
+                .where(editor_collaboration_leases.c.session_id == session_id)
+            )
+            or 0
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hold_before", _SIGN_OUT_HOLDS)
+async def test_a_sign_out_and_a_rotation_of_its_lease_do_not_deadlock(
+    database: _DatabaseHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    hold_before: int,
+) -> None:
+    document_id = f"ed_collaboration_sign_out_during_rotation_{hold_before}"
+    await _collaboration_document_of_owner_a(database, document_id)
+    _, lease = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+    successor = _rotation_stamped_after(
+        lease,
+        issued_at=database.now + 1.5,
+        token=b"rotation-while-the-session-signs-out",
+    )
+    _hold_before_statement(monkeypatch, database.store, hold_before)
+
+    rotated, signed_out = await _interleave(
+        database,
+        lambda: database.store.rotate_lease(
+            previous_lease_id=lease.lease_id,
+            previous_token_hash=lease.token_hash,
+            replacement=successor,
+            max_issued_per_window=30,
+            issued_since=database.now - 60.0,
+        ),
+        lambda: _sign_out(database, lease.session_id),
+    )
+
+    assert signed_out is None, signed_out
+    assert rotated == successor or isinstance(
+        rotated, CollaborationLeaseInvalid
+    ), rotated
+    assert await _leases_of_session(database, lease.session_id) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hold_before", _SIGN_OUT_HOLDS)
+async def test_a_sign_out_and_a_lease_issue_of_its_session_do_not_deadlock(
+    database: _DatabaseHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    hold_before: int,
+) -> None:
+    """The issue removes an expired lease of the same session before it inserts."""
+    document_id = f"ed_collaboration_sign_out_during_issue_{hold_before}"
+    await _collaboration_document_of_owner_a(database, document_id)
+    _, lease = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+    stale_id = uuid.uuid4()
+    stale = replace(
+        lease,
+        lease_id=stale_id,
+        token_hash=_sha256(f"stale:{stale_id}".encode()),
+        issued_at=database.now - 200_000.0,
+        expires_at=database.now - 100_000.0,
+        last_validated_at=None,
+    )
+    async with database.session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                insert(editor_collaboration_leases).values(
+                    **collaboration_postgres._lease_values(stale)
+                )
+            )
+    next_id = uuid.uuid4()
+    next_lease = replace(
+        lease,
+        lease_id=next_id,
+        token_hash=_sha256(f"next:{next_id}".encode()),
+        issued_at=database.now + 1.0,
+        expires_at=database.now + 3_600.0,
+        last_validated_at=None,
+    )
+    _hold_before_statement(monkeypatch, database.store, hold_before)
+
+    issued, signed_out = await _interleave(
+        database,
+        lambda: database.store.issue_lease(
+            next_lease,
+            max_issued_per_window=30,
+            issued_since=database.now - 60.0,
+        ),
+        lambda: _sign_out(database, lease.session_id),
+    )
+
+    assert signed_out is None, signed_out
+    assert issued == next_lease or isinstance(
+        issued, CollaborationLeaseInvalid
+    ), issued
+    assert await _leases_of_session(database, lease.session_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_reloading_a_document_again_and_again_never_locks_the_person_out(
+    database: _DatabaseHarness,
+) -> None:
+    """A reload leaves its old lease live; only open connections count, in Node."""
+    document_id = "ed_collaboration_reload_loop"
+    await _collaboration_document_of_owner_a(database, document_id)
+    _, lease = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+
+    for reload in range(1, 8):
+        reload_id = uuid.uuid4()
+        await database.store.issue_lease(
+            replace(
+                lease,
+                lease_id=reload_id,
+                token_hash=_sha256(f"reload:{reload_id}".encode()),
+                issued_at=database.now + reload,
+                expires_at=database.now + reload + 60.0,
+                last_validated_at=None,
+            ),
+            max_issued_per_window=30,
+            issued_since=database.now - 60.0,
+        )
+
+    assert await _leases_of_session(database, lease.session_id) == 8
 
 
 async def _assert_the_owner_change_won(
@@ -8696,7 +8918,6 @@ async def test_an_introspection_that_finds_the_access_gone_revokes_the_lease(
     )
     await database.store.issue_lease(
         later,
-        max_active=5,
         max_issued_per_window=30,
         issued_since=database.now - 60.0,
     )
@@ -8833,6 +9054,7 @@ async def test_a_guest_refresh_and_the_same_guests_lease_call_both_commit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.two_connections_on_purpose
 async def test_a_restricted_member_update_and_lease_issue_do_not_deadlock(
     database: _DatabaseHarness,
 ) -> None:
@@ -8915,7 +9137,6 @@ async def test_a_restricted_member_update_and_lease_issue_do_not_deadlock(
         )
         lease = await store.issue_lease(
             member_lease(database.now),
-            max_active=5,
             max_issued_per_window=30,
             issued_since=database.now - 60.0,
         )
@@ -8943,7 +9164,6 @@ async def test_a_restricted_member_update_and_lease_issue_do_not_deadlock(
                 issue_task = asyncio.create_task(
                     store.issue_lease(
                         member_lease(database.now + 1.0),
-                        max_active=5,
                         max_issued_per_window=30,
                         issued_since=database.now - 60.0,
                     )
@@ -9022,7 +9242,6 @@ async def test_an_update_under_a_long_expired_lease_leaves_that_lease_unlocked(
     issue_task, paused = _start_paused(
         lambda: database.store.issue_lease(
             fresh,
-            max_active=5,
             max_issued_per_window=30,
             issued_since=database.now - 60.0,
         )

@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
@@ -241,22 +241,21 @@ def test_tool_span_middleware_is_the_outermost_result_changing_tool_layer(
     recording, monkeypatch
 ):
     """The span wraps every layer that can change a result: it is the first
-    kernel-supplied middleware, the only tool layer outside it is the
-    filesystem pass-through (eviction off), and the object that leaves the
+    middleware and the only tool layer, and the object that leaves the
     composed chain is the one the span observed. It adds no graph node."""
-    import deepagents.graph as deepagents_graph
+    import langchain.agents as agents
     import langchain.agents.factory as agent_factory
     from langchain.agents.middleware import AgentMiddleware
 
     _capture(monkeypatch, on=False)
     captured: dict[str, list[Any]] = {}
-    real_create_agent = deepagents_graph.create_agent
+    real_create_agent = agents.create_agent
 
     def spy_create_agent(*args: Any, **kwargs: Any) -> Any:
         captured["middleware"] = list(kwargs["middleware"])
         return real_create_agent(*args, **kwargs)
 
-    monkeypatch.setattr(deepagents_graph, "create_agent", spy_create_agent)
+    monkeypatch.setattr(agents, "create_agent", spy_create_agent)
     _production_kernel(_ScriptedProvider([]), [echo_tool])
 
     stack = captured["middleware"]
@@ -267,16 +266,8 @@ def test_tool_span_middleware_is_the_outermost_result_changing_tool_layer(
         if type(m).wrap_tool_call is not AgentMiddleware.wrap_tool_call
         or type(m).awrap_tool_call is not AgentMiddleware.awrap_tool_call
     ]
-    assert tool_layers == [
-        "FilesystemMiddleware",
-        "KernelToolSpanMiddleware",
-        "_ToolExclusionMiddleware",
-    ]
-    assert names.index("KernelToolSpanMiddleware") == (
-        names.index("PatchToolCallsMiddleware") + 1
-    )
-    (filesystem,) = [m for m in stack if type(m).__name__ == "FilesystemMiddleware"]
-    assert filesystem._tool_token_limit_before_evict is None
+    assert tool_layers == ["KernelToolSpanMiddleware"]
+    assert names.index("KernelToolSpanMiddleware") == 0
     span_cls = type(stack[names.index("KernelToolSpanMiddleware")])
     for hook in (
         "before_agent",
@@ -315,7 +306,7 @@ def test_tool_span_middleware_is_the_outermost_result_changing_tool_layer(
     monkeypatch.setattr(agent_factory, "_chain_tool_call_wrappers", spy_chain)
     provider = _ScriptedProvider(
         [
-            _tool_call_turn("c_excl", "read_file", {"file_path": "/secret"}),
+            _tool_call_turn("c_unoffered", "read_file", {"file_path": "/secret"}),
             _text_turn("Zugriff verweigert."),
         ]
     )
@@ -328,7 +319,7 @@ def test_tool_span_middleware_is_the_outermost_result_changing_tool_layer(
     assert len(observed) == len(left_chain) == 1
     assert left_chain[0] is observed[0]
     (span,) = _tool_spans(recording)
-    assert span.name == "execute_tool read_file"
+    assert span.name == "execute_tool unknown_tool"
     assert span.attributes["inqtrix.outcome"] == "failed"
     assert span.attributes["langfuse.observation.level"] == "WARNING"
     assert span.attributes["langfuse.observation.status_message"] == "error_status"
@@ -488,7 +479,9 @@ def test_visible_failures_are_warnings_not_errors(recording, monkeypatch):
         ),
         (
             ToolMessage(
-                "Error: read_file is not available.", tool_call_id="c1", status="error"
+                "Error: read_file is not a valid tool, try one of [echo_tool].",
+                tool_call_id="c1",
+                status="error",
             ),
             "error_status",
         ),
@@ -784,7 +777,6 @@ def test_tool_spans_join_timeline_rows_with_explicit_exceptions(
                 ),
             ),
             _desk_turn(
-                ToolCallRequest(id="c_excl", name="read_file", arguments={"file_path": "/x"}),
                 ToolCallRequest(id="c_fake", name=INVENTED_TOOL_NAME, arguments={}),
             ),
             _desk_turn(
@@ -896,7 +888,7 @@ def test_tool_spans_join_timeline_rows_with_explicit_exceptions(
                 run_span = _ancestor_run(span, by_id)
                 assert run_span is not None, row
                 assert run_span.attributes["inqtrix.run_id"] == facts.run_id
-    assert joined == {"c_web", "c_todo", "c_excl", "c_fake"}
+    assert joined == {"c_web", "c_todo", "c_fake"}
     assert explained == {
         "c_rej": ["hitl_reject"],
         "c_todo_a": ["parallel_write_todos"],

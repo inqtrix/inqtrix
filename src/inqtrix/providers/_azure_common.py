@@ -2,8 +2,7 @@
 
 The Azure variants (``AzureOpenAILLM``, ``AzureFoundryWebSearch``)
 live in separate modules because their request shapes and response
-schemas diverge. What they *do* share is
-boilerplate around credential handling, base URL normalisation and API
+schemas diverge. What they *do* share is base URL normalisation and API
 error diagnostics. This module centralises those helpers so a fix in
 one place propagates to every Azure provider.
 
@@ -14,19 +13,9 @@ the providers.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 from openai import APIStatusError
-
-
-AZURE_OPENAI_DEFAULT_SCOPE = "https://cognitiveservices.azure.com/.default"
-"""Default OAuth scope for Azure OpenAI (Cognitive Services) Entra ID auth.
-
-Used by :func:`build_azure_openai_token_provider` when no explicit
-``scope`` is supplied. This is the scope documented by Microsoft for
-Azure OpenAI resources accessed via Service Principal, Managed
-Identity, or other Entra ID flows.
-"""
 
 
 def extract_azure_api_error_details(exc: APIStatusError) -> dict[str, Any]:
@@ -83,106 +72,6 @@ def extract_azure_api_error_details(exc: APIStatusError) -> dict[str, Any]:
         "error_code": error_code,
         "message": message,
     }
-
-
-def resolve_azure_credential(
-    *,
-    credential: Any | None,
-    tenant_id: str | None,
-    client_id: str | None,
-    client_secret: str | None,
-) -> Any:
-    """Build or return an Azure credential object.
-
-    Shared between Foundry-backed providers that authenticate via
-    ``azure-identity`` rather than a raw API key. The ``azure-identity``
-    package is imported lazily so users who only rely on API keys do
-    not need it installed.
-
-    Args:
-        credential: A pre-built credential object. When supplied it
-            wins over tenant/client credentials.
-        tenant_id: Service principal tenant id.
-        client_id: Service principal client id.
-        client_secret: Service principal secret.
-
-    Returns:
-        Any: A credential object (``ClientSecretCredential`` if all
-        three service-principal fields are supplied, otherwise
-        ``DefaultAzureCredential``).
-    """
-    if credential is not None:
-        return credential
-
-    from azure.identity import ClientSecretCredential, DefaultAzureCredential
-
-    if tenant_id and client_id and client_secret:
-        return ClientSecretCredential(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            client_secret=client_secret,
-        )
-    return DefaultAzureCredential()
-
-
-def build_azure_openai_token_provider(
-    *,
-    credential: Any | None = None,
-    tenant_id: str | None = None,
-    client_id: str | None = None,
-    client_secret: str | None = None,
-    scope: str = AZURE_OPENAI_DEFAULT_SCOPE,
-) -> Callable[[], str] | None:
-    """Build an Azure OpenAI bearer-token provider from explicit inputs.
-
-    The OpenAI SDK accepts a callable for ``api_key`` so it can refresh
-    the bearer token before each request. This helper produces such a
-    callable from the same Service Principal / explicit credential
-    inputs that the Foundry providers already accept directly. The
-    ``azure-identity`` package is imported lazily so callers that only
-    use static API keys do not pay the import cost.
-
-    Resolution order matches :func:`resolve_azure_credential`:
-
-    1. ``credential`` (a pre-built ``TokenCredential``-like object)
-    2. ``tenant_id`` + ``client_id`` + ``client_secret``
-       → ``ClientSecretCredential``
-    3. Returns ``None`` if none of the inputs are present, leaving the
-       caller to decide whether that is an error.
-
-    Args:
-        credential: Optional pre-built Azure credential. When supplied it
-            wins over the Service Principal fields.
-        tenant_id: Service principal tenant id.
-        client_id: Service principal client id.
-        client_secret: Service principal secret.
-        scope: OAuth scope for the bearer token. Defaults to the Azure
-            OpenAI / Cognitive Services scope. Override this for
-            non-OpenAI Azure surfaces (for example
-            ``"https://ai.azure.com/.default"`` for Foundry).
-
-    Returns:
-        Callable[[], str] | None: Bearer-token provider compatible with
-        the OpenAI SDK's ``azure_ad_token_provider`` or ``api_key``
-        callable input, or ``None`` when no credential inputs were
-        provided.
-    """
-    has_sp = bool(tenant_id and client_id and client_secret)
-    if credential is None and not has_sp:
-        return None
-
-    from azure.identity import (
-        ClientSecretCredential,
-        get_bearer_token_provider,
-    )
-
-    if credential is None:
-        credential = ClientSecretCredential(
-            tenant_id=tenant_id or "",
-            client_id=client_id or "",
-            client_secret=client_secret or "",
-        )
-    return get_bearer_token_provider(credential, scope)
 
 
 def normalize_openai_v1_base_url(endpoint_or_base_url: str) -> str:

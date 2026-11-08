@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from inqtrix.providers.attempts import observe_retries, report_retry
 from inqtrix.knowledge.retrieval import retrieve
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import (
@@ -16,7 +17,6 @@ from inqtrix.knowledge.stores.ports import (
     RetrievalCandidateBatch,
     RetrievalDegradation,
 )
-from inqtrix.providers.base import _RetryNoticeMixin
 from inqtrix.providers.rerankers import CohereRerank, RerankerError, RerankResult
 from inqtrix.services.knowledge_service import KnowledgeService
 
@@ -29,17 +29,7 @@ def make_cohere(transport: httpx.MockTransport) -> CohereRerank:
         base_url="https://rerank.example",
         default_model="rerank-v3.5",
     )
-    original_post = httpx.post
-
-    def patched_post(url, **kwargs):
-        client = httpx.Client(transport=transport)
-        try:
-            return client.post(url, **kwargs)
-        finally:
-            client.close()
-
-    httpx.post = patched_post
-    reranker._restore = lambda: setattr(httpx, "post", original_post)
+    reranker._client_kwargs["transport"] = transport
     return reranker
 
 
@@ -65,12 +55,9 @@ def test_cohere_rerank_parses_results_best_first():
         )
 
     reranker = make_cohere(httpx.MockTransport(handler))
-    try:
-        results = reranker.rerank(
-            "Haftung", ["a", "b", "c"], top_n=2
-        )
-    finally:
-        reranker._restore()
+    results = reranker.rerank(
+        "Haftung", ["a", "b", "c"], top_n=2
+    )
 
     assert results == [
         RerankResult(index=2, relevance_score=0.91),
@@ -87,11 +74,8 @@ def test_cohere_rerank_http_error_raises_loudly():
         return httpx.Response(401, json={"message": "bad key"})
 
     reranker = make_cohere(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(RerankerError, match="Rerank call failed"):
-            reranker.rerank("q", ["a"], top_n=1)
-    finally:
-        reranker._restore()
+    with pytest.raises(RerankerError, match="Rerank call failed"):
+        reranker.rerank("q", ["a"], top_n=1)
 
 
 def test_cohere_rerank_retries_on_429_then_succeeds():
@@ -106,10 +90,7 @@ def test_cohere_rerank_retries_on_429_then_succeeds():
         )
 
     reranker = make_cohere(httpx.MockTransport(handler))
-    try:
-        results = reranker.rerank("q", ["a"], top_n=1)
-    finally:
-        reranker._restore()
+    results = reranker.rerank("q", ["a"], top_n=1)
 
     assert attempts["count"] == 2
     assert results[0].index == 0
@@ -128,19 +109,16 @@ def test_cohere_rerank_retry_records_notice():
         )
 
     reranker = make_cohere(httpx.MockTransport(handler))
-    try:
+    with observe_retries("rerank") as retry_log:
         reranker.rerank("q", ["a"], top_n=1)
-    finally:
-        reranker._restore()
 
-    notices = reranker.consume_retry_notices()
+    notices = retry_log.notices()
     assert len(notices) == 1
     assert notices[0]["provider"] == "CohereRerank"
     assert notices[0]["operation"] == "rerank"
     assert notices[0]["attempt"] == 1
     assert notices[0]["max_attempts"] == 3
     assert notices[0]["status_code"] == 429
-    assert reranker.consume_retry_notices() == []
 
 
 def test_cohere_rerank_never_exceeds_three_total_attempts():
@@ -151,11 +129,8 @@ def test_cohere_rerank_never_exceeds_three_total_attempts():
         return httpx.Response(503)
 
     reranker = make_cohere(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(RerankerError):
-            reranker.rerank("q", ["a"], top_n=1)
-    finally:
-        reranker._restore()
+    with pytest.raises(RerankerError):
+        reranker.rerank("q", ["a"], top_n=1)
 
     assert attempts["count"] == 3
 
@@ -249,11 +224,11 @@ async def test_rerank_stage_reorders_and_caps_results():
     assert hits[0].score == pytest.approx(1.0)
 
 
-class NotifyingReranker(_RetryNoticeMixin, FakeReranker):
-    """Fake that reports one retry through the shared mixin seam."""
+class NotifyingReranker(FakeReranker):
+    """Fake that reports one retry where a reranker reports its retries."""
 
     def rerank(self, query, documents, *, top_n, model=None):
-        self._append_retry_notice({
+        report_retry("rerank", {
             "provider": "FakeRerank",
             "model": "fake-rerank",
             "operation": "rerank",
@@ -521,6 +496,20 @@ def test_llm_reranker_caps_per_document_chars():
     reranker = LLMReranker(llm, max_chars_per_document=10)
     reranker.rerank("Frage", ["x" * 500, "y"], top_n=2)
     assert "x" * 11 not in llm.prompts[0]
+
+
+def test_llm_reranker_passes_a_cancelled_run_through():
+    """A cancelled run ends the call the reranker waits for; that is no broken rerank."""
+    from inqtrix.exceptions import AgentCancelled
+    from inqtrix.providers.rerankers import LLMReranker
+
+    class CancelledLLM(RankingLLM):
+        def complete_with_metadata(self, prompt: str, **kwargs):
+            raise AgentCancelled("Provider call cancelled after cancellation was requested.")
+
+    reranker = LLMReranker(CancelledLLM(""))
+    with pytest.raises(AgentCancelled):
+        reranker.rerank("Frage", ["a", "b"], top_n=2)
 
 
 def test_llm_reranker_malformed_json_raises_loudly():

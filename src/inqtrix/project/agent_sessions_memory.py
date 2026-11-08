@@ -17,7 +17,7 @@ from inqtrix.project.agent_sessions_ports import (
     AgentSessionGroupNotFound,
     AgentSessionNotFound,
 )
-from inqtrix.project.scoped_upsert import ResourceScope, require_memory_scope
+from inqtrix.storage.scoped_upsert import ResourceScope, require_memory_scope
 from inqtrix.project.session_titles import TitleSource, title_after_save
 
 
@@ -262,9 +262,6 @@ class MemoryAgentSessionStore:
                     self._sessions[session_id] = replace(
                         session, group_id=None
                     )
-
-    async def aclose(self) -> None:
-        return None
 
 
 def _scoped(

@@ -1,0 +1,47 @@
+{
+  "description": "Tracked sample for the parity tooling tests. The canonical set for real comparisons stays local in tests/integration/.",
+  "questions": [
+    {
+      "id": "q001",
+      "question": "What changed in the latest stable release of PostgreSQL?",
+      "category": "news",
+      "expected_keywords": ["PostgreSQL", "release"],
+      "notes": "Recent event with a clear primary source."
+    },
+    {
+      "id": "q002",
+      "question": "What is the boiling point of water at sea level?",
+      "category": "factual",
+      "expected_keywords": ["100", "Celsius"],
+      "notes": "Single fact."
+    },
+    {
+      "id": "q003",
+      "question": "How do B-tree and LSM-tree storage engines differ in write amplification?",
+      "category": "complex",
+      "expected_keywords": ["write amplification", "compaction"],
+      "notes": "Comparison across several sources."
+    },
+    {
+      "id": "q004",
+      "question": "What does the peer-reviewed literature report about spaced repetition and long-term retention?",
+      "category": "academic",
+      "expected_keywords": ["retention", "study"],
+      "notes": "Scholarly sources expected."
+    },
+    {
+      "id": "q005",
+      "question": "Is there evidence that the fictional Orlanth protocol is used in production networks?",
+      "category": "negative_evidence",
+      "expected_keywords": ["no evidence"],
+      "notes": "The honest answer is that nothing was found."
+    },
+    {
+      "id": "q006",
+      "question": "Which trade-offs matter when choosing between synchronous and asynchronous replication?",
+      "category": "complex",
+      "expected_keywords": ["latency", "durability"],
+      "notes": "Weighing, no single answer."
+    }
+  ]
+}

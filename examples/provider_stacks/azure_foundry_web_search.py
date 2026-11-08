@@ -66,43 +66,26 @@ Prerequisites (one-time Azure Portal setup)
    agent with the Web Search tool enabled.  Note the **Agent Name** and,
    if relevant, the **Agent Version**.
 
-3. **Authentication:** Choose one:
-   - **API key** from Project Settings > Keys & Endpoint
-   - **Service Principal** with project access
-   - **DefaultAzureCredential** (local ``az login`` / Managed Identity)
+3. **Authentication:** Note the project **API key** from Project
+   Settings > Keys & Endpoint.  Web search authenticates with it.
 
 Required environment variables (in .env or process env):
 - AZURE_OPENAI_API_KEY          (for LLM -- API-key auth)
 - AZURE_OPENAI_ENDPOINT         (e.g. https://mein-openai.openai.azure.com/)
-- AZURE_OPENAI_DEPLOYMENT_NAME  (the deployment name, NOT the model name)
 - AZURE_AI_PROJECT_ENDPOINT     (e.g. https://mein-projekt.services.ai.azure.com/api/projects/mein-projekt)
+- AZURE_AI_PROJECT_API_KEY      (Foundry project key for web search)
 - WEB_SEARCH_AGENT_NAME         (agent name from Foundry)
 
 Optional:
 - WEB_SEARCH_AGENT_VERSION      (specific agent version; if empty, latest/default)
-- AZURE_AI_PROJECT_API_KEY      (simplest auth path for web search)
-- AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET  (Service Principal)
-- AZURE_OPENAI_CLAIM_EXTRACT_DEPLOYMENT_NAME  (cheaper deployment for claim extraction;
-                                            see "Claim-extraction behaviour" below)
-- AZURE_WEB_STACK_QUESTION      (override the default demo question)
+- AZURE_OPENAI_CONTEXT_WINDOW_TOKENS  (context window of the deployments; default 128000)
 
-Claim-extraction behaviour
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-The LLM constructor in this script reads
-``AZURE_OPENAI_CLAIM_EXTRACT_DEPLOYMENT_NAME`` and forwards it as
-``claim_extract_model``:
-
-- If set (e.g. ``gpt-4.1-mini``), per-source claim-extraction calls
-  use that cheaper deployment, while
-  classify / plan / evaluate / answer keep using the strong
-  ``default_model``.  Per Inqtrix run this typically saves ~5x on
-  the claim-extraction token costs.
-- If empty or unset, claim extraction falls back to the default
-  ``default_model`` (no cost benefit, no behavioural change).
-
-The same env-driven pattern works for ``classify_model`` and
-``evaluate_model`` if you want even finer-grained role splitting --
-those are not wired up here on purpose, to keep the example minimal.
+Deployments and question
+~~~~~~~~~~~~~~~~~~~~~~~~
+The Azure deployment names are set in ``main()`` as three model tiers
+(high for the answer, mid for plan / evaluate / direct chat, fast for
+classify and claim extraction); replace them with your deployment names.
+The demo question is the ``QUESTION`` constant below.
 
 Terminal rendering
 ------------------
@@ -212,7 +195,7 @@ def main() -> None:
     #   examples/provider_stacks/azure_smoke_tests/test_llm.py
     # Test that file first if the combined setup fails.
     #
-    # Option A: API Key (default)
+    # Authentication: the API key of the Azure OpenAI resource.
     azure_api_key = _require_env("AZURE_OPENAI_API_KEY")
 
     llm = AzureOpenAILLM(
@@ -242,34 +225,6 @@ def main() -> None:
         selectable_models=["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
     )
 
-    # -- Option B: Service Principal (Entra ID) --------------------------------
-    #
-    # from azure.identity import ClientSecretCredential, get_bearer_token_provider
-    #
-    # credential = ClientSecretCredential(
-    #     tenant_id=os.environ["AZURE_TENANT_ID"],
-    #     client_id=os.environ["AZURE_CLIENT_ID"],
-    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
-    # )
-    # token_provider = get_bearer_token_provider(
-    #     credential,
-    #     "https://cognitiveservices.azure.com/.default",
-    # )
-    #
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     azure_ad_token_provider=token_provider,
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # -- Option C: Existing token provider -------------------------------------
-    #
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     azure_ad_token_provider=existing_token_provider,
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
     # -- Search Provider -------------------------------------------------------
     #
     # AzureFoundryWebSearch is the same component that is smoke-tested in:
@@ -287,30 +242,17 @@ def main() -> None:
     # - search_mode         → ignored
     # - return_related      → ignored
     #
-    # Option A: Auto-resolve auth from environment (recommended)
-    # Priority:
-    #   1. AZURE_AI_PROJECT_API_KEY
-    #   2. AZURE_TENANT_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET
-    #   3. DefaultAzureCredential
+    # Option A: Project API key from the environment (recommended)
+    # The Foundry project key is sent in the api-key header.
     #
-    web_api_key = os.getenv("AZURE_AI_PROJECT_API_KEY", "").strip()
-    tenant_id = os.getenv("AZURE_TENANT_ID", "").strip()
-    client_id = os.getenv("AZURE_CLIENT_ID", "").strip()
-    client_secret = os.getenv("AZURE_CLIENT_SECRET", "").strip()
+    web_api_key = _require_env("AZURE_AI_PROJECT_API_KEY")
 
-    search_kwargs = {
-        "project_endpoint": project_endpoint,
-        "agent_name": agent_name,
-        "agent_version": agent_version,
-    }
-    if web_api_key:
-        search_kwargs["api_key"] = web_api_key
-    elif tenant_id and client_id and client_secret:
-        search_kwargs["tenant_id"] = tenant_id
-        search_kwargs["client_id"] = client_id
-        search_kwargs["client_secret"] = client_secret
-
-    search = AzureFoundryWebSearch(**search_kwargs)
+    search = AzureFoundryWebSearch(
+        project_endpoint=project_endpoint,
+        agent_name=agent_name,
+        agent_version=agent_version,
+        api_key=web_api_key,
+    )
 
     # -- Option B: Hardcoded API key -------------------------------------------
     #
@@ -319,26 +261,6 @@ def main() -> None:
     #     agent_name=agent_name,
     #     agent_version=agent_version,
     #     api_key="your-api-key-from-azure-portal",
-    # )
-
-    # -- Option C: Hardcoded Service Principal ---------------------------------
-    #
-    # search = AzureFoundryWebSearch(
-    #     project_endpoint=project_endpoint,
-    #     agent_name=agent_name,
-    #     agent_version=agent_version,
-    #     tenant_id="your-tenant-id",
-    #     client_id="your-client-id",
-    #     client_secret="your-client-secret",
-    # )
-
-    # -- Option D: DefaultAzureCredential only ---------------------------------
-    #
-    # Requires: brew install azure-cli && az login
-    # search = AzureFoundryWebSearch(
-    #     project_endpoint=project_endpoint,
-    #     agent_name=agent_name,
-    #     agent_version=agent_version,
     # )
 
     # ── AgentConfig — all available options ──────────────────────────

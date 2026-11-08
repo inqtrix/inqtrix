@@ -132,6 +132,26 @@ test('every preset keeps the fixed logo and high contrast overrides the lock scr
 })
 
 
+test('high contrast draws the error border only on a field marked invalid', async ({ page }) => {
+  await page.goto(`${fixture}?theme=light&contrastMode=high`)
+  await page.addStyleTag({ content: '* { transition: none !important; }' })
+  const field = page.locator('input').first()
+  await expect(field).toBeVisible()
+  const borders = await field.evaluate((element) => {
+    const probe = document.createElement('div')
+    probe.style.border = '1px solid var(--destructive)'
+    document.body.append(probe)
+    const destructive = getComputedStyle(probe).borderTopColor
+    probe.remove()
+    const calm = getComputedStyle(element).borderTopColor
+    element.setAttribute('aria-invalid', 'true')
+    return { calm, destructive, invalid: getComputedStyle(element).borderTopColor }
+  })
+  expect(borders.calm).not.toBe(borders.destructive)
+  expect(borders.invalid).toBe(borders.destructive)
+})
+
+
 test('owner setup and guest access use a crisp 24px mark', async ({ page }, testInfo) => {
   for (const theme of ['light', 'dark']) {
     await page.setViewportSize({ width: 390, height: 844 })

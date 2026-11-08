@@ -40,14 +40,12 @@ describe('modelCardDescription', () => {
     }
   })
 
-  it('covers every model the server catalog ships', () => {
-    // Drift guard: a model added to model_cards.py without a translation
-    // silently falls back to German for English readers.
+  it('describes the same models in both languages', () => {
+    // The server side holds the other half of the drift guard:
+    // tests/test_model_cards.py checks that both tables name exactly the cards
+    // of model_cards.py, so a new card without a translation turns it red.
     const de = Object.keys(translations.de.chat.modelDescriptions)
     const en = Object.keys(translations.en.chat.modelDescriptions)
     expect(new Set(de)).toEqual(new Set(en))
-    expect(de).toContain('claude-opus-4-8')
-    expect(de).toContain('gemini-3.1-pro')
-    expect(de.length).toBeGreaterThanOrEqual(19)
   })
 })

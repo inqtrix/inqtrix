@@ -772,22 +772,21 @@ class TestOwnerListing:
                 user_lookup=user_exists,
             )
 
-    def test_run_share_reads_leave_the_event_loop_free(self):
-        """The durable run store answers synchronously; the share layer
-        must not hold the API event loop while it does."""
+    def test_run_share_reads_await_the_run_store(self):
+        """A read waiting for the database must not hold the API event loop."""
         from inqtrix.server.container import _run_share_resolvers
 
         class SlowRunStore:
-            def owner_user_id(self, run_id: str) -> uuid.UUID:
-                time.sleep(0.2)
+            async def aowner_user_id(self, run_id: str) -> uuid.UUID:
+                await asyncio.sleep(0.2)
                 return OWNER_ID
 
-            def title(self, run_id: str) -> str:
-                time.sleep(0.2)
+            async def atitle(self, run_id: str) -> str:
+                await asyncio.sleep(0.2)
                 return "Run"
 
-            def share_facts(self, run_ids: Sequence[str]) -> dict[str, ShareFacts]:
-                time.sleep(0.2)
+            async def ashare_facts(self, run_ids: Sequence[str]) -> dict[str, ShareFacts]:
+                await asyncio.sleep(0.2)
                 return {run_id: ShareFacts(OWNER_ID, "Run") for run_id in run_ids}
 
         owner, title, facts = _run_share_resolvers(SlowRunStore())
@@ -836,7 +835,7 @@ class TestShareFactsParity:
 
     @pytest.mark.asyncio
     async def test_runs(self):
-        from inqtrix.server.runs import RunStore
+        from inqtrix.runs.memory_store import RunStore
 
         store = RunStore(
             max_concurrent=2,
@@ -845,6 +844,7 @@ class TestShareFactsParity:
             event_buffer_size=64,
         )
         owned = store.import_completed_run(
+            mode="research",
             source_run_id="src-owned",
             question="Owned question?",
             stack_name="stack",
@@ -852,6 +852,7 @@ class TestShareFactsParity:
             created_by_user_id=OWNER_ID,
         )["run_id"]
         legacy = store.import_completed_run(
+            mode="research",
             source_run_id="src-legacy",
             question="Legacy question?",
             stack_name="stack",

@@ -8,7 +8,7 @@ applies the established security layering: DML grants for ``inqtrix_app``
 and ENABLE + FORCE row-level security with the fail-closed tenant policy
 (InitPlan ``(SELECT ...)`` wrapper), identical to ``0003_runs_durability``
 and ``0010_knowledge``. The status CHECK constraint mirrors
-:class:`~inqtrix.server.indexing.IndexingJobStatus`; the lifecycle
+:class:`~inqtrix.runs.indexing_records.IndexingJobStatus`; the lifecycle
 ordering lives only in that application enum.
 
 This is the durable twin of the in-memory reindex-job store: a background
@@ -101,7 +101,7 @@ indexing_jobs = Table(
 """Durable reindex-job records — the source of truth once
 ``INQTRIX_STORAGE_BACKEND=postgres`` is active. The status CHECK
 constraint is added in migration 0011 (values from
-:class:`~inqtrix.server.indexing.IndexingJobStatus`); the progress
+:class:`~inqtrix.runs.indexing_records.IndexingJobStatus`); the progress
 snapshot is derived from the count columns, not stored, so it cannot
 drift from the wire shape."""
 

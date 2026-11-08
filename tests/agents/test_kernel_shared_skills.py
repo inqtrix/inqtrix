@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -317,11 +317,11 @@ def test_load_skill_refuses_a_shared_skill_for_the_recipient():
 
     shared_reply = tool_reply(llm, "call_shared")
     assert USER_ONLY_REFUSAL in shared_reply
-    assert not shared_reply.startswith("[skill_geladen:")
+    assert not shared_reply.startswith("[skill_loaded:")
     assert not model_saw(llm, "MARKE2")
     # Positive control: the recipient's own skill still loads.
     assert tool_reply(llm, "call_own").startswith(
-        f"[skill_geladen:{own['id']}@"
+        f"[skill_loaded:{own['id']}@"
     )
 
 

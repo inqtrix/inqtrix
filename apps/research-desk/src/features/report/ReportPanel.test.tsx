@@ -7,7 +7,8 @@ import { attachRunResult } from '@/features/project/types'
 import { serializeResearchRun, parseResearchRun } from '@/features/project/markdown'
 import { agentArtifactReferences } from '@/features/agent/artifactCitations'
 import { evidenceLineageFromArtifactPayload } from '@/features/agent/evidenceProvenance'
-import { LiveRunOverview, ReferenceStatements, ReportEvidence } from './ReportPanel'
+import { TooltipProvider } from '@/components/ui/tooltip'
+import { LiveRunOverview, ReferenceStatements, ReportEvidence, ReportPanel } from './ReportPanel'
 
 vi.mock('@/i18n/LocaleProvider', () => ({
   useLocale: () => ({ locale: 'de', t: translations.de }),
@@ -115,5 +116,35 @@ describe('research status overview', () => {
     const missing = renderToStaticMarkup(<LiveRunOverview run={record} />)
     expect(missing).toContain('—')
     expect(missing).not.toContain('00:00:00')
+  })
+})
+
+describe('the step log of a finished run after a reload', () => {
+  // A reload brings the run's result, not its step log; the server still
+  // holds every step. The log asks for them and says it is loading, not
+  // that none were stored.
+  const failed: ResearchRunRecord = {
+    status: 'failed', agentOverrides: {}, createdAt: '2026-01-01T10:00:00Z', events: [],
+    runId: 'run-steps', source: 'api', stack: 'default', submittedAt: '2026-01-01T10:00:00Z',
+    summary: { title: 'Steps' }, phaseState: { activePhase: 'search', completedPhases: ['analysis'] },
+    metrics: { rounds: '1 / 1', sources: 0, queries: 2, claims: 0 },
+  }
+  const render = (props: Partial<Parameters<typeof ReportPanel>[0]>) => renderToStaticMarkup(
+    <TooltipProvider>
+      <ReportPanel onHide={() => undefined} selectedRun={failed} {...props} />
+    </TooltipProvider>,
+  )
+
+  it('says it is loading while the stored steps are on their way', () => {
+    const html = render({ onRequestSteps: () => undefined, stepsLoad: 'loading' })
+    expect(html).toContain(translations.de.report.agentStepsLoading)
+    expect(html).not.toContain(translations.de.report.agentStepsEmpty)
+  })
+
+  it('says none were stored only once the server answered with none', () => {
+    expect(render({ onRequestSteps: () => undefined, stepsLoad: 'done' }))
+      .toContain(translations.de.report.agentStepsEmpty)
+    // A run this view cannot ask the server for (a local one) has what it holds.
+    expect(render({})).toContain(translations.de.report.agentStepsEmpty)
   })
 })

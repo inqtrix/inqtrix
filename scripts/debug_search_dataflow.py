@@ -95,22 +95,20 @@ def _build_provider(name: str) -> tuple[Any, str]:
 
         endpoint = os.getenv("AZURE_AI_PROJECT_ENDPOINT")
         agent = os.getenv("WEB_SEARCH_AGENT_NAME")
-        if not (endpoint and agent):
-            sys.exit("Set AZURE_AI_PROJECT_ENDPOINT and WEB_SEARCH_AGENT_NAME.")
-        kwargs: dict[str, Any] = {"project_endpoint": endpoint, "agent_name": agent}
+        project_key = os.getenv("AZURE_AI_PROJECT_API_KEY")
+        if not (endpoint and agent and project_key):
+            sys.exit(
+                "Set AZURE_AI_PROJECT_ENDPOINT, WEB_SEARCH_AGENT_NAME and "
+                "AZURE_AI_PROJECT_API_KEY."
+            )
+        kwargs: dict[str, Any] = {
+            "project_endpoint": endpoint,
+            "agent_name": agent,
+            "api_key": project_key,
+        }
         version = os.getenv("WEB_SEARCH_AGENT_VERSION")
         if version:
             kwargs["agent_version"] = version
-        project_key = os.getenv("AZURE_AI_PROJECT_API_KEY")
-        tid, cid, sec = (
-            os.getenv("AZURE_TENANT_ID"),
-            os.getenv("AZURE_CLIENT_ID"),
-            os.getenv("AZURE_CLIENT_SECRET"),
-        )
-        if project_key:
-            kwargs["api_key"] = project_key
-        elif tid and cid and sec:
-            kwargs.update(tenant_id=tid, client_id=cid, client_secret=sec)
         return AzureFoundryWebSearch(**kwargs), "AzureFoundryWebSearch"
 
     sys.exit(f"Unknown provider: {name}")

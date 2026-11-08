@@ -15,7 +15,8 @@ from inqtrix.execution_authority import (
     guard_provider_context,
     pinned_knowledge_collection_ids,
 )
-from inqtrix.server.runs import ANSWER_DELTA_MAX_BYTES, RunHandle, RunStore
+from inqtrix.runs.memory_store import RunStore
+from inqtrix.runs.records import ANSWER_DELTA_MAX_BYTES, RunHandle
 from inqtrix.services.run_service import execute_run_request
 from inqtrix.providers.base import (
     ChatTurn,
@@ -235,6 +236,8 @@ def _running_run() -> tuple[RunStore, str, RunHandle]:
     )
     release = threading.Event()
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="q",
         stack_name="default",
         work=lambda handle: release.wait(5),

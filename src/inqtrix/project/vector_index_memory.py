@@ -18,11 +18,11 @@ from inqtrix.project.vector_index_ports import (
     VectorIndexNotFound,
     VectorIndexRecord,
 )
-from inqtrix.project.scoped_upsert import ResourceScope, require_memory_scope
-from inqtrix.source_authority import SourceLifecycleConflict, SourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope, require_memory_scope
+from inqtrix.storage.source_authority import SourceLifecycleConflict, SourceScope
 
 if TYPE_CHECKING:
-    from inqtrix.source_authority import MemorySourceLifecycleAuthority
+    from inqtrix.storage.source_authority import MemorySourceLifecycleAuthority
 
 
 class MemoryVectorIndexStore:
@@ -173,9 +173,6 @@ class MemoryVectorIndexStore:
             for member in index.members
             if member.file_id == file_id
         )
-
-    async def aclose(self) -> None:
-        return None
 
 
 def _scoped(values, created_by_user_id: uuid.UUID | None, workspace_id):

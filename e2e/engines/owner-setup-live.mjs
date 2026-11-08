@@ -11,11 +11,13 @@ import { join } from 'node:path'
 
 import { chromium, firefox, webkit } from '@playwright/test'
 
+import { createScenarioBook, writeScenarioSidecar } from '../../tests/verification/fixtures/scenario-sidecar.mjs'
 import {
   assertVerificationRunId,
 } from '../../tests/verification/fixtures/run-scope.mjs'
+import { httpsErrorsIgnored } from '../../tests/verification/fixtures/https-errors.mjs'
 
-const baseURL = process.env.INQTRIX_E2E_BASE_URL ?? 'http://127.0.0.1:8080'
+const baseURL = process.env.INQTRIX_E2E_BASE_URL ?? 'http://localhost:8080'
 const ownerEmail = requiredEnvironment('INQTRIX_E2E_ADMIN_EMAIL')
 const ownerPassword = requiredEnvironment('INQTRIX_E2E_ADMIN_PASSWORD')
 const userEmail = requiredEnvironment('INQTRIX_E2E_TESTER_EMAIL')
@@ -28,7 +30,7 @@ const runId = assertVerificationRunId(
 )
 const reportDirectory = requiredEnvironment('INQTRIX_VERIFICATION_REPORT_DIR')
 const screenshotDirectory = join(reportDirectory, 'screenshots')
-const ignoreHTTPSErrors = process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1'
+const ignoreHTTPSErrors = httpsErrorsIgnored()
 
 const BROWSER_TYPES = { chromium, firefox, webkit }
 const SCENARIOS = [
@@ -38,11 +40,12 @@ const SCENARIOS = [
   'auth.pointer-logout',
   'auth.console-network-clean',
 ]
-// Same rule as the other engines: an unmeasured scenario is NOT RUN. A
-// pre-cooked failure turns a campaign that died early into a wall of red
-// verdicts for checks that never executed, and the report layer can no
-// longer point at the one that really broke.
-const scenarioStatus = new Map(SCENARIOS.map((id) => [id, 'not_run']))
+// Same rule as the other engines: an unmeasured scenario is not run. The
+// steps run in the order of SCENARIOS, so the step that broke is the first
+// that has not passed; the catch below marks it failed with the reason, and
+// the steps after it stay not run.
+const verdicts = createScenarioBook(SCENARIOS)
+const STEPS = SCENARIOS.filter((id) => id !== 'auth.console-network-clean')
 const consoleErrors = []
 const consoleWarnings = []
 const networkFindings = []
@@ -100,7 +103,7 @@ try {
     .waitFor({ state: 'visible', timeout: 30_000 })
   await page.getByRole('button', { exact: true, name: 'Angemeldet' })
     .waitFor({ state: 'visible', timeout: 30_000 })
-  scenarioStatus.set('auth.owner-setup-visible', 'passed')
+  verdicts.pass('auth.owner-setup-visible')
 
   const initialMutation = await initialMutationPromise
   assert(
@@ -117,7 +120,7 @@ try {
     ).count() === 0,
     'The state-owning project badge reports a synchronization error.',
   )
-  scenarioStatus.set('auth.initial-server-mutation', 'passed')
+  verdicts.pass('auth.initial-server-mutation')
   await captureScreenshot('02-owner-shell-synchronized.png')
 
   progress('Echte-Daten- und Benutzerverwaltung pruefen')
@@ -174,7 +177,7 @@ try {
   const createdRow = page.getByRole('row').filter({ hasText: userEmail })
   await createdRow.waitFor({ state: 'visible', timeout: 20_000 })
   await createdRow.getByText('Aktiv', { exact: true }).waitFor({ state: 'visible' })
-  scenarioStatus.set('auth.admin-user-create', 'passed')
+  verdicts.pass('auth.admin-user-create')
   await captureScreenshot('05-admin-user-table.png')
 
   progress('Pointer-Logout und Sitzungsende pruefen')
@@ -228,11 +231,14 @@ try {
     sessionState.status === 200 && sessionState.authenticated === false,
     'The server still reports an authenticated session after logout.',
   )
-  scenarioStatus.set('auth.pointer-logout', 'passed')
+  verdicts.pass('auth.pointer-logout')
   await captureScreenshot('07-logout-anonymous.png')
 
 } catch (error) {
-  progress(`Engine-Fehler: ${sanitize(error instanceof Error ? error.message : error)}`)
+  const message = sanitize(error instanceof Error ? error.message : error)
+  progress(`Engine-Fehler: ${message}`)
+  const broken = STEPS.find((id) => verdicts.status(id) === 'not_run')
+  if (broken) verdicts.fail(broken, message)
 } finally {
   const classifiedConsole = classifyConsoleErrors()
   const classifiedWarnings = classifyConsoleWarnings()
@@ -243,20 +249,19 @@ try {
     ...classifiedRequestFailures.actionable,
     ...networkFindings,
   ]
-  scenarioStatus.set(
-    'auth.console-network-clean',
-    hygieneFindings.length === 0 ? 'passed' : 'failed',
-  )
+  if (hygieneFindings.length === 0) verdicts.pass('auth.console-network-clean')
+  else verdicts.fail('auth.console-network-clean', `${hygieneFindings.length} console or network findings`)
   if (hygieneFindings.length > 0) {
     progress(`Konsole/Netzwerk nicht sauber (${hygieneFindings.length} Befunde)`)
   }
   await writeStructuralEvidence().catch(() => undefined)
-  exitCode = [...scenarioStatus.values()].every((status) => status === 'passed')
-    ? 0
-    : 1
-  await writeScenarioSidecar(
-    SCENARIOS.map((id) => ({ id, status: scenarioStatus.get(id) ?? 'not_run' })),
-  )
+  exitCode = verdicts.allPassed() ? 0 : 1
+  try {
+    await writeScenarioSidecar(verdicts.entries())
+  } catch (error) {
+    exitCode = 1
+    progress(`Ergebnisdatei nicht geschrieben: ${sanitize(error instanceof Error ? error.message : error)}`)
+  }
   await context?.close().catch(() => undefined)
   await browser?.close().catch(() => undefined)
 }
@@ -377,16 +382,6 @@ async function writeStructuralEvidence() {
   await chmod(path, 0o600)
 }
 
-async function writeScenarioSidecar(scenarios) {
-  const path = process.env.INQTRIX_VERIFICATION_SCENARIO_RESULTS_PATH
-  if (!path) return
-  const temporaryPath = `${path}.tmp`
-  const payload = `${JSON.stringify({ scenarios, schemaVersion: 1 }, null, 2)}\n`
-  await writeFile(temporaryPath, payload, { encoding: 'utf8', mode: 0o600 })
-  await rename(temporaryPath, path)
-  await chmod(path, 0o600)
-}
-
 function isEvidenceRoute(path) {
   return [
     '/api/auth/config',
@@ -422,7 +417,7 @@ function classifyConsoleErrors() {
 
 function classifyConsoleWarnings() {
   const logoutStreamTerminationIsAnchored = (
-    scenarioStatus.get('auth.pointer-logout') === 'passed'
+    verdicts.status('auth.pointer-logout') === 'passed'
     && logoutRequestCount === 1
     && (routeSummary.get('POST /api/auth/logout 200') ?? 0) === 1
     && (routeSummary.get('GET /v1/user/events 200') ?? 0) >= 1

@@ -22,10 +22,19 @@ if TYPE_CHECKING:
 class RunNotFound(KeyError):
     """Raised when a run is absent or intentionally indistinguishable.
 
-    Run stores use the same exception for unknown ids and authorization
-    denials. Keeping the type below the server layer lets schedulers and
-    services distinguish true retention/deletion from infrastructure
-    failures without importing FastAPI-facing modules.
+    Run stores raise it for unknown ids, and its subclass
+    :class:`RunAccessDenied` for authorization denials, which every caller
+    answers the same way. Keeping the type below the server layer lets
+    schedulers and services distinguish true retention/deletion from
+    infrastructure failures without importing FastAPI-facing modules.
+    """
+
+
+class RunAccessDenied(RunNotFound):
+    """The run exists, but the caller may not see it.
+
+    Callers answer exactly as for a missing run. The type lets a store with
+    an audit sink record the denial once the read's session is closed.
     """
 
 
@@ -74,6 +83,15 @@ class AgentRateLimited(Exception):
         original: The underlying SDK exception that prompted the
             rate-limit classification. Provider modules use this to
             extract retry-after headers and request IDs for logging.
+    """
+
+    partial_state: Mapping[str, Any] | None = None
+    """Current graph-node state retained when the rate limit unwinds a node.
+
+    As for :class:`AgentCancelled`: the graph runner's input is not its
+    evolving node state, so the runner reports the phase, round, progress and
+    recorded provider usage the run had reached from this state, not from
+    its input. It belongs to this exception instance only.
     """
 
     def __init__(self, model: str, original: Exception):
@@ -210,6 +228,20 @@ class AgentToolArgumentsError(AgentStructuredOutputError):
         )
 
 
+class AgentRequiredToolCallMissing(AgentStructuredOutputError):
+    """A turn that had to end with a tool call answered in text instead.
+
+    A model that rejects a forced tool choice gets ``auto`` and an instruction; when
+    it still answers in text, the kernel shows it the obligation again, within the
+    same attempt budget, instead of taking the text as the step's result.
+    """
+
+    def __init__(self, model: str, *, turn: ChatTurn, tool_names: tuple[str, ...]) -> None:
+        self.turn = turn
+        self.tool_names = tool_names
+        super().__init__(model, "tool_calls", "The turn had to call a tool and answered in text.")
+
+
 class AgentContextArchiveError(RuntimeError):
     """Context cannot be reduced because its original was not archived."""
 
@@ -225,14 +257,13 @@ class AgentCancelled(Exception):
     ``cancelled=True`` instead of propagating.
 
     Checkpoints are: node entry (:func:`inqtrix.state.check_cancel_event`),
-    every provider retry attempt and backoff sleep
-    (:func:`inqtrix.providers.base.provider_cancel_scope`), the search and
-    claim-extraction fan-out coordinators, and the per-section loop of
-    answer composition. An in-flight provider HTTP attempt is still not
-    aborted mid-request — the residual latency from the request to the
-    actual stop is the remainder of that ONE attempt, bounded by its
-    transport timeout (full transport-level abort remains a deferred
-    design decision, a known open item).
+    every provider retry attempt and backoff sleep, and the wait of a
+    provider call made through a sync face, which ends the waiting request
+    at once (:func:`inqtrix.providers.base.provider_cancel_scope`); the
+    search and claim-extraction fan-out coordinators; and the per-section
+    loop of answer composition. A Bedrock request thread runs on to its
+    read timeout. A request cut off this way reports no usage, so its
+    tokens are not known and not booked.
     """
 
     partial_state: Mapping[str, Any] | None = None

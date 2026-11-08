@@ -11,7 +11,9 @@ from contextlib import suppress
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.requests import ClientDisconnect
 
+from .backend_replicas import replica_transport
 from .headers import _proxy_request_headers, _relay_response_headers
 from .identity_edge import IdentityEdge
 from .logging import _redact_guest_route_tokens
@@ -158,12 +160,13 @@ def build_backend_client(
     transport: httpx.AsyncBaseTransport | None,
 ) -> httpx.AsyncClient:
     """Construct the one shared, cookie-stateless app-lifespan client."""
+    limits = _backend_limits(max_connections)
     return httpx.AsyncClient(
         base_url=backend_url,
         cookies=_stateless_cookie_jar(),
         timeout=_backend_timeout(),
-        limits=_backend_limits(max_connections),
-        transport=transport,
+        limits=limits,
+        transport=transport or replica_transport(backend_url, limits),
     )
 
 
@@ -241,6 +244,17 @@ def register_http_routes(
             response = await _send_watching_disconnect(
                 client, upstream, request, body_done
             )
+        except ClientDisconnect:
+            # The browser left while its body was still being relayed (a
+            # closed tab, an aborted upload). Raised inside the upstream send,
+            # it ends that exchange; it is an abort, not a gateway fault.
+            log.info(
+                "Client disconnected while sending the request body for %s %s "
+                "— upstream request aborted.",
+                request.method,
+                _redact_guest_route_tokens(request.url.path),
+            )
+            return Response(status_code=499)
         except _RequestBodyTooLarge:
             return JSONResponse(
                 {"detail": "Request body too large"},

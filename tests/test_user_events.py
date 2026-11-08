@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -10,12 +11,14 @@ import pytest
 from fastapi import HTTPException
 
 from inqtrix.auth.principal import Principal
+from inqtrix.server.routers import user_events as user_events_router
 from inqtrix.server.routers.user_events import (
     _invalidation_frame,
     _sse_frame,
     build_router,
 )
 from inqtrix.user_events import (
+    USER_EVENT_RETENTION_SECONDS,
     MemoryUserEventStore,
     UserEventPage,
     UserInvalidation,
@@ -150,8 +153,9 @@ class _ReplayStore:
             self.event.id,
         )
 
-    async def wait_for_change(self, **kwargs) -> None:
+    async def wait_for_change(self, **kwargs) -> bool:
         del kwargs
+        return False
 
 
 def _event_endpoint(container) -> object:
@@ -233,39 +237,327 @@ async def test_user_stream_rechecks_identity_before_each_data_frame() -> None:
         await anext(iterator)
 
 
-@pytest.mark.asyncio
-async def test_user_stream_rechecks_identity_before_quiet_keepalive() -> None:
-    user_id = uuid.uuid4()
-    principal = Principal(user_id=user_id, kind="oidc_session")
-    event = UserInvalidation(
-        id=2,
-        tenant_id="default",
-        target_user_id=user_id,
-        scope="skills",
+class _QuietStore:
+    """Nothing arrives, and each wait uses up its whole time on the test's clock."""
+
+    def __init__(self, clock: SimpleNamespace) -> None:
+        self.clock = clock
+        self.reads = 0
+        self.timeouts: list[float] = []
+
+    async def current_cursor(self, *, tenant_id: str) -> int:
+        del tenant_id
+        return 0
+
+    async def page_after(self, **kwargs) -> UserEventPage:
+        del kwargs
+        self.reads += 1
+        return UserEventPage((), 0)
+
+    async def wait_for_change(self, **kwargs) -> bool:
+        self.timeouts.append(kwargs["timeout"])
+        self.clock.now += kwargs["timeout"]
+        return False
+
+
+@pytest.fixture
+def stream_clock(monkeypatch) -> SimpleNamespace:
+    """The stream's clock, with each check as late as the window allows."""
+    clock = SimpleNamespace(now=1000.0)
+    clock.monotonic = lambda: clock.now
+    monkeypatch.setattr(user_events_router, "time", clock)
+    monkeypatch.setattr(
+        user_events_router,
+        "random",
+        SimpleNamespace(uniform=lambda _low, high: high),
     )
-    calls = 0
+    return clock
+
+
+KEEPALIVE = ": keepalive\n\n"
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_stream_reads_nothing_between_its_checks(stream_clock) -> None:
+    principal = Principal(user_id=uuid.uuid4(), kind="oidc_session")
+    identity_checks = 0
 
     async def resolve(_request):
-        nonlocal calls
-        calls += 1
-        if calls > 1:
+        nonlocal identity_checks
+        identity_checks += 1
+        return principal
+
+    store = _QuietStore(stream_clock)
+    endpoint = _event_endpoint(
+        SimpleNamespace(user_event_store=store, principal_dependency=resolve)
+    )
+    response = await endpoint(_ConnectedRequest("0"), principal)
+    iterator = response.body_iterator
+
+    assert "event: ready" in await anext(iterator)
+    for _ in range(11):
+        assert await anext(iterator) == KEEPALIVE
+    assert store.reads == 1
+    assert identity_checks == 1
+
+    assert await anext(iterator) == KEEPALIVE
+    assert identity_checks == 2
+    assert await anext(iterator) == KEEPALIVE
+    assert store.reads == 2
+    await iterator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_signed_out_stream_ends_within_a_minute(stream_clock) -> None:
+    principal = Principal(user_id=uuid.uuid4(), kind="oidc_session")
+    signed_out = False
+
+    async def resolve(_request):
+        if signed_out:
             raise HTTPException(status_code=401)
+        return principal
+
+    store = _QuietStore(stream_clock)
+    endpoint = _event_endpoint(
+        SimpleNamespace(user_event_store=store, principal_dependency=resolve)
+    )
+    response = await endpoint(_ConnectedRequest("0"), principal)
+    iterator = response.body_iterator
+    started = stream_clock.now
+
+    assert "event: ready" in await anext(iterator)
+    signed_out = True
+    frames = [frame async for frame in iterator]
+
+    assert frames
+    assert set(frames) == {KEEPALIVE}
+    assert stream_clock.now - started <= 60
+    assert max(store.timeouts) <= 5
+
+
+@pytest.mark.asyncio
+async def test_a_wait_never_runs_past_the_check(monkeypatch, stream_clock) -> None:
+    """Between two keepalives, so the minute is a real upper bound."""
+    principal = Principal(user_id=uuid.uuid4(), kind="oidc_session")
+    signed_out = False
+    monkeypatch.setattr(
+        user_events_router,
+        "random",
+        SimpleNamespace(uniform=lambda _low, _high: 57.0),
+    )
+
+    async def resolve(_request):
+        if signed_out:
+            raise HTTPException(status_code=401)
+        return principal
+
+    store = _QuietStore(stream_clock)
+    endpoint = _event_endpoint(
+        SimpleNamespace(user_event_store=store, principal_dependency=resolve)
+    )
+    response = await endpoint(_ConnectedRequest("0"), principal)
+    iterator = response.body_iterator
+    started = stream_clock.now
+
+    await anext(iterator)
+    signed_out = True
+    frames = [frame async for frame in iterator]
+
+    assert set(frames) == {KEEPALIVE}
+    assert stream_clock.now - started == 57.0
+    assert store.timeouts[-1] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_a_tab_that_connects_with_others_does_not_stay_in_step(
+    monkeypatch, stream_clock
+) -> None:
+    """The check falls somewhere in a window, never after the minute."""
+    principal = Principal(user_id=uuid.uuid4(), kind="oidc_session")
+    windows: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        windows.append((low, high))
+        return high
+
+    monkeypatch.setattr(
+        user_events_router, "random", SimpleNamespace(uniform=uniform)
+    )
+
+    async def resolve(_request):
         return principal
 
     endpoint = _event_endpoint(
         SimpleNamespace(
-            user_event_store=_ReplayStore(event),
+            user_event_store=_QuietStore(stream_clock),
             principal_dependency=resolve,
         )
     )
-    response = await endpoint(_ConnectedRequest("2"), principal)
+    response = await endpoint(_ConnectedRequest("0"), principal)
+    iterator = response.body_iterator
+    await anext(iterator)
+    await iterator.aclose()
+
+    assert windows
+    low, high = windows[0]
+    assert low < high <= 60
+
+
+@pytest.mark.asyncio
+async def test_a_woken_stream_reads_at_once_and_checks_before_the_frame(
+    stream_clock,
+) -> None:
+    user_id = uuid.uuid4()
+    principal = Principal(user_id=user_id, kind="oidc_session")
+    event = UserInvalidation(
+        id=7,
+        tenant_id="default",
+        target_user_id=user_id,
+        scope="skills",
+    )
+    identity_checks = 0
+
+    async def resolve(_request):
+        nonlocal identity_checks
+        identity_checks += 1
+        return principal
+
+    class _WakingStore(_QuietStore):
+        arrived = False
+
+        async def page_after(self, **kwargs) -> UserEventPage:
+            self.reads += 1
+            if self.arrived and int(kwargs["cursor"]) < event.id:
+                return UserEventPage((event,), event.id)
+            return UserEventPage((), event.id if self.arrived else 0)
+
+        async def wait_for_change(self, **kwargs) -> bool:
+            del kwargs
+            self.arrived = True
+            return True
+
+    endpoint = _event_endpoint(
+        SimpleNamespace(
+            user_event_store=_WakingStore(stream_clock),
+            principal_dependency=resolve,
+        )
+    )
+    response = await endpoint(_ConnectedRequest("0"), principal)
     iterator = response.body_iterator
 
-    ready = await anext(iterator)
+    assert "event: ready" in await anext(iterator)
+    checks_before_the_event = identity_checks
+    frame = await anext(iterator)
+    await iterator.aclose()
 
-    assert "event: ready" in ready
-    with pytest.raises(StopAsyncIteration):
-        await anext(iterator)
+    assert "event: invalidate" in frame
+    assert identity_checks == checks_before_the_event + 1
+    assert stream_clock.now == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_that_no_longer_fits_resets_at_the_next_check(
+    stream_clock,
+) -> None:
+    """Only the read finds this: the wake-up compares ids and stays silent."""
+    principal = Principal(user_id=uuid.uuid4(), kind="oidc_session")
+
+    async def resolve(_request):
+        return principal
+
+    class _RestoredTable(_QuietStore):
+        async def page_after(self, **kwargs) -> UserEventPage:
+            del kwargs
+            self.reads += 1
+            return UserEventPage((), 0, reset_required=self.reads == 2)
+
+    store = _RestoredTable(stream_clock)
+    endpoint = _event_endpoint(
+        SimpleNamespace(user_event_store=store, principal_dependency=resolve)
+    )
+    response = await endpoint(_ConnectedRequest("9"), principal)
+    iterator = response.body_iterator
+    started = stream_clock.now
+
+    assert "event: ready" in await anext(iterator)
+    frames = []
+    while "event: reset" not in (frame := await anext(iterator)):
+        frames.append(frame)
+    await iterator.aclose()
+
+    assert set(frames) == {KEEPALIVE}
+    assert stream_clock.now - started <= 60
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_gets_reset_waits_before_it_reads_again(stream_clock) -> None:
+    """A store that keeps asking for a reset must not turn the stream into a busy loop."""
+    principal = Principal(user_id=uuid.uuid4(), kind="oidc_session")
+
+    async def resolve(_request):
+        return principal
+
+    class _AlwaysReset(_QuietStore):
+        async def page_after(self, **kwargs) -> UserEventPage:
+            del kwargs
+            self.reads += 1
+            return UserEventPage((), 9, reset_required=True)
+
+        async def wait_for_change(self, **kwargs) -> bool:
+            self.timeouts.append(kwargs["timeout"])
+            return True
+
+    store = _AlwaysReset(stream_clock)
+    endpoint = _event_endpoint(
+        SimpleNamespace(user_event_store=store, principal_dependency=resolve)
+    )
+    response = await endpoint(_ConnectedRequest("9"), principal)
+    iterator = response.body_iterator
+
+    await anext(iterator)
+    assert "event: reset" in await anext(iterator)
+    assert "event: reset" in await anext(iterator)
+    await iterator.aclose()
+
+    assert store.reads == 2
+    assert len(store.timeouts) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_at_the_head_stays_valid_after_everything_expired(monkeypatch) -> None:
+    store = MemoryUserEventStore()
+    user_id = uuid.uuid4()
+    arguments = {"tenant_id": "default", "target_user_id": user_id, "scope": "runs"}
+    first = await store.append(**arguments)
+    last = await store.append(**arguments)
+    later = time.time() + 2 * USER_EVENT_RETENTION_SECONDS
+    monkeypatch.setattr("inqtrix.user_events.time.time", lambda: later)
+
+    at_the_head = await store.page_after(
+        tenant_id="default", target_user_id=user_id, cursor=last.id
+    )
+    behind_it = await store.page_after(
+        tenant_id="default", target_user_id=user_id, cursor=first.id
+    )
+
+    assert at_the_head.reset_required is False
+    assert at_the_head.events == ()
+    assert behind_it.reset_required is True
+
+
+@pytest.mark.asyncio
+async def test_the_memory_store_says_whether_something_came() -> None:
+    store = MemoryUserEventStore()
+    user_id = uuid.uuid4()
+    arguments = {"tenant_id": "default", "target_user_id": user_id, "cursor": 0}
+
+    assert await store.wait_for_change(**arguments, timeout=0.01) is False
+    await store.append(
+        tenant_id="default",
+        target_user_id=user_id,
+        scope="skills",
+    )
+    assert await store.wait_for_change(**arguments, timeout=1.0) is True
 
 
 def test_postgres_store_constructor_rejects_nonpositive_knobs() -> None:

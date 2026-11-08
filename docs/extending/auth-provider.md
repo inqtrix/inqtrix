@@ -943,9 +943,10 @@ if __name__ == "__main__":
 ```
 
 `build_gateway_provider` runs the start checks of the API server and builds
-the provider with its PostgreSQL stores from the settings; `create_app` uses
-that provider as it is and calls its `aclose()` at shutdown, which passes the
-call on to your resolver. `check_retired_settings()` is described under
+the provider with its PostgreSQL stores from the settings. Those stores sit on
+the one database engine of the process: `create_app` takes that engine over
+instead of building a second one. It uses the provider as it is and calls its
+`aclose()` at shutdown, which passes the call on to your resolver. `check_retired_settings()` is described under
 [Retired variables](../observability/logging.md#environment-variables).
 
 This process is the API server only. A deployment around it needs the same

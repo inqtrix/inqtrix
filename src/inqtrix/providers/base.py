@@ -21,11 +21,14 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 
+import httpx
+
+from inqtrix import aio
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.exceptions import (
     AgentCancelled,
@@ -45,15 +48,16 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # =========================================================
-# Retry budget for OpenAI-SDK-based providers
+# Retry budget of every provider call
 # =========================================================
 # Inqtrix disables hidden SDK retries and owns one visible retry authority.
 # The contract is three TOTAL attempts inside one logical-operation deadline,
-# not three retries per layer.  The ``*_MAX_RETRIES`` aliases remain because
-# replay tests and provider modules intentionally patch them to zero.
+# not three retries per layer.  Replay tests patch the rate-limit ceiling below
+# to zero; the transient ceiling is the same number.
 MAX_PROVIDER_ATTEMPTS = 3
 _SDK_MAX_RETRIES = MAX_PROVIDER_ATTEMPTS - 1
-_RETRYABLE_SDK_STATUS_CODES = frozenset({408, 409, 500, 502, 503, 504})
+# 529 is Anthropic's overload answer under sustained load.
+_RETRYABLE_SDK_STATUS_CODES = frozenset({408, 409, 500, 502, 503, 504, 529})
 _RETRYABLE_SDK_ERROR_TYPES = frozenset({"APIConnectionError", "APITimeoutError"})
 
 # Rate-limit (HTTP 429) handling retains a separately patchable ceiling for
@@ -63,7 +67,6 @@ _RETRYABLE_SDK_ERROR_TYPES = frozenset({"APIConnectionError", "APITimeoutError"}
 # never stack independent retry budgets.
 _SDK_RATE_LIMIT_MAX_RETRIES = MAX_PROVIDER_ATTEMPTS - 1
 
-ProviderRetryCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass
@@ -126,21 +129,6 @@ def provider_attempt_scope(budget: ProviderAttemptBudget) -> Iterator[None]:
     finally:
         _PROVIDER_ATTEMPT_BUDGET.reset(token)
 
-
-def observe_provider_retries(
-    provider: object,
-    callback: ProviderRetryCallback | None,
-) -> ContextManager[object]:
-    """Bind one retry observer when the provider exposes the shared seam.
-
-    Adapters that do not implement retry diagnostics remain compatible and
-    simply return a no-op context. Keeping this duck-typed binding here lets
-    Research nodes and capability-backed Agent tools share one retry bridge.
-    """
-    observer = getattr(provider, "observe_retries", None)
-    if callback is None or not callable(observer):
-        return nullcontext()
-    return observer(callback)
 
 # =========================================================
 # Shared retry / backoff constants
@@ -255,7 +243,18 @@ def _check_provider_operation_deadline(
 # not any operator-tunable behaviour.
 _CANCEL_PROBE_POLL_SECONDS: float = 0.5
 
-_cancel_probe: contextvars.ContextVar[Callable[[], bool] | None] = contextvars.ContextVar(
+
+class _BoundProbe:
+    """One bound cancel probe, and whether it already failed once."""
+
+    __slots__ = ("probe", "failed")
+
+    def __init__(self, probe: Callable[[], bool]) -> None:
+        self.probe = probe
+        self.failed = False
+
+
+_cancel_probe: contextvars.ContextVar[_BoundProbe | None] = contextvars.ContextVar(
     "inqtrix_provider_cancel_probe", default=None
 )
 
@@ -266,12 +265,13 @@ def provider_cancel_scope(
 ) -> Iterator[None]:
     """Bind one run-cancellation probe to the current execution context.
 
-    Providers consult the probe before every retry attempt and while
-    sleeping between attempts, so a cancelled run stops within
-    ``_CANCEL_PROBE_POLL_SECONDS`` of the request instead of serving the
-    full retry ladder. The binding follows execution-context copies and keeps
-    provider signatures unchanged, including async model adapters that execute
-    synchronous providers in an executor.
+    Providers consult the probe before every retry attempt, while
+    sleeping between attempts and, ten times a second, while a sync face
+    waits for its call, which then ends the waiting request: a cancelled
+    run stops at once instead of serving the full retry ladder. The
+    binding follows execution-context copies and keeps provider signatures
+    unchanged, including async model adapters that execute synchronous
+    providers in an executor.
 
     Args:
         probe: Zero-argument callable returning ``True`` once the run has
@@ -285,7 +285,7 @@ def provider_cancel_scope(
     if probe is None:
         yield
         return
-    token = _cancel_probe.set(probe)
+    token = _cancel_probe.set(_BoundProbe(probe))
     try:
         yield
     finally:
@@ -298,13 +298,18 @@ def _provider_cancel_requested() -> bool:
     Never raises: a failing probe is logged and treated as "not
     cancelled" so a diagnostics problem cannot abort a healthy run.
     """
-    probe = _cancel_probe.get()
-    if probe is None:
+    bound = _cancel_probe.get()
+    if bound is None:
         return False
     try:
-        return bool(probe())
+        return bool(bound.probe())
     except Exception:
-        log.exception("Provider cancel probe failed")
+        # A waiting call asks ten times a second: one stack trace per binding.
+        if bound.failed:
+            log.debug("Provider cancel probe failed again")
+        else:
+            bound.failed = True
+            log.exception("Provider cancel probe failed; further failures of this probe go to DEBUG")
         return False
 
 
@@ -331,7 +336,11 @@ def _check_provider_cancel(*, label: str = "Provider call") -> None:
 
 
 class _NonFatalNoticeMixin:
-    """Thread-local helper for surfacing provider fallback notices."""
+    """Thread-local helper for the claim extraction's fallback notices.
+
+    The public :class:`~inqtrix.strategies.LLMClaimExtractor` keeps this
+    surface; providers return their notices with the result instead.
+    """
 
     _nonfatal_init_lock = threading.Lock()
 
@@ -355,10 +364,8 @@ class _NonFatalNoticeMixin:
     ) -> None:
         """Store one structured fallback notice for the current thread.
 
-        ``consume_nonfatal_notice()`` remains the compatibility surface used
-        by the research graph. Capability adapters may consume the additive
-        detail shape in the SAME provider thread to distinguish a genuine
-        upstream failure from an honest empty result.
+        ``consume_nonfatal_notice()`` is the surface the research graph
+        reads in the SAME worker thread, right after the call.
         """
         if message:
             self._notice_state().notice = {
@@ -376,10 +383,6 @@ class _NonFatalNoticeMixin:
         state = self._notice_state()
         if hasattr(state, "notice"):
             delattr(state, "notice")
-        # Compatibility with provider instances that were populated by an
-        # older implementation before a hot reload.
-        if hasattr(state, "message"):
-            delattr(state, "message")
 
     def consume_nonfatal_notice(self) -> str | None:
         """Return and clear the pending notice, or ``None`` if none exists."""
@@ -398,73 +401,6 @@ class _NonFatalNoticeMixin:
         if hasattr(state, "message"):
             delattr(state, "message")
         return {"message": str(message)} if message else None
-
-
-class _RetryNoticeMixin:
-    """Thread-local helper for surfacing provider retry attempts."""
-
-    _retry_notice_init_lock = threading.Lock()
-
-    def _retry_notice_state(self) -> threading.local:
-        """Return the thread-local retry diagnostics state."""
-        state = getattr(self, "_retry_notice_state_obj", None)
-        if state is None:
-            with self._retry_notice_init_lock:
-                state = getattr(self, "_retry_notice_state_obj", None)
-                if state is None:
-                    state = threading.local()
-                    self._retry_notice_state_obj = state
-        return state
-
-    @contextmanager
-    def observe_retries(self, callback: ProviderRetryCallback) -> Iterator[object]:
-        """Call *callback* synchronously whenever this thread retries."""
-        state = self._retry_notice_state()
-        previous = getattr(state, "retry_callback", None)
-        state.retry_callback = callback
-        try:
-            yield self
-        finally:
-            if previous is not None:
-                state.retry_callback = previous
-            else:
-                try:
-                    delattr(state, "retry_callback")
-                except AttributeError:
-                    pass
-
-    def _append_retry_notice(self, notice: dict[str, Any]) -> None:
-        """Store retry diagnostics and notify any active observer."""
-        state = self._retry_notice_state()
-        item = dict(notice)
-        callback = getattr(state, "retry_callback", None)
-        if callable(callback):
-            item["progress_emitted"] = True
-            try:
-                callback(dict(item))
-            except Exception:
-                log.exception("Provider retry observer failed")
-        notices = getattr(state, "notices", None)
-        if not isinstance(notices, list):
-            notices = []
-        notices.append(item)
-        state.notices = notices
-
-    def _clear_retry_notices(self) -> None:
-        """Clear pending retry diagnostics for the current thread."""
-        state = self._retry_notice_state()
-        if hasattr(state, "notices"):
-            delattr(state, "notices")
-
-    def consume_retry_notices(self) -> list[dict[str, Any]]:
-        """Return and clear retry diagnostics for the current thread."""
-        state = self._retry_notice_state()
-        notices = getattr(state, "notices", None)
-        if hasattr(state, "notices"):
-            delattr(state, "notices")
-        if not isinstance(notices, list):
-            return []
-        return [dict(item) for item in notices if isinstance(item, dict)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,6 +561,27 @@ def reported_capability(
         return bool(checker())
 
 
+def reported_reasoning_levels(provider: object, *, model: str) -> list[str] | None:
+    """Ask a provider which reasoning efforts it can send for *model*, without assuming it.
+
+    The sibling of :func:`reported_capability` for
+    :meth:`LLMProvider.reasoning_levels`: a provider or decorator that declares
+    nothing answers ``None`` ("the card's levels stand") at every layer.
+
+    Args:
+        provider: Provider or decorator to ask.
+        model: Model the question is about.
+
+    Returns:
+        The levels the provider reports, or ``None`` when it reports none.
+    """
+    reader = getattr(provider, "reasoning_levels", None)
+    if not callable(reader):
+        return None
+    levels = reader(model=model)
+    return list(levels) if levels is not None else None
+
+
 # --------------------------------------------------------------------------- #
 # Per-call reasoning-effort helpers (provider-neutral)
 # --------------------------------------------------------------------------- #
@@ -635,6 +592,9 @@ REASONING_EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", 
 ``""`` (inherit the provider's constructor default) and ``"none"`` (force
 reasoning off for this call) are handled separately and are not listed here.
 """
+
+_EFFORT_STRENGTH: tuple[str, ...] = (*REASONING_EFFORT_LEVELS, "max")
+"""Every graded effort, weakest to strongest; ``max`` is sent only where a model and its API take it."""
 
 
 def normalize_reasoning_effort(value: str | None) -> str:
@@ -660,9 +620,11 @@ def validate_reasoning_effort(
     """Validate a normalized graded effort token against a provider's levels.
 
     ``""`` (inherit) and ``"none"`` (off) always pass through unchanged. A
-    graded level outside *supported_levels* is downgraded to ``"none"`` and a
-    human-readable warning is returned so the caller can surface it
-    (no silent fallbacks).
+    graded level outside *supported_levels* becomes the strongest supported
+    level below it (``max`` → ``xhigh`` where ``max`` is not sent), or
+    ``"none"`` when there is none below it or the token is unknown, so a call
+    never thinks more than was asked. A human-readable warning is returned so
+    the caller can surface it (no silent fallbacks).
 
     Args:
         value: A normalized effort token (see :func:`normalize_reasoning_effort`).
@@ -677,16 +639,29 @@ def validate_reasoning_effort(
     if value in ("", "none") or value in supported_levels:
         return value, []
     prefix = f"{label}: " if label else ""
-    warning = (
+    allowed = ", ".join(supported_levels)
+    below = [
+        level
+        for level in supported_levels
+        if level in _EFFORT_STRENGTH
+        and value in _EFFORT_STRENGTH
+        and _EFFORT_STRENGTH.index(level) < _EFFORT_STRENGTH.index(value)
+    ]
+    if not below:
+        return "none", [
+            f"{prefix}reasoning_effort={value!r} is not supported "
+            f"(allowed: {allowed}); reasoning disabled for this call."
+        ]
+    floor = max(below, key=_EFFORT_STRENGTH.index)
+    return floor, [
         f"{prefix}reasoning_effort={value!r} is not supported "
-        f"(allowed: {', '.join(supported_levels)}); reasoning disabled for "
-        f"this call."
-    )
-    return "none", [warning]
+        f"(allowed: {allowed}); this call runs at {floor!r}, the strongest "
+        f"allowed level below it."
+    ]
 
 
 # =========================================================
-# Shared retry helpers (Anthropic & Bedrock)
+# Helpers of the one retry loop (every provider)
 # =========================================================
 
 
@@ -715,35 +690,8 @@ def _retry_delay_seconds(
     return base * random.uniform(*_JITTER_RANGE)
 
 
-def _sleep_before_retry(
-    delay: float, deadline: float | None = None
-) -> None:
-    """Sleep for *delay* seconds, clamped to the remaining deadline.
-
-    The sleep is sliced into ``_CANCEL_PROBE_POLL_SECONDS`` intervals so a
-    cancellation bound via :func:`provider_cancel_scope` interrupts the
-    backoff promptly instead of serving the full delay. Without a bound
-    probe the timing behaviour is identical to one uninterrupted sleep.
-    """
-    if delay <= 0:
-        return
-    _check_provider_cancel()
-    if deadline is not None:
-        _check_deadline(deadline)
-        delay = min(delay, max(0.0, deadline - time.monotonic()))
-    if delay <= 0:
-        return
-    wake_at = time.monotonic() + delay
-    while True:
-        remaining = wake_at - time.monotonic()
-        if remaining <= 0:
-            return
-        time.sleep(min(_CANCEL_PROBE_POLL_SECONDS, remaining))
-        _check_provider_cancel()
-
-
 def _sdk_error_status_code(exc: BaseException) -> int | None:
-    """Extract an HTTP status code from an OpenAI-SDK style exception."""
+    """Extract an HTTP status code from a provider exception (an SDK status error or httpx's)."""
     status = getattr(exc, "status_code", None)
     if isinstance(status, int):
         return status
@@ -753,7 +701,7 @@ def _sdk_error_status_code(exc: BaseException) -> int | None:
 
 
 def _sdk_error_code(exc: BaseException) -> str:
-    """Return a compact retry reason for OpenAI-SDK style exceptions."""
+    """Return a compact retry reason for a provider exception."""
     status = _sdk_error_status_code(exc)
     if status is not None:
         return f"HTTP {status}"
@@ -761,9 +709,9 @@ def _sdk_error_code(exc: BaseException) -> str:
 
 
 def sdk_retry_after(exc: BaseException) -> str | None:
-    """Extract the ``Retry-After`` header from an OpenAI-SDK exception.
+    """Extract the ``Retry-After`` header from a provider exception.
 
-    The SDK's ``APIStatusError``/``RateLimitError`` carry the HTTP
+    The SDKs' status errors and httpx's ``HTTPStatusError`` carry the HTTP
     ``response``; its headers hold the server's back-off hint. Returned
     verbatim so :func:`_retry_delay_seconds` can honour it (and fall
     back to exponential backoff on absent/non-numeric values). Public
@@ -781,7 +729,7 @@ def sdk_retry_after(exc: BaseException) -> str | None:
 
 
 def _is_sdk_rate_limit(exc: BaseException) -> bool:
-    """Return whether an OpenAI-SDK exception is a 429 / rate limit."""
+    """Return whether a provider exception is a 429 / rate limit."""
     return (
         _sdk_error_status_code(exc) == 429
         or type(exc).__name__ == "RateLimitError"
@@ -789,151 +737,138 @@ def _is_sdk_rate_limit(exc: BaseException) -> bool:
 
 
 def _is_retryable_sdk_error(exc: BaseException) -> bool:
-    """Return whether an OpenAI-SDK style exception is transient."""
+    """Return whether a provider exception is transient.
+
+    A raw ``httpx`` transport error counts as well: adapters that speak HTTP
+    themselves get it unwrapped, where the SDKs wrap it in their connection
+    and timeout errors.
+    """
     status = _sdk_error_status_code(exc)
     if status is not None:
         return status in _RETRYABLE_SDK_STATUS_CODES
-    return type(exc).__name__ in _RETRYABLE_SDK_ERROR_TYPES
+    return type(exc).__name__ in _RETRYABLE_SDK_ERROR_TYPES or isinstance(exc, httpx.TransportError)
 
 
-def _call_openai_chat_completion_with_retries(
+def _plan_retry(
+    exc: Exception,
     *,
+    attempt: int,
+    budget: ProviderAttemptBudget | None,
     provider_label: str,
     model: str,
     operation: str,
-    deadline: float | None,
-    outer_deadline: float | None = None,
-    timeout_label: str = "Provider call",
-    configured_timeout_seconds: float | None = None,
-    create: Callable[[], Any],
-    append_retry_notice: Callable[[dict[str, Any]], None],
-    error_code_for: Callable[[BaseException], str] | None = None,
-    request_id_for: Callable[[BaseException], str] | None = None,
-) -> Any:
-    """Call an OpenAI-SDK style operation with visible transient retries.
+    configured_timeout_seconds: float | None,
+    effective_timeout_seconds: float | None,
+    error_code_for: Callable[[BaseException], str] | None,
+    request_id_for: Callable[[BaseException], str] | None,
+    transient_for: Callable[[BaseException], bool] | None = None,
+    deadline: float | None = None,
+) -> tuple[float, dict[str, Any]] | None:
+    """Whether a failed provider attempt is retried, and how.
 
+    Returns the delay before the next attempt and its retry notice, after
+    logging the retry, or ``None`` when the caller has to give up and re-raise:
+    no attempt is left, the failure is not transient, or the wait (a
+    ``Retry-After`` included) would end at or past *deadline*.
+    The decision of :func:`inqtrix.providers.attempts.call_with_retries`.
     Transient and rate-limit failures share one total attempt counter. Their
     separately patchable retry ceilings remain useful for replay tests, but a
     mixed sequence can never exceed the larger ceiling (three attempts in
-    production). Every sleep and request is clamped to ``deadline``.
+    production).
     """
-    effective_timeout_seconds = (
-        max(0.0, deadline - time.monotonic())
-        if deadline is not None
-        else None
+    if budget is not None and not budget.remaining:
+        return None
+    status_code = _sdk_error_status_code(exc)
+    if _is_sdk_rate_limit(exc):
+        max_attempts = _SDK_RATE_LIMIT_MAX_RETRIES + 1
+        if attempt >= max_attempts:
+            return None
+        delay = _retry_delay_seconds(
+            attempt - 1, sdk_retry_after(exc)
+        )
+    else:
+        max_attempts = _SDK_MAX_RETRIES + 1
+        transient = _is_retryable_sdk_error(exc) or (
+            transient_for is not None and transient_for(exc)
+        )
+        if not transient or attempt >= max_attempts:
+            return None
+        # A server error may name its wait too, like a rate limit.
+        delay = _retry_delay_seconds(attempt - 1, sdk_retry_after(exc))
+    if deadline is not None and delay >= deadline - time.monotonic():
+        # A wait that ends at or past the deadline buys no further attempt:
+        # the failure that asked for the wait is the honest answer.
+        return None
+    error_code = (
+        error_code_for(exc)
+        if error_code_for is not None
+        else _sdk_error_code(exc)
     )
-    attempt = 1
-    budget = current_provider_attempt_budget()
-    while True:
-        _check_provider_cancel(label=timeout_label)
-        if deadline is not None:
-            _check_provider_operation_deadline(
-                deadline,
-                outer_deadline,
-                label=timeout_label,
-            )
-        if budget is not None:
-            budget.claim()
-        try:
-            return create()
-        except Exception as exc:
-            if budget is not None and not budget.remaining:
-                raise
-            status_code = _sdk_error_status_code(exc)
-            if _is_sdk_rate_limit(exc):
-                max_attempts = _SDK_RATE_LIMIT_MAX_RETRIES + 1
-                if attempt >= max_attempts:
-                    raise
-                delay = _retry_delay_seconds(
-                    attempt - 1, sdk_retry_after(exc)
+    request_id = (
+        request_id_for(exc)
+        if request_id_for is not None
+        else ""
+    )
+    reported_attempt = budget.used if budget is not None else attempt
+    reported_max_attempts = (
+        min(budget.max_attempts, budget.used + max_attempts - attempt)
+        if budget is not None else max_attempts
+    )
+    notice: dict[str, Any] = {
+        "provider": provider_label,
+        "model": model,
+        "operation": operation,
+        "error_code": error_code,
+        "status_code": status_code,
+        "request_id": request_id,
+        "attempt": reported_attempt,
+        "max_attempts": reported_max_attempts,
+        "delay_seconds": round(delay, 3),
+        **(
+            {
+                "configured_timeout_seconds": round(
+                    float(configured_timeout_seconds), 3
                 )
-            else:
-                max_attempts = _SDK_MAX_RETRIES + 1
-                if (
-                    not _is_retryable_sdk_error(exc)
-                    or attempt >= max_attempts
-                ):
-                    raise
-                delay = _retry_delay_seconds(attempt - 1)
-            error_code = (
-                error_code_for(exc)
-                if error_code_for is not None
-                else _sdk_error_code(exc)
-            )
-            request_id = (
-                request_id_for(exc)
-                if request_id_for is not None
-                else ""
-            )
-            reported_attempt = budget.used if budget is not None else attempt
-            reported_max_attempts = (
-                min(budget.max_attempts, budget.used + max_attempts - attempt)
-                if budget is not None else max_attempts
-            )
-            append_retry_notice({
-                "provider": provider_label,
-                "model": model,
-                "operation": operation,
-                "error_code": error_code,
-                "status_code": status_code,
-                "request_id": request_id,
-                "attempt": reported_attempt,
-                "max_attempts": reported_max_attempts,
-                "delay_seconds": round(delay, 3),
-                **(
-                    {
-                        "configured_timeout_seconds": round(
-                            float(configured_timeout_seconds), 3
-                        )
-                    }
-                    if configured_timeout_seconds is not None
-                    else {}
-                ),
-                **(
-                    {
-                        "effective_timeout_seconds": round(
-                            effective_timeout_seconds, 3
-                        )
-                    }
-                    if effective_timeout_seconds is not None
-                    else {}
-                ),
-            })
-            if status_code is not None:
-                log.warning(
-                    "%s transient error (%s, code=%s, status=%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
-                    provider_label,
-                    model,
-                    error_code,
-                    status_code,
-                    request_id or "-",
-                    reported_attempt,
-                    reported_max_attempts,
-                    delay,
+            }
+            if configured_timeout_seconds is not None
+            else {}
+        ),
+        **(
+            {
+                "effective_timeout_seconds": round(
+                    effective_timeout_seconds, 3
                 )
-            else:
-                log.warning(
-                    "%s transport error "
-                    "(model=%s, code=%s, error_type=%s, attempt=%d/%d). "
-                    "Retrying in %.2fs.",
-                    provider_label,
-                    model,
-                    error_code,
-                    type(exc).__name__,
-                    reported_attempt,
-                    reported_max_attempts,
-                    delay,
-                )
-            try:
-                _sleep_before_retry(delay, deadline)
-            except AgentTimeout:
-                _check_provider_operation_deadline(
-                    deadline,
-                    outer_deadline,
-                    label=timeout_label,
-                )
-                raise
-            attempt += 1
+            }
+            if effective_timeout_seconds is not None
+            else {}
+        ),
+    }
+    if status_code is not None:
+        log.warning(
+            "%s transient error (%s, code=%s, status=%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
+            provider_label,
+            model,
+            error_code,
+            status_code,
+            request_id or "-",
+            reported_attempt,
+            reported_max_attempts,
+            delay,
+        )
+    else:
+        log.warning(
+            "%s transport error "
+            "(model=%s, code=%s, error_type=%s, attempt=%d/%d). "
+            "Retrying in %.2fs.",
+            provider_label,
+            model,
+            error_code,
+            type(exc).__name__,
+            reported_attempt,
+            reported_max_attempts,
+            delay,
+        )
+    return delay, notice
 
 
 # =========================================================
@@ -958,6 +893,18 @@ grounded answer) treats these as an incomplete delivery, never as model output
 to parse — the visible text, often empty, is not what the model was asked
 for.  One definition for every consumer (contextualisation, claim extraction,
 the knowledge answer)."""
+
+
+def counted_input_tokens(response: Any) -> int:
+    """Input tokens a limit or a quota counts: what the model read anew.
+
+    The backend reports cache reads inside the input. They cost a fraction of it,
+    and a long run sends the same text with every call, so counting them measures
+    repetition instead of work. Cache writes stay counted: they are billed in full.
+    """
+    prompt_tokens = int(getattr(response, "prompt_tokens", 0) or 0)
+    cache_read_tokens = int(getattr(response, "cache_read_tokens", 0) or 0)
+    return max(0, prompt_tokens - cache_read_tokens)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1097,6 +1044,96 @@ class ChatTurn:
     cache_read_tokens: int | None = None
     cache_creation_tokens: int | None = None
     reasoning_tokens: int | None = None
+    provider_state: dict[str, Any] | None = None
+    """What the provider needs back unchanged on the next turn, such as Claude's thinking
+    blocks: ``{"provider", "model", "content"}`` with JSON-plain values. Opaque to every
+    caller; it travels with the assistant message as :data:`PROVIDER_STATE_FIELD` and
+    never reaches an event, a log line, a span text, a transcript or an archive."""
+
+
+PROVIDER_STATE_FIELD = "provider_state"
+"""Key of :attr:`ChatTurn.provider_state` in an assistant message dict handed to
+:meth:`LLMProvider.chat`. An adapter that cannot use it drops it before sending."""
+
+
+_FOREIGN_STATE_DROPS: dict[tuple[str, str], int] = {}
+_FOREIGN_STATE_LOCK = threading.Lock()
+
+
+def is_foreign_state(state: Any, *, provider: str) -> bool:
+    """Whether *state* is a provider state that another provider wrote.
+
+    Such a state is never sent: its blocks mean nothing to *provider*. The first
+    drop of each pair of providers is a WARNING per process; every drop is counted
+    (DEBUG), because a long conversation sends the same state with every turn.
+    """
+    if not isinstance(state, dict):
+        return False
+    source = str(state.get("provider") or "unknown")[:40]
+    if source == provider:
+        return False
+    with _FOREIGN_STATE_LOCK:
+        count = _FOREIGN_STATE_DROPS.get((source, provider), 0) + 1
+        _FOREIGN_STATE_DROPS[(source, provider)] = count
+    if count == 1:
+        log.warning(
+            "Did not send the provider state of %s to %s: its thinking blocks belong to "
+            "the provider that wrote them. Further drops of this pair are counted at DEBUG.",
+            source,
+            provider,
+        )
+    else:
+        log.debug("Did not send the provider state of %s to %s (%d so far).", source, provider, count)
+    return True
+
+
+def without_provider_state(
+    messages: list[dict[str, Any]], *, provider: str
+) -> list[dict[str, Any]]:
+    """The messages without :data:`PROVIDER_STATE_FIELD`, for a request that does not take it.
+
+    *provider* names the backend. A state another provider wrote is reported once
+    (:func:`is_foreign_state`); the backend's own state (the Responses output an
+    OpenAI-compatible adapter keeps) is dropped quietly, because a Chat
+    Completions request has no place for it.
+    """
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict) and PROVIDER_STATE_FIELD in message:
+            is_foreign_state(message[PROVIDER_STATE_FIELD], provider=provider)
+            message = {key: value for key, value in message.items() if key != PROVIDER_STATE_FIELD}
+        out.append(message)
+    return out
+
+
+_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+
+
+def redact_thinking(value: Any) -> Any:
+    """A copy of a provider payload with every thinking block reduced to its type and length.
+
+    Covers Claude's ``thinking`` and ``redacted_thinking`` content blocks, Bedrock's
+    ``reasoningContent`` blocks and the OpenAI Responses API's ``reasoning`` items
+    (encrypted content and any summary), wherever they sit in the payload, and drops
+    :data:`PROVIDER_STATE_FIELD`, so a span shows that the model thought, never what.
+    """
+    if isinstance(value, list):
+        return [redact_thinking(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("type") in _THINKING_BLOCK_TYPES:
+        body = value.get("thinking") or value.get("data") or ""
+        return {"type": value["type"], "redacted": True, "length": len(str(body))}
+    if value.get("type") == "reasoning":
+        body = {key: value.get(key) for key in ("encrypted_content", "summary", "content") if value.get(key)}
+        return {"type": "reasoning", "redacted": True, "length": len(json.dumps(body, ensure_ascii=False, default=str))}
+    if "reasoningContent" in value:
+        return {"reasoningContent": {"redacted": True, "length": len(str(value["reasoningContent"]))}}
+    return {
+        key: redact_thinking(item)
+        for key, item in value.items()
+        if key != PROVIDER_STATE_FIELD
+    }
 
 
 def chat_turn_from_openai_response(
@@ -1712,6 +1749,65 @@ def _build_recency_language_hints(
 
 
 # =========================================================
+# Async calls of providers that implement only the sync methods
+# =========================================================
+
+_SYNC_ONLY_CLASSES: set[type] = set()
+_SYNC_ONLY_LOCK = threading.Lock()
+
+
+async def _on_provider_lane(call: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    return await aio.run_provider_blocking(call, *args, **kwargs)
+
+
+async def sync_twin(provider: object, method: str, /, *args: Any, **kwargs: Any) -> Any:
+    """Serve an async provider call through the provider's sync *method*.
+
+    The answer for a provider that implements only the sync methods: the call
+    runs on the provider lane of the process loop and holds one thread for its
+    whole duration. Each such class is named once in a WARNING. Keyword
+    arguments left at ``None`` (and an empty effort) are not passed on, so a
+    provider whose sync method predates a parameter keeps working.
+    """
+    cls = type(provider)
+    with _SYNC_ONLY_LOCK:
+        first = cls not in _SYNC_ONLY_CLASSES
+        _SYNC_ONLY_CLASSES.add(cls)
+    if first:
+        log.warning(
+            "CONFIG: %s has no async %s; its async calls run the sync method on the "
+            "provider lane, one thread per call. Implement the async methods to "
+            "run on the event loop.",
+            cls.__name__,
+            method,
+        )
+    given = {
+        name: value
+        for name, value in kwargs.items()
+        if value is not None and not (name == "reasoning_effort" and not value)
+    }
+    return await aio.on_process_loop(
+        _on_provider_lane(getattr(provider, method), *args, **given)
+    )
+
+
+def async_call(provider: object, method: str) -> Callable[..., Any]:
+    """The async twin ``a<method>`` of *provider*, or its sync *method* served on the lane.
+
+    Wrappers forward to whatever they wrap, and that need not derive from the
+    provider base classes.
+    """
+    twin = getattr(provider, f"a{method}", None)
+    if callable(twin):
+        return twin
+
+    async def served(*args: Any, **kwargs: Any) -> Any:
+        return await sync_twin(provider, method, *args, **kwargs)
+
+    return served
+
+
+# =========================================================
 # Abstract base classes
 # =========================================================
 
@@ -1972,6 +2068,22 @@ class LLMProvider(ABC):
         """
         return False
 
+    def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
+        """Return the reasoning efforts this provider can send for *model*.
+
+        The model card lists what the model knows; the API a provider calls it
+        through may take less (OpenAI Chat Completions sends no ``max``). The
+        model picker offers the levels returned here.
+
+        Args:
+            model: The model or deployment identifier the question is about.
+
+        Returns:
+            The levels in the card's order, or ``None`` when this provider adds
+            no limit to the card's levels (the default).
+        """
+        return None
+
     def chat(
         self,
         messages: list[dict[str, Any]],
@@ -1999,7 +2111,9 @@ class LLMProvider(ABC):
         Args:
             messages: Conversation so far in the OpenAI chat-completions
                 message shape. The provider sends it verbatim (it never
-                rewrites history — the agent loop owns trimming).
+                rewrites history — the agent loop owns trimming), except
+                for :data:`PROVIDER_STATE_FIELD` on assistant messages,
+                which only the adapter that wrote it uses.
             tools: Tool definitions in the OpenAI function-tool shape
                 (``{"type": "function", "function": {"name", "description",
                 "parameters"}}``). ``None``/empty runs a plain chat turn.
@@ -2014,10 +2128,11 @@ class LLMProvider(ABC):
             reasoning_effort: Optional per-call reasoning-effort override
                 with the same vocabulary as :meth:`complete`.
             tool_choice: Optional obligation for the turn's tool use in the
-                OpenAI-compatible vocabulary (``"required"``: the turn must
-                call a tool). ``None`` sends nothing and leaves the choice
-                to the model. Sent verbatim: a backend or model that does
-                not support it rejects the request visibly, never silently.
+                OpenAI-compatible vocabulary: ``"required"`` (the turn must
+                call a tool) or ``"none"`` (the turn must not). ``None`` sends
+                nothing and leaves the choice to the model. An adapter maps
+                each value to its backend or rejects it visibly, never
+                silently.
 
         Returns:
             ChatTurn: The next assistant turn with tool-call requests,
@@ -2032,6 +2147,104 @@ class LLMProvider(ABC):
         raise NotImplementedError(
             "Provider does not implement native tool calling; check "
             "supports_tool_calls() before calling chat()."
+        )
+
+    async def acomplete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        state: dict | None = None,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        """Async twin of :meth:`complete`: same arguments, result and errors.
+
+        A provider without its own async implementation serves it through
+        :meth:`complete` on the provider lane (:func:`sync_twin`).
+        """
+        return await sync_twin(
+            self, "complete", prompt, system=system, model=model,
+            max_output_tokens=max_output_tokens, timeout=timeout, state=state,
+            deadline=deadline, reasoning_effort=reasoning_effort,
+        )
+
+    async def acomplete_with_metadata(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        state: dict | None = None,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """Async twin of :meth:`complete_with_metadata`: same arguments, result and errors.
+
+        A provider without its own async implementation serves it through
+        :meth:`complete_with_metadata` on the provider lane.
+        """
+        return await sync_twin(
+            self, "complete_with_metadata", prompt, system=system, model=model,
+            max_output_tokens=max_output_tokens, timeout=timeout, state=state,
+            deadline=deadline, reasoning_effort=reasoning_effort,
+        )
+
+    async def acomplete_structured(
+        self,
+        prompt: str,
+        *,
+        schema: dict[str, Any],
+        schema_name: str,
+        schema_description: str = "",
+        system: str | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        state: dict | None = None,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> StructuredLLMResponse:
+        """Async twin of :meth:`complete_structured`: same arguments, result and errors.
+
+        A provider without its own async implementation serves it through
+        :meth:`complete_structured` on the provider lane.
+        """
+        return await sync_twin(
+            self, "complete_structured", prompt, schema=schema,
+            schema_name=schema_name, schema_description=schema_description,
+            system=system, model=model, max_output_tokens=max_output_tokens,
+            timeout=timeout, state=state, deadline=deadline,
+            reasoning_effort=reasoning_effort,
+        )
+
+    async def achat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+        tool_choice: str | None = None,
+    ) -> "ChatTurn":
+        """Async twin of :meth:`chat`: same arguments, result and errors.
+
+        A provider without its own async implementation serves it through
+        :meth:`chat` on the provider lane.
+        """
+        return await sync_twin(
+            self, "chat", messages, tools=tools, model=model,
+            max_output_tokens=max_output_tokens, timeout=timeout,
+            deadline=deadline, reasoning_effort=reasoning_effort,
+            tool_choice=tool_choice,
         )
 
     @abstractmethod
@@ -2120,6 +2333,30 @@ class SearchProvider(ABC):
             Exception: Provider-specific fatal errors may propagate when no
                 safe empty-result fallback exists.
         """
+
+    async def asearch(
+        self,
+        query: str,
+        *,
+        search_context_size: str = "high",
+        recency_filter: str | None = None,
+        language_filter: list[str] | None = None,
+        domain_filter: list[str] | None = None,
+        search_mode: str | None = None,
+        return_related: bool = False,
+        deadline: float | None = None,
+    ) -> GroundedSearchResult:
+        """Async twin of :meth:`search`: same arguments, result and errors.
+
+        A provider without its own async implementation serves it through
+        :meth:`search` on the provider lane (:func:`sync_twin`).
+        """
+        return await sync_twin(
+            self, "search", query, search_context_size=search_context_size,
+            recency_filter=recency_filter, language_filter=language_filter,
+            domain_filter=domain_filter, search_mode=search_mode,
+            return_related=return_related, deadline=deadline,
+        )
 
     @abstractmethod
     def is_available(self) -> bool:
@@ -2281,19 +2518,14 @@ class ConfiguredLLMProvider(LLMProvider):
             AgentTimeout: Surfaced from the wrapped provider.
             AgentRateLimited: Surfaced from the wrapped provider.
         """
-        call_kwargs: dict[str, object] = {
-            "system": system,
-            "max_output_tokens": max_output_tokens,
-            "timeout": timeout,
-            "state": state,
-            "deadline": deadline,
-        }
-        effective_model = model or self._models.reasoning_model
-        if effective_model:
-            call_kwargs["model"] = effective_model
-        if reasoning_effort:
-            call_kwargs["reasoning_effort"] = reasoning_effort
-        return self._provider.complete(prompt, **call_kwargs)
+        return self._provider.complete(
+            prompt,
+            **self._forwarded(
+                model, reasoning_effort, system=system,
+                max_output_tokens=max_output_tokens, timeout=timeout,
+                state=state, deadline=deadline,
+            ),
+        )
 
     def complete_with_metadata(
         self,
@@ -2330,19 +2562,14 @@ class ConfiguredLLMProvider(LLMProvider):
             AgentTimeout: Surfaced from the wrapped provider.
             AgentRateLimited: Surfaced from the wrapped provider.
         """
-        call_kwargs: dict[str, object] = {
-            "system": system,
-            "max_output_tokens": max_output_tokens,
-            "timeout": timeout,
-            "state": state,
-            "deadline": deadline,
-        }
-        effective_model = model or self._models.reasoning_model
-        if effective_model:
-            call_kwargs["model"] = effective_model
-        if reasoning_effort:
-            call_kwargs["reasoning_effort"] = reasoning_effort
-        return self._provider.complete_with_metadata(prompt, **call_kwargs)
+        return self._provider.complete_with_metadata(
+            prompt,
+            **self._forwarded(
+                model, reasoning_effort, system=system,
+                max_output_tokens=max_output_tokens, timeout=timeout,
+                state=state, deadline=deadline,
+            ),
+        )
 
     def supports_structured_output(self, *, model: str | None = None) -> bool:
         """Forward structured-output capability checks to the wrapped provider.
@@ -2375,6 +2602,12 @@ class ConfiguredLLMProvider(LLMProvider):
             self._provider,
             "supports_tool_calls",
             model=model or self._models.reasoning_model,
+        )
+
+    def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
+        """Forward the reasoning levels of *model* to the wrapped provider."""
+        return reported_reasoning_levels(
+            self._provider, model=model or self._models.reasoning_model
         )
 
     def chat(
@@ -2418,20 +2651,14 @@ class ConfiguredLLMProvider(LLMProvider):
             raise NotImplementedError(
                 "Wrapped provider does not implement native tool calling."
             )
-        call_kwargs: dict[str, object] = {
-            "tools": tools,
-            "max_output_tokens": max_output_tokens,
-            "timeout": timeout,
-            "deadline": deadline,
-        }
-        effective_model = model or self._models.reasoning_model
-        if effective_model:
-            call_kwargs["model"] = effective_model
-        if reasoning_effort:
-            call_kwargs["reasoning_effort"] = reasoning_effort
-        if tool_choice is not None:
-            call_kwargs["tool_choice"] = tool_choice
-        return inner_chat(messages, **call_kwargs)
+        return inner_chat(
+            messages,
+            **self._forwarded_chat(
+                tools=tools, model=model, max_output_tokens=max_output_tokens,
+                timeout=timeout, deadline=deadline,
+                reasoning_effort=reasoning_effort, tool_choice=tool_choice,
+            ),
+        )
 
     def complete_structured(
         self,
@@ -2476,42 +2703,142 @@ class ConfiguredLLMProvider(LLMProvider):
             raise NotImplementedError(
                 "Wrapped provider does not implement structured output."
             )
-        call_kwargs: dict[str, object] = {
-            "schema": schema,
-            "schema_name": schema_name,
-            "schema_description": schema_description,
-            "system": system,
-            "max_output_tokens": max_output_tokens,
-            "timeout": timeout,
-            "state": state,
-            "deadline": deadline,
-        }
+        return structured(
+            prompt,
+            **self._forwarded(
+                model, reasoning_effort, schema=schema,
+                schema_name=schema_name, schema_description=schema_description,
+                system=system, max_output_tokens=max_output_tokens,
+                timeout=timeout, state=state, deadline=deadline,
+            ),
+        )
+
+    def _forwarded(
+        self, model: str | None, reasoning_effort: str | None, **always: Any
+    ) -> dict[str, object]:
+        """Keyword arguments of a forwarded call, sync or async.
+
+        *always* goes along as given; the model only when one is in effect,
+        defaulting to ``self.models.reasoning_model``; the effort only when
+        set, so a wrapped provider that predates the parameter keeps working.
+        """
+        call_kwargs: dict[str, object] = dict(always)
         effective_model = model or self._models.reasoning_model
         if effective_model:
             call_kwargs["model"] = effective_model
         if reasoning_effort:
             call_kwargs["reasoning_effort"] = reasoning_effort
-        return structured(prompt, **call_kwargs)
+        return call_kwargs
 
-    @contextmanager
-    def observe_retries(self, callback: ProviderRetryCallback) -> Iterator[object]:
-        """Forward retry observation to the wrapped provider when available."""
-        observer = getattr(self._provider, "observe_retries", None)
-        if callable(observer):
-            with observer(callback):
-                yield self
-        else:
-            yield self
+    def _forwarded_chat(
+        self, *, model: str | None, reasoning_effort: str | None,
+        tool_choice: str | None, **always: Any,
+    ) -> dict[str, object]:
+        """:meth:`_forwarded` for a chat turn: the tool choice only when set."""
+        call_kwargs = self._forwarded(model, reasoning_effort, **always)
+        if tool_choice is not None:
+            call_kwargs["tool_choice"] = tool_choice
+        return call_kwargs
 
-    def consume_retry_notices(self) -> list[dict[str, Any]]:
-        """Forward retry diagnostics from the wrapped provider when available."""
-        consumer = getattr(self._provider, "consume_retry_notices", None)
-        if not callable(consumer):
-            return []
-        notices = consumer()
-        if not isinstance(notices, list):
-            return []
-        return [dict(item) for item in notices if isinstance(item, dict)]
+    async def acomplete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        state: dict | None = None,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        """Async twin of :meth:`complete`, with the same defaulting."""
+        return await async_call(self._provider, "complete")(
+            prompt,
+            **self._forwarded(
+                model, reasoning_effort, system=system,
+                max_output_tokens=max_output_tokens, timeout=timeout,
+                state=state, deadline=deadline,
+            ),
+        )
+
+    async def acomplete_with_metadata(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        state: dict | None = None,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """Async twin of :meth:`complete_with_metadata`, with the same defaulting."""
+        return await async_call(self._provider, "complete_with_metadata")(
+            prompt,
+            **self._forwarded(
+                model, reasoning_effort, system=system,
+                max_output_tokens=max_output_tokens, timeout=timeout,
+                state=state, deadline=deadline,
+            ),
+        )
+
+    async def acomplete_structured(
+        self,
+        prompt: str,
+        *,
+        schema: dict[str, Any],
+        schema_name: str,
+        schema_description: str = "",
+        system: str | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        state: dict | None = None,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> StructuredLLMResponse:
+        """Async twin of :meth:`complete_structured`, with the same defaulting."""
+        if not callable(getattr(self._provider, "complete_structured", None)):
+            raise NotImplementedError(
+                "Wrapped provider does not implement structured output."
+            )
+        return await async_call(self._provider, "complete_structured")(
+            prompt,
+            **self._forwarded(
+                model, reasoning_effort, schema=schema,
+                schema_name=schema_name, schema_description=schema_description,
+                system=system, max_output_tokens=max_output_tokens,
+                timeout=timeout, state=state, deadline=deadline,
+            ),
+        )
+
+    async def achat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+        tool_choice: str | None = None,
+    ) -> "ChatTurn":
+        """Async twin of :meth:`chat`, with the same defaulting."""
+        if not callable(getattr(self._provider, "chat", None)):
+            raise NotImplementedError(
+                "Wrapped provider does not implement native tool calling."
+            )
+        return await async_call(self._provider, "chat")(
+            messages,
+            **self._forwarded_chat(
+                tools=tools, model=model, max_output_tokens=max_output_tokens,
+                timeout=timeout, deadline=deadline,
+                reasoning_effort=reasoning_effort, tool_choice=tool_choice,
+            ),
+        )
 
     def is_available(self) -> bool:
         """Forward the availability check to the wrapped provider.
@@ -2522,21 +2849,6 @@ class ConfiguredLLMProvider(LLMProvider):
             adds no availability logic of its own.
         """
         return self._provider.is_available()
-
-    def consume_nonfatal_notice(self) -> str | None:
-        """Forward an optional non-fatal notice from the wrapped provider.
-
-        Returns:
-            The wrapped provider's ``consume_nonfatal_notice()`` value
-            when that method exists (typically a one-shot warning
-            string used by the runtime to surface degraded-but-
-            successful conditions). ``None`` when the wrapped provider
-            does not implement this hook.
-        """
-        consumer = getattr(self._provider, "consume_nonfatal_notice", None)
-        if callable(consumer):
-            return consumer()
-        return None
 
 
 class UntrustedContentRuleProvider(LLMProvider):
@@ -2598,6 +2910,9 @@ class UntrustedContentRuleProvider(LLMProvider):
             self._provider, "supports_tool_calls", model=model
         )
 
+    def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
+        return reported_reasoning_levels(self._provider, model=model or "")
+
     def is_available(self) -> bool:
         return self._provider.is_available()
 
@@ -2631,6 +2946,40 @@ class UntrustedContentRuleProvider(LLMProvider):
         from inqtrix.untrusted_content import messages_with_untrusted_content_rule
 
         return self._provider.chat(
+            messages_with_untrusted_content_rule(messages), **kwargs
+        )
+
+    async def acomplete(
+        self, prompt: str, *, system: str | None = None, **kwargs: Any
+    ) -> str:
+        from inqtrix.untrusted_content import with_untrusted_content_rule
+
+        return await async_call(self._provider, "complete")(
+            prompt, system=with_untrusted_content_rule(system), **kwargs
+        )
+
+    async def acomplete_with_metadata(
+        self, prompt: str, *, system: str | None = None, **kwargs: Any
+    ) -> "LLMResponse":
+        from inqtrix.untrusted_content import with_untrusted_content_rule
+
+        return await async_call(self._provider, "complete_with_metadata")(
+            prompt, system=with_untrusted_content_rule(system), **kwargs
+        )
+
+    async def acomplete_structured(
+        self, prompt: str, *, system: str | None = None, **kwargs: Any
+    ) -> "StructuredLLMResponse":
+        from inqtrix.untrusted_content import with_untrusted_content_rule
+
+        return await async_call(self._provider, "complete_structured")(
+            prompt, system=with_untrusted_content_rule(system), **kwargs
+        )
+
+    async def achat(self, messages: list[dict[str, Any]], **kwargs: Any) -> "ChatTurn":
+        from inqtrix.untrusted_content import messages_with_untrusted_content_rule
+
+        return await async_call(self._provider, "chat")(
             messages_with_untrusted_content_rule(messages), **kwargs
         )
 

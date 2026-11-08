@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 import uuid
 from dataclasses import replace
@@ -22,6 +23,9 @@ from inqtrix.project.editor_guest_links import (
     EditorGuestLinkNotFound,
     EditorGuestLinkRateLimited,
     EditorGuestLinkUnavailable,
+)
+from inqtrix.services.editor_collaboration_service import (
+    CollaborationAuthenticationRequired,
 )
 from inqtrix.services.editor_guest_link_service import EditorGuestLinkService
 from inqtrix.server.routers.editor_guest_links import build_router
@@ -901,3 +905,165 @@ def test_a_link_of_an_inactive_owner_answers_currently_unavailable() -> None:
     assert {response.json()["error"]["type"] for response in responses} == {
         "guest_link_unavailable"
     }
+
+
+def _guest_router_app(guest_service, editor_collaboration=None) -> FastAPI:
+    container = SimpleNamespace(
+        collaboration_service=object(),
+        editor_collaboration_service=editor_collaboration or object(),
+        editor_guest_link_service=guest_service,
+        principal_dependency=lambda: _principal(),
+        settings=SimpleNamespace(
+            auth=SimpleNamespace(trusted_proxy_hops=0),
+            editor_guest_links=SimpleNamespace(allow_insecure_http=False),
+            server=SimpleNamespace(public_base_url="https://desk.example.test"),
+        ),
+        share_service=object(),
+    )
+    app = FastAPI()
+    app.include_router(build_router(container))
+    return app
+
+
+def _collaboration_failures() -> list[Exception]:
+    from inqtrix.project.editor_collaboration_ports import (
+        CollaborationConflict,
+        CollaborationInstanceFenced,
+        CollaborationLeaseInvalid,
+        CollaborationRateLimited,
+    )
+    from inqtrix.services.collaboration_client import (
+        CollaborationNodeConflict,
+        CollaborationServiceUnavailable,
+    )
+    from inqtrix.services.editor_collaboration_service import (
+        CollaborationDocumentTooLarge,
+        CollaborationProtocolConflict,
+    )
+
+    return [
+        CollaborationLeaseInvalid("lease_expired"),
+        CollaborationLeaseInvalid("lease_revoked"),
+        CollaborationLeaseInvalid("access_revoked"),
+        CollaborationRateLimited("lease_rate_limited"),
+        CollaborationServiceUnavailable("node down"),
+        CollaborationInstanceFenced("instance_fenced"),
+        CollaborationDocumentTooLarge("too large"),
+        CollaborationConflict("generation_changed", current_sequence=3),
+        CollaborationProtocolConflict("protocol_version"),
+        CollaborationNodeConflict("schema_mismatch"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure", _collaboration_failures(), ids=lambda failure: type(failure).__name__
+)
+def test_a_guest_lease_request_answers_every_collaboration_failure_like_a_signed_in_one(
+    failure: Exception,
+) -> None:
+    """A guest whose lease is consumed, expired or revoked, or who meets a rate
+    limit or an unavailable service, gets the status and reason a signed-in
+    editor gets: the browser's lease recovery decides on them, and a 500
+    leaves it nothing to decide on."""
+    from inqtrix.server.routers.editor_collaboration import _public_error
+
+    class FailingGuestService:
+        async def create_collaboration_session(self, **_kwargs):
+            raise failure
+
+    app = _guest_router_app(FailingGuestService())
+    with TestClient(app, base_url="https://desk.example.test") as client:
+        client.cookies.set("inqtrix_editor_guest", "guest-session-token")
+        client.cookies.set("inqtrix_editor_guest_csrf", "guest-csrf")
+        response = client.post(
+            "/v1/editor/guest/collaboration/session",
+            headers={
+                "Origin": "https://desk.example.test",
+                "x-inqtrix-guest-csrf": "guest-csrf",
+            },
+            json={
+                "protocol_version": 1,
+                "schema_version": 1,
+                "lease_token": "consumed-lease",
+                "rotation_command_id": str(COMMAND_ID),
+            },
+        )
+
+    signed_in = _public_error(failure)
+    assert signed_in is not None
+    assert response.status_code == signed_in.status_code
+    assert response.json()["error"].get("reason") == (
+        json.loads(signed_in.body)["error"].get("reason")
+    )
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    "failure", _collaboration_failures(), ids=lambda failure: type(failure).__name__
+)
+def test_a_guest_comment_route_answers_every_collaboration_failure_like_a_signed_in_one(
+    failure: Exception,
+) -> None:
+    """The guest comment routes answer every collaboration failure the
+    guest-link answers do not cover as a signed-in comment route does: a
+    document too large stays 413 although it is a ValueError, and a
+    conflict keeps its reason."""
+    from inqtrix.server.routers.editor_collaboration import _public_error
+
+    class RouterGuestService:
+        async def session(self, token: str):
+            return object()
+
+    class FailingCollaboration:
+        async def list_guest_comments(self, **_kwargs):
+            raise failure
+
+    app = _guest_router_app(RouterGuestService(), FailingCollaboration())
+    with TestClient(app, base_url="https://desk.example.test") as client:
+        response = client.get(
+            "/v1/editor/guest/collaboration/comments",
+            headers={"Cookie": "inqtrix_editor_guest=guest-session"},
+        )
+
+    signed_in = _public_error(failure)
+    assert signed_in is not None
+    assert response.status_code == signed_in.status_code
+    assert response.json()["error"] == json.loads(signed_in.body)["error"]
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (CollaborationAuthenticationRequired("guest links unavailable"), "Guest session is no longer valid."),
+        (EditorGuestLinkNotFound(), "Guest session has expired."),
+        (EditorGuestLinkExpired(), "Guest session has expired."),
+    ],
+    ids=["authentication-required", "not-found", "expired"],
+)
+def test_a_guest_lease_request_ends_guest_access_with_401(failure: Exception, message: str) -> None:
+    """A guest whose session is gone gets 401, the status that ends guest
+    access in the browser; the shared mapping would answer 403 or nothing,
+    and a 500 sends the guest into endless reconnects."""
+
+    class FailingGuestService:
+        async def create_collaboration_session(self, **_kwargs):
+            raise failure
+
+    app = _guest_router_app(FailingGuestService())
+    with TestClient(app, base_url="https://desk.example.test") as client:
+        client.cookies.set("inqtrix_editor_guest", "guest-session-token")
+        client.cookies.set("inqtrix_editor_guest_csrf", "guest-csrf")
+        response = client.post(
+            "/v1/editor/guest/collaboration/session",
+            headers={
+                "Origin": "https://desk.example.test",
+                "x-inqtrix-guest-csrf": "guest-csrf",
+            },
+            json={"protocol_version": 1, "schema_version": 1},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["message"] == message
+    assert response.headers["cache-control"] == "no-store"
+

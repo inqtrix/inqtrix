@@ -83,7 +83,6 @@ async def patch_store(wiped):
         engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE
     )
     yield store
-    await store.aclose()
 
 
 @pytest_asyncio.fixture()
@@ -92,7 +91,6 @@ async def persistence(wiped):
         engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE
     )
     yield EditorPersistenceService(store=store, durable=True)
-    await store.aclose()
 
 
 @pytest.fixture()

@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from inqtrix.auth.identity_memory import MemoryIdentityStore
 from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.knowledge.parsing import DocumentParseError, DocumentParser
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
 from inqtrix.server.routers import asset_records as asset_records_router

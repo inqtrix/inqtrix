@@ -437,7 +437,6 @@ class EditorCollaborationStore(Protocol):
         self,
         lease: CollaborationLease,
         *,
-        max_active: int,
         max_issued_per_window: int,
         issued_since: float,
     ) -> CollaborationLease:

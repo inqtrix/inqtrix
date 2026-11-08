@@ -9,7 +9,6 @@ it at call time; the algorithm sets/resets it around each segment.
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import hashlib
 import logging
@@ -17,6 +16,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from inqtrix import aio
 from inqtrix.agents.context_sources import SourceCoverageLedger
 from inqtrix.agents.tier_policy import blocked_kernel_tools, resolve_tier_policy
 from inqtrix.core.results import SourcePolicy
@@ -155,6 +155,11 @@ class KernelDeps:
             deps-build time from the platform pin or the resolved
             model's card; the shared compiled graph reads it through
             the deps ContextVar, so one graph serves every model.
+        compaction_hold_tokens: View size below which this segment does
+            not try another compaction after one that did not shrink the
+            view (0 = no hold).
+        compaction_stall_warned: Whether this segment already warned that
+            only the kept messages are left above the trigger.
         context_offload_chars: Bulk tool results above this many
             characters are archived in full without shortening the model
             handover (0 disables eager archival).
@@ -359,6 +364,8 @@ this selection; research children keep their independent model routing.
     context_trigger_tokens: int = 0
     context_offload_chars: int = 0
     context_input_budget: int = 0
+    compaction_hold_tokens: int = 0
+    compaction_stall_warned: bool = False
     context_sources_available: bool = False
     _source_receipt: dict[str, Any] = field(default_factory=dict, repr=False)
     _source_receipt_lock: Any = field(default_factory=threading.RLock, repr=False)
@@ -969,10 +976,10 @@ this selection; research children keep their independent model routing.
         return ids[0]
 
     def append_private_context_archive(self, title: str, text: str, messages: list[Any], representation: str) -> str:
-        from inqtrix.agents.kernel.transcript import transcript_descriptor
+        from inqtrix.agents.kernel.transcript import public_message_dump, transcript_descriptor
 
         run_coro(self.source_service.assert_scope(self.capability_context))
-        encoded = [message.model_dump(mode="json") for message in messages]
+        encoded = [public_message_dump(message) for message in messages]
         descriptor = transcript_descriptor(self, encoded, text, representation)
         records = run_coro(self.control.put_context_archive(
             run_id=self.run_id, title=title, text=text, transcript=descriptor,
@@ -1028,12 +1035,11 @@ this selection; research children keep their independent model routing.
         if receipt:
             from inqtrix.capabilities import CapabilityError
             from inqtrix.execution_authority import AuthorizationRevoked
-            from inqtrix.sync_bridge import run_coro_sync
 
             if self.source_service is None:
                 raise AuthorizationRevoked("Conversation source authorization is unavailable.")
             try:
-                run_coro_sync(self.source_service.validate_receipt(self.capability_context, receipt))
+                aio.call_from_thread(self.source_service.validate_receipt(self.capability_context, receipt))
             except CapabilityError as exc:
                 raise AuthorizationRevoked("Previously read conversation sources are no longer authorized.") from exc
 
@@ -1041,8 +1047,8 @@ this selection; research children keep their independent model routing.
         """Stop the loop at the model-call boundary (cancel or budget).
 
         Mirrors the research graph's node-boundary check
-        (``state.raise_if_cancelled``): best-effort — an in-flight
-        provider HTTP call is not interrupted, the NEXT model turn is.
+        (``state.raise_if_cancelled``): a model call in flight ends
+        through the provider cancel probe, this check stops the next turn.
 
         Raises:
             AgentCancelled: The cancel event is set, or the configured
@@ -1084,5 +1090,5 @@ def set_kernel_deps(deps: KernelDeps | None) -> None:
 
 
 def run_coro(coro: Any) -> Any:
-    """Drive one control-store coroutine from the sync worker thread."""
-    return asyncio.run(coro)
+    """Await one coroutine on the process loop from the sync worker thread."""
+    return aio.call_from_thread(coro)

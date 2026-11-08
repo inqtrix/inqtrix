@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -50,14 +51,14 @@ def active_recorder(monkeypatch):
     rec = UsageRecorder(store, flush_interval_seconds=3600.0)
     monkeypatch.setattr(recorder_module, "_active", rec)
     yield store, rec
-    rec.close()
+    asyncio.run(rec.aclose())
     monkeypatch.setattr(recorder_module, "_active", None)
 
 
 def test_wrapper_feeds_ledger_row(active_recorder):
     """The provider tracing wrapper books one ledger row per LLM call with the
     ambient subject, feature, and canonical model."""
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
     from tests.test_provider_tracing import SUMMARY, FakeLLM
 
     store, rec = active_recorder
@@ -69,7 +70,7 @@ def test_wrapper_feeds_ledger_row(active_recorder):
     finally:
         reset_feature(feature_token)
         clear_usage_subject()
-    rec.close()
+    asyncio.run(rec.aclose())
     rows = store.rows_snapshot()
     assert len(rows) == 1
     row = rows[0]
@@ -85,19 +86,19 @@ def test_wrapper_feeds_ledger_row(active_recorder):
 
 
 def test_no_subject_books_nothing(active_recorder):
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
     from tests.test_provider_tracing import SUMMARY, FakeLLM
 
     store, rec = active_recorder
     clear_usage_subject()
     llm = instrument_llm(FakeLLM(), provider_name="fake", policy=SUMMARY)
     llm.complete_with_metadata("hallo")
-    rec.close()
+    asyncio.run(rec.aclose())
     assert store.rows_snapshot() == []
 
 
 def test_error_call_books_zero_token_row(active_recorder):
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
     from tests.test_provider_tracing import SUMMARY, FakeLLM
 
     store, rec = active_recorder
@@ -113,7 +114,7 @@ def test_error_call_books_zero_token_row(active_recorder):
             llm.complete_with_metadata("x")
     finally:
         clear_usage_subject()
-    rec.close()
+    asyncio.run(rec.aclose())
     rows = store.rows_snapshot()
     assert len(rows) == 1
     assert rows[0].outcome == "timeout"
@@ -136,11 +137,11 @@ def test_flush_failure_warns_requeues_and_recovers(caplog):
     rec = UsageRecorder(store, flush_interval_seconds=3600.0)
     rec.record(_row())
     with caplog.at_level("WARNING", logger="inqtrix"):
-        rec._flush_once()
+        asyncio.run(rec._flush_once())
     assert any("Usage ledger flush failed" in r.message for r in caplog.records)
     assert store.rows == []
     store.fail = False
-    rec.close()
+    asyncio.run(rec.aclose())
     assert len(store.rows) == 1
 
 
@@ -153,7 +154,7 @@ def test_overflow_drops_new_rows_with_warning(caplog):
         for _ in range(4):
             rec.record(_row())
     assert any("Usage ledger buffer full" in r.message for r in caplog.records)
-    rec.close()
+    asyncio.run(rec.aclose())
     assert len(store.rows_snapshot()) == 2
 
 
@@ -269,7 +270,7 @@ def test_ledger_matches_quota_booking_per_run(monkeypatch):
     from types import SimpleNamespace
 
     from inqtrix.observability.context import clear_usage_subject
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
     from inqtrix.quota.memory import MemoryQuotaStore
     from inqtrix.quota.models import QuotaDimension, QuotaSubject
     from inqtrix.services.quota_service import QuotaService
@@ -365,7 +366,7 @@ def test_ledger_matches_quota_booking_per_run(monkeypatch):
     finally:
         clear_usage_subject()
         reset_log_context(log_tokens)
-    rec.close()
+    asyncio.run(rec.aclose())
     monkeypatch.setattr(recorder_module, "_active", None)
 
     rows = [
@@ -406,10 +407,10 @@ def test_partial_multi_tenant_flush_does_not_double_book():
     rec = UsageRecorder(store, flush_interval_seconds=3600.0)
     rec.record(_row(tenant_id="t1"))
     rec.record(_row(tenant_id="t2", user_id=other_user))
-    rec._flush_once()
+    asyncio.run(rec._flush_once())
     assert [r.tenant_id for r in store.rows] == ["t1"]
     store.reject_tenant = "none"
-    rec.close()
+    asyncio.run(rec.aclose())
     # t1 exactly once, t2 recovered on the retry.
     assert sorted(r.tenant_id for r in store.rows) == ["t1", "t2"]
 
@@ -427,10 +428,10 @@ def test_poison_batch_is_dropped_loudly_after_retry_budget(caplog):
     rec.record(_row())
     with caplog.at_level("ERROR", logger="inqtrix"):
         for _ in range(rec_module._MAX_FLUSH_RETRIES + 1):
-            rec._flush_once()
+            asyncio.run(rec._flush_once())
     assert any("discarding them so subsequent usage recording can continue" in r.message for r in caplog.records)
     rec.record(_row())  # buffer is usable again
-    rec.close()
+    asyncio.run(rec.aclose())
 
 
 def test_flush_warning_never_carries_raw_identifiers(caplog):
@@ -447,21 +448,21 @@ def test_flush_warning_never_carries_raw_identifiers(caplog):
     rec = UsageRecorder(_LeakyStore(), flush_interval_seconds=3600.0)
     rec.record(_row(tenant_id="tenant-secret"))
     with caplog.at_level("WARNING", logger="inqtrix"):
-        rec._flush_once()
+        asyncio.run(rec._flush_once())
     rendered = "\n".join(
         r.getMessage() + (r.exc_text or "") for r in caplog.records
     )
     assert "tenant-secret" not in rendered
     assert str(USER) not in rendered
     assert "RuntimeError" in rendered  # the error class stays visible
-    rec.close()
+    asyncio.run(rec.aclose())
 
 
 def test_complete_path_books_state_accumulator_tokens(active_recorder):
     """``complete()`` returns bare text; its tokens only reach
     the caller through state= — the ledger must book the same delta quota
     books, not a zero-token row."""
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
     from tests.test_provider_tracing import SUMMARY, FakeLLM
 
     store, rec = active_recorder
@@ -481,7 +482,7 @@ def test_complete_path_books_state_accumulator_tokens(active_recorder):
         llm.complete("hi", state=usage_state)
     finally:
         clear_usage_subject()
-    rec.close()
+    asyncio.run(rec.aclose())
     rows = store.rows_snapshot()
     assert len(rows) == 1
     assert (rows[0].input_tokens, rows[0].output_tokens) == (13, 4)
@@ -534,8 +535,8 @@ def test_indexing_ledger_bind_is_independent_of_quota(monkeypatch):
 def test_embedding_call_books_the_estimated_input_tokens(active_recorder):
     """Embedding wrappers book the same estimate the quota path uses over the
     same texts, so ledger and quota cannot drift apart."""
-    from inqtrix.observability.provider_tracing import instrument_embeddings
-    from inqtrix.quota.models import estimate_tokens
+    from inqtrix.providers.tracing import instrument_embeddings
+    from inqtrix.text import estimate_tokens
     from tests.test_provider_tracing import SUMMARY, FakeEmbeddings
 
     store, rec = active_recorder
@@ -547,7 +548,7 @@ def test_embedding_call_books_the_estimated_input_tokens(active_recorder):
         embeddings.embed_query(texts[0])
     finally:
         clear_usage_subject()
-    rec.close()
+    asyncio.run(rec.aclose())
 
     rows = store.rows_snapshot()
     assert [row.operation for row in rows] == ["embeddings", "embeddings"]
@@ -562,7 +563,7 @@ def test_ledger_keeps_the_full_model_id_when_the_metric_label_is_capped(
     """The metric cardinality guard protects a time series, not an immutable
     billing record: the ledger keeps the identifier a price can resolve."""
     from inqtrix.observability import metrics_defs
-    from inqtrix.observability.provider_tracing import instrument_llm
+    from inqtrix.providers.tracing import instrument_llm
     from tests.test_provider_tracing import SUMMARY, FakeLLM
 
     monkeypatch.setattr(metrics_defs, "_fallback_model_labels", set())
@@ -578,7 +579,7 @@ def test_ledger_keeps_the_full_model_id_when_the_metric_label_is_capped(
         llm.complete_with_metadata("hallo")
     finally:
         clear_usage_subject()
-    rec.close()
+    asyncio.run(rec.aclose())
 
     assert store.rows_snapshot()[0].model == "fake-1"
 
@@ -734,3 +735,62 @@ def test_a_row_with_an_unpriced_share_is_marked_incomplete():
     assert zeile["cost_usd"] == pytest.approx(1.0)
     assert zeile["cost_complete"] is False
     assert zeile["input_tokens"] == 1_050_000
+
+
+def test_a_new_recorder_starts_nothing_and_only_collects():
+    """``create_app`` builds it before any loop runs."""
+    store = MemoryUsageStore()
+    rec = UsageRecorder(store, flush_interval_seconds=0.01)
+    rec.record(_row())
+    assert store.rows_snapshot() == []
+
+
+def test_a_started_flusher_writes_on_its_interval():
+    store = MemoryUsageStore()
+    rec = UsageRecorder(store, flush_interval_seconds=0.01)
+    rec.record(_row())
+
+    async def scenario() -> None:
+        rec.start()
+        rec.start()
+        assert [
+            task.get_name() for task in asyncio.all_tasks() if task.get_name() == "inqtrix-usage-ledger"
+        ] == ["inqtrix-usage-ledger"]
+        while not store.rows_snapshot():
+            await asyncio.sleep(0.01)
+        await rec.aclose()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+    assert len(store.rows_snapshot()) == 1
+
+
+def test_closing_never_cancels_a_flush_in_progress(monkeypatch):
+    """A batch leaves the buffer before its insert: a cancel in between would lose it."""
+    from inqtrix.usage import recorder as rec_module
+
+    monkeypatch.setattr(rec_module, "_CLOSE_WAIT_SECONDS", 0.05)
+
+    class SlowStore:
+        def __init__(self) -> None:
+            self.rows: list = []
+            self.release = asyncio.Event()
+
+        async def insert_rows(self, rows):
+            await self.release.wait()
+            self.rows.extend(rows)
+            return len(rows)
+
+    store = SlowStore()
+    rec = UsageRecorder(store, flush_interval_seconds=0.01)
+    rec.record(_row())
+
+    async def scenario() -> None:
+        rec.start()
+        await asyncio.sleep(0.05)
+        await rec.aclose()
+        store.release.set()
+        await asyncio.sleep(0.05)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+    assert len(store.rows) == 1
+

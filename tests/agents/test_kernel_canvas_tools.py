@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -84,7 +84,7 @@ def _text_turn(text: str) -> ChatTurn:
     )
 
 
-def make_client(llm: ScriptedToolLLM) -> TestClient:
+def make_client(llm: ScriptedToolLLM, *, max_tool_calls: int = 30) -> TestClient:
     app = FastAPI()
     router = create_router()
     settings = Settings(
@@ -96,6 +96,7 @@ def make_client(llm: ScriptedToolLLM) -> TestClient:
     settings.agent_platform = AgentPlatformSettings(
         INQTRIX_AGENT_ALLOW_VOLATILE=True,
         INQTRIX_AGENT_KERNEL_ENABLED=True,
+        INQTRIX_AGENT_KERNEL_MAX_TOOL_CALLS=max_tool_calls,
     )
     container = register_routes(
         router,
@@ -726,6 +727,7 @@ def _seed_report(client, *, question: str, url: str) -> str:
         "references": [{"label": "E1", "url": url, "tier": "primary"}],
     }
     summary = store.submit(
+        workflow_contract=1,
         question=question,
         stack_name="default",
         work=lambda handle: handle.complete(payload),
@@ -902,3 +904,58 @@ def test_an_uncited_answer_surfaces_no_sources_the_run_did_not_gather():
         wait_status(client, cited, {"completed"})
         result = client.get(f"/v1/runs/{cited}/result").json()
         assert [ref["label"] for ref in result["references"]] == ["W1"]
+
+
+def test_a_partial_answer_names_the_document_already_in_the_canvas():
+    """The memo is done and only the closing answer is missing: the receipt says so."""
+    llm = ScriptedToolLLM(
+        [
+            _tool_turn(
+                "call_canvas1",
+                "write_canvas",
+                {"title": "Memo Pilotbetrieb", "content_markdown": "# Memo"},
+            ),
+            _tool_turn(
+                "call_canvas2",
+                "write_canvas",
+                {"title": "Zweiter Entwurf", "content_markdown": "# Noch nicht"},
+            ),
+        ]
+    )
+    client = make_client(llm, max_tool_calls=1)
+    with client:
+        run_id = client.post(
+            "/v1/runs",
+            json={"question": "Bitte schreibe ein Memo für den Pilotbetrieb.", "mode": "agent_kernel"},
+        ).json()["run_id"]
+        wait_status(client, run_id, {"waiting_for_input"})
+        rows = client.get(f"/v1/runs/{run_id}/clarifications").json()["data"]
+        answered = client.post(
+            f"/v1/runs/{run_id}/clarifications/{rows[0]['clarification_id']}",
+            json={"option_id": "partial"},
+        )
+        assert answered.status_code == 200, answered.text
+        wait_status(client, run_id, {"completed"})
+
+        answer = client.get(f"/v1/runs/{run_id}/result").json()["answer"]
+
+    assert "- Memo Pilotbetrieb" in answer.splitlines()
+    assert "Zweiter Entwurf" not in answer
+
+
+def test_the_receipt_stands_when_the_documents_cannot_be_read(caplog):
+    from types import SimpleNamespace
+
+    from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
+
+    def unreadable(_deps):
+        raise OSError("store is gone")
+
+    algorithm = SimpleNamespace(_current_run_canvases=unreadable)
+    deps = SimpleNamespace(run_id="run_partial")
+
+    with caplog.at_level("WARNING", logger="inqtrix.agents.kernel.algorithm"):
+        titles = KernelAgentAlgorithm._documents_for_the_receipt(algorithm, deps)
+
+    assert titles == []
+    assert "names no documents: OSError" in caplog.text

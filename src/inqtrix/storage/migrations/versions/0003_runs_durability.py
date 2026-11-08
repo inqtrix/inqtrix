@@ -9,7 +9,7 @@ grants for the ``inqtrix_app`` role and ENABLE + FORCE row-level
 security with the fail-closed tenant policy (the ``(SELECT ...)``
 wrapper keeps the helper call an InitPlan — once per query, not per
 row). The status CHECK constraint mirrors
-:class:`~inqtrix.server.runs.RunStatus`; the lifecycle ordering itself
+:class:`~inqtrix.runs.records.RunStatus`; the lifecycle ordering itself
 lives only in that application enum.
 """
 

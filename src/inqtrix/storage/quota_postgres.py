@@ -28,7 +28,7 @@ from inqtrix.quota.models import (
     StockLifecycleState,
     current_period_start,
 )
-from inqtrix.storage.db import build_engine, build_session_factory, tenant_session
+from inqtrix.storage.db import tenant_session
 from inqtrix.storage.quota_orm import (
     quota_limits,
     quota_stock_lifecycles,
@@ -131,64 +131,19 @@ async def _get_limits_in(
 class PostgresQuotaStore:
     """Quota usage + limits over the ``quota_*`` tables.
 
-    Two instances serve one deployment, the same split as every other
-    durable repository (request path pooled, run threads NullPool):
-
-    * Built from *database_url*, the store owns a NullPool engine and is
-      loop-agnostic. Run threads record their spend through
-      ``asyncio.run`` on a throwaway loop, and asyncpg connections are
-      loop-affine, so this lane opens a fresh connection per call.
-    * Built from *session_factory*, the store borrows the API's pooled
-      request-path engine. Admission, the composer meter (every 30
-      seconds per visible tab) and the admin overview run on the request
-      loop, where a connect per call would turn ordinary idle browsing
-      into a stream of new database connections.
-
     Args:
         app_role: Restricted Postgres role for the tenant sessions.
-        database_url: Async SQLAlchemy URL (``postgresql+asyncpg://...``)
-            for an owned NullPool engine.
-        session_factory: A borrowed session factory (the request path's
-            pooled engine); the store never disposes it.
-
-    Raises:
-        ValueError: Unless exactly one of *database_url* and
-            *session_factory* is given.
+        session_factory: Session factory on the engine of the process.
     """
 
     def __init__(
         self,
         *,
         app_role: str,
-        database_url: str | None = None,
-        session_factory: "async_sessionmaker[AsyncSession] | None" = None,
+        session_factory: "async_sessionmaker[AsyncSession]",
     ) -> None:
-        if (database_url is None) == (session_factory is None):
-            raise ValueError(
-                "PostgresQuotaStore needs exactly one of database_url or session_factory"
-            )
-        self._engine = (
-            build_engine(database_url, null_pool=True) if database_url is not None else None
-        )
-        self._session_factory = (
-            session_factory
-            if session_factory is not None
-            else build_session_factory(self._engine)
-        )
+        self._session_factory = session_factory
         self._app_role = app_role
-
-    async def aclose(self) -> None:
-        """Dispose the owned engine at shutdown (lifecycle parity).
-
-        Must run on a live event loop, not a throwaway ``asyncio.run``
-        one — the API lifespan teardown calls this. NullPool holds no
-        idle connections, so this only releases the engine/dialect
-        machinery, but keeps the store's lifecycle consistent with the
-        run store's ``close``. A borrowed session factory belongs to its
-        owner and is left alone.
-        """
-        if self._engine is not None:
-            await self._engine.dispose()
 
     def _session(self, tenant_id: str) -> "AbstractAsyncContextManager[AsyncSession]":
         return tenant_session(

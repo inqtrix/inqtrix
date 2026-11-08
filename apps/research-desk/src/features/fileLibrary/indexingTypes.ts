@@ -8,6 +8,8 @@
  * ``inqtrix.index.*`` event payloads byte-for-byte.
  */
 
+import type { VectorIndexRecord } from '@/features/project/types'
+
 export type IndexingJobStatus =
   | 'queued'
   | 'running'
@@ -155,6 +157,121 @@ export function indexingJobDisposition(status: IndexingJobStatus): IndexingJobDi
 
 export function isTerminalIndexingStatus(status: IndexingJobStatus): boolean {
   return TERMINAL_INDEXING_STATUSES.has(status)
+}
+
+/** What the server knows about the documents of one index, read from the
+ * API's newest-first feed. Only the newest attempt of a document counts: a retry
+ * settles what the attempt before it ended with. */
+export type DocumentJobsView = {
+  active: { fileId: string; status: ActiveIndexingJobStatus; summary: IndexingJobSummary }[]
+  embeddedFileIds: string[]
+  /** The first failure of a document that still owes its vectors. */
+  failed: IndexingJobSummary | null
+  paused: { fileId: string; status: PausedIndexingJobStatus; summary: IndexingJobSummary }[]
+}
+
+export function documentJobsView(
+  jobs: readonly IndexingJobSummary[],
+  members: ReadonlyArray<{
+    fileId: string
+    serverDocumentId?: string | null
+    state: string
+  }>,
+): DocumentJobsView {
+  const view: DocumentJobsView = { active: [], embeddedFileIds: [], failed: null, paused: [] }
+  const seenDocuments = new Set<string>()
+  for (const job of jobs) {
+    if (job.operation_kind !== 'document_revision' || !job.document_id) continue
+    if (seenDocuments.has(job.document_id)) continue
+    seenDocuments.add(job.document_id)
+    const member = members.find((candidate) => candidate.serverDocumentId === job.document_id)
+    if (!member) continue
+    const disposition = indexingJobDisposition(job.status)
+    if (disposition.kind === 'active') {
+      view.active.push({ fileId: member.fileId, status: disposition.status, summary: job })
+    } else if (disposition.kind === 'paused') {
+      view.paused.push({ fileId: member.fileId, status: disposition.status, summary: job })
+    } else if (disposition.kind === 'completed' || disposition.kind === 'ready_raw') {
+      view.embeddedFileIds.push(member.fileId)
+    } else if (disposition.kind === 'failed' && member.state !== 'embedded') {
+      view.failed ??= job
+    }
+  }
+  return view
+}
+
+/** The documents a server collection holds: every listed id, and the first
+ * document per local asset id (`metadata.fileId`). A document is listed only
+ * once one of its revisions is published, so a listed document is embedded. */
+export type CollectionDocuments = {
+  byFileId: ReadonlyMap<string, string>
+  ids: ReadonlySet<string>
+}
+
+/** Pending members the collection already holds.
+ *
+ * The job list keeps a finished document job an hour and at most ten per
+ * collection, so after a reload it forgets what was embedded before; the
+ * document list keeps it. A member that knows its server document counts only
+ * when that very document is listed (another document of the same file is a
+ * duplicate); a member that never learned its id adopts the listed one. */
+export function listedMembersView(
+  members: ReadonlyArray<{
+    fileId: string
+    serverDocumentId?: string | null
+    state: string
+  }>,
+  listed: CollectionDocuments,
+): { embeddedFileIds: string[]; serverDocumentIds: Record<string, string> } {
+  const embeddedFileIds: string[] = []
+  const serverDocumentIds: Record<string, string> = {}
+  for (const member of members) {
+    if (member.state !== 'pending') continue
+    if (member.serverDocumentId) {
+      if (listed.ids.has(member.serverDocumentId)) embeddedFileIds.push(member.fileId)
+      continue
+    }
+    const documentId = listed.byFileId.get(member.fileId)
+    if (!documentId) continue
+    embeddedFileIds.push(member.fileId)
+    serverDocumentIds[member.fileId] = documentId
+  }
+  return { embeddedFileIds, serverDocumentIds }
+}
+
+/** The server-backed indexes with pending members whose collection is worth
+ * listing once: not `done` in this view yet, and not owned by a run or a
+ * deletion in flight. */
+export function indexesWithListablePendingMembers(
+  indexes: Readonly<Record<string, VectorIndexRecord>>,
+  done: ReadonlySet<string>,
+): VectorIndexRecord[] {
+  return Object.values(indexes).filter((index) => (
+    Boolean(index.serverCollectionId)
+    && !done.has(index.id)
+    && index.status !== 'indexing'
+    && index.status !== 'deleting'
+    && index.status !== 'delete_failed'
+    && index.members.some((member) => member.state === 'pending')
+  ))
+}
+
+/** A collection's document jobs come back as one run; a generation job is the
+ * collection's one current job. */
+export function splitJobsByKind(jobs: readonly IndexingJobSummary[]): {
+  documentJobs: Map<string, IndexingJobSummary[]>
+  generations: IndexingJobSummary[]
+} {
+  const documentJobs = new Map<string, IndexingJobSummary[]>()
+  const generations: IndexingJobSummary[] = []
+  for (const job of jobs) {
+    if (job.operation_kind !== 'document_revision') {
+      generations.push(job)
+      continue
+    }
+    documentJobs.set(job.collection_id, [...(documentJobs.get(job.collection_id) ?? []), job])
+  }
+  return { documentJobs, generations }
 }
 
 /** Select the newest job per collection from the API's newest-first

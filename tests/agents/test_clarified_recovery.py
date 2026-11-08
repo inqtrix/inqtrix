@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from inqtrix.agents.kernel.algorithm import _recover_clarified_answers
 

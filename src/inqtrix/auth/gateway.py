@@ -1543,7 +1543,11 @@ def build_gateway_provider(
     Raises:
         RuntimeError: The gateway configuration is incomplete or unsafe.
     """
-    from inqtrix.auth.api_key import build_session_backends, claim_mapping_from_settings
+    from inqtrix.auth.api_key import (
+        build_session_backends,
+        claim_mapping_from_settings,
+        engine_of_session_factory,
+    )
     from inqtrix.auth.invitations import RegistrationGate
     from inqtrix.auth.lifecycle import UserLifecycleService
     from inqtrix.auth.pat import PatService, PatVerifier
@@ -1599,7 +1603,7 @@ def build_gateway_provider(
         users,
         pat_store,
         invitation_repo,
-        _session_factory,
+        session_factory,
         lifecycle_transaction,
     ) = build_session_backends(settings, source_issuer=source.issuer_key)
     # Without SCIM nothing tells Inqtrix that a person left; these bounds
@@ -1649,6 +1653,7 @@ def build_gateway_provider(
             transaction=lifecycle_transaction,
         ),
     )
+    provider.database_engine = engine_of_session_factory(session_factory)
     _start_warnings(auth, mapping)
     trusted_proxies = [entry for entry in auth.gateway_trusted_proxies.split(",") if entry.strip()]
     log.info(

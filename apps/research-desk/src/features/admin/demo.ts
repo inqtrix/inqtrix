@@ -1,5 +1,6 @@
 import type {
   AdminAuditEvent,
+  AdminRunBindings,
   AdminSystemRuntime,
   AccessToken,
   AdminUser,
@@ -305,6 +306,17 @@ export function seedSystemCapabilities(): InqtrixCapabilities {
       research_run_seconds: 3600,
       max_attempts: 3,
     },
+  }
+}
+
+/** Seeded run bindings for the demo System panel: every open run fits. */
+export function seedAdminRunBindings(): AdminRunBindings {
+  return {
+    contracts: { agent_kernel: 1, knowledge: 1, research: 1 },
+    counts: [
+      { mode: 'agent_kernel', status: 'running', workflow_contract: 1, runs: 1 },
+      { mode: 'research', status: 'queued', workflow_contract: 1, runs: 2 },
+    ],
   }
 }
 

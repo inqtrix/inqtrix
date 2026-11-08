@@ -174,21 +174,51 @@ function printInventory(
   }
 }
 
-function printSummary(report: VerificationReport, json: boolean): void {
+export function printSummary(
+  report: VerificationReport,
+  json: boolean,
+  out: Pick<NodeJS.WritableStream, 'write'> = process.stdout,
+): void {
   if (json) {
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    out.write(`${JSON.stringify(report, null, 2)}\n`)
     return
   }
   const failedPreflight = report.preflight.filter((check) => check.status === 'failed')
-  process.stdout.write(`Verification ${report.runId}: ${report.status}\n`)
-  process.stdout.write(`  Inqtrix version: ${report.inqtrixVersion}\n`)
-  process.stdout.write(`  profile: ${report.profile}\n`)
-  process.stdout.write(`  scenarios: ${report.scenarios.length}\n`)
-  process.stdout.write(`  adapters: ${report.adapters.length}\n`)
-  process.stdout.write(`  preflight failures: ${failedPreflight.length}\n`)
-  process.stdout.write(`  cleanup failures: ${report.cleanup.failed}\n`)
-  process.stdout.write(`  retained review resources: ${report.cleanup.retained}\n`)
-  process.stdout.write(
+  out.write(`Verification ${report.runId}: ${report.status}\n`)
+  out.write(`  Inqtrix version: ${report.inqtrixVersion}\n`)
+  out.write(`  profile: ${report.profile}\n`)
+  out.write(`  scenarios: ${report.scenarios.length}\n`)
+  const skipped = report.scenarios.filter((scenario) => scenario.status === 'skipped')
+  out.write(`  skipped scenarios: ${skipped.length}\n`)
+  for (const scenario of skipped) {
+    out.write(`    ${scenario.id}: ${scenario.reason ?? ''}\n`)
+  }
+  out.write(`  adapters: ${report.adapters.length}\n`)
+  for (const adapter of report.adapters) {
+    if (adapter.scenarioResultsProblem) {
+      out.write(
+        `    ${adapter.engine}: result file discarded (${adapter.scenarioResultsProblem})\n`,
+      )
+    }
+    if (adapter.scenarioGap) {
+      out.write(`    ${adapter.engine}: red although it exited 0 (${adapter.scenarioGap})\n`)
+    }
+  }
+  out.write(`  preflight failures: ${failedPreflight.length}\n`)
+  out.write(`  cleanup failures: ${report.cleanup.failed}\n`)
+  out.write(`  retained review resources: ${report.cleanup.retained}\n`)
+  out.write(`  log inspection: ${report.logInspection.status}\n`)
+  if (report.logInspection.reason) {
+    out.write(`    ${report.logInspection.reason}\n`)
+  }
+  for (const [service, row] of Object.entries(report.logInspection.services ?? {})) {
+    const missing = Object.keys(row.missingFields)
+    out.write(
+      `    ${service}: ${row.lines} lines, ${row.errors} errors, ${row.notJson} not JSON`
+      + `${missing.length > 0 ? `, missing ${missing.join(', ')}` : ''}\n`,
+    )
+  }
+  out.write(
     `  report: e2e/.results/verification/${report.runId}/report.json\n`,
   )
 }

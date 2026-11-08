@@ -62,7 +62,7 @@ project + agent. No separate search resource is needed.
    - Foundry project -> "Project Settings" (or "Overview")
      -> Endpoint, form
      ``https://aif-inqtrix-test.services.ai.azure.com/api/projects/proj-inqtrix-test``.
-   - "Keys & Endpoint" -> copy API key (simplest auth path).
+   - "Keys & Endpoint" -> copy the API key (required for authentication).
 
 3. Model deployment IN the Foundry project
    - Foundry project -> "My assets" -> "Models + endpoints"
@@ -97,8 +97,7 @@ project + agent. No separate search resource is needed.
 WHAT THIS SCRIPT CHECKS
 ===============================================================================
 - Azure AI Foundry project endpoint is correct
-- Authentication works (API key, Service Principal, or
-  DefaultAzureCredential -- whichever is provided)
+- Authentication with the project API key works
 - the configured Web Search agent is reachable
 - the agent actually invokes its Web Search tool (indirectly visible
   in prompt-token count 10-30K, vs ~50 without grounding)
@@ -110,6 +109,7 @@ ENVIRONMENT VARIABLES
 
 Required:
 - AZURE_AI_PROJECT_ENDPOINT
+- AZURE_AI_PROJECT_API_KEY
 - WEB_SEARCH_AGENT_NAME
 
 Optional:
@@ -121,31 +121,15 @@ Optional:
 - OBSERVABILITY_PROFILE (``forensic`` keeps lineage in the protected run audit;
   see ``docs/observability/logging.md``)
 
-Authentication -- three options (pick ONE):
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Authentication -- project API key
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Option 1 -- API Key (simplest)**
-    Set in .env::
+Set in .env::
 
-        AZURE_AI_PROJECT_API_KEY=abc123...
+    AZURE_AI_PROJECT_API_KEY=abc123...
 
-    Found in Azure Portal -> your Foundry project -> Project Settings
-    -> Keys & Endpoint.
-
-**Option 2 -- Service Principal**
-    Set in .env::
-
-        AZURE_TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-        AZURE_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-        AZURE_CLIENT_SECRET=your-secret-value
-
-    Created via Azure Portal -> App Registrations -> New Registration
-    -> Certificates & Secrets.
-
-**Option 3 -- DefaultAzureCredential (fallback)**
-    Requires NO extra env vars.  Uses the first available credential:
-    ``az login`` (Azure CLI), Managed Identity, VS Code Azure sign-in, etc.
-    Install Azure CLI: ``brew install azure-cli && az login``
+Found in Azure Portal -> your Foundry project -> Project Settings
+-> Keys & Endpoint.  The provider sends it in the ``api-key`` header.
 
 Notes:
 - ``recency_filter``, ``language_filter``, and ``domain_filter`` are
@@ -204,27 +188,15 @@ def main() -> None:
     agent_name = _require_env("WEB_SEARCH_AGENT_NAME")
     agent_version = os.getenv("WEB_SEARCH_AGENT_VERSION", "")
 
-    # ── Auth: pick the first available credential ────────────────────
-    api_key = os.getenv("AZURE_AI_PROJECT_API_KEY")
-    tenant_id = os.getenv("AZURE_TENANT_ID")
-    client_id = os.getenv("AZURE_CLIENT_ID")
-    client_secret = os.getenv("AZURE_CLIENT_SECRET")
+    # ── Auth: the Foundry project key ────────────────────────────────
+    api_key = _require_env("AZURE_AI_PROJECT_API_KEY")
 
-    # Option 1 — API Key (if AZURE_AI_PROJECT_API_KEY is set in .env)
-    # → Simplest. No azure-identity or az login needed.
     search = AzureFoundryWebSearch(
         project_endpoint=project_endpoint,
         agent_name=agent_name,
         agent_version=agent_version,
-        api_key=api_key,                # None → falls through to Entra ID
-        tenant_id=tenant_id,            # None → ignored when api_key is set
-        client_id=client_id,            # None → ignored when api_key is set
-        client_secret=client_secret,    # None → ignored when api_key is set
+        api_key=api_key,
     )
-    # The constructor resolves auth automatically in this priority:
-    #   1. api_key set          → uses static API key
-    #   2. tenant/client/secret → uses Service Principal (ClientSecretCredential)
-    #   3. none of the above    → uses DefaultAzureCredential (az login etc.)
 
     # --- Alternative: hardcoded API key (uncomment to test) ---
     # search = AzureFoundryWebSearch(
@@ -234,31 +206,13 @@ def main() -> None:
     #     api_key="your-api-key-from-azure-portal",
     # )
 
-    # --- Alternative: hardcoded Service Principal (uncomment to test) ---
-    # search = AzureFoundryWebSearch(
-    #     project_endpoint=project_endpoint,
-    #     agent_name=agent_name,
-    #     agent_version=agent_version,
-    #     tenant_id="your-tenant-id",
-    #     client_id="your-client-id",
-    #     client_secret="your-client-secret",
-    # )
-
-    # --- Alternative: DefaultAzureCredential only (uncomment to test) ---
-    # Requires: brew install azure-cli && az login
-    # search = AzureFoundryWebSearch(
-    #     project_endpoint=project_endpoint,
-    #     agent_name=agent_name,
-    #     agent_version=agent_version,
-    # )
-
     result = search.search(
         QUERY,
         recency_filter="month",
         language_filter=["de"],
     )
 
-    nonfatal_notice = search.consume_nonfatal_notice()
+    nonfatal_notice = next((notice.message for notice in result.notices), None)
     citations = result.citation_urls
     citations_text = "\n".join(f"- {url}" for url in citations) or "<no citations returned>"
 
@@ -276,10 +230,10 @@ def main() -> None:
                 Panel(
                     "Azure hat den Prompt per Content Filter blockiert. "
                     "Das ist kein Auth- oder Endpoint-Fehler. "
-                    "Setze fuer einen Smoke-Test z. B. "
+                    "Setze für einen Smoke-Test z. B. "
                     "AZURE_WEB_SEARCH_TEST_QUERY='Tell me what you can help with.' "
                     "oder eine einfache aktuelle Nachrichtenfrage. "
-                    "Wenn selbst harmlose Queries blockiert werden, pruefe auch die Agent-"
+                    "Wenn selbst harmlose Queries blockiert werden, prüfe auch die Agent-"
                     "Instruktionen im Foundry-Portal.",
                     title="Hint",
                     expand=False,

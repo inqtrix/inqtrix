@@ -67,7 +67,7 @@ from inqtrix.services.editor_collaboration_service import (
     CollaborationProtocolConflict,
     EditorCollaborationService,
 )
-from inqtrix.services.user_erasure import (
+from inqtrix.storage.user_erasure import (
     DELETED_ACCOUNT_DISPLAY_NAME,
     DELETED_ACCOUNT_EMAIL,
 )
@@ -379,12 +379,11 @@ class _PublicStore:
         self,
         lease: CollaborationLease,
         *,
-        max_active: int,
         max_issued_per_window: int,
         issued_since: float,
     ) -> CollaborationLease:
         """Persist one lease or expose the configured durable rate error."""
-        del max_active, max_issued_per_window, issued_since
+        del max_issued_per_window, issued_since
         if self.issue_error is not None:
             raise self.issue_error
         self.issue_calls.append(lease)
@@ -786,7 +785,6 @@ def _public_harness(
         lease_ttl_seconds=60,
         token_refresh_seconds=17,
         provider_flush_ms=75,
-        max_sessions_per_user_document=5,
         session_rate_per_minute=30,
         instance_lease_seconds=15.0,
         update_payload_retention_seconds=60.0,
@@ -1681,11 +1679,10 @@ def test_public_lease_rotation_preserves_terminal_lease_reason(reason: str) -> N
     assert response.json()["error"]["reason"] == reason
 
 
-@pytest.mark.parametrize("reason", ["session_limit", "session_rate_limited"])
-def test_public_session_preserves_durable_rate_limit_reason(reason: str) -> None:
-    """Both durable lease limits map to the public 429 envelope."""
+def test_public_session_preserves_durable_rate_limit_reason() -> None:
+    """The durable issuance limit maps to the public 429 envelope."""
     harness = _public_harness(collaboration=True)
-    harness.store.issue_error = CollaborationRateLimited(reason)
+    harness.store.issue_error = CollaborationRateLimited("session_rate_limited")
 
     with harness.client:
         response = harness.client.post(
@@ -1697,7 +1694,7 @@ def test_public_session_preserves_durable_rate_limit_reason(reason: str) -> None
     assert response.json()["error"] == {
         "message": "Too many collaboration sessions or session requests.",
         "type": "rate_limit_error",
-        "reason": reason,
+        "reason": "session_rate_limited",
     }
 
 

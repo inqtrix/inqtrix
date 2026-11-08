@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { formatClockTime, formatMessageTimestamp } from './time'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
+
+import { formatClockTime, formatCount, formatMessageTimestamp, formatTimeOfDay, intlLocale } from './time'
 
 describe('formatClockTime', () => {
   it('names the local clock time of a server timestamp in the reader\'s language', () => {
@@ -43,5 +47,59 @@ describe('formatMessageTimestamp', () => {
     const twice = formatMessageTimestamp('2026-01-02T03:04:00.000Z', 'de')
 
     expect(twice).toBe(once)
+  })
+})
+
+describe('dates, times and numbers follow the interface language', () => {
+  // A German desk in an English browser must not show "10:59 PM": every
+  // date, time and number follows the interface language.
+  const moment = new Date(2026, 10, 6, 22, 59, 7)
+
+  it('formats a clock time in the desk language, not the browser\'s', () => {
+    expect(formatTimeOfDay(moment, 'de')).toBe('22:59')
+    expect(formatTimeOfDay(moment, 'en')).toMatch(/^10:59\sPM$/)
+    expect(formatTimeOfDay(moment.getTime(), 'de', { seconds: true })).toBe('22:59:07')
+    expect(formatTimeOfDay('not a date', 'de')).toBe('not a date')
+  })
+
+  it('formats a count in the desk language', () => {
+    expect(formatCount(12_345, 'de')).toBe('12.345')
+    expect(formatCount(12_345, 'en')).toBe('12,345')
+    expect(intlLocale('de')).toBe('de-DE')
+    expect(intlLocale('en')).toBe('en-US')
+  })
+
+  it('leaves no formatter in the desk that asks the browser for its language', () => {
+    // Every date, time and number goes through intlLocale(locale). A call
+    // without a locale, or with [] or undefined, takes the browser's.
+    const blind = [
+      /\.toLocale(?:Time|Date)?String\(\s*(?:\[\]|undefined)?\s*[,)]/,
+      /new Intl\.(?:DateTimeFormat|NumberFormat|RelativeTimeFormat)\(\s*(?:\[\]|undefined)?\s*[,)]/,
+      /new Intl\.(?:DateTimeFormat|NumberFormat)\(\s*'(?:de-DE|en-US)'/,
+    ]
+    // Anchored on this file, not on the working directory: started from
+    // elsewhere, a relative root would scan another tree and pass empty.
+    const root = fileURLToPath(new URL('..', import.meta.url))
+    const mappingPoint = fileURLToPath(new URL('./time.ts', import.meta.url))
+    const offenders: string[] = []
+    let scanned = 0
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const path = join(dir, name)
+        if (statSync(path).isDirectory()) {
+          if (name !== 'browser-tests') walk(path)
+          continue
+        }
+        if (!/\.(?:ts|tsx)$/.test(name) || /\.test\.tsx?$/.test(name) || path === mappingPoint) continue
+        scanned += 1
+        const lines = readFileSync(path, 'utf8').split('\n')
+        lines.forEach((line, index) => {
+          if (blind.some((pattern) => pattern.test(line))) offenders.push(`${path}:${index + 1}`)
+        })
+      }
+    }
+    walk(root)
+    expect(scanned).toBeGreaterThan(200)
+    expect(offenders).toEqual([])
   })
 })

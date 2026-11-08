@@ -12,10 +12,12 @@ from typing import Any
 
 from inqtrix.runs.upload_operations import UploadAttemptSuperseded
 from inqtrix.runs.upload_queue import QueuedUploadOperation
+from tests._store_doubles import BothNames
 from inqtrix.worker.upload_loop import UploadWorkerLoop
+from tests._process_loop import run_on_configured_loop
 
 
-class StubUploadStore:
+class StubUploadStore(BothNames):
     """Recording stand-in pinning the real upload-store signatures."""
 
     def __init__(
@@ -67,16 +69,16 @@ class StubUploadQueue:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
 
-    def ack(self, message_id):
+    async def ack(self, message_id):
         self.calls.append(("ack", message_id))
 
-    def dead_letter(self, job, *, reason):
+    async def dead_letter(self, job, *, reason):
         self.calls.append(("dead_letter", job.operation_id, reason))
 
-    def enqueue(self, *, operation_id, tenant_id):
+    async def enqueue(self, *, operation_id, tenant_id):
         self.calls.append(("enqueue", operation_id))
 
-    def heartbeat(self, message_ids):
+    async def heartbeat(self, message_ids):
         return None
 
 
@@ -122,8 +124,12 @@ def _loop(store, queue, service) -> UploadWorkerLoop:
 
 def _run_one(store, queue, service, *, job=None) -> None:
     loop = _loop(store, queue, service)
-    loop._start(job or _job(), takeover=False)
-    assert loop.drain(timeout=10), "upload job did not finish in time"
+
+    async def scenario() -> bool:
+        await loop._start(job or _job(), takeover=False)
+        return await loop.drain(timeout=10)
+
+    assert run_on_configured_loop(scenario()), "upload job did not finish in time"
 
 
 def test_exhausted_delivery_budget_claims_then_fails_with_fence():
@@ -132,7 +138,7 @@ def test_exhausted_delivery_budget_claims_then_fails_with_fence():
     queue = StubUploadQueue()
 
     loop = _loop(store, queue, StubUploadService())
-    loop._start(_job(delivery_count=4), takeover=True)
+    run_on_configured_loop(loop._start(_job(delivery_count=4), takeover=True))
 
     assert ("claim", "up_w1", True) in store.calls
     fails = [call for call in store.calls if call[0] == "fail"]
@@ -145,7 +151,7 @@ def test_exhausted_budget_on_terminal_row_dead_letters_without_fail():
     queue = StubUploadQueue()
 
     loop = _loop(store, queue, StubUploadService())
-    loop._start(_job(delivery_count=4), takeover=True)
+    run_on_configured_loop(loop._start(_job(delivery_count=4), takeover=True))
 
     assert [call for call in store.calls if call[0] == "fail"] == []
     assert ("dead_letter", "up_w1", "max_attempts_exceeded") in queue.calls
@@ -187,10 +193,10 @@ def test_superseded_attempt_never_acks():
 
 
 def test_finalization_failure_is_logged_not_swallowed(caplog):
-    """An ack exception must leave a loud trace, never an unobserved Future."""
+    """An ack exception must leave a loud trace, never an unobserved task."""
 
     class _BrokenAckQueue(StubUploadQueue):
-        def ack(self, message_id):
+        async def ack(self, message_id):
             raise RuntimeError("ack kaputt")
 
     store = StubUploadStore(claim_result=_Claimed(), attempt_current=False)
@@ -213,7 +219,7 @@ class _PreparingService(StubUploadService):
         self.queued = list(queued)
         self.failure = failure
 
-    def queue_missing_preparations(self):
+    async def aqueue_missing_preparations(self):
         if self.failure is not None:
             raise self.failure
         return list(self.queued)
@@ -234,7 +240,7 @@ def test_queued_preparations_are_dispatched_by_the_stale_pass():
 
     # The stale rows go back to the base loop; the queued preparation is
     # dispatched here, once, without the "stuck in queued" resend.
-    assert loop._stale_dispatch() == [("up_stale", "default")]
+    assert run_on_configured_loop(loop._stale_dispatch()) == [("up_stale", "default")]
     assert queue.calls == [("enqueue", "up_prep")]
 
 
@@ -246,5 +252,5 @@ def test_a_failing_preparation_pass_never_blocks_the_stale_pass(caplog):
     )
 
     with caplog.at_level("WARNING"):
-        assert loop._stale_dispatch() == [("up_stale", "default")]
+        assert run_on_configured_loop(loop._stale_dispatch()) == [("up_stale", "default")]
     assert "Missing upload preparations could not be queued" in caplog.text

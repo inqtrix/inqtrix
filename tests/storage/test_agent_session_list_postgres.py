@@ -47,4 +47,3 @@ async def test_the_postgres_session_list_carries_each_settings_body():
     finally:
         async with factory() as session, session.begin():
             await session.execute(agent_sessions.delete().where(agent_sessions.c.id == session_id))
-        await store.aclose()

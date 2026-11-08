@@ -18,6 +18,7 @@ import uuid
 import pytest
 import sqlalchemy as sa
 
+from inqtrix import aio
 from inqtrix.auth.lifecycle import AdminActor, ExternalProfile, ProvisioningActor, UserLifecycleStatus
 from inqtrix.runs.deletion_operations import (
     DeletionOperationConflict,
@@ -28,10 +29,9 @@ from inqtrix.runs.deletion_operations import (
 from inqtrix.runs.deletion_postgres import PostgresDeletionOperationStore
 from inqtrix.services.user_erasure_aggregates import DeletionMachineAggregates
 from inqtrix.services.user_erasure_executor import AggregateRef
-from inqtrix.services.user_erasure_inventory import _tables
+from inqtrix.storage.user_erasure_inventory import _tables
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.migrate import run_migrations
-from inqtrix.sync_bridge import run_coro_sync
 from tests.storage._canonical_users import ensure_canonical_users
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
@@ -64,7 +64,7 @@ class _RecordingQueue:
     def __init__(self) -> None:
         self.enqueued: list[str] = []
 
-    def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
+    async def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
         del tenant_id
         self.enqueued.append(operation_id)
 
@@ -83,7 +83,7 @@ def schema_migrated():
 def factory():
     engine = build_engine(TEST_DATABASE_URL, null_pool=True)
     yield build_session_factory(engine)
-    run_coro_sync(engine.dispose())
+    asyncio.run(engine.dispose())
 
 
 def _transaction(factory, body):
@@ -92,7 +92,7 @@ def _transaction(factory, body):
             async with session.begin():
                 return await body(session)
 
-    return run_coro_sync(run())
+    return asyncio.run(run())
 
 
 @pytest.fixture()
@@ -302,13 +302,13 @@ def test_an_operation_registered_for_inline_execution_reaches_no_worker(
     assert queue.enqueued == []
 
 
+@pytest.mark.refuses_the_bridge_on_purpose
 def test_a_registration_on_an_event_loop_is_refused_before_it_waits(
     people, store
 ) -> None:
     """Registering can wait for a lock a transaction of another request
-    holds; on that request's event loop it would wait for itself. The store
-    refuses before it touches the database, and the same write from a
-    worker thread goes through."""
+    holds; on that request's event loop it would wait for itself. The sync
+    name refuses before it touches the database; the loop awaits ``asubmit``."""
     admin, _other, account = people
     operation_id = _operation_id()
 
@@ -324,7 +324,7 @@ def test_a_registration_on_an_event_loop_is_refused_before_it_waits(
         )
 
     for write in (register, reopen):
-        with pytest.raises(RuntimeError, match="event loop"):
+        with pytest.raises(aio.CalledOnLoopThread):
             asyncio.run(on_the_loop(write))
     assert (
         store.find_for_target(
@@ -337,12 +337,7 @@ def test_a_registration_on_an_event_loop_is_refused_before_it_waits(
         is None
     )
 
-    async def from_a_worker_thread():
-        return await asyncio.to_thread(
-            _submit, store, admin=admin, account=account, operation_id=operation_id
-        )
-
-    registered = asyncio.run(from_a_worker_thread())
+    registered = _submit(store, admin=admin, account=account, operation_id=operation_id)
     assert registered["operation_id"] == operation_id
 
 
@@ -396,6 +391,8 @@ def test_the_port_names_every_aggregate_the_account_owns_in_order(
                     run_id=run_id,
                     tenant_id=tenant,
                     question="fixture",
+                    mode="research",
+                    workflow_contract=1,
                     created_at=_NOW,
                     created_by_user_id=owner,
                     parent_run_id=parent,
@@ -534,11 +531,9 @@ def test_the_port_names_every_aggregate_the_account_owns_in_order(
     )
 
 
-def test_the_wired_erasure_reaches_the_database_from_a_fresh_loop_every_time(
+def test_the_wired_erasure_reaches_the_database_on_the_engine_it_is_given(
     store,
 ) -> None:
-    """``run_coro_sync`` runs every call on a new event loop, so the engine
-    the container wires must never hand one call's connection to the next."""
     from inqtrix.server.container import _bind_user_erasure
     from inqtrix.settings import Settings, StorageSettings
 
@@ -567,6 +562,7 @@ def test_the_wired_erasure_reaches_the_database_from_a_fresh_loop_every_time(
         asset_deletion_service=service,
         deletion_store=store,
         run_store=None,
+        engine=store._session_factory.kw["bind"],
     )
 
     # No such account: each call only looks it up and finishes.
@@ -579,7 +575,8 @@ def test_the_wired_erasure_reaches_the_database_from_a_fresh_loop_every_time(
 
 
 class _Machine:
-    """The deletion machine wired as the worker wires it, on this database."""
+    """The deletion machine wired as the worker wires it, on this database, with
+    the store on an engine of its own: the worker's one engine is proven elsewhere."""
 
     def __init__(self, tmp_path, *, knowledge=None) -> None:
         from inqtrix.auth.permissions import AuthorizationService
@@ -632,6 +629,7 @@ class _Machine:
             asset_deletion_service=self.service,
             deletion_store=self.deletions,
             run_store=None,
+            engine=self.engine,
         )
 
     def erase(self, *, admin: uuid.UUID, subject: uuid.UUID) -> dict:
@@ -647,7 +645,7 @@ class _Machine:
                 sa.update(users).where(users.c.id == admin).values(instance_role="admin")
             ),
         )
-        outcome, report = run_coro_sync(
+        outcome, report = aio.call_from_thread(
             PostgresUserLifecycleTransaction(
                 session_factory=self.factory, app_role=APP_ROLE
             ).begin_erasure(
@@ -658,7 +656,7 @@ class _Machine:
             )
         )
         assert "operation_id" in report, (outcome, report)
-        summary = run_coro_sync(
+        summary = aio.call_from_thread(
             self.service.start_user_erasure(
                 subject,
                 actor=AdminActor(admin),
@@ -670,7 +668,7 @@ class _Machine:
 
     def erase_as_provisioning(self, lifecycle, *, subject: uuid.UUID) -> dict:
         """Start the erasure as a SCIM DELETE with ``erase`` does; wait for its end."""
-        outcome, report = run_coro_sync(
+        outcome, report = aio.call_from_thread(
             lifecycle.begin_erasure(
                 tenant_id=TENANT,
                 user_id=subject,
@@ -679,7 +677,7 @@ class _Machine:
             )
         )
         assert "operation_id" in report, (outcome, report)
-        summary = run_coro_sync(
+        summary = aio.call_from_thread(
             self.service.start_user_erasure(
                 subject,
                 actor=ProvisioningActor(),
@@ -755,8 +753,7 @@ class _Machine:
 
         _transaction(self.factory, cleanup)
         self.deletions.close()
-        run_coro_sync(self.library.aclose())
-        run_coro_sync(self.engine.dispose())
+        aio.call_from_thread(self.engine.dispose())
 
 
 def test_an_account_is_erased_through_the_real_deletion_machine(
@@ -771,7 +768,7 @@ def test_an_account_is_erased_through_the_real_deletion_machine(
     sections nor the tombstones.
     """
     from inqtrix.content.ports import FileRecord
-    from inqtrix.project.scoped_upsert import ResourceScope
+    from inqtrix.storage.scoped_upsert import ResourceScope
 
     admin, _, subject = people
     tag = uuid.uuid4().hex[:12]
@@ -779,13 +776,13 @@ def test_an_account_is_erased_through_the_real_deletion_machine(
     file_id = f"fl_{tag}"
     object_key = f"tenants/{TENANT}/files/{file_id}"
     try:
-        sections = run_coro_sync(
+        sections = aio.call_from_thread(
             machine.library.ensure_default_sections(
                 created_by_user_id=subject, workspace_id=None
             )
         )
         library = next(s for s in sections if s.semantic_role == "library")
-        asset = run_coro_sync(
+        asset = aio.call_from_thread(
             machine.library.upsert_asset(
                 id=f"fa_{tag}", section_id=library.id, group_id=None,
                 title="A", label="A", file_name="a.txt", mime_type="text/plain",
@@ -798,7 +795,7 @@ def test_an_account_is_erased_through_the_real_deletion_machine(
         source = tmp_path / "a.txt"
         source.write_bytes(b"hello")
         machine.blobs.put(object_key, source)
-        run_coro_sync(
+        aio.call_from_thread(
             machine.registry.create(
                 FileRecord(
                     id=file_id, tenant_id=TENANT, owner_user_id=subject,
@@ -808,7 +805,7 @@ def test_an_account_is_erased_through_the_real_deletion_machine(
                 )
             )
         )
-        run_coro_sync(
+        aio.call_from_thread(
             machine.library.finalize_asset_upload(
                 id=asset.id, section_id=library.id, group_id=None,
                 title=asset.title, label=asset.label, file_name="a.txt",
@@ -866,7 +863,7 @@ def test_provisioning_erases_an_account_to_the_end_and_a_new_one_starts_empty(
         app_role=APP_ROLE,
         source_issuer=f"gateway:erasure-{tag}",
     )
-    created = run_coro_sync(
+    created = aio.call_from_thread(
         lifecycle.provision_external_user(
             tenant_id=TENANT,
             subject=f"oid-{tag}",
@@ -877,14 +874,14 @@ def test_provisioning_erases_an_account_to_the_end_and_a_new_one_starts_empty(
     again_id = None
     operation_ids: list[str] = []
     try:
-        run_coro_sync(
+        aio.call_from_thread(
             machine.library.ensure_default_sections(
                 created_by_user_id=subject, workspace_id=None
             )
         )
         assert machine.owned(subject)["asset_sections"] == 3
         assert (
-            run_coro_sync(lifecycle.deprovision(tenant_id=TENANT, user_id=subject))
+            aio.call_from_thread(lifecycle.deprovision(tenant_id=TENANT, user_id=subject))
             is UserLifecycleStatus.UPDATED
         )
 
@@ -895,7 +892,7 @@ def test_provisioning_erases_an_account_to_the_end_and_a_new_one_starts_empty(
         assert _erased_by(machine, subject) == [("provisioning", None)]
         gone = machine.owned(subject)
         assert (gone["asset_sections"], gone["users"]) == (0, 0)
-        again = run_coro_sync(
+        again = aio.call_from_thread(
             lifecycle.provision_external_user(
                 tenant_id=TENANT,
                 subject=f"oid-{tag}",

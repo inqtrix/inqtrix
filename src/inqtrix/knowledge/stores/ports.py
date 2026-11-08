@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
-from inqtrix.source_authority import SourceDeletionPermit, SourceScope
+from inqtrix.storage.source_authority import SourceDeletionPermit, SourceScope
 from inqtrix.knowledge.source_cleanup import SourceCleanupPlan
 
 if TYPE_CHECKING:
@@ -515,8 +515,8 @@ class KnowledgeStore(Protocol):
     drop-ins. **All methods are async**: the platform persistence layer
     is async end-to-end (asyncpg), and a uniform async port lets the
     HTTP routes ``await`` directly while the synchronous research graph
-    and the reindex worker bridge through ``asyncio.run`` in their own
-    threads (the established sync-bridge pattern).
+    and the reindex worker reach the process loop through
+    ``aio.call_from_thread``.
     """
 
     async def create_collection(

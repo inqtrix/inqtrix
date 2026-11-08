@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.execution_failures import classify_execution_failure
@@ -26,9 +26,14 @@ if TYPE_CHECKING:
         ClaimedDeletionOperation,
         PostgresDeletionOperationStore,
     )
-    from inqtrix.services.asset_deletion_service import AssetDeletionService
 
 log = logging.getLogger(__name__)
+
+
+class ClaimedDeletionService(Protocol):
+    """What a claimed attempt needs of the deletion service."""
+
+    def execute(self, handle: DeletionJobHandle, **operation: Any) -> None: ...
 
 
 class FencedDeletionJobHandle(DeletionJobHandle):
@@ -119,7 +124,7 @@ def operation_principal(
 
 def execute_claimed_deletion(
     store: "PostgresDeletionOperationStore",
-    service: "AssetDeletionService",
+    service: ClaimedDeletionService,
     claimed: "ClaimedDeletionOperation",
 ) -> FencedDeletionJobHandle:
     """Run one claimed attempt to its terminal state, or until superseded.

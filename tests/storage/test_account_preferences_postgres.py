@@ -72,7 +72,6 @@ async def store():
                 )
     prefs_store = PostgresAccountPreferencesStore(engine=engine, app_role=APP_ROLE)
     yield prefs_store
-    await prefs_store.aclose()
 
 
 @pytest.mark.asyncio

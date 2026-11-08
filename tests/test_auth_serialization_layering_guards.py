@@ -2,14 +2,12 @@
 
 Each test pins one behaviour: the async-gate auth bypass, the AUTH_MODE
 serialization round-trip, the UnknownAlgorithm 500 escape, the streaming
-capability guard, principal threading into the chat path, and the
-services-never-import-server layering rule.
+capability guard, and principal threading into the chat path.
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
 
 import pytest
 from fastapi import FastAPI, Header, HTTPException
@@ -204,6 +202,7 @@ def test_modeless_request_on_custom_registry_returns_400_envelope():
     class _CustomAlgorithm:
         id = "custom_only"
         display_name = "Custom"
+        contract_version = 1
 
         def capabilities(self) -> dict:
             return {}
@@ -242,6 +241,7 @@ def test_streaming_rejects_algorithm_without_chat_completions_capability():
     class _NonChatAlgorithm:
         id = "research"
         display_name = "Custom non-chat algorithm"
+        contract_version = 1
 
         def capabilities(self) -> dict:
             return {"supports_chat_completions": False}
@@ -294,51 +294,3 @@ def test_chat_execution_context_carries_static_principal(monkeypatch):
     assert response.status_code == 200
     assert seen["principal"] is STATIC_PRINCIPAL
     assert original_execute is not spying_execute
-
-
-# ------------------------------------------------------------------ #
-# Guard: services do not import the server package (layering)
-# ------------------------------------------------------------------ #
-
-
-def test_services_package_does_not_import_server_at_runtime():
-    """Import every services module fresh and assert no server modules load.
-
-    The worker process (and the future knowledge service) must be able
-    to import the service layer without dragging in the HTTP server
-    package. ``inqtrix.server.overrides`` stays importable as a
-    deprecation shim, but the dependency direction is
-    services <- server, never services -> server.
-    """
-    import importlib
-    import pkgutil
-
-    import inqtrix.services as services_pkg
-
-    # Snapshot and RESTORE the original module objects afterwards —
-    # leaving freshly re-imported inqtrix modules in sys.modules would
-    # break module identity (isinstance checks, monkeypatch targets)
-    # for every later test in the session (Test-Order-Hygiene,
-    # Gotcha #1 class of failures).
-    saved = {
-        name: module
-        for name, module in sys.modules.items()
-        if name.startswith("inqtrix")
-    }
-    for name in saved:
-        del sys.modules[name]
-    try:
-        importlib.import_module("inqtrix.services")
-        for module_info in pkgutil.iter_modules(services_pkg.__path__):
-            importlib.import_module(f"inqtrix.services.{module_info.name}")
-        loaded_server_modules = [
-            name for name in sys.modules if name.startswith("inqtrix.server")
-        ]
-        assert loaded_server_modules == [], (
-            "services imports pulled in server modules: "
-            f"{loaded_server_modules}"
-        )
-    finally:
-        for name in [n for n in sys.modules if n.startswith("inqtrix")]:
-            del sys.modules[name]
-        sys.modules.update(saved)

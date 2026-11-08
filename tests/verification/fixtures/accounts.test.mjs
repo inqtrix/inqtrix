@@ -76,7 +76,7 @@ test('temporary user scope supports the 24-user soak cohort without widening run
 
 /** An admin actor over a scripted server: the account erasure answers 202,
  * then each read of its operation takes the next state. */
-function erasureWorld({ deleteStatus = 202, reads = [] } = {}) {
+function erasureWorld({ deleteStatus = 202, listed = [], reads = [] } = {}) {
   const requests = []
   const completed = []
   const actor = {
@@ -93,6 +93,7 @@ function erasureWorld({ deleteStatus = 202, reads = [] } = {}) {
               ? jsonResponse(202, { operation_id: 'del_1', status: 'queued' })
               : jsonResponse(404, { error: { type: 'not_found' } })
           }
+          if (path === '/v1/admin/users') return jsonResponse(200, { users: listed })
           return jsonResponse(200, { operation_id: 'del_1', ...reads.shift() })
         },
       },
@@ -123,8 +124,9 @@ test('a temporary account is erased and its cleanup completes once it is gone', 
     // The erasure belongs to no workspace; a read naming one would 404.
     { method: 'GET', path: '/v1/deletion-operations/del_1', workspace: null },
     { method: 'GET', path: '/v1/deletion-operations/del_1', workspace: null },
+    { method: 'GET', path: '/v1/admin/users', workspace: 'workspace' },
   ])
-  assert.deepEqual(world.completed, [['cleanup-1', 3]])
+  assert.deepEqual(world.completed, [['cleanup-1', 4]])
 })
 
 test('a failed erasure leaves the cleanup open and says only how it failed', async () => {
@@ -139,13 +141,21 @@ test('a failed erasure leaves the cleanup open and says only how it failed', asy
   assert.deepEqual(world.completed, [])
 })
 
-test('an account that is already gone completes its cleanup at once', async () => {
+test('an account that is already gone completes its cleanup once the listing confirms it', async () => {
   const world = erasureWorld({ deleteStatus: 404 })
 
   await world.erase()
 
-  assert.equal(world.requests.length, 1)
-  assert.deepEqual(world.completed, [['cleanup-1', 1]])
+  assert.equal(world.requests.length, 2)
+  assert.deepEqual(world.completed, [['cleanup-1', 2]])
+})
+
+test('a 404 for an account that is still listed leaves the cleanup open', async () => {
+  const world = erasureWorld({ deleteStatus: 404, listed: [{ id: 'user-1' }] })
+
+  await assert.rejects(world.erase(), /still listed/)
+
+  assert.deepEqual(world.completed, [])
 })
 
 function preferenceWorld(saved, { serverLocale } = {}) {

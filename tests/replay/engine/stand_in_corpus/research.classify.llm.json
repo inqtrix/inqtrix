@@ -1,0 +1,7 @@
+[
+ {
+  "content": "DECISION: SEARCH\nLANGUAGE: de\nSEARCH_LANGUAGE: de\nRECENCY: YEAR\nTYPE: GENERAL\nANSWER_CONTRACT: DATA_EXTRACTION\nSUB_QUESTIONS: [\"Wie arbeitet das Modellgerät?\",\"Welche Kennzahl gilt beim Modellgerät als gut?\"]",
+  "prompt_tokens": 120,
+  "completion_tokens": 40
+ }
+]

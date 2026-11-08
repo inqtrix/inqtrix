@@ -12,7 +12,6 @@ does.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -46,7 +45,8 @@ from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.evidence import project_web_search_payload
 from inqtrix.pagination import InvalidCursor, clamp_limit, decode_cursor, list_envelope
 from inqtrix.runs.shared import access_permits_edit
-from inqtrix.server.runs import RunActive, RunNotFound
+from inqtrix.exceptions import RunNotFound
+from inqtrix.runs.records import RunActive
 from inqtrix.services.agent_control_service import (
     AgentControlUnavailable,
     AgentControlValidationError,
@@ -95,8 +95,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         """
         try:
             workspace_id = workspace_id_from_request(req)
-            summary = await asyncio.to_thread(
-                run_store.get,
+            summary = await run_store.aget(
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,

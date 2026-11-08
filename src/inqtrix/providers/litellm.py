@@ -10,32 +10,47 @@ progress.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any, Literal
+import weakref
+from typing import Any, Literal, Mapping
 
-from openai import OpenAI, OpenAIError, RateLimitError, APIStatusError
+from openai import APIStatusError, AsyncOpenAI, OpenAIError, RateLimitError
 
 from inqtrix.constants import (
     DEFAULT_LLM_MAX_OUTPUT_TOKENS,
     REASONING_TIMEOUT,
 )
 from inqtrix.exceptions import AgentModelCapacityError, AgentRateLimited
+from inqtrix.providers.attempts import (
+    AsyncNativeLLMProvider,
+    call_with_retries,
+    estimate_request_tokens,
+)
+from inqtrix.providers import _openai_resources  # noqa: F401  (resources at import)
+from inqtrix.providers._openai_responses import (
+    api_name as openai_api_name,
+    chat_turn as openai_chat_turn,
+    send as send_openai_request,
+    sent_form as sent_openai_request,
+    uses_responses,
+)
 from inqtrix.providers.base import (
-    LLMProvider,
+    without_provider_state,
     ChatTurn,
     LLMResponse,
     StructuredLLMResponse,
-    _NonFatalNoticeMixin,
-    _RetryNoticeMixin,
     _bounded_timeout,
     _check_deadline,
-    _call_openai_chat_completion_with_retries,
     _operation_deadline,
-    chat_turn_from_openai_response,
     model_capacity_reason,
     _normalize_completion_response,
     normalize_reasoning_effort,
     parse_structured_response_content,
+)
+from inqtrix.providers._openai_rules import (
+    reasoning_levels as openai_reasoning_levels,
+    effort_to_send,
 )
 from inqtrix.providers._schema import strictify_json_schema
 from inqtrix.settings import ModelSettings
@@ -44,7 +59,7 @@ from inqtrix.state import track_tokens
 log = logging.getLogger(__name__)
 
 
-class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
+class LiteLLM(AsyncNativeLLMProvider):
     """Route LLM calls through a LiteLLM or OpenAI-compatible endpoint.
 
     Use this provider when your reasoning models are exposed behind a
@@ -54,7 +69,8 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
     should front multiple upstream models.
 
     Attributes:
-        _client (OpenAI): Shared SDK client used for LLM requests.
+        _clients (WeakKeyDictionary): One ``AsyncOpenAI`` client per event
+            loop, built on first use from ``_client_kwargs``.
         _models (ModelSettings): Effective model mapping for reasoning,
             classify, claim extraction, and evaluate roles.
     """
@@ -83,6 +99,7 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         context_window_tokens: int | None = None,
         token_budget_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
         selectable_models: list[str] | None = None,
+        default_headers: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize the LiteLLM-backed provider.
 
@@ -134,6 +151,8 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 Switch to ``"max_completion_tokens"`` when targeting OpenAI
                 o-series reasoning models (o1, o3, o4) directly, where
                 ``max_tokens`` is rejected in favour of the new field.
+            default_headers: Optional headers sent with every request,
+                for example the subscription header of an API gateway.
 
         Raises:
             ValueError: If ``token_budget_parameter`` is not one of
@@ -154,9 +173,14 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             raise ValueError(
                 "token_budget_parameter must be 'max_tokens' or 'max_completion_tokens'."
             )
-        self._client = OpenAI(
-            base_url=base_url, api_key=api_key, max_retries=0,
-        )
+        self._client_kwargs: dict[str, Any] = {
+            "base_url": base_url, "api_key": api_key, "max_retries": 0,
+        }
+        if default_headers:
+            self._client_kwargs["default_headers"] = dict(default_headers)
+        self._clients: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, AsyncOpenAI
+        ] = weakref.WeakKeyDictionary()
         self._token_budget_parameter = token_budget_parameter
         self._default_max_tokens = default_max_tokens
         self._context_window_tokens = context_window_tokens
@@ -202,23 +226,51 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
 
     @staticmethod
     def _apply_reasoning_effort(
-        create_kwargs: dict[str, object], reasoning_effort: str | None
+        create_kwargs: dict[str, object],
+        reasoning_effort: str | None,
+        *,
+        model: str,
     ) -> None:
         """Add an explicitly enabled effort hint to an outgoing request.
 
-        Empty values inherit gateway defaults and ``none`` deliberately omits
-        the field. A gateway that cannot honor a graded value rejects the
-        request visibly; the provider never silently removes that contract.
+        Empty values inherit gateway defaults. For a model with OpenAI rules on
+        its card the value comes from
+        :func:`~inqtrix.providers._openai_rules.effort_to_send`, as on Azure:
+        ``none`` goes out explicitly where the card knows it, a model that
+        reasons but cannot be switched off runs at its weakest level, and a
+        level its API cannot send becomes the strongest allowed level below it,
+        with one visible warning per model. Every other model keeps the gateway's
+        handling: ``none`` omits the field and a graded value goes through
+        unchanged, so a gateway that cannot honor it rejects the request visibly;
+        the provider never silently removes that contract.
 
         Args:
             create_kwargs: Mutable OpenAI-compatible request parameters.
             reasoning_effort: Optional per-call effort override.
+            model: The effective model of the call.
         """
         normalized = normalize_reasoning_effort(reasoning_effort)
-        if normalized not in {"", "none"}:
-            create_kwargs["reasoning_effort"] = normalized
+        if normalized == "":
+            return
+        levels = openai_reasoning_levels(model)
+        if levels is None:
+            if normalized != "none":
+                create_kwargs["reasoning_effort"] = normalized
+            return
+        sent = effort_to_send(model, normalized, label="LiteLLM")
+        if sent is not None:
+            create_kwargs["reasoning_effort"] = sent
 
-    def _create_chat_completion_with_retry(
+    def _async_client(self) -> AsyncOpenAI:
+        """The SDK client of the running loop: one per adapter and loop, built on first use."""
+        loop = asyncio.get_running_loop()
+        client = self._clients.get(loop)
+        if client is None:
+            client = AsyncOpenAI(**self._client_kwargs)
+            self._clients[loop] = client
+        return client
+
+    async def _acreate_chat_completion(
         self,
         *,
         create_kwargs: dict[str, object],
@@ -227,10 +279,18 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         timeout: float,
         deadline: float | None,
     ) -> object:
-        """Call Chat Completions with visible transient-error retries."""
-        self._clear_retry_notices()
+        """Call the model's API (Chat Completions, or Responses where the card says so) with visible retries."""
         operation_deadline = _operation_deadline(timeout, deadline)
-        return _call_openai_chat_completion_with_retries(
+        client = self._async_client()
+        return await call_with_retries(
+            lambda: send_openai_request(
+                client,
+                {
+                    **create_kwargs,
+                    "timeout": _bounded_timeout(timeout, operation_deadline),
+                },
+                provider="litellm",
+            ),
             provider_label="LiteLLM",
             model=model,
             operation=operation,
@@ -238,16 +298,12 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             outer_deadline=deadline,
             timeout_label=f'LiteLLM call ({operation})',
             configured_timeout_seconds=timeout,
-            create=lambda: self._client.chat.completions.create(
-                **{
-                    **create_kwargs,
-                    "timeout": _bounded_timeout(timeout, operation_deadline),
-                }
-            ),
-            append_retry_notice=self._append_retry_notice,
+            estimated_input_tokens=estimate_request_tokens(sent_openai_request(create_kwargs, provider="litellm")),
+            max_output_tokens=int(create_kwargs.get(self._token_budget_parameter) or 0) or None,
+            reasoning_effort=str(create_kwargs.get("reasoning_effort") or "") or None,
         )
 
-    def complete(
+    async def acomplete(
         self,
         prompt: str,
         *,
@@ -289,18 +345,20 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             OpenAIError: If the SDK surfaces a non-rate-limit backend
                 failure.
         """
-        return self.complete_with_metadata(
-            prompt,
-            system=system,
-            model=model,
-            max_output_tokens=max_output_tokens,
-            timeout=timeout,
-            state=state,
-            deadline=deadline,
-            reasoning_effort=reasoning_effort,
+        return (
+            await self.acomplete_with_metadata(
+                prompt,
+                system=system,
+                model=model,
+                max_output_tokens=max_output_tokens,
+                timeout=timeout,
+                state=state,
+                deadline=deadline,
+                reasoning_effort=reasoning_effort,
+            )
         ).content
 
-    def complete_with_metadata(
+    async def acomplete_with_metadata(
         self,
         prompt: str,
         *,
@@ -365,8 +423,8 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             create_kwargs[self._token_budget_parameter] = (
                 max_output_tokens or self._default_max_tokens
             )
-            self._apply_reasoning_effort(create_kwargs, reasoning_effort)
-            r = self._create_chat_completion_with_retry(
+            self._apply_reasoning_effort(create_kwargs, reasoning_effort, model=use_model)
+            r = await self._acreate_chat_completion(
                 create_kwargs=create_kwargs,
                 model=use_model,
                 operation="complete",
@@ -423,8 +481,9 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=e,
                 ) from e
             log.error(
-                "LLM call failed (model=%s, status=%s, error_type=%s)",
+                "LLM call failed (model=%s, api=%s, status=%s, error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 e.status_code,
                 type(e).__name__,
             )
@@ -444,8 +503,9 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=e,
                 ) from e
             log.error(
-                "LLM call failed (model=%s, error_type=%s)",
+                "LLM call failed (model=%s, api=%s, error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 type(e).__name__,
             )
             raise
@@ -458,6 +518,10 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         never silently degraded)."""
         return True
 
+    def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
+        """The efforts this adapter can send for *model*; ``None`` for models without OpenAI rules."""
+        return openai_reasoning_levels(model or self._models.reasoning_model)
+
     def supports_structured_output(self, *, model: str | None = None) -> bool:
         """Advertise the OpenAI-compatible JSON-schema request surface.
 
@@ -467,7 +531,7 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         """
         return True
 
-    def complete_structured(
+    async def acomplete_structured(
         self,
         prompt: str,
         *,
@@ -526,9 +590,9 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         create_kwargs[self._token_budget_parameter] = (
             max_output_tokens or self._default_max_tokens
         )
-        self._apply_reasoning_effort(create_kwargs, reasoning_effort)
+        self._apply_reasoning_effort(create_kwargs, reasoning_effort, model=use_model)
         try:
-            raw_response = self._create_chat_completion_with_retry(
+            raw_response = await self._acreate_chat_completion(
                 create_kwargs=create_kwargs,
                 model=use_model,
                 operation="structured_response",
@@ -592,8 +656,9 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=exc,
                 ) from exc
             log.error(
-                "LLM structured call failed (model=%s, status=%s, error_type=%s)",
+                "LLM structured call failed (model=%s, api=%s, status=%s, error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 exc.status_code,
                 type(exc).__name__,
             )
@@ -613,13 +678,14 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=exc,
                 ) from exc
             log.error(
-                "LLM structured call failed (model=%s, error_type=%s)",
+                "LLM structured call failed (model=%s, api=%s, error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 type(exc).__name__,
             )
             raise
 
-    def chat(
+    async def achat(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -647,26 +713,30 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         try:
             create_kwargs: dict[str, object] = {
                 "model": use_model,
-                "messages": list(messages),
+                "messages": (
+                messages
+                if uses_responses(use_model)
+                else without_provider_state(messages, provider="litellm")
+            ),
                 "timeout": _bounded_timeout(timeout, deadline),
                 "stream": False,
             }
             create_kwargs[self._token_budget_parameter] = (
                 max_output_tokens or self._default_max_tokens
             )
-            self._apply_reasoning_effort(create_kwargs, reasoning_effort)
+            self._apply_reasoning_effort(create_kwargs, reasoning_effort, model=use_model)
             if tools:
                 create_kwargs["tools"] = list(tools)
             if tool_choice is not None:
                 create_kwargs["tool_choice"] = tool_choice
-            response = self._create_chat_completion_with_retry(
+            response = await self._acreate_chat_completion(
                 create_kwargs=create_kwargs,
                 model=use_model,
                 operation="chat",
                 timeout=timeout,
                 deadline=deadline,
             )
-            return chat_turn_from_openai_response(response, model=use_model)
+            return openai_chat_turn(response, provider="litellm", model=use_model)
         except RateLimitError as e:
             log.error(
                 "FATAL Rate-Limit (model=%s, error_type=%s)",
@@ -700,8 +770,9 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=e,
                 ) from e
             log.error(
-                "LLM chat failed (model=%s, status=%s, error_type=%s)",
+                "LLM chat failed (model=%s, api=%s, status=%s, error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 e.status_code,
                 type(e).__name__,
             )
@@ -721,8 +792,9 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=e,
                 ) from e
             log.error(
-                "LLM chat failed (model=%s, error_type=%s)",
+                "LLM chat failed (model=%s, api=%s, error_type=%s)",
                 use_model,
+                openai_api_name(use_model),
                 type(e).__name__,
             )
             raise
@@ -730,16 +802,16 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
     def is_available(self) -> bool:
         """Report whether the provider is configured to attempt requests.
 
-        Configuration here means: the OpenAI SDK client was successfully
-        constructed. The constructor enforces a non-empty ``api_key``
-        and a non-empty ``base_url`` so a successfully constructed
-        ``LiteLLM`` instance always returns ``True`` here today.
+        Configuration here means: the OpenAI SDK client configuration was
+        resolved; the client itself is built per loop on first use. The
+        constructor checks neither ``api_key`` nor ``base_url``, so a
+        constructed ``LiteLLM`` instance always returns ``True`` here today.
         Backend reachability or key validity is not checked — those
         only surface on the first ``complete()`` call.
 
         Returns:
-            ``True`` when the internal SDK client was constructed,
+            ``True`` when the client configuration was resolved,
             otherwise ``False``.
         """
-        return self._client is not None
+        return self._client_kwargs is not None
 

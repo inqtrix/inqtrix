@@ -2,8 +2,7 @@
 
 Same conventions as the other auth stores: every operation runs inside
 :func:`~inqtrix.storage.db.tenant_session` (restricted role + tenant GUC,
-forced RLS), guarded UPDATEs are replica-safe, and the store shares the
-identity bundle's HTTP-loop engine. The owner bootstrap is race-safe via
+forced RLS), guarded UPDATEs are replica-safe. The owner bootstrap is race-safe via
 ``INSERT ... WHERE NOT EXISTS`` (rowcount tells the winner); the
 functional unique index on ``lower(email)`` makes duplicate emails fail
 closed rather than silently creating a second account.
@@ -43,7 +42,7 @@ class PostgresCredentialStore:
     """Durable local-credential store (accounts survive restarts/replicas).
 
     Args:
-        session_factory: Async session factory on the HTTP loop's engine.
+        session_factory: Async session factory on the engine of the process.
         app_role: Restricted role assumed per transaction.
     """
 

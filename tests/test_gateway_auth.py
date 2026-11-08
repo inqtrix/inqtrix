@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
+import hashlib
+import hmac
 import inspect
 import json
 import logging
 import types
-import warnings
 from ipaddress import ip_network
 from pathlib import Path
 from typing import get_args
@@ -23,7 +25,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from joserfc import jwt as jose_jwt
-from joserfc.jwk import KeySet, OctKey, RSAKey
+from joserfc.jwk import KeySet, RSAKey
 from pydantic import ValidationError
 from starlette.requests import Request
 
@@ -679,8 +681,6 @@ def test_an_assertion_header_nested_beyond_the_parser_is_malformed() -> None:
 
 
 def _unsigned(header: dict[str, object], claims: dict[str, object]) -> str:
-    import base64
-
     def segment(data: object) -> str:
         return base64.urlsafe_b64encode(json.dumps(data).encode()).rstrip(b"=").decode()
 
@@ -694,12 +694,11 @@ def test_alg_none_is_rejected() -> None:
 
 
 def test_hmac_with_the_public_key_as_secret_is_rejected() -> None:
-    public_pem = KEY_ONE.as_pem(private=False)
-    with warnings.catch_warnings():
-        # The library warns about exactly this misuse; the test is the attack.
-        warnings.simplefilter("ignore")
-        attacker_key = OctKey.import_key(public_pem)
-    token = jose_jwt.encode({"alg": "HS256", "kid": "key-one"}, _claims(), attacker_key)
+    # The library refuses to build this key, so the attack token is signed by hand.
+    secret = KEY_ONE.as_pem(private=False)
+    unsigned = _unsigned({"alg": "HS256", "kid": "key-one"}, _claims()).rstrip(".")
+    signature = hmac.new(secret, unsigned.encode(), hashlib.sha256).digest()
+    token = f"{unsigned}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
 
     assert _outcome(_jwt_resolver(), _jwt_request(token)) == "signature_invalid"
 

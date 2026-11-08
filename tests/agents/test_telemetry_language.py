@@ -56,3 +56,13 @@ def test_the_provider_retry_text_carries_its_numbers_in_both_languages() -> None
         assert "2.0 s" in activity["detail"]
     assert "fehlgeschlagen" in german["detail"]
     assert "failed" in english["detail"]
+
+
+def test_every_model_call_names_its_retry_in_both_languages() -> None:
+    """A purpose without its own text would show the raw message key."""
+    from inqtrix.agents.telemetry import _MODEL_RETRY_CONTEXT
+
+    for node in _MODEL_RETRY_CONTEXT:
+        for language in ("de", "en"):
+            purpose = model_retry_activity(dict(_NOTICE), node=node, language=language)["purpose"]
+            assert not purpose.startswith("telemetry_"), (node, language)

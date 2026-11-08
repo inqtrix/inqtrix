@@ -336,7 +336,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                     and bool(getattr(guest_link_settings, "stats_enabled", False))
                 ),
                 # Agent capability tools are registered in the same curated
-                # registry consumed by deepagents and MCP adapters. This is on
+                # registry consumed by the kernel and MCP adapters. This is on
                 # when at least one capability is wired.
                 "agent_tools": bool(
                     container.capability_registry is not None

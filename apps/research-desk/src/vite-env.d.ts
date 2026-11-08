@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 // Build-time constant from the `define` block in vite.config.ts,
-// single-sourced from `__display_version__` in src/inqtrix/__init__.py.
+// single-sourced from `__display_version__` in src/inqtrix/version.py.
 declare const __APP_VERSION__: string
 
 // mammoth ships lib/index.d.ts next to its main entry, and its package.json

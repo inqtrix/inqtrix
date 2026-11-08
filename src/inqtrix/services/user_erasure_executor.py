@@ -35,10 +35,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from inqtrix import aio
 from inqtrix.auth.directory import DELETED_ACCOUNT_ISSUER
 from inqtrix.auth.lifecycle import AdminActor, ProvisioningActor
 from inqtrix.runs.deletion_operations import DeletionStage
-from inqtrix.services.user_erasure import (
+from inqtrix.storage.user_erasure import (
     DELETED_ACCOUNT_DISPLAY_NAME,
     DELETED_ACCOUNT_EMAIL,
     DELETED_ACCOUNT_SUBJECT,
@@ -46,13 +47,12 @@ from inqtrix.services.user_erasure import (
     Disposition,
     rule_for,
 )
-from inqtrix.services.user_erasure_inventory import (
+from inqtrix.storage.user_erasure_inventory import (
     _match,
     _tables,
     collect_inventory,
 )
 from inqtrix.storage.db import tenant_session
-from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -179,7 +179,7 @@ class UserErasure:
         actor_user_id: uuid.UUID | None,
     ) -> None:
         """Run every remaining stage; the operation completes at the end."""
-        exists, marked_by = run_coro_sync(
+        exists, marked_by = aio.call_from_thread(
             self._lifecycle.erasure_operation_id(
                 tenant_id=tenant_id, user_id=user_id
             )
@@ -214,7 +214,7 @@ class UserErasure:
             )
 
         handle.assert_current()
-        placeholder = run_coro_sync(self._delete_rows(tenant_id, user_id))
+        placeholder = aio.call_from_thread(self._delete_rows(tenant_id, user_id))
         log.info(
             "Account erasure %s: rows removed, references moved to %s.",
             handle.operation_id,
@@ -227,7 +227,7 @@ class UserErasure:
         )
 
         handle.assert_current()
-        residuals = run_coro_sync(self._residuals(tenant_id, user_id))
+        residuals = aio.call_from_thread(self._residuals(tenant_id, user_id))
         if residuals:
             raise ErasureResiduals(residuals)
         handle.progress(
@@ -236,7 +236,7 @@ class UserErasure:
             total_items=total,
         )
         handle.assert_current()
-        run_coro_sync(
+        aio.call_from_thread(
             self._lifecycle.finish_erasure(
                 tenant_id=tenant_id,
                 user_id=user_id,

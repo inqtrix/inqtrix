@@ -1,7 +1,7 @@
 """Durable run store: records, events, and results in Postgres.
 
 Same public surface as the in-memory
-:class:`~inqtrix.server.runs.RunStore` — the runs router and
+:class:`~inqtrix.runs.memory_store.RunStore` — the runs router and
 :class:`~inqtrix.services.run_service.RunService` cannot tell the
 backends apart. Two execution modes:
 
@@ -15,10 +15,8 @@ backends apart. Two execution modes:
   truth — a lost stream message is recoverable from Postgres, and the
   guarded status transitions make at-least-once delivery idempotent.
 
-The storage layer is async (asyncpg) while this surface is sync (the
-routers and the run-handle call it from worker threads); the store
-therefore owns one background event loop and funnels every database
-operation through it. Sequence numbers are allocated via
+Every operation is a coroutine on the process loop (asyncpg); job bodies on
+threads reach it through its sync name. Sequence numbers are allocated via
 ``UPDATE runs SET event_seq = event_seq + 1 RETURNING event_seq`` —
 serialized on the row lock, gap-free across processes, which is what
 keeps the SSE stream byte-compatible with the in-memory store.
@@ -27,13 +25,13 @@ keeps the SSE stream byte-compatible with the in-memory store.
 from __future__ import annotations
 
 import logging
-import asyncio
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from queue import Empty, Queue, SimpleQueue
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 from sqlalchemy import (
     Text,
@@ -57,6 +55,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
+from inqtrix import aio
 from inqtrix.storage.migration_contract import (
     assert_schema_head,
 )
@@ -77,25 +76,28 @@ from inqtrix.runs.durable_store import (
 from inqtrix.pagination import encode_cursor
 from inqtrix.runs.ports import RunStoreMetrics
 from inqtrix.runs.shared import (
+    ADMIN_CANCEL_REASON,
+    BINDING_ASKED_STATUS,
+    binding_overview_payload,
+    bridge_to_loop,
     clipped_question,
-    CHILD_PROGRESS_EVENT,
     access_annotation as _access_annotation,
     build_child_progress_payload,
     build_run_summary,
     expand_run_event,
-    incognito_request,
     question_was_clipped,
     run_elapsed_seconds,
     run_segment_id,
     should_project_child_event,
 )
 from inqtrix.runtime_logging import new_run_id
-from inqtrix.server.runs import (
+from inqtrix.exceptions import RunAccessDenied, RunNotFound
+from inqtrix.runs.records import (
+    IMPORTED_RUN_CONTRACT,
     TERMINAL_RUN_STATUSES,
     WAITING_RUN_STATUSES,
     RunActive,
     RunHandle,
-    RunNotFound,
     RunParentInactive,
     RunPerUserLimit,
     RunQueueFull,
@@ -115,7 +117,8 @@ from inqtrix.storage.agent_sessions_orm import agent_sessions
 from inqtrix.storage.agent_memory_orm import agent_feedback, agent_memory_candidates
 from inqtrix.storage.identity_orm import resource_shares, workspace_members
 from inqtrix.storage.knowledge_sessions_orm import knowledge_sessions
-from inqtrix.services.audit_service import build_audit_entry
+from inqtrix.auth.audit_entries import build_audit_entry
+from inqtrix.observability.incognito import incognito_request
 from inqtrix.storage.resource_access import (
     append_resource_effects,
     lock_active_users,
@@ -123,6 +126,26 @@ from inqtrix.storage.resource_access import (
     revoke_resource_shares,
 )
 from inqtrix.urls import sanitize_error
+from inqtrix.harness.contracts import binding as run_binding
+from inqtrix.harness.contracts.binding import (
+    BindingVerdict,
+    RunBinding,
+    RunBindingNewer,
+    WorkflowUnavailable,
+    check_run_binding,
+)
+from inqtrix.harness.contracts.events import (
+    CHILD_PROGRESS_EVENT,
+    RUN_CANCELLED_EVENT,
+    RUN_CANCEL_REQUESTED_EVENT,
+    RUN_COMPLETED_EVENT,
+    RUN_FAILED_EVENT,
+    RUN_QUEUED_EVENT,
+    RUN_RESUMED_EVENT,
+    RUN_STARTED_EVENT,
+    RUN_TRACE_EVENT,
+    RUN_WAITING_EVENT,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -135,6 +158,12 @@ log = logging.getLogger(__name__)
 _TERMINAL_VALUES = tuple(status.value for status in TERMINAL_RUN_STATUSES)
 
 _WAITING_VALUES = tuple(status.value for status in WAITING_RUN_STATUSES)
+
+_BINDING_END_REASONS = {
+    BindingVerdict.RETIRE_OLDER: "workflow_contract_changed",
+    BindingVerdict.RETIRED_MODE: "workflow_retired",
+}
+"""Verdicts that end a run, with the reason its cancel event carries."""
 
 _ACTIVE_AGENT_SESSION_CONSTRAINT = "uq_runs_active_agent_session"
 
@@ -153,10 +182,21 @@ _EXECUTION_LOST_ERROR = {
 }
 
 _TERMINAL_EVENT_TYPES = frozenset(
-    {"inqtrix.run.completed", "inqtrix.run.failed", "inqtrix.run.cancelled"}
+    {RUN_COMPLETED_EVENT, RUN_FAILED_EVENT, RUN_CANCELLED_EVENT}
 )
 
-_CLEANUP_HANDOFF_KEY = "inqtrix_run_cleanup_handoffs"
+_POST_COMMIT_HANDOFF_KEY = "inqtrix_run_post_commit_handoffs"
+
+
+class _SubtreeCancel(NamedTuple):
+    """What one walk over a run's subtree did (see ``_cancel_live_subtree_db``)."""
+
+    run_ids: tuple[str, ...]
+    """Every run of the subtree, the walked run first, terminal ones included."""
+    cancelled: tuple[str, ...]
+    """The descendants the walk ended or asked to stop."""
+    woken_parents: tuple[str, ...]
+    """Parents a descendant's terminal write woke."""
 
 
 def _elapsed_sql(start_column: Any, now: float) -> Any:
@@ -273,12 +313,8 @@ class PostgresRunStore(DurableJobStoreBase):
     """Durable run registry with the in-memory store's public surface.
 
     Args:
-        engine: Async engine OWNED by this store. asyncpg pools are
-            event-loop-affine: every connection must live on the
-            store's background loop, so the engine is deliberately NOT
-            shared with the identity/file backends (which run on the
-            HTTP server's loop) — sharing one pool across loops
-            corrupts connections.
+        engine: Async engine OWNED by this store, whose connections live on
+            the process loop.
         app_role: Restricted database role assumed per transaction
             (``SET LOCAL ROLE``) so forced RLS applies.
         queue: Job queue for worker dispatch; ``None`` keeps execution
@@ -316,7 +352,6 @@ class PostgresRunStore(DurableJobStoreBase):
     predicate, never the row tenant.
     """
 
-    _loop_thread_name = "inqtrix-runs-db"
     _dispatch_thread_prefix = "inqtrix-run"
     _job_kind = "Native run"
 
@@ -333,7 +368,7 @@ class PostgresRunStore(DurableJobStoreBase):
         worker_id: str,
         audit: "AuditSink | None" = None,
         waiting_ttl_seconds: float = 7 * 24 * 3600.0,
-        queued_ttl_seconds: float = 24 * 3600.0,
+        queued_ttl_seconds: float = 2 * 3600.0,
         max_concurrent_per_user: int | None = None,
         restrict_to_workspace_members: bool = False,
         sharing_enabled: bool = True,
@@ -342,9 +377,8 @@ class PostgresRunStore(DurableJobStoreBase):
         checkpoint_cleanup: Callable[[str, str], None] | None = None,
         incognito_ttl_seconds: int = RUN_INCOGNITO_RETENTION_SECONDS,
     ) -> None:
-        # Validate BEFORE super().__init__ spawns the background loop
-        # thread and adopts the engine — a config error must not leak
-        # either.
+        # Validate BEFORE super().__init__ adopts the engine — a config
+        # error must not leak it.
         if float(waiting_ttl_seconds) <= 0:
             raise ValueError(
                 f"waiting_ttl_seconds must be > 0, got {waiting_ttl_seconds}"
@@ -353,7 +387,7 @@ class PostgresRunStore(DurableJobStoreBase):
             raise ValueError(
                 f"queued_ttl_seconds must be > 0, got {queued_ttl_seconds}"
             )
-        # The engine/session/loop/dispatch plumbing lives in
+        # The engine/session/dispatch plumbing lives in
         # DurableJobStoreBase; this store adds only its sizing,
         # retention, and audit state.
         super().__init__(
@@ -377,41 +411,45 @@ class PostgresRunStore(DurableJobStoreBase):
         self._max_concurrent_per_user = max_concurrent_per_user
         self._restrict_to_workspace_members = restrict_to_workspace_members
         # TTL-swept waiting run ids, handed over from the cleanup
-        # coroutine (which must never take self._lock — see
-        # _cleanup_db) to the sync surface, which releases their
-        # retained no-queue closures in _release_swept_locals().
+        # transaction once it committed; _release_swept_locals() then
+        # releases their retained no-queue closures.
         self._swept_waiting: SimpleQueue[str] = SimpleQueue()
         # Parents flipped waiting_for_children -> queued by a child's
         # terminal write (or the park-time self-heal). Same handoff
-        # pattern as _swept_waiting: the coroutine only records the id
-        # post-commit, the sync mutators perform the actual dispatch in
-        # _dispatch_woken_parents() — never from the store loop.
+        # pattern as _swept_waiting: the transaction only records the id
+        # post-commit, the operation dispatches it afterwards in
+        # _dispatch_woken_parents().
         self._parents_to_wake: SimpleQueue[str] = SimpleQueue()
-        # Coroutine -> sync-mutator handoff for the parent-failure child
-        # cascade (a coroutine must NEVER take self._lock — the
-        # documented deadlock class): _terminal_db(FAILED) enqueues
-        # (root_id, cascaded_child_ids), the calling mutator drains and
-        # projects the cancellations into local work handles.
-        self._failed_cascades: SimpleQueue[tuple[str, tuple[str, ...]]] = SimpleQueue()
-        # The restart sweep runs eagerly so orphans of the previous
-        # process are terminal before the first client read. A failure
-        # keeps the one-shot flag set — the lazy first-cleanup fallback
-        # remains, so startup gains no new hard dependency.
-        if self._sweep_orphans:
-            try:
-                self.sweep()
-            except Exception:  # noqa: BLE001 — lazy cleanup remains
-                log.warning(
-                    "Startup cleanup failed; it will be retried on the next database "
-                    "access.",
-                    exc_info=True,
-                )
+        # Child cascades of runs that ended on their own path (failure, time
+        # out, restart, lost authority, binding end, a cancel landing):
+        # (run id, its status, its subtree) once the transaction committed;
+        # _dispatch_woken_parents() projects them into local work handles.
+        self._cascades: SimpleQueue[tuple[str, str, tuple[str, ...]]] = SimpleQueue()
 
-    def _release_swept_locals(self) -> None:
+    async def astart(self) -> None:
+        """Make orphans of the previous process terminal before the first client read.
+
+        A failure costs only this pass: the lost-execution fence still catches
+        the orphans, so startup gains no new hard dependency.
+        """
+        if not self._sweep_orphans:
+            return
+        try:
+            await self.asweep()
+        except Exception:  # noqa: BLE001 — lazy cleanup remains
+            log.warning(
+                "Startup cleanup failed; it will be retried on the next database "
+                "access.",
+                exc_info=True,
+            )
+
+    start = bridge_to_loop(astart)
+
+    async def _release_swept_locals(self) -> None:
         """Apply post-commit handoffs produced by lazy cleanup.
 
         The cleanup transaction records swept ids and parents to wake only
-        from SQLAlchemy's ``after_commit`` hook. The synchronous caller may
+        from SQLAlchemy's ``after_commit`` hook. The caller may
         therefore safely release retained closures and dispatch resumed
         parents without observing state that later rolls back.
         """
@@ -428,50 +466,59 @@ class PostgresRunStore(DurableJobStoreBase):
                     if local is not None:
                         local.cancel_event.set()
                         local.work = None
-        self._dispatch_woken_parents()
+        await self._dispatch_woken_parents()
 
-    def _register_cleanup_handoffs(
+    def _register_post_commit_handoffs(
         self,
         session: "AsyncSession",
         *,
-        swept_run_ids: list[str],
-        woken_parent_ids: list[str],
+        swept_run_ids: Sequence[str] = (),
+        woken_parent_ids: Sequence[str] = (),
+        cascades: Sequence[tuple[str, str, tuple[str, ...]]] = (),
     ) -> None:
-        """Publish cleanup side effects only after its transaction commits."""
-        if not swept_run_ids and not woken_parent_ids:
+        """Publish a transaction's local side effects only after it commits.
+
+        Swept waits release their retained closures, woken parents dispatch,
+        and child cascades (run id, its status, its subtree) signal the local
+        work handles of the runs they ended or asked to stop. A transaction
+        that rolls back publishes nothing.
+        """
+        if not swept_run_ids and not woken_parent_ids and not cascades:
             return
         sync_session = session.sync_session
         pending = sync_session.info.setdefault(
-            _CLEANUP_HANDOFF_KEY,
-            {"swept": [], "parents": [], "registered": False},
+            _POST_COMMIT_HANDOFF_KEY,
+            {"swept": [], "parents": [], "cascades": [], "registered": False},
         )
         pending["swept"].extend(swept_run_ids)
         pending["parents"].extend(woken_parent_ids)
+        pending["cascades"].extend(cascades)
         if pending["registered"]:
             return
         pending["registered"] = True
 
         @event.listens_for(sync_session, "after_commit", once=True)
         def _publish(committed_session: Any) -> None:
-            committed = committed_session.info.pop(_CLEANUP_HANDOFF_KEY, {})
+            committed = committed_session.info.pop(_POST_COMMIT_HANDOFF_KEY, {})
             for run_id in committed.get("swept", ()):
                 self._swept_waiting.put(run_id)
             for parent_id in committed.get("parents", ()):
                 self._parents_to_wake.put(parent_id)
+            for cascade in committed.get("cascades", ()):
+                self._cascades.put(cascade)
 
-    def _dispatch_woken_parents(self) -> None:
+    async def _dispatch_woken_parents(self) -> None:
         """Dispatch parents whose last child's terminal write woke them.
 
-        Also drains the parent-failure child cascade first — every
-        terminal-landing sync mutator passes through here, making it the
+        Also drains the committed child cascades first — every
+        terminal-landing mutator passes through here, making it the
         ONE chokepoint where committed cascades project into local
         handles.
 
         The DB rows already flipped ``waiting_for_children -> queued``
         inside the child's terminal transaction (or the park-time
-        self-heal); this performs the mode-appropriate dispatch on the
-        SYNC surface — the store loop must never take ``self._lock``
-        (see ``_cleanup_db``) nor block on a queue round-trip.
+        self-heal); this performs the mode-appropriate dispatch outside
+        that transaction.
 
         Queue mode enqueues a fresh dispatch message (any worker resumes
         from payload + checkpoint); a lost enqueue is healed by the
@@ -481,7 +528,8 @@ class PostgresRunStore(DurableJobStoreBase):
         parked) is logged loudly: it cannot resume in-process and ends
         via the waiting/stuck lifecycle, never silently.
         """
-        self._drain_failed_cascades()
+        self._drain_cascades()
+        requeued = False
         while True:
             try:
                 parent_id = self._parents_to_wake.get_nowait()
@@ -489,7 +537,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 break
             if self._dispatch_queue is not None:
                 try:
-                    self._dispatch_queue.enqueue(
+                    await self._dispatch_queue.enqueue(
                         run_id=parent_id, tenant_id=DEFAULT_TENANT
                     )
                 except Exception:  # noqa: BLE001 — row committed; reconciler heals
@@ -515,18 +563,21 @@ class PostgresRunStore(DurableJobStoreBase):
                 else:
                     local.parked = False
                     self._pending.append(parent_id)
-                    self._dispatch_locked()
+                    requeued = True
+        if requeued:
+            await self._dispatch_now()
 
     # -- public surface (RunStore parity) -------------------------------- #
 
-    def submit(
+    async def asubmit(
         self,
         *,
         question: str,
         stack_name: str,
         work: RunWork,
+        mode: str,
+        workflow_contract: int,
         agent_overrides: dict[str, Any] | None = None,
-        mode: str = "research",
         workspace_id: str | None = None,
         created_by_user_id: uuid.UUID | None = None,
         created_by_tenant_id: str | None = None,
@@ -552,7 +603,7 @@ class PostgresRunStore(DurableJobStoreBase):
         # Best-effort fence before admission (bounded by grace +
         # throttle): a lost execution should stop holding a concurrency
         # slot against new submissions within that window.
-        self._expire_lost_executions()
+        await self._expire_lost_executions()
         durable_payload = dict(request_payload or {})
         # Carry the submitter's trace context in the run row (W3C
         # traceparent): the queue message stays (run_id, tenant_id), the
@@ -562,35 +613,34 @@ class PostgresRunStore(DurableJobStoreBase):
             body = dict(durable_payload.get("body") or {})
             body["origin_key"] = origin_key
             durable_payload["body"] = body
-        summary, created = self._call(
-            self._submit_db(
-                tenant_id=DEFAULT_TENANT,
-                question=clipped_question(question),
-                stack_name=stack_name,
-                agent_overrides=dict(agent_overrides or {}),
-                mode=mode,
-                workspace_id=workspace_id,
-                created_by_user_id=created_by_user_id,
-                created_by_tenant_id=created_by_tenant_id,
-                execution_actor_user_id=created_by_user_id,
-                execution_scopes=sorted(execution_scopes),
-                request_payload=durable_payload or None,
-                kind=kind,
-                parent_run_id=parent_run_id,
-                root_run_id=root_run_id,
-                session_id=session_id,
-                # The retention sweep's index of the flag the run service
-                # put into the request; written once, never updated.
-                incognito=incognito_request(durable_payload),
-            )
+        summary, created = await self._submit_db(
+            tenant_id=DEFAULT_TENANT,
+            question=clipped_question(question),
+            stack_name=stack_name,
+            agent_overrides=dict(agent_overrides or {}),
+            mode=mode,
+            workflow_contract=workflow_contract,
+            workspace_id=workspace_id,
+            created_by_user_id=created_by_user_id,
+            created_by_tenant_id=created_by_tenant_id,
+            execution_actor_user_id=created_by_user_id,
+            execution_scopes=sorted(execution_scopes),
+            request_payload=durable_payload or None,
+            kind=kind,
+            parent_run_id=parent_run_id,
+            root_run_id=root_run_id,
+            session_id=session_id,
+            # The retention sweep's index of the flag the run service
+            # put into the request; written once, never updated.
+            incognito=incognito_request(durable_payload),
         )
-        self._release_swept_locals()
+        await self._release_swept_locals()
         if not created:
             return summary
         run_id = summary["run_id"]
         if self._dispatch_queue is not None:
             try:
-                self._dispatch_queue.enqueue(run_id=run_id, tenant_id=DEFAULT_TENANT)
+                await self._dispatch_queue.enqueue(run_id=run_id, tenant_id=DEFAULT_TENANT)
             except Exception:  # noqa: BLE001 — row is committed; visible
                 # The run row is the source of truth: the worker
                 # reconciler re-dispatches stale queued rows, so a
@@ -605,18 +655,20 @@ class PostgresRunStore(DurableJobStoreBase):
             with self._lock:
                 self._local[run_id] = _LocalJob(work=work)
                 self._pending.append(run_id)
-                self._dispatch_locked()
+            await self._dispatch_now()
         return summary
 
-    def import_completed_run(
+    submit = bridge_to_loop(asubmit)
+
+    async def aimport_completed_run(
         self,
         *,
         source_run_id: str,
         question: str,
         stack_name: str,
         result: dict[str, Any],
+        mode: str,
         status: str = "completed",
-        mode: str = "research",
         agent_overrides: dict[str, Any] | None = None,
         snapshot: dict[str, Any] | None = None,
         error: dict[str, Any] | None = None,
@@ -641,28 +693,28 @@ class PostgresRunStore(DurableJobStoreBase):
             raise ValueError("source_run_id must not be empty")
         if len(source_run_id) > 255:
             raise ValueError("source_run_id must not exceed 255 characters")
-        summary = self._call(
-            self._import_completed_run_db(
-                tenant_id=DEFAULT_TENANT,
-                source_run_id=source_run_id,
-                question=clipped_question(question),
-                stack_name=stack_name,
-                result=result,
-                status=status,
-                mode=mode,
-                agent_overrides=dict(agent_overrides or {}),
-                snapshot=dict(snapshot or {}),
-                error=dict(error) if error else None,
-                created_at=created_at,
-                workspace_id=workspace_id,
-                created_by_user_id=created_by_user_id,
-                created_by_tenant_id=created_by_tenant_id,
-            )
+        summary = await self._import_completed_run_db(
+            tenant_id=DEFAULT_TENANT,
+            source_run_id=source_run_id,
+            question=clipped_question(question),
+            stack_name=stack_name,
+            result=result,
+            status=status,
+            mode=mode,
+            agent_overrides=dict(agent_overrides or {}),
+            snapshot=dict(snapshot or {}),
+            error=dict(error) if error else None,
+            created_at=created_at,
+            workspace_id=workspace_id,
+            created_by_user_id=created_by_user_id,
+            created_by_tenant_id=created_by_tenant_id,
         )
-        self._release_swept_locals()
+        await self._release_swept_locals()
         return summary
 
-    def get(
+    import_completed_run = bridge_to_loop(aimport_completed_run)
+
+    async def aget(
         self,
         run_id: str,
         *,
@@ -670,39 +722,47 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> dict[str, Any]:
         """Return a public summary for *run_id*."""
-        self._expire_lost_executions()
-        summary = self._call(self._summary_db(run_id, workspace_id, visible_to))
-        self._release_swept_locals()
+        await self._expire_lost_executions()
+        summary = await self._summary_db(run_id, workspace_id, visible_to)
+        await self._release_swept_locals()
         return summary
 
-    def list(
+    get = bridge_to_loop(aget)
+
+    async def alist(
         self,
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
     ) -> list[dict[str, Any]]:
         """Return public summaries, newest first (unbounded)."""
-        self._expire_lost_executions()
-        summaries = self._call(self._list_db(workspace_id, visible_to))
-        self._release_swept_locals()
+        await self._expire_lost_executions()
+        summaries = await self._list_db(workspace_id, visible_to)
+        await self._release_swept_locals()
         return summaries
 
-    def list_session_runs(
+    list = bridge_to_loop(alist)
+
+    async def alist_session_runs(
         self,
         session_id: str,
         *,
         visible_to: "UserContext | None" = None,
     ) -> list[dict[str, Any]]:
         """Visible summaries of one agent session, oldest first."""
-        summaries = self._call(self._list_session_runs_db(session_id, visible_to))
-        self._release_swept_locals()
+        summaries = await self._list_session_runs_db(session_id, visible_to)
+        await self._release_swept_locals()
         return summaries
 
-    def session_owners(self, session_id: str) -> set[tuple[str | None, str | None]]:
-        """Return every recorded owner identity for ``session_id``."""
-        return self._call(self._session_owners_db(session_id))
+    list_session_runs = bridge_to_loop(alist_session_runs)
 
-    def delete_agent_session_aggregate(
+    async def asession_owners(self, session_id: str) -> set[tuple[str | None, str | None]]:
+        """Return every recorded owner identity for ``session_id``."""
+        return await self._session_owners_db(session_id)
+
+    session_owners = bridge_to_loop(asession_owners)
+
+    async def adelete_agent_session_aggregate(
         self,
         session_id: str,
         *,
@@ -713,7 +773,7 @@ class PostgresRunStore(DurableJobStoreBase):
     ) -> None:
         """Remove the fenced run lineage and every run-owned child row."""
 
-        self._delete_session_aggregate(
+        await self._delete_session_aggregate(
             session_id,
             session_kind="agent",
             tenant_id=tenant_id,
@@ -722,7 +782,9 @@ class PostgresRunStore(DurableJobStoreBase):
             run_ids=run_ids,
         )
 
-    def delete_knowledge_session_aggregate(
+    delete_agent_session_aggregate = bridge_to_loop(adelete_agent_session_aggregate)
+
+    async def adelete_knowledge_session_aggregate(
         self,
         session_id: str,
         *,
@@ -733,7 +795,7 @@ class PostgresRunStore(DurableJobStoreBase):
     ) -> None:
         """Remove the fenced Knowledge runs and every run-owned child row."""
 
-        self._delete_session_aggregate(
+        await self._delete_session_aggregate(
             session_id,
             session_kind="knowledge",
             tenant_id=tenant_id,
@@ -742,7 +804,9 @@ class PostgresRunStore(DurableJobStoreBase):
             run_ids=run_ids,
         )
 
-    def _delete_session_aggregate(
+    delete_knowledge_session_aggregate = bridge_to_loop(adelete_knowledge_session_aggregate)
+
+    async def _delete_session_aggregate(
         self,
         session_id: str,
         *,
@@ -757,19 +821,17 @@ class PostgresRunStore(DurableJobStoreBase):
                 local = self._local.get(run_id)
                 if local is not None:
                     local.cancel_event.set()
-        self._call(
-            self._delete_session_aggregate_db(
-                session_id,
-                session_kind=session_kind,
-                tenant_id=tenant_id,
-                requester_user_id=requester_user_id,
-                workspace_id=workspace_id,
-                run_ids=run_ids,
-            )
+        await self._delete_session_aggregate_db(
+            session_id,
+            session_kind=session_kind,
+            tenant_id=tenant_id,
+            requester_user_id=requester_user_id,
+            workspace_id=workspace_id,
+            run_ids=run_ids,
         )
-        self._release_swept_locals()
+        await self._release_swept_locals()
 
-    def prepare_agent_session_aggregate_deletion(
+    async def aprepare_agent_session_aggregate_deletion(
         self,
         session_id: str,
         *,
@@ -786,7 +848,7 @@ class PostgresRunStore(DurableJobStoreBase):
         session deletion.
         """
 
-        self._prepare_session_aggregate_deletion(
+        await self._prepare_session_aggregate_deletion(
             session_id,
             session_kind="agent",
             tenant_id=tenant_id,
@@ -795,7 +857,9 @@ class PostgresRunStore(DurableJobStoreBase):
             run_ids=run_ids,
         )
 
-    def prepare_knowledge_session_aggregate_deletion(
+    prepare_agent_session_aggregate_deletion = bridge_to_loop(aprepare_agent_session_aggregate_deletion)
+
+    async def aprepare_knowledge_session_aggregate_deletion(
         self,
         session_id: str,
         *,
@@ -806,7 +870,7 @@ class PostgresRunStore(DurableJobStoreBase):
     ) -> None:
         """Fence saved Knowledge runs before their session is removed."""
 
-        self._prepare_session_aggregate_deletion(
+        await self._prepare_session_aggregate_deletion(
             session_id,
             session_kind="knowledge",
             tenant_id=tenant_id,
@@ -815,7 +879,9 @@ class PostgresRunStore(DurableJobStoreBase):
             run_ids=run_ids,
         )
 
-    def _prepare_session_aggregate_deletion(
+    prepare_knowledge_session_aggregate_deletion = bridge_to_loop(aprepare_knowledge_session_aggregate_deletion)
+
+    async def _prepare_session_aggregate_deletion(
         self,
         session_id: str,
         *,
@@ -825,15 +891,13 @@ class PostgresRunStore(DurableJobStoreBase):
         workspace_id: str | None,
         run_ids: tuple[str, ...],
     ) -> None:
-        remaining = self._call(
-            self._prepare_session_aggregate_deletion_db(
-                session_id,
-                session_kind=session_kind,
-                tenant_id=tenant_id,
-                requester_user_id=requester_user_id,
-                workspace_id=workspace_id,
-                run_ids=run_ids,
-            )
+        remaining = await self._prepare_session_aggregate_deletion_db(
+            session_id,
+            session_kind=session_kind,
+            tenant_id=tenant_id,
+            requester_user_id=requester_user_id,
+            workspace_id=workspace_id,
+            run_ids=run_ids,
         )
         with self._lock:
             for run_id in run_ids:
@@ -1055,7 +1119,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 )
             )
 
-    def agent_session_residuals(
+    async def aagent_session_residuals(
         self,
         session_id: str,
         *,
@@ -1064,7 +1128,7 @@ class PostgresRunStore(DurableJobStoreBase):
         workspace_id: str | None,
         run_ids: tuple[str, ...],
     ) -> dict[str, int]:
-        return self._session_aggregate_residuals(
+        return await self._session_aggregate_residuals(
             session_id,
             tenant_id=tenant_id,
             requester_user_id=requester_user_id,
@@ -1072,7 +1136,9 @@ class PostgresRunStore(DurableJobStoreBase):
             run_ids=run_ids,
         )
 
-    def knowledge_session_residuals(
+    agent_session_residuals = bridge_to_loop(aagent_session_residuals)
+
+    async def aknowledge_session_residuals(
         self,
         session_id: str,
         *,
@@ -1081,7 +1147,7 @@ class PostgresRunStore(DurableJobStoreBase):
         workspace_id: str | None,
         run_ids: tuple[str, ...],
     ) -> dict[str, int]:
-        return self._session_aggregate_residuals(
+        return await self._session_aggregate_residuals(
             session_id,
             tenant_id=tenant_id,
             requester_user_id=requester_user_id,
@@ -1089,7 +1155,9 @@ class PostgresRunStore(DurableJobStoreBase):
             run_ids=run_ids,
         )
 
-    def _session_aggregate_residuals(
+    knowledge_session_residuals = bridge_to_loop(aknowledge_session_residuals)
+
+    async def _session_aggregate_residuals(
         self,
         session_id: str,
         *,
@@ -1099,13 +1167,11 @@ class PostgresRunStore(DurableJobStoreBase):
         run_ids: tuple[str, ...],
     ) -> dict[str, int]:
         del workspace_id
-        return self._call(
-            self._session_aggregate_residuals_db(
-                session_id,
-                tenant_id=tenant_id,
-                requester_user_id=requester_user_id,
-                run_ids=run_ids,
-            )
+        return await self._session_aggregate_residuals_db(
+            session_id,
+            tenant_id=tenant_id,
+            requester_user_id=requester_user_id,
+            run_ids=run_ids,
         )
 
     async def _session_aggregate_residuals_db(
@@ -1240,7 +1306,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 )
             return summaries
 
-    def list_page(
+    async def alist_page(
         self,
         *,
         limit: int,
@@ -1255,18 +1321,22 @@ class PostgresRunStore(DurableJobStoreBase):
         materialised whole on every poll. Keyed on the existing
         ``ix_runs_tenant_created_id`` (created_at, run_id) index.
         """
-        result = self._call(self._list_page_db(workspace_id, visible_to, limit, after))
-        self._release_swept_locals()
+        result = await self._list_page_db(workspace_id, visible_to, limit, after)
+        await self._release_swept_locals()
         return result
 
-    def metrics_snapshot(self) -> RunStoreMetrics:
+    list_page = bridge_to_loop(alist_page)
+
+    async def ametrics_snapshot(self) -> RunStoreMetrics:
         """Current QUEUED/RUNNING counts for the ``/metrics`` collector.
 
         ``capacity`` is ``None``: in the durable topology the worker
         fleet owns the execution slots, not this API process, so there is
         no single in-process ceiling to report.
         """
-        return self._call(self._metrics_snapshot_db())
+        return await self._metrics_snapshot_db()
+
+    metrics_snapshot = bridge_to_loop(ametrics_snapshot)
 
     async def _metrics_snapshot_db(self) -> RunStoreMetrics:
         async with self._session("default") as session:
@@ -1291,16 +1361,20 @@ class PostgresRunStore(DurableJobStoreBase):
             capacity=None,
         )
 
-    def owner_user_id(self, run_id: str) -> uuid.UUID | None:
+    async def aowner_user_id(self, run_id: str) -> uuid.UUID | None:
         """The run's creator regardless of visibility (share layer)."""
-        return self._call(self._owner_user_id_db(run_id))
+        return await self._owner_user_id_db(run_id)
 
-    def share_facts(self, run_ids: Sequence[str]) -> dict[str, ShareFacts]:
+    owner_user_id = bridge_to_loop(aowner_user_id)
+
+    async def ashare_facts(self, run_ids: Sequence[str]) -> dict[str, ShareFacts]:
         """Creator and question of each listed run regardless of visibility
         (share layer), in one read; unknown runs are absent."""
-        return self._call(self._share_facts_db(sorted(set(run_ids))))
+        return await self._share_facts_db(sorted(set(run_ids)))
 
-    def events_snapshot(
+    share_facts = bridge_to_loop(ashare_facts)
+
+    async def aevents_snapshot(
         self, run_id: str, *, after: int = 0
     ) -> list[dict[str, Any]]:
         """Durable event rows for the admin run drawer (visibility-free).
@@ -1309,9 +1383,11 @@ class PostgresRunStore(DurableJobStoreBase):
         lookup (``owner_user_id`` precedent). Row shape matches the
         owner SSE replay: ``{type, run_id, sequence, created_at, data}``.
         """
-        return self._events_after(run_id, DEFAULT_TENANT, int(after))
+        return await self._poll_events_db(run_id, DEFAULT_TENANT, int(after))
 
-    def trace_id(self, run_id: str) -> str | None:
+    events_snapshot = bridge_to_loop(aevents_snapshot)
+
+    async def atrace_id(self, run_id: str) -> str | None:
         """Latest ``inqtrix.run.trace`` event's trace id (admin surface).
 
         Not visibility-gated — authorization happens at the instance-
@@ -1319,7 +1395,9 @@ class PostgresRunStore(DurableJobStoreBase):
         Targeted query: long runs carry thousands of event rows and this
         needs exactly one of them.
         """
-        return self._call(self._trace_id_db(run_id))
+        return await self._trace_id_db(run_id)
+
+    trace_id = bridge_to_loop(atrace_id)
 
     async def _trace_id_db(self, run_id: str) -> str | None:
         async with self._session(DEFAULT_TENANT) as session:
@@ -1327,7 +1405,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 select(run_events.c.data)
                 .where(
                     run_events.c.run_id == run_id,
-                    run_events.c.type == "inqtrix.run.trace",
+                    run_events.c.type == RUN_TRACE_EVENT,
                 )
                 .order_by(run_events.c.sequence.desc())
                 .limit(1)
@@ -1338,9 +1416,11 @@ class PostgresRunStore(DurableJobStoreBase):
         value = str((row[0] or {}).get("trace_id") or "")
         return value or None
 
-    def execution_request_body(self, run_id: str) -> dict[str, Any]:
+    async def aexecution_request_body(self, run_id: str) -> dict[str, Any]:
         """Return the run's persisted execution body without exposing it."""
-        return self._call(self._execution_request_body_db(run_id))
+        return await self._execution_request_body_db(run_id)
+
+    execution_request_body = bridge_to_loop(aexecution_request_body)
 
     async def _execution_request_body_db(self, run_id: str) -> dict[str, Any]:
         async with self._session(DEFAULT_TENANT) as session:
@@ -1361,12 +1441,14 @@ class PostgresRunStore(DurableJobStoreBase):
             raise RuntimeError("Persisted run request body is invalid.")
         return dict(body)
 
-    def source_request_body(self, run_id: str, *, visible_to, workspace_id=None) -> dict[str, Any]:
+    async def asource_request_body(self, run_id: str, *, visible_to, workspace_id=None) -> dict[str, Any]:
         """Read source provenance using an owner-authorized storage statement."""
-        return self._call(self._source_request_body_db(run_id, visible_to, workspace_id))
+        return await self._source_request_body_db(run_id, visible_to, workspace_id)
+
+    source_request_body = bridge_to_loop(asource_request_body)
 
     async def _source_request_body_db(self, run_id, visible_to, workspace_id):
-        async with self._session(DEFAULT_TENANT) as session:
+        async with self._denials_audited(visible_to), self._session(DEFAULT_TENANT) as session:
             row, shared = await self._visible_row_db(session, run_id, workspace_id, visible_to)
             if shared is not None:
                 raise RunNotFound(run_id)
@@ -1375,9 +1457,11 @@ class PostgresRunStore(DurableJobStoreBase):
                 raise RuntimeError("Persisted run request body is invalid.")
             return dict(body)
 
-    def source_run_catalogue(self, session_id: str, *, visible_to, workspace_id=None) -> list[dict[str, Any]]:
+    async def asource_run_catalogue(self, session_id: str, *, visible_to, workspace_id=None) -> list[dict[str, Any]]:
         """Discover originals without loading results or complete requests."""
-        return self._call(self._source_run_catalogue_db(session_id, visible_to, workspace_id))
+        return await self._source_run_catalogue_db(session_id, visible_to, workspace_id)
+
+    source_run_catalogue = bridge_to_loop(asource_run_catalogue)
 
     async def _source_run_catalogue_db(self, session_id, visible_to, workspace_id):
         async with self._session(DEFAULT_TENANT) as session:
@@ -1396,9 +1480,11 @@ class PostgresRunStore(DurableJobStoreBase):
             rows = (await session.execute(query.order_by(runs.c.created_at, runs.c.run_id))).mappings().all()
             return [dict(row) for row in rows]
 
-    def source_origins_visible(self, run_ids: list[str], *, visible_to, owner_only: bool = False) -> bool:
+    async def asource_origins_visible(self, run_ids: list[str], *, visible_to, owner_only: bool = False) -> bool:
         """Check current source grants in bounded metadata-only batches."""
-        return self._call(self._source_origins_visible_db(run_ids, visible_to, owner_only))
+        return await self._source_origins_visible_db(run_ids, visible_to, owner_only)
+
+    source_origins_visible = bridge_to_loop(asource_origins_visible)
 
     async def _source_origins_visible_db(self, run_ids, visible_to, owner_only):
         ids = sorted(set(run_ids))
@@ -1421,14 +1507,14 @@ class PostgresRunStore(DurableJobStoreBase):
                     return False
         return True
 
-    def execution_principal(
+    async def aexecution_principal(
         self,
         run_id: str,
         *,
         fallback: Principal | None = None,
     ) -> Principal | None:
         """Reconstruct the persisted actor for an in-process segment."""
-        row = self._call(self._execution_authority_db(run_id))
+        row = await self._execution_authority_db(run_id)
         actor_user_id, tenant_id, scopes = row
         if actor_user_id is None:
             return fallback
@@ -1440,19 +1526,25 @@ class PostgresRunStore(DurableJobStoreBase):
             scopes=frozenset(scopes or ()),
         )
 
-    def total_elapsed_seconds(self, run_id: str) -> float:
+    execution_principal = bridge_to_loop(aexecution_principal)
+
+    async def atotal_elapsed_seconds(self, run_id: str) -> float:
         """Return worker-visible wall time from the internal run row."""
 
-        return self._call(self._total_elapsed_seconds_db(run_id))
+        return await self._total_elapsed_seconds_db(run_id)
 
-    def check_execution_authority(self, run_id: str) -> None:
+    total_elapsed_seconds = bridge_to_loop(atotal_elapsed_seconds)
+
+    async def acheck_execution_authority(self, run_id: str) -> None:
         """Assert the persisted actor still has live edit access."""
         try:
-            self._call(self._check_execution_authority_db(run_id))
+            await self._check_execution_authority_db(run_id)
         except RunNotFound as exc:
             raise AuthorizationRevoked(
                 "run execution authority is missing or revoked"
             ) from exc
+
+    check_execution_authority = bridge_to_loop(acheck_execution_authority)
 
     async def _execution_authority_db(
         self, run_id: str
@@ -1673,11 +1765,13 @@ class PostgresRunStore(DurableJobStoreBase):
             ).first()
         return row[0] if row is not None else None
 
-    def title(self, run_id: str) -> str | None:
+    async def atitle(self, run_id: str) -> str | None:
         """The run's question as a share-surface title, regardless of
         visibility — a pending-share recipient must see it to decide. ``None``
         when the run no longer exists, so the inbox skips it."""
-        return self._call(self._title_db(run_id))
+        return await self._title_db(run_id)
+
+    title = bridge_to_loop(atitle)
 
     async def _share_facts_db(self, run_ids: list[str]) -> dict[str, ShareFacts]:
         if not run_ids:
@@ -1760,7 +1854,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 raise RunActive(run_id)
             if self._checkpoint_cleanup is not None:
                 for child in subtree:
-                    await asyncio.to_thread(self._checkpoint_cleanup, child["run_id"], child["mode"])
+                    await aio.run_blocking(self._checkpoint_cleanup, child["run_id"], child["mode"])
             recipients = await revoke_resource_shares(
                 session,
                 tenant_id=row["tenant_id"],
@@ -1781,7 +1875,7 @@ class PostgresRunStore(DurableJobStoreBase):
             )
             await session.execute(delete(runs).where(runs.c.run_id == run_id))
 
-    def result(
+    async def aresult(
         self,
         run_id: str,
         *,
@@ -1789,11 +1883,13 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> dict[str, Any]:
         """Return the stored result payload for a completed run."""
-        result = self._call(self._result_db(run_id, workspace_id, visible_to))
-        self._release_swept_locals()
+        result = await self._result_db(run_id, workspace_id, visible_to)
+        await self._release_swept_locals()
         return result
 
-    def cancel(
+    result = bridge_to_loop(aresult)
+
+    async def acancel(
         self,
         run_id: str,
         *,
@@ -1807,14 +1903,16 @@ class PostgresRunStore(DurableJobStoreBase):
         runs get ``cancel_requested`` set, observed by the executing
         process at the next graph node boundary.
         """
-        summary, _affected = self.cancel_tree(
+        summary, _affected = await self.acancel_tree(
             run_id,
             workspace_id=workspace_id,
             visible_to=visible_to,
         )
         return summary
 
-    def cancel_tree(
+    cancel = bridge_to_loop(acancel)
+
+    async def acancel_tree(
         self,
         run_id: str,
         *,
@@ -1822,11 +1920,9 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> tuple[dict[str, Any], tuple[str, ...]]:
         """Cancel one durable run tree and expose the committed affected ids."""
-        summary, cascaded_children = self._call(
-            self._cancel_db(run_id, workspace_id, visible_to)
-        )
-        self._release_swept_locals()
-        self._dispatch_woken_parents()
+        summary, cascaded_children = await self._cancel_db(run_id, workspace_id, visible_to)
+        await self._release_swept_locals()
+        await self._dispatch_woken_parents()
         self._apply_cancelled_locals(
             run_id,
             str(summary["status"]),
@@ -1834,7 +1930,9 @@ class PostgresRunStore(DurableJobStoreBase):
         )
         return summary, (run_id, *cascaded_children)
 
-    def authorized_control_write(
+    cancel_tree = bridge_to_loop(acancel_tree)
+
+    async def aauthorized_control_write(
         self,
         run_id: str,
         *,
@@ -1843,16 +1941,14 @@ class PostgresRunStore(DurableJobStoreBase):
         control_write: Any,
     ) -> Any:
         """Apply one control-table write under live root authorization."""
-        result, cancellations = self._call(
-            self._authorized_control_write_db(
-                run_id,
-                workspace_id,
-                visible_to,
-                control_write,
-            )
+        result, cancellations = await self._authorized_control_write_db(
+            run_id,
+            workspace_id,
+            visible_to,
+            control_write,
         )
-        self._release_swept_locals()
-        self._dispatch_woken_parents()
+        await self._release_swept_locals()
+        await self._dispatch_woken_parents()
         for child_run_id, child_status, affected_ids in cancellations:
             self._apply_cancelled_locals(
                 child_run_id,
@@ -1861,21 +1957,21 @@ class PostgresRunStore(DurableJobStoreBase):
             )
         return result
 
-    def _drain_failed_cascades(self) -> None:
-        """Project committed parent-failure cascades into local handles.
+    authorized_control_write = bridge_to_loop(aauthorized_control_write)
 
-        Sync-mutator half of the ``_failed_cascades`` handoff: the
-        coroutine only enqueues (it must never take ``self._lock``);
-        every mutator that can land a FAILED terminal drains here.
+    def _drain_cascades(self) -> None:
+        """Project committed child cascades into local handles.
+
+        Second half of the ``_cascades`` handoff: a transaction publishes a
+        cascade only once it committed (``_register_post_commit_handoffs``);
+        every operation that can end a run drains here.
         """
         while True:
             try:
-                root_id, children = self._failed_cascades.get_nowait()
+                run_id, status, subtree = self._cascades.get_nowait()
             except Empty:
                 return
-            self._apply_cancelled_locals(
-                root_id, RunStatus.FAILED.value, (root_id, *children)
-            )
+            self._apply_cancelled_locals(run_id, status, subtree)
 
     def _apply_cancelled_locals(
         self,
@@ -1913,16 +2009,18 @@ class PostgresRunStore(DurableJobStoreBase):
         """The bound cleanup owns the external cache, never run authorization."""
         self._checkpoint_cleanup = cleanup
 
-    def sweep(self) -> None:
+    async def asweep(self) -> None:
         """Run the cleanup pass every access runs, without waiting for one.
 
         Its own transaction under the default tenant (like the worker's
         reconciler), then the post-commit handoffs.
         """
-        self._call(self._cleanup_pass_db())
-        self._release_swept_locals()
+        await self._cleanup_pass_db()
+        await self._release_swept_locals()
 
-    def delete(
+    sweep = bridge_to_loop(asweep)
+
+    async def adelete(
         self,
         run_id: str,
         *,
@@ -1937,8 +2035,8 @@ class PostgresRunStore(DurableJobStoreBase):
         unknown / non-owner / cross-namespace ids; ``RunActive`` for a
         still-active run.
         """
-        self._call(self._delete_db(run_id, workspace_id, requester_user_id))
-        self._release_swept_locals()
+        await self._delete_db(run_id, workspace_id, requester_user_id)
+        await self._release_swept_locals()
         with self._lock:
             self._local.pop(run_id, None)
             try:
@@ -1946,7 +2044,9 @@ class PostgresRunStore(DurableJobStoreBase):
             except ValueError:
                 pass
 
-    def subscribe(
+    delete = bridge_to_loop(adelete)
+
+    async def asubscribe(
         self,
         run_id: str,
         *,
@@ -1960,11 +2060,9 @@ class PostgresRunStore(DurableJobStoreBase):
         fallback): same visibility check and replay, but no poller
         thread, no registration, no viewer-metric observation.
         """
-        self._expire_lost_executions()
-        tenant_id, replay = self._call(
-            self._replay_db(run_id, workspace_id, visible_to)
-        )
-        self._release_swept_locals()
+        await self._expire_lost_executions()
+        tenant_id, replay = await self._replay_db(run_id, workspace_id, visible_to)
+        await self._release_swept_locals()
         return PollingJobSubscription(
             self,
             run_id,
@@ -1975,10 +2073,12 @@ class PostgresRunStore(DurableJobStoreBase):
             stream=stream,
         )
 
+    subscribe = bridge_to_loop(asubscribe)
+
     def unsubscribe(self, run_id: str, queue: Queue) -> None:
         """Parity no-op: polling subscriptions detach via ``close()``."""
 
-    def emit(
+    async def aemit(
         self,
         run_id: str,
         event_type: str,
@@ -1992,9 +2092,11 @@ class PostgresRunStore(DurableJobStoreBase):
         superseded attempt are dropped with a visible log instead of
         interleaving with the superseding attempt's stream.
         """
-        self._call(self._emit_db(run_id, event_type, payload or {}, fence_attempt))
+        await self._emit_db(run_id, event_type, payload or {}, fence_attempt)
 
-    def complete(
+    emit = bridge_to_loop(aemit)
+
+    async def acomplete(
         self,
         run_id: str,
         result: dict[str, Any],
@@ -2010,32 +2112,32 @@ class PostgresRunStore(DurableJobStoreBase):
             superseding claim) — the caller must NOT ack the dispatch
             message in that case.
         """
-        landed = self._call(
-            self._terminal_db(
-                run_id,
-                RunStatus.COMPLETED,
-                fence_attempt=fence_attempt,
-                result=dict(result),
-                snapshot=dict(snapshot) if snapshot else None,
-                event_builder=lambda row_snapshot: (
-                    "inqtrix.run.completed",
-                    {
-                        "status": "completed",
-                        "metrics": (
-                            result.get("metrics")
-                            if isinstance(result.get("metrics"), dict)
-                            else {}
-                        ),
-                        "result_url": f"/v1/runs/{run_id}/result",
-                        "snapshot": row_snapshot,
-                    },
-                ),
-            )
+        landed = await self._terminal_db(
+            run_id,
+            RunStatus.COMPLETED,
+            fence_attempt=fence_attempt,
+            result=dict(result),
+            snapshot=dict(snapshot) if snapshot else None,
+            event_builder=lambda row_snapshot: (
+                RUN_COMPLETED_EVENT,
+                {
+                    "status": "completed",
+                    "metrics": (
+                        result.get("metrics")
+                        if isinstance(result.get("metrics"), dict)
+                        else {}
+                    ),
+                    "result_url": f"/v1/runs/{run_id}/result",
+                    "snapshot": row_snapshot,
+                },
+            ),
         )
-        self._dispatch_woken_parents()
+        await self._dispatch_woken_parents()
         return landed
 
-    def fail(
+    complete = bridge_to_loop(acomplete)
+
+    async def afail(
         self,
         run_id: str,
         message: str,
@@ -2049,26 +2151,26 @@ class PostgresRunStore(DurableJobStoreBase):
             ``True`` when the transition landed (see :meth:`complete`).
         """
         error = {"message": sanitize_error(message), "type": error_type}
-        landed = self._call(
-            self._terminal_db(
-                run_id,
-                RunStatus.FAILED,
-                fence_attempt=fence_attempt,
-                error=error,
-                event_builder=lambda row_snapshot: (
-                    "inqtrix.run.failed",
-                    {
-                        "status": "failed",
-                        "error": error,
-                        "snapshot": row_snapshot,
-                    },
-                ),
-            )
+        landed = await self._terminal_db(
+            run_id,
+            RunStatus.FAILED,
+            fence_attempt=fence_attempt,
+            error=error,
+            event_builder=lambda row_snapshot: (
+                RUN_FAILED_EVENT,
+                {
+                    "status": "failed",
+                    "error": error,
+                    "snapshot": row_snapshot,
+                },
+            ),
         )
-        self._dispatch_woken_parents()
+        await self._dispatch_woken_parents()
         return landed
 
-    def mark_cancelled(
+    fail = bridge_to_loop(afail)
+
+    async def amark_cancelled(
         self,
         run_id: str,
         *,
@@ -2080,25 +2182,25 @@ class PostgresRunStore(DurableJobStoreBase):
         Returns:
             ``True`` when the transition landed (see :meth:`complete`).
         """
-        landed = self._call(
-            self._terminal_db(
-                run_id,
-                RunStatus.CANCELLED,
-                fence_attempt=fence_attempt,
-                event_builder=lambda row_snapshot: (
-                    "inqtrix.run.cancelled",
-                    {
-                        "status": "cancelled",
-                        "reason": reason,
-                        "snapshot": row_snapshot,
-                    },
-                ),
-            )
+        landed = await self._terminal_db(
+            run_id,
+            RunStatus.CANCELLED,
+            fence_attempt=fence_attempt,
+            event_builder=lambda row_snapshot: (
+                RUN_CANCELLED_EVENT,
+                {
+                    "status": "cancelled",
+                    "reason": reason,
+                    "snapshot": row_snapshot,
+                },
+            ),
         )
-        self._dispatch_woken_parents()
+        await self._dispatch_woken_parents()
         return landed
 
-    def mark_waiting(
+    mark_cancelled = bridge_to_loop(amark_cancelled)
+
+    async def amark_waiting(
         self,
         run_id: str,
         *,
@@ -2112,7 +2214,7 @@ class PostgresRunStore(DurableJobStoreBase):
         :meth:`resume_run` can re-dispatch the same closure. Only the
         two waiting statuses are accepted, and only from RUNNING. When
         a cancel request is already pending, the run is CANCELLED
-        instead of parked (reason ``cancelled_while_waiting``) — a
+        instead of parked, with the reason of the last request — a
         cancelled assignment must not sit in a waiting status until
         its TTL (memory-store parity).
         """
@@ -2129,7 +2231,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 local.parked = True
                 local.park_in_flight = True
         try:
-            parked = self._call(self._mark_waiting_db(run_id, waiting, fence_attempt))
+            parked = await self._mark_waiting_db(run_id, waiting, fence_attempt)
         except BaseException:
             with self._lock:
                 local = self._local.get(run_id)
@@ -2141,7 +2243,7 @@ class PostgresRunStore(DurableJobStoreBase):
         # terminal, _mark_waiting_db flipped the row straight back to
         # queued — dispatch it now (park_in_flight defers the local
         # re-dispatch to this worker's unwind, exactly like resume_run).
-        self._dispatch_woken_parents()
+        await self._dispatch_woken_parents()
         if not parked:
             # Resolved as a cancel (a cancel request was pending):
             # nothing is retained, the unwind cleans up normally.
@@ -2151,7 +2253,9 @@ class PostgresRunStore(DurableJobStoreBase):
                     local.parked = False
                     local.park_in_flight = False
 
-    def resume_run(
+    mark_waiting = bridge_to_loop(amark_waiting)
+
+    async def aresume_run(
         self,
         run_id: str,
         *,
@@ -2192,7 +2296,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 # row probe), not waiting -> RunActive with the status,
                 # waiting without a closure (process restarted) ->
                 # RunActive naming the restart.
-                current_status = self._call(self._status_db(run_id))
+                current_status = await self._status_db(run_id)
                 if current_status not in _WAITING_VALUES:
                     raise RunActive(
                         f"run {run_id} is not waiting " f"(status {current_status})"
@@ -2201,18 +2305,16 @@ class PostgresRunStore(DurableJobStoreBase):
                     f"run {run_id} has no retained work to resume "
                     "(no-queue mode after a restart)"
                 )
-        summary = self._call(
-            self._resume_db(
-                run_id,
-                actor_user_id,
-                execution_scopes,
-                control_write,
-            )
+        summary = await self._resume_db(
+            run_id,
+            actor_user_id,
+            execution_scopes,
+            control_write,
         )
-        self._release_swept_locals()
+        await self._release_swept_locals()
         if self._dispatch_queue is not None:
             try:
-                self._dispatch_queue.enqueue(run_id=run_id, tenant_id=DEFAULT_TENANT)
+                await self._dispatch_queue.enqueue(run_id=run_id, tenant_id=DEFAULT_TENANT)
             except Exception:  # noqa: BLE001 — row committed; reconciler heals
                 log.warning(
                     "Resume dispatch for run %s could not be sent; the reconciler will "
@@ -2236,27 +2338,32 @@ class PostgresRunStore(DurableJobStoreBase):
             else:
                 local.parked = False
                 self._pending.append(run_id)
-                self._dispatch_locked()
+        await self._dispatch_now()
         return summary
 
-    def children(self, run_id: str) -> list[dict[str, Any]]:
+    resume_run = bridge_to_loop(aresume_run)
+
+    async def achildren(self, run_id: str) -> list[dict[str, Any]]:
         """Summaries of this run's direct children, newest first.
 
         Authorization happens on the PARENT (the route resolves it via
         :meth:`get` first); children inherit that access.
         """
-        children = self._call(self._children_db(run_id))
-        self._release_swept_locals()
+        children = await self._children_db(run_id)
+        await self._release_swept_locals()
         return children
+
+    children = bridge_to_loop(achildren)
 
     # -- worker surface --------------------------------------------------- #
 
-    def claim_for_execution(
+    async def aclaim_for_execution(
         self,
         run_id: str,
         tenant_id: str,
         *,
         allow_takeover: bool,
+        workflow_contracts: Mapping[str, int],
     ) -> ClaimedRun | None:
         """Atomically claim one run for execution.
 
@@ -2267,20 +2374,160 @@ class PostgresRunStore(DurableJobStoreBase):
                 ``running`` — only correct for redeliveries (the
                 previous worker stopped heartbeating); fresh duplicate
                 messages must NOT take over a healthy execution.
+            workflow_contracts: The contract this worker carries per
+                registered mode. A run is executed only under the contract
+                it is bound to; a run that never ran takes the worker's.
 
         Returns:
             The claim with its fencing ``attempt``, or ``None`` when
-            the run is terminal, missing, or running elsewhere.
+            the run is terminal, missing, or running elsewhere, or when
+            its binding ended it (an older contract with stored state, or
+            a retired mode).
+
+        Raises:
+            RunBindingNewer: The run is bound to a newer contract; the
+                claim rolled back.
+            WorkflowUnavailable: The run's mode is not registered here;
+                the claim rolled back.
         """
-        return self._call(
-            self._claim_db(run_id, tenant_id, allow_takeover=allow_takeover)
+        claimed = await self._claim_db(
+            run_id,
+            tenant_id,
+            allow_takeover=allow_takeover,
+            workflow_contracts=workflow_contracts,
+        )
+        # A run the claim ended may have been a parent's last open child: the
+        # woken parent goes out now, not with this process's next write.
+        await self._dispatch_woken_parents()
+        return claimed
+
+    claim_for_execution = bridge_to_loop(aclaim_for_execution)
+
+    async def aend_outdated_waits(self, workflow_contracts: Mapping[str, int]) -> int:
+        """End parked runs this worker could no longer resume, at once.
+
+        A run waiting for an approval, an answer or its children, bound to an
+        older contract than *workflow_contracts* names for its mode or to a
+        retired mode, would only end at its next claim, after a person decided
+        for nothing. It ends now as at the claim, its children with it, and its
+        checkpoint goes after the commit. A newer binding or a mode missing
+        from *workflow_contracts* stays parked.
+
+        Returns:
+            How many runs ended.
+        """
+        ended = await self._end_outdated_waits_db(workflow_contracts)
+        for run_id, mode in ended:
+            await self._delete_checkpoint_of_ended_run(run_id, mode)
+        await self._release_swept_locals()
+        return len(ended)
+
+    end_outdated_waits = bridge_to_loop(aend_outdated_waits)
+
+    async def abinding_overview(
+        self,
+        *,
+        mode: str | None,
+        below: int | None,
+        above: int | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        """Open runs by binding, for the operator list (see the port)."""
+        scope = [runs.c.status.notin_(_TERMINAL_VALUES)]
+        if mode is not None:
+            scope.append(runs.c.mode == mode)
+        bounds = []
+        if below is not None:
+            bounds.append(runs.c.workflow_contract < below)
+        if above is not None:
+            bounds.append(runs.c.workflow_contract > above)
+        # A running run already asked to stop counts apart: an admin cancel
+        # neither offers nor asks nor audits it again.
+        shown_status = case(
+            (
+                and_(
+                    runs.c.status == RunStatus.RUNNING.value,
+                    runs.c.cancel_requested.is_(True),
+                ),
+                literal(BINDING_ASKED_STATUS),
+            ),
+            else_=runs.c.status,
+        )
+        async with self._session(DEFAULT_TENANT) as session:
+            grouped = (
+                await session.execute(
+                    select(
+                        runs.c.mode,
+                        shown_status,
+                        runs.c.workflow_contract,
+                        func.count(),
+                    )
+                    .where(*scope)
+                    .group_by(runs.c.mode, shown_status, runs.c.workflow_contract)
+                )
+            ).all()
+            listed: list[tuple[str, str, str, int]] = []
+            total = 0
+            if bounds:
+                outside = [*scope, or_(*bounds)]
+                total = int(
+                    await session.scalar(
+                        select(func.count()).select_from(runs).where(*outside)
+                    )
+                    or 0
+                )
+                listed = [
+                    (str(row[0]), str(row[1]), str(row[2]), int(row[3]))
+                    for row in (
+                        await session.execute(
+                            select(
+                                runs.c.run_id,
+                                runs.c.mode,
+                                shown_status,
+                                runs.c.workflow_contract,
+                            )
+                            .where(*outside)
+                            .order_by(runs.c.created_at, runs.c.run_id)
+                            .limit(limit)
+                        )
+                    ).all()
+                ]
+        return binding_overview_payload(
+            {(str(row[0]), str(row[1]), int(row[2])): int(row[3]) for row in grouped},
+            listed,
+            total=total,
         )
 
-    def cancel_requested_runs(self, run_ids: dict[str, str]) -> set[str]:
-        """Subset of ``run_ids`` (id -> tenant) with a pending cancel."""
-        return self._call(self._cancel_requested_db(run_ids))
+    binding_overview = bridge_to_loop(abinding_overview)
 
-    def dispatch_status(self, run_id: str, tenant_id: str) -> str | None:
+    async def acancel_outside_binding(
+        self,
+        *,
+        mode: str,
+        workflow_contracts: Mapping[str, int],
+        actor_user_id: uuid.UUID | None,
+    ) -> dict[str, int]:
+        """Cancel the open runs of *mode* this server cannot run (see the port)."""
+        outcome, trees = await self._cancel_outside_binding_db(
+            mode=mode,
+            workflow_contracts=workflow_contracts,
+            actor_user_id=actor_user_id,
+        )
+        await self._release_swept_locals()
+        await self._dispatch_woken_parents()
+        for run_id, status, affected in trees:
+            self._apply_cancelled_locals(run_id, status, affected)
+        return outcome
+
+    cancel_outside_binding = bridge_to_loop(acancel_outside_binding)
+
+    async def acancel_requested_runs(self, run_ids: dict[str, str]) -> set[str]:
+        """Subset of ``run_ids`` (id -> tenant) with a pending cancel."""
+        return await self._cancel_requested_db(run_ids)
+
+    cancel_requested_runs = bridge_to_loop(acancel_requested_runs)
+
+    async def adispatch_status(self, run_id: str, tenant_id: str) -> str | None:
         """Authoritative row status for worker duplicate classification.
 
         This intentionally skips cleanup and caller visibility: it is a
@@ -2288,9 +2535,11 @@ class PostgresRunStore(DurableJobStoreBase):
         the row disappeared; storage errors propagate so uncertainty never
         turns a legitimate successor into an ACK.
         """
-        return self._call(self._dispatch_status_db(run_id, tenant_id))
+        return await self._dispatch_status_db(run_id, tenant_id)
 
-    def stale_queued_runs(self, *, older_than_seconds: float) -> list[tuple[str, str]]:
+    dispatch_status = bridge_to_loop(adispatch_status)
+
+    async def astale_queued_runs(self, *, older_than_seconds: float) -> list[tuple[str, str]]:
         """Queued ``(run_id, tenant_id)`` pairs older than the threshold.
 
         Re-enqueue feed for the worker's reconciler: a crash between
@@ -2298,7 +2547,9 @@ class PostgresRunStore(DurableJobStoreBase):
         queued with no message; re-dispatching is safe because fresh
         duplicates never take over a healthy execution.
         """
-        return self._call(self._stale_queued_db(older_than_seconds))
+        return await self._stale_queued_db(older_than_seconds)
+
+    stale_queued_runs = bridge_to_loop(astale_queued_runs)
 
     # -- in-process execution hooks (no-queue mode) ---------------------- #
 
@@ -2315,10 +2566,7 @@ class PostgresRunStore(DurableJobStoreBase):
         runs would trace headless and their failures could never mark a
         run span (terminate_native_run marks the CURRENT span).
         """
-        from inqtrix.observability.context import (
-            bind_log_context,
-            reset_log_context,
-        )
+        from inqtrix.observability.context import bind_log_context
         from inqtrix.observability.otel import run_execute_span
 
         stack.enter_context(
@@ -2331,11 +2579,10 @@ class PostgresRunStore(DurableJobStoreBase):
                 payload=getattr(claimed, "request_payload", None),
             )
         )
-        tokens = bind_log_context(
+        bind_log_context(
             run_id=entity_id,
             tenant=str(getattr(claimed, "tenant_id", "") or DEFAULT_TENANT),
         )
-        stack.callback(reset_log_context, tokens)
 
     def _terminate_work_exception(
         self, handle: RunHandle, entity_id: str, exc: BaseException
@@ -2345,44 +2592,50 @@ class PostgresRunStore(DurableJobStoreBase):
         terminate_native_run(handle, exc)
 
     def _auto_complete(self, run_id: str) -> None:
+        self._call(self._auto_complete_db(run_id))
+
+    async def _auto_complete_db(self, run_id: str) -> None:
         # exclude_waiting: a work closure that parked its run (agent
         # interrupt) returns normally — the safety net must not
         # terminal-write over the parked row (memory-store parity).
-        self._call(
-            self._terminal_db(
-                run_id,
-                RunStatus.COMPLETED,
-                fence_attempt=None,
-                warn_on_noop=False,
-                exclude_waiting=True,
-                event_builder=lambda row_snapshot: (
-                    "inqtrix.run.completed",
-                    {"status": "completed", "snapshot": row_snapshot},
-                ),
-            )
+        await self._terminal_db(
+            run_id,
+            RunStatus.COMPLETED,
+            fence_attempt=None,
+            warn_on_noop=False,
+            exclude_waiting=True,
+            event_builder=lambda row_snapshot: (
+                RUN_COMPLETED_EVENT,
+                {"status": "completed", "snapshot": row_snapshot},
+            ),
         )
-        self._dispatch_woken_parents()
+        await self._dispatch_woken_parents()
 
     # -- subscription poll bridge ----------------------------------------- #
 
     def _events_after(
         self, run_id: str, tenant_id: str, after_sequence: int
     ) -> list[dict[str, Any]]:
+        return self._call(self._poll_events_db(run_id, tenant_id, after_sequence))
+
+    async def _poll_events_db(
+        self, run_id: str, tenant_id: str, after_sequence: int
+    ) -> list[dict[str, Any]]:
         # The fence hook on the poll path is what lets an ALREADY
         # ATTACHED stream self-heal: the next subscription poll
         # terminalizes a lost run, reads its terminal event, and closes
         # the stream.
-        self._expire_lost_executions()
-        return self._call(self._events_after_db(run_id, tenant_id, after_sequence))
+        await self._expire_lost_executions()
+        return await self._events_after_db(run_id, tenant_id, after_sequence)
 
     # -- lost-execution fence (no-queue mode) ----------------------------- #
 
-    def _expire_lost_executions(self) -> bool:
-        expired = super()._expire_lost_executions()
+    async def _expire_lost_executions(self) -> bool:
+        expired = await super()._expire_lost_executions()
         if expired:
             # Post-commit handoffs (woken parents of fenced children)
-            # must dispatch immediately, even from the poller thread.
-            self._release_swept_locals()
+            # must dispatch immediately.
+            await self._release_swept_locals()
         return expired
 
     async def _lost_execution_candidates_db(
@@ -2419,7 +2672,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 candidate_ids=entity_ids,
                 error=_EXECUTION_LOST_ERROR,
             )
-            self._register_cleanup_handoffs(
+            self._register_post_commit_handoffs(
                 session,
                 swept_run_ids=[],
                 woken_parent_ids=woken,
@@ -2490,14 +2743,10 @@ class PostgresRunStore(DurableJobStoreBase):
                 )
                 return build_run_summary(existing, queue_position=position)
 
-        inactive = {
-            *_TERMINAL_VALUES,
-            RunStatus.EXPIRED.value,
-        }
         if (
-            str(parent["status"]) in inactive
+            str(parent["status"]) in _TERMINAL_VALUES
             or bool(parent["cancel_requested"])
-            or str(root["status"]) in inactive
+            or str(root["status"]) in _TERMINAL_VALUES
             or bool(root["cancel_requested"])
         ):
             raise RunParentInactive("agent child parent or root is no longer active")
@@ -2623,7 +2872,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 run_id,
                 tenant_id,
                 expand_run_event(
-                    "inqtrix.run.queued",
+                    RUN_QUEUED_EVENT,
                     {"status": "queued", "queue_position": position},
                     status=RunStatus.QUEUED.value,
                 )[1],
@@ -2635,7 +2884,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 parent_run_id=fields.get("parent_run_id"),
                 request_payload=fields.get("request_payload") or {},
                 run_status=RunStatus.QUEUED.value,
-                event_type="inqtrix.run.queued",
+                event_type=RUN_QUEUED_EVENT,
                 payload={"status": "queued", "queue_position": position},
                 snapshot={},
             )
@@ -2688,6 +2937,7 @@ class PostgresRunStore(DurableJobStoreBase):
             "stack_name": stack_name,
             "workspace_id": workspace_id,
             "mode": mode,
+            "workflow_contract": IMPORTED_RUN_CONTRACT,
             "agent_overrides": agent_overrides,
             "created_by_user_id": created_by_user_id,
             "created_by_tenant_id": created_by_tenant_id,
@@ -2803,6 +3053,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     stack_name=fields["stack_name"],
                     workspace_id=fields["workspace_id"],
                     mode=fields["mode"],
+                    workflow_contract=fields["workflow_contract"],
                     agent_overrides=fields["agent_overrides"],
                     request_payload=fields["request_payload"],
                     created_by_user_id=fields["created_by_user_id"],
@@ -2905,19 +3156,35 @@ class PostgresRunStore(DurableJobStoreBase):
             resource_type="run",
             resource_id=run_id,
         )
-        if self._audit is not None and visible_to is not None:
-            await self._audit.record(
-                build_audit_entry(
-                    tenant_id=visible_to.principal.tenant_id,
-                    actor_user_id=visible_to.principal.user_id,
-                    action="authz.denied",
-                    resource_type="run",
-                    resource_id=run_id,
-                    detail={"surface": "runs"},
-                    outcome="denied",
+        raise RunAccessDenied(run_id)
+
+    @asynccontextmanager
+    async def _denials_audited(self, visible_to: "UserContext | None"):
+        """Write a denied read to the audit sink once its session has closed.
+
+        The read's session holds its pool connection while it checks
+        visibility, and the audit sink opens a session of its own: recorded
+        inside the read, every denial would hold two connections, and with
+        the one shared pool full, concurrent denials would wait for each
+        other until the pool's timeout failed them. Enter this before the
+        read's session, so the session closes first.
+        """
+        try:
+            yield
+        except RunAccessDenied as denied:
+            if self._audit is not None and visible_to is not None:
+                await self._audit.record(
+                    build_audit_entry(
+                        tenant_id=visible_to.principal.tenant_id,
+                        actor_user_id=visible_to.principal.user_id,
+                        action="authz.denied",
+                        resource_type="run",
+                        resource_id=str(denied.args[0]),
+                        detail={"surface": "runs"},
+                        outcome="denied",
+                    )
                 )
-            )
-        raise RunNotFound(run_id)
+            raise
 
     def _common_workspace_exists(
         self,
@@ -3014,7 +3281,7 @@ class PostgresRunStore(DurableJobStoreBase):
         workspace_id: str | None,
         visible_to: "UserContext | None",
     ) -> dict[str, Any]:
-        async with self._session(DEFAULT_TENANT) as session:
+        async with self._denials_audited(visible_to), self._session(DEFAULT_TENANT) as session:
             await self._cleanup_db(session)
             row, shared = await self._visible_row_db(
                 session, run_id, workspace_id, visible_to
@@ -3215,7 +3482,7 @@ class PostgresRunStore(DurableJobStoreBase):
         workspace_id: str | None,
         visible_to: "UserContext | None",
     ) -> dict[str, Any]:
-        async with self._session(DEFAULT_TENANT) as session:
+        async with self._denials_audited(visible_to), self._session(DEFAULT_TENANT) as session:
             await self._cleanup_db(session)
             row, _shared = await self._visible_row_db(
                 session, run_id, workspace_id, visible_to
@@ -3265,19 +3532,20 @@ class PostgresRunStore(DurableJobStoreBase):
                     or child_root["run_id"] != root["run_id"]
                 ):
                     raise RunNotFound(child_run_id)
-                subtree = await self._lock_run_subtree_db(session, child_run_id)
-                affected_ids = tuple(str(item["run_id"]) for item in subtree)
-                for item in subtree:
-                    if item["status"] in _TERMINAL_VALUES:
-                        continue
+                if str(child["status"]) not in _TERMINAL_VALUES:
                     woken = await self._cancel_row_db(
                         session,
-                        str(item["run_id"]),
-                        str(item["tenant_id"]),
-                        str(item["status"]),
+                        child_run_id,
+                        str(child["tenant_id"]),
+                        str(child["status"]),
                     )
                     if woken is not None:
                         woken_parents.add(woken)
+                subtree = await self._cancel_live_subtree_db(
+                    session, child_run_id, reason=None
+                )
+                woken_parents.update(subtree.woken_parents)
+                affected_ids = subtree.run_ids
                 await append_resource_effects(
                     session,
                     tenant_id=str(root["tenant_id"]),
@@ -3335,20 +3603,11 @@ class PostgresRunStore(DurableJobStoreBase):
             # cancel is responsible for them (authorization was the
             # parent's; children inherit it). The per-child
             # wake probe no-ops here: the parent went terminal first.
-            child_rows = (await self._lock_run_subtree_db(session, run_id))[1:]
             woken = await self._cancel_row_db(
                 session, run_id, row["tenant_id"], row["status"]
             )
-            cascaded: list[str] = []
-            for child in child_rows:
-                child_id = child["run_id"]
-                child_tenant = child["tenant_id"]
-                child_status = child["status"]
-                cascaded.append(child_id)
-                if child_status not in _TERMINAL_VALUES:
-                    await self._cancel_row_db(
-                        session, child_id, child_tenant, child_status
-                    )
+            subtree = await self._cancel_live_subtree_db(session, run_id, reason=None)
+            cascaded = list(subtree.run_ids[1:])
             await append_resource_effects(
                 session,
                 tenant_id=row["tenant_id"],
@@ -3376,6 +3635,125 @@ class PostgresRunStore(DurableJobStoreBase):
         if woken:
             self._parents_to_wake.put(woken)
         return summary, cascaded
+
+    async def _cancel_live_subtree_db(
+        self,
+        session: "AsyncSession",
+        run_id: str,
+        *,
+        reason: str | None,
+        ended: str | None = None,
+    ) -> _SubtreeCancel:
+        """Cancel every live run below one run whose lineage is locked.
+
+        The one walk behind every operation that asks a run to end, or ends
+        it other than by completing it: queued and waiting descendants end at
+        once, running ones receive a cancel request. A run that ends because
+        it was asked needs no second walk (the request took its subtree
+        along, and no child is admitted below a run asked to stop); a run
+        that fails, times out or stops on its own does. ``reason`` names the
+        run's outcome on each descendant's event (``parent_failed``,
+        ``parent_cancelled``); ``None`` keeps the per-state reasons of an
+        explicit cancel. A running descendant whose cancel was already
+        requested is left alone: it ends with the reason of its own request,
+        which no cascade overwrites.
+
+        The caller runs this after the run's own transition, with its lineage
+        locked root to leaf; the walk locks the subtree below in the same
+        order, so a descendant's wake probe never flips the run itself.
+        ``ended`` completes the operator line logged when the walk cancelled
+        anything (``Run <id> <ended>; ...``); explicit cancels pass none.
+        """
+        subtree = await self._lock_run_subtree_db(session, run_id)
+        cancelled: list[str] = []
+        woken: list[str] = []
+        for descendant in subtree[1:]:
+            status = str(descendant["status"])
+            if status in _TERMINAL_VALUES or (
+                status == RunStatus.RUNNING.value and bool(descendant["cancel_requested"])
+            ):
+                continue
+            descendant_id = str(descendant["run_id"])
+            cancelled.append(descendant_id)
+            woken_parent = await self._cancel_row_db(
+                session,
+                descendant_id,
+                str(descendant["tenant_id"]),
+                status,
+                cascade_reason=reason,
+            )
+            if woken_parent is not None:
+                woken.append(woken_parent)
+        if cancelled and ended is not None:
+            log.warning(
+                "Run %s %s; %d active child runs cancelled (%s).",
+                run_id,
+                ended,
+                len(cancelled),
+                reason,
+            )
+        return _SubtreeCancel(
+            run_ids=tuple(str(item["run_id"]) for item in subtree),
+            cancelled=tuple(cancelled),
+            woken_parents=tuple(woken),
+        )
+
+    async def _end_subtree_db(
+        self,
+        session: "AsyncSession",
+        run_id: str,
+        status: str,
+        *,
+        ended: str,
+    ) -> None:
+        """Cascade from one run that ended on its own path, signalled after commit.
+
+        A failed run's descendants are cancelled with ``parent_failed``, a
+        cancelled run's with ``parent_cancelled``; the local work handles of
+        the subtree learn of it once the transaction committed.
+        """
+        subtree = await self._cancel_live_subtree_db(
+            session,
+            run_id,
+            reason=(
+                "parent_failed"
+                if status == RunStatus.FAILED.value
+                else "parent_cancelled"
+            ),
+            ended=ended,
+        )
+        self._register_post_commit_handoffs(
+            session,
+            woken_parent_ids=subtree.woken_parents,
+            cascades=(
+                [(run_id, status, (run_id, *subtree.cancelled))]
+                if subtree.cancelled
+                else []
+            ),
+        )
+
+    async def _requested_cancel_reason_db(
+        self, session: "AsyncSession", run_id: str
+    ) -> str | None:
+        """The reason of the run's latest cancel request, ``None`` without one.
+
+        A run asked to stop ends with the reason of that request: its engine
+        only sees that the cancel event was set and reports the generic
+        ``client_requested_cancel``, while the request knows whether a client,
+        an admin, a cascade or a session deletion asked.
+        """
+        data = (
+            await session.execute(
+                select(run_events.c.data)
+                .where(
+                    run_events.c.run_id == run_id,
+                    run_events.c.type == RUN_CANCEL_REQUESTED_EVENT,
+                )
+                .order_by(run_events.c.sequence.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return str((data or {}).get("reason") or "") or None
 
     async def _cancel_row_db(
         self,
@@ -3459,7 +3837,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     parent_run_id=cancelled[1],
                     request_payload=dict(cancelled[2] or {}),
                     status=RunStatus.CANCELLED.value,
-                    event_type="inqtrix.run.cancelled",
+                    event_type=RUN_CANCELLED_EVENT,
                     payload={
                         "status": "cancelled",
                         "reason": cascade_reason or "cancelled_before_start",
@@ -3494,7 +3872,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     run_id,
                     tenant_id,
                     expand_run_event(
-                        "inqtrix.run.cancel_requested",
+                        RUN_CANCEL_REQUESTED_EVENT,
                         {
                             "status": "running",
                             "reason": (cascade_reason or "client_requested_cancel"),
@@ -3586,7 +3964,7 @@ class PostgresRunStore(DurableJobStoreBase):
             parent_run_id=waited[2],
             request_payload=dict(waited[3] or {}),
             status=RunStatus.CANCELLED.value,
-            event_type="inqtrix.run.cancelled",
+            event_type=RUN_CANCELLED_EVENT,
             payload={
                 "status": "cancelled",
                 "reason": cascade_reason or "cancelled_while_waiting",
@@ -3605,7 +3983,7 @@ class PostgresRunStore(DurableJobStoreBase):
         """Park one RUNNING row; returns whether it parked.
 
         ``False`` means a pending cancel request won instead: the row
-        went terminal ``cancelled`` (reason ``cancelled_while_waiting``)
+        went terminal ``cancelled`` with the reason of the last request
         — parking it would leave a cancelled assignment waiting until
         its TTL (memory-store parity).
         """
@@ -3659,7 +4037,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     "snapshot": dict(row[0] or {}),
                 }
                 _, events = expand_run_event(
-                    "inqtrix.run.waiting",
+                    RUN_WAITING_EVENT,
                     waiting_payload,
                     status=waiting.value,
                 )
@@ -3677,7 +4055,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     parent_run_id=row[3],
                     request_payload=dict(row[4] or {}),
                     run_status=waiting.value,
-                    event_type="inqtrix.run.waiting",
+                    event_type=RUN_WAITING_EVENT,
                     payload=waiting_payload,
                     snapshot=dict(row[0] or {}),
                     attempt=int(row[5]),
@@ -3778,9 +4156,14 @@ class PostgresRunStore(DurableJobStoreBase):
             if cancelled is not None:
                 payload = {
                     "status": "cancelled",
-                    "reason": "cancelled_while_waiting",
+                    "reason": (
+                        await self._requested_cancel_reason_db(session, run_id)
+                        or "cancelled_while_waiting"
+                    ),
                     "snapshot": dict(cancelled[0] or {}),
                 }
+                # The request took the subtree along when it was made, and
+                # no child is admitted below a run asked to stop.
                 return await self._record_terminal_run_db(
                     session,
                     run_id=run_id,
@@ -3789,7 +4172,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     parent_run_id=cancelled[3],
                     request_payload=dict(cancelled[4] or {}),
                     status=RunStatus.CANCELLED.value,
-                    event_type="inqtrix.run.cancelled",
+                    event_type=RUN_CANCELLED_EVENT,
                     payload=payload,
                     snapshot=dict(cancelled[0] or {}),
                     attempt=int(cancelled[5] or 0) or None,
@@ -3874,7 +4257,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 await control_write(session)
             position = await self._queue_position_db(session, row[1])
             _, events = expand_run_event(
-                "inqtrix.run.queued",
+                RUN_QUEUED_EVENT,
                 {
                     "status": "queued",
                     "queue_position": position,
@@ -3938,7 +4321,7 @@ class PostgresRunStore(DurableJobStoreBase):
         workspace_id: str | None,
         visible_to: "UserContext | None",
     ) -> tuple[str, list[dict[str, Any]]]:
-        async with self._session(DEFAULT_TENANT) as session:
+        async with self._denials_audited(visible_to), self._session(DEFAULT_TENANT) as session:
             await self._cleanup_db(session)
             row, _shared = await self._visible_row_db(
                 session, run_id, workspace_id, visible_to
@@ -4271,7 +4654,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 error = revoked_error
                 snapshot = None
                 event_builder = lambda row_snapshot: (
-                    "inqtrix.run.failed",
+                    RUN_FAILED_EVENT,
                     {
                         "status": "failed",
                         "error": revoked_error,
@@ -4340,6 +4723,10 @@ class PostgresRunStore(DurableJobStoreBase):
                     )
                 return False
             event_type, payload = event_builder(dict(row[0] or {}))
+            if status is RunStatus.CANCELLED:
+                requested = await self._requested_cancel_reason_db(session, run_id)
+                if requested is not None:
+                    payload = {**payload, "reason": requested}
             # Dienststart-Index metadata for the terminal audit row
             # (written inside _record_terminal_run_db, same tx): mode,
             # duration, token sums, error type, trace id — never
@@ -4367,7 +4754,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     select(run_events.c.data)
                     .where(
                         run_events.c.run_id == run_id,
-                        run_events.c.type == "inqtrix.run.trace",
+                        run_events.c.type == RUN_TRACE_EVENT,
                     )
                     .order_by(run_events.c.sequence.desc())
                     .limit(1)
@@ -4394,37 +4781,21 @@ class PostgresRunStore(DurableJobStoreBase):
                 audit_detail=audit_detail,
                 audit_correlation=audit_correlation,
             )
-            if status is RunStatus.FAILED:
-                # Parent terminal failure cascades to live descendants
-                # (orphans burning quota behind a dead parent) — FENCED:
-                # this branch runs only after the terminal CAS above
+            if status is not RunStatus.COMPLETED:
+                # A run that fails or stops takes its live descendants
+                # along (orphans burning quota behind a dead parent) —
+                # FENCED: this runs only after the terminal CAS above
                 # landed, so a reclaimed zombie attempt can never cancel
-                # anyone. Same transaction, same subtree lock order as
-                # cancel_tree.
-                child_rows = (await self._lock_run_subtree_db(session, run_id))[1:]
-                cascaded: list[str] = []
-                for child in child_rows:
-                    if child["status"] in _TERMINAL_VALUES:
-                        continue
-                    cascaded.append(child["run_id"])
-                    await self._cancel_row_db(
-                        session,
-                        child["run_id"],
-                        child["tenant_id"],
-                        child["status"],
-                        cascade_reason="parent_failed",
-                    )
-                if cascaded:
-                    log.warning(
-                        "Parent run %s failed; %d active child runs cancelled "
-                        "(parent_failed).",
-                        run_id,
-                        len(cascaded),
-                    )
-                    self._failed_cascades.put((run_id, tuple(cascaded)))
+                # anyone.
+                await self._end_subtree_db(
+                    session,
+                    run_id,
+                    status.value,
+                    ended="failed" if status is RunStatus.FAILED else "was cancelled",
+                )
         if woken_parent:
-            # Post-commit handoff: the sync mutators dispatch (queue
-            # enqueue / local re-append) — never this loop coroutine.
+            # Post-commit handoff: the calling operation dispatches (queue
+            # enqueue / local re-append) once this transaction has committed.
             self._parents_to_wake.put(woken_parent)
         return True
 
@@ -4509,7 +4880,7 @@ class PostgresRunStore(DurableJobStoreBase):
             return None
         position = await self._queue_position_db(session, row[1])
         _, events = expand_run_event(
-            "inqtrix.run.queued",
+            RUN_QUEUED_EVENT,
             {
                 "status": "queued",
                 "queue_position": position,
@@ -4528,7 +4899,11 @@ class PostgresRunStore(DurableJobStoreBase):
         *,
         run_id: str,
     ) -> str | None:
-        """Fail one already lineage-locked run without requiring its share."""
+        """Fail one already lineage-locked run without requiring its share.
+
+        Its live descendants share the lost authority and end with it
+        (``parent_failed``).
+        """
         error = {
             "message": "Execution authority was revoked",
             "type": AuthorizationRevoked.code,
@@ -4560,7 +4935,7 @@ class PostgresRunStore(DurableJobStoreBase):
         ).first()
         if row is None:
             return None
-        return await self._record_terminal_run_db(
+        woken_parent = await self._record_terminal_run_db(
             session,
             run_id=run_id,
             tenant_id=row[1],
@@ -4568,7 +4943,7 @@ class PostgresRunStore(DurableJobStoreBase):
             parent_run_id=row[3],
             request_payload=dict(row[4] or {}),
             status=RunStatus.FAILED.value,
-            event_type="inqtrix.run.failed",
+            event_type=RUN_FAILED_EVENT,
             payload={
                 "status": "failed",
                 "error": error,
@@ -4577,12 +4952,40 @@ class PostgresRunStore(DurableJobStoreBase):
             snapshot=dict(row[0] or {}),
             attempt=int(row[5] or 0) or None,
         )
+        await self._end_subtree_db(
+            session,
+            run_id,
+            RunStatus.FAILED.value,
+            ended="lost its execution authority",
+        )
+        return woken_parent
+
+    async def _claim_local_db(self, run_id: str) -> ClaimedRun | None:
+        # In-process execution runs work this process accepted and stamped
+        # with its own registry, so its binding holds by construction. Only
+        # a claim from the queue can meet a run another process accepted.
+        return await self._claim_db(
+            run_id, DEFAULT_TENANT, allow_takeover=False, workflow_contracts=None
+        )
 
     async def _claim_db(
-        self, run_id: str, tenant_id: str, *, allow_takeover: bool
+        self,
+        run_id: str,
+        tenant_id: str,
+        *,
+        allow_takeover: bool,
+        workflow_contracts: Mapping[str, int] | None,
     ) -> ClaimedRun | None:
+        """Claim one run; ``workflow_contracts=None`` only for in-process work."""
         woken_parent: str | None = None
         claimed: ClaimedRun | None = None
+        verdict: BindingVerdict | None = None
+        ended_mode: str | None = None
+        claimable = (
+            (RunStatus.QUEUED.value, RunStatus.RUNNING.value)
+            if allow_takeover
+            else (RunStatus.QUEUED.value,)
+        )
         async with self._session(tenant_id) as session:
             # Cutover fence, FIRST statement of the claim transaction: a
             # worker whose image predates a completed migration must not
@@ -4604,11 +5007,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 row = None
             elif bool(_locked["cancel_requested"]) and str(
                 _locked["status"]
-            ) in (
-                (RunStatus.QUEUED.value, RunStatus.RUNNING.value)
-                if allow_takeover
-                else (RunStatus.QUEUED.value,)
-            ):
+            ) in claimable:
                 # A cancel arrived while no live worker was watching this
                 # row (its owner crashed before the poller observed it, or
                 # the run re-queued with the request pending). Resolve the
@@ -4617,17 +5016,12 @@ class PostgresRunStore(DurableJobStoreBase):
                 # takeover-only: without takeover authority this claim
                 # must not touch a row a live owner still resolves.
                 now = time.time()
-                cancel_statuses = (
-                    (RunStatus.QUEUED.value, RunStatus.RUNNING.value)
-                    if allow_takeover
-                    else (RunStatus.QUEUED.value,)
-                )
                 cancelled = (
                     await session.execute(
                         update(runs)
                         .where(
                             runs.c.run_id == run_id,
-                            runs.c.status.in_(cancel_statuses),
+                            runs.c.status.in_(claimable),
                         )
                         .values(
                             status=RunStatus.CANCELLED.value,
@@ -4649,22 +5043,6 @@ class PostgresRunStore(DurableJobStoreBase):
                     # parent_failed/session_deleting) — read it back so
                     # the terminal event never relabels a cascade as a
                     # client action.
-                    requested_reason = (
-                        await session.execute(
-                            select(run_events.c.data)
-                            .where(
-                                run_events.c.run_id == run_id,
-                                run_events.c.type
-                                == "inqtrix.run.cancel_requested",
-                            )
-                            .order_by(run_events.c.sequence.desc())
-                            .limit(1)
-                        )
-                    ).scalar_one_or_none()
-                    reason = (
-                        str((requested_reason or {}).get("reason") or "")
-                        or "client_requested_cancel"
-                    )
                     woken_parent = await self._record_terminal_run_db(
                         session,
                         run_id=run_id,
@@ -4673,14 +5051,38 @@ class PostgresRunStore(DurableJobStoreBase):
                         parent_run_id=cancelled[1],
                         request_payload=dict(cancelled[2] or {}),
                         status=RunStatus.CANCELLED.value,
-                        event_type="inqtrix.run.cancelled",
+                        event_type=RUN_CANCELLED_EVENT,
                         payload={
                             "status": "cancelled",
-                            "reason": reason,
+                            "reason": (
+                                await self._requested_cancel_reason_db(session, run_id)
+                                or "client_requested_cancel"
+                            ),
                         },
                         snapshot=dict(cancelled[3] or {}),
                         attempt=int(cancelled[4] or 0) or None,
                     )
+                row = None
+            elif (
+                workflow_contracts is not None
+                and str(_locked["status"]) in claimable
+                and (verdict := self._binding_verdict(_locked, workflow_contracts))
+                in _BINDING_END_REASONS
+            ):
+                # Nothing of the run's mode executes: its stored state belongs
+                # to a contract this worker no longer reads, or the mode is
+                # retired. The run ends visibly; its checkpoint goes after the
+                # commit, without being read.
+                ended, woken_parent = await self._end_for_binding_db(
+                    session,
+                    locked=_locked,
+                    tenant_id=tenant_id,
+                    verdict=verdict,
+                    workflow_contracts=workflow_contracts,
+                    statuses=claimable,
+                )
+                if ended:
+                    ended_mode = str(_locked["mode"])
                 row = None
             else:
                 previous_status = str(_locked["status"])
@@ -4702,9 +5104,6 @@ class PostgresRunStore(DurableJobStoreBase):
                     segment_ordinal += 1
                     segment_id = run_segment_id(run_id, segment_ordinal)
                     segment_reason = "resume"
-                allowed = [RunStatus.QUEUED.value]
-                if allow_takeover:
-                    allowed.append(RunStatus.RUNNING.value)
                 values: dict[str, Any] = {
                     "status": RunStatus.RUNNING.value,
                     "claimed_by": self._worker_id,
@@ -4725,13 +5124,19 @@ class PostgresRunStore(DurableJobStoreBase):
                     values["queued_seconds"] = runs.c.queued_seconds + _elapsed_sql(
                         runs.c.queued_since, now
                     )
+                if verdict is BindingVerdict.RESTAMP:
+                    # It never ran, so nothing stored binds it to its old
+                    # contract: it runs under the one this worker carries.
+                    values["workflow_contract"] = workflow_contracts[
+                        str(_locked["mode"])
+                    ]
                 row = (
                     (
                         await session.execute(
                             update(runs)
                             .where(
                                 runs.c.run_id == run_id,
-                                runs.c.status.in_(allowed),
+                                runs.c.status.in_(claimable),
                             )
                             .values(**values)
                             .returning(
@@ -4754,13 +5159,22 @@ class PostgresRunStore(DurableJobStoreBase):
                     .mappings()
                     .first()
                 )
+                if row is not None and verdict is BindingVerdict.RESTAMP:
+                    log.info(
+                        "Run %s never ran under %s contract %d; it runs under "
+                        "contract %d.",
+                        run_id,
+                        _locked["mode"],
+                        _locked["workflow_contract"],
+                        values["workflow_contract"],
+                    )
             if row is None:
                 claimed = None
             else:
                 lifecycle_event = (
-                    "inqtrix.run.started"
+                    RUN_STARTED_EVENT
                     if initial_start
-                    else "inqtrix.run.resumed" if resumed_dispatch else None
+                    else RUN_RESUMED_EVENT if resumed_dispatch else None
                 )
                 if lifecycle_event is not None:
                     lifecycle_payload = {
@@ -4804,9 +5218,302 @@ class PostgresRunStore(DurableJobStoreBase):
                     execution_actor_user_id=row["execution_actor_user_id"],
                     execution_scopes=tuple(row["execution_scopes"] or ()),
                 )
+        if ended_mode is not None:
+            await self._delete_checkpoint_of_ended_run(run_id, ended_mode)
         if woken_parent:
             self._parents_to_wake.put(woken_parent)
         return claimed
+
+    @staticmethod
+    def _locked_binding(locked: Mapping[str, Any]) -> tuple[RunBinding, bool]:
+        """A locked run's binding, and whether it has stored state to resume from.
+
+        Stored state is ``attempt > 0`` for every mode: a run that never ran has
+        nothing a changed contract could misread.
+        """
+        binding = RunBinding(
+            mode=str(locked["mode"]),
+            workflow_contract=int(locked["workflow_contract"]),
+        )
+        return binding, int(locked["attempt"] or 0) > 0
+
+    @classmethod
+    def _binding_verdict(
+        cls, locked: Mapping[str, Any], workflow_contracts: Mapping[str, int]
+    ) -> BindingVerdict:
+        """Judge a locked run's binding; a run this worker must leave alone raises.
+
+        Raises:
+            RunBindingNewer: The run is bound to a newer contract.
+            WorkflowUnavailable: The run's mode is not registered here.
+        """
+        binding, stored = cls._locked_binding(locked)
+        verdict = check_run_binding(
+            binding, workflow_contracts, has_checkpoint_state=stored
+        )
+        if verdict is BindingVerdict.DEFER_NEWER:
+            raise RunBindingNewer(
+                run_id=str(locked["run_id"]),
+                mode=binding.mode,
+                bound_contract=binding.workflow_contract,
+                worker_contract=workflow_contracts[binding.mode],
+            )
+        if verdict is BindingVerdict.UNAVAILABLE:
+            raise WorkflowUnavailable(
+                run_id=str(locked["run_id"]),
+                mode=binding.mode,
+                registered=tuple(workflow_contracts),
+            )
+        return verdict
+
+    async def _end_for_binding_db(
+        self,
+        session: "AsyncSession",
+        *,
+        locked: Mapping[str, Any],
+        tenant_id: str,
+        verdict: BindingVerdict,
+        workflow_contracts: Mapping[str, int],
+        statuses: Sequence[str],
+    ) -> tuple[bool, str | None]:
+        """End a run whose binding this worker cannot execute, with its children.
+
+        Its active children are cancelled with ``parent_cancelled`` in the same
+        transaction, through the one subtree walk of every ending run; a
+        running child gets the cancel request its worker acts on.
+
+        Returns:
+            Whether the run ended (it still had one of *statuses*) and the
+            parent its terminal write woke, if any.
+        """
+        run_id = str(locked["run_id"])
+        now = time.time()
+        ended = (
+            await session.execute(
+                update(runs)
+                .where(runs.c.run_id == run_id, runs.c.status.in_(statuses))
+                .values(
+                    status=RunStatus.CANCELLED.value,
+                    finished_at=now,
+                    **_terminal_timing_values(now),
+                )
+                .returning(
+                    runs.c.kind,
+                    runs.c.parent_run_id,
+                    runs.c.request_payload,
+                    runs.c.snapshot,
+                    runs.c.attempt,
+                )
+            )
+        ).first()
+        if ended is None:
+            return False, None
+        mode = str(locked["mode"])
+        payload: dict[str, Any] = {
+            "status": "cancelled",
+            "reason": _BINDING_END_REASONS[verdict],
+            "bound_contract": int(locked["workflow_contract"]),
+        }
+        if mode in workflow_contracts:
+            payload["worker_contract"] = workflow_contracts[mode]
+        woken_parent = await self._record_terminal_run_db(
+            session,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            kind=str(ended[0] or "standard"),
+            parent_run_id=ended[1],
+            request_payload=dict(ended[2] or {}),
+            status=RunStatus.CANCELLED.value,
+            event_type=RUN_CANCELLED_EVENT,
+            payload=payload,
+            snapshot=dict(ended[3] or {}),
+            attempt=int(ended[4] or 0) or None,
+        )
+        await self._end_subtree_db(
+            session,
+            run_id,
+            RunStatus.CANCELLED.value,
+            ended="ended for its workflow binding",
+        )
+        return True, woken_parent
+
+    async def _end_outdated_waits_db(
+        self, workflow_contracts: Mapping[str, int]
+    ) -> list[tuple[str, str]]:
+        """End the outdated parked runs; returns each ended run with its mode."""
+        outdated = [
+            and_(runs.c.mode == mode, runs.c.workflow_contract < contract)
+            for mode, contract in workflow_contracts.items()
+        ]
+        if run_binding.RETIRED_WORKFLOWS:
+            outdated.append(runs.c.mode.in_(sorted(run_binding.RETIRED_WORKFLOWS)))
+        if not outdated:
+            return []
+        async with self._session(DEFAULT_TENANT) as session:
+            candidate_ids = (
+                (
+                    await session.execute(
+                        select(runs.c.run_id)
+                        .where(runs.c.status.in_(_WAITING_VALUES), or_(*outdated))
+                        .order_by(
+                            func.coalesce(runs.c.root_run_id, runs.c.run_id),
+                            runs.c.run_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        ended: list[tuple[str, str]] = []
+        for candidate_id in candidate_ids:
+            # One lineage per transaction, locked root to leaf and judged again
+            # under the lock: no end holds the locks of another, and claims of
+            # other workers wait at most for one lineage.
+            async with self._session(DEFAULT_TENANT) as session:
+                try:
+                    locked, _root = await self._lock_system_run_path_db(
+                        session, candidate_id
+                    )
+                except RunNotFound:
+                    continue
+                if str(locked["status"]) not in _WAITING_VALUES:
+                    continue
+                binding, stored = self._locked_binding(locked)
+                verdict = check_run_binding(
+                    binding, workflow_contracts, has_checkpoint_state=stored
+                )
+                if verdict not in _BINDING_END_REASONS:
+                    continue
+                landed, woken_parent = await self._end_for_binding_db(
+                    session,
+                    locked=locked,
+                    tenant_id=str(locked["tenant_id"]),
+                    verdict=verdict,
+                    workflow_contracts=workflow_contracts,
+                    statuses=_WAITING_VALUES,
+                )
+                if landed:
+                    ended.append((candidate_id, binding.mode))
+                self._register_post_commit_handoffs(
+                    session,
+                    swept_run_ids=[candidate_id] if landed else [],
+                    woken_parent_ids=[woken_parent] if woken_parent else [],
+                )
+        return ended
+
+    async def _cancel_outside_binding_db(
+        self,
+        *,
+        mode: str,
+        workflow_contracts: Mapping[str, int],
+        actor_user_id: uuid.UUID | None,
+    ) -> tuple[dict[str, int], list[tuple[str, str, tuple[str, ...]]]]:
+        """Cancel the runs an admin ends for their binding, one lineage at a time.
+
+        Returns:
+            The counts for the caller and, per cancelled run, its id, its
+            status after the cancel and every run of its tree.
+        """
+        server_contract = workflow_contracts.get(mode)
+        outside = [runs.c.mode == mode]
+        if server_contract is not None:
+            outside.append(runs.c.workflow_contract > server_contract)
+        async with self._session(DEFAULT_TENANT) as session:
+            candidate_ids = (
+                (
+                    await session.execute(
+                        select(runs.c.run_id)
+                        .where(runs.c.status.notin_(_TERMINAL_VALUES), *outside)
+                        # A parent is created before its children: its cancel
+                        # takes them along instead of waking it for nothing.
+                        .order_by(runs.c.created_at, runs.c.run_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        outcome = {"cancelled": 0, "cancel_requested": 0}
+        trees: list[tuple[str, str, tuple[str, ...]]] = []
+        for candidate_id in candidate_ids:
+            # One lineage per transaction, locked root to leaf and judged again
+            # under the lock, as the wait sweep does.
+            async with self._session(DEFAULT_TENANT) as session:
+                try:
+                    locked, root = await self._lock_system_run_path_db(
+                        session, candidate_id
+                    )
+                except RunNotFound:
+                    continue
+                # A run already asked to stop (by an earlier cancel, or by its
+                # parent's cancel in this pass) is neither asked nor audited
+                # again.
+                if (
+                    str(locked["status"]) in _TERMINAL_VALUES
+                    or str(locked["mode"]) != mode
+                    or (
+                        str(locked["status"]) == RunStatus.RUNNING.value
+                        and bool(locked["cancel_requested"])
+                    )
+                    or (
+                        server_contract is not None
+                        and int(locked["workflow_contract"]) <= server_contract
+                    )
+                ):
+                    continue
+                woken = await self._cancel_row_db(
+                    session,
+                    candidate_id,
+                    str(locked["tenant_id"]),
+                    str(locked["status"]),
+                    cascade_reason=ADMIN_CANCEL_REASON,
+                )
+                subtree = await self._cancel_live_subtree_db(
+                    session, candidate_id, reason="parent_cancelled"
+                )
+                woken_parents = [*([woken] if woken is not None else []), *subtree.woken_parents]
+                await append_resource_effects(
+                    session,
+                    tenant_id=str(locked["tenant_id"]),
+                    actor_user_id=actor_user_id,
+                    owner_user_id=root["created_by_user_id"],
+                    action="run.cancelled_by_admin",
+                    resource_type="run",
+                    resource_id=candidate_id,
+                    scope="runs",
+                    detail={
+                        "mode": mode,
+                        "bound_contract": int(locked["workflow_contract"]),
+                        "server_contract": server_contract,
+                    },
+                )
+                status = str((await self._row_db(session, candidate_id)).status)
+                outcome[
+                    "cancelled" if status in _TERMINAL_VALUES else "cancel_requested"
+                ] += 1
+                trees.append((candidate_id, status, subtree.run_ids))
+                self._register_post_commit_handoffs(
+                    session, woken_parent_ids=woken_parents
+                )
+        return outcome, trees
+
+    async def _delete_checkpoint_of_ended_run(self, run_id: str, mode: str) -> None:
+        """Delete the checkpoint of a run its binding ended, after the commit.
+
+        A failed deletion leaves the checkpoint until the run is removed,
+        whose cleanup is strict; the run itself stays ended.
+        """
+        if self._checkpoint_cleanup is None:
+            return
+        from inqtrix.exceptions import RunCleanupFailed
+
+        try:
+            await aio.run_blocking(self._checkpoint_cleanup, run_id, mode)
+        except RunCleanupFailed:
+            log.warning(
+                "Run %s ended for its workflow binding; its checkpoint could not "
+                "be deleted and stays until the run is removed.",
+                run_id,
+            )
 
     async def _cancel_requested_db(self, run_ids: dict[str, str]) -> set[str]:
         if not run_ids:
@@ -4964,14 +5671,23 @@ class PostgresRunStore(DurableJobStoreBase):
                 parent_run_id=waited[3],
                 request_payload=dict(waited[4] or {}),
                 status=RunStatus.CANCELLED.value,
-                event_type="inqtrix.run.cancelled",
+                event_type=RUN_CANCELLED_EVENT,
                 payload=payload,
                 snapshot=dict(waited[5] or {}),
                 attempt=int(waited[6] or 0) or None,
             )
             if woken_parent:
                 woken_parents.append(woken_parent)
-        self._register_cleanup_handoffs(
+            # After every candidate ended with its own reason: a timed-out
+            # child keeps approval_timeout, its live siblings and
+            # descendants go with the parent.
+            await self._end_subtree_db(
+                session,
+                waited_id,
+                RunStatus.CANCELLED.value,
+                ended="timed out waiting",
+            )
+        self._register_post_commit_handoffs(
             session,
             swept_run_ids=[row[0] for row, _reason in timed_out],
             woken_parent_ids=woken_parents,
@@ -5028,7 +5744,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     < time.time() - self._queued_ttl_seconds,
                 ),
             )
-            self._register_cleanup_handoffs(
+            self._register_post_commit_handoffs(
                 session,
                 swept_run_ids=[],
                 woken_parent_ids=queued_woken,
@@ -5092,7 +5808,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 candidate_ids=stuck_ids,
                 error=_EXECUTION_LOST_ERROR,
             )
-            self._register_cleanup_handoffs(
+            self._register_post_commit_handoffs(
                 session,
                 swept_run_ids=[],
                 woken_parent_ids=stuck_woken,
@@ -5162,7 +5878,7 @@ class PostgresRunStore(DurableJobStoreBase):
 
                 try:
                     for child in subtree:
-                        await asyncio.to_thread(self._checkpoint_cleanup, child["run_id"], child["mode"])
+                        await aio.run_blocking(self._checkpoint_cleanup, child["run_id"], child["mode"])
                 except RunCleanupFailed:
                     # The cleanup callback reports its failure. Keep the
                     # terminal anchors so a later sweep can retry safely.
@@ -5206,7 +5922,9 @@ class PostgresRunStore(DurableJobStoreBase):
         survive the restart) and the pre-filtered id lists of the
         lost-execution fence and the stuck-row failsafe. The status CAS
         is the true guard: a candidate that finished or got claimed in
-        the meantime is skipped silently.
+        the meantime is skipped silently. Once every candidate failed with
+        its own error, each one's live descendants (a parked child) are
+        cancelled with ``parent_failed``.
 
         The blanket restart selection assumes a SINGLE API process in
         no-queue durable mode (the documented deployment shape): a
@@ -5319,13 +6037,21 @@ class PostgresRunStore(DurableJobStoreBase):
                 parent_run_id=row[3],
                 request_payload=dict(row[4] or {}),
                 status=RunStatus.FAILED.value,
-                event_type="inqtrix.run.failed",
+                event_type=RUN_FAILED_EVENT,
                 payload=payload,
                 snapshot=dict(row[5] or {}),
                 attempt=int(row[6] or 0) or None,
             )
             if woken_parent:
                 woken_parents.append(woken_parent)
+            # After every candidate failed with its own error: what is left
+            # alive below (a parked child) goes with the failed run.
+            await self._end_subtree_db(
+                session,
+                run_id,
+                RunStatus.FAILED.value,
+                ended=f"failed ({error['type']})",
+            )
         return woken_parents
 
 

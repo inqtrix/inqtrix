@@ -16,8 +16,9 @@ import logging
 import re
 
 import pytest
+from inqtrix.harness.contracts.events import ANSWER_DRAFT_EVENT
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from inqtrix.agents.prompts import build_kernel_user_message
 from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
@@ -25,12 +26,7 @@ from inqtrix.i18n import t
 from inqtrix.observability.context import current_purpose
 from inqtrix.pagination import encode_cursor
 from inqtrix.providers.base import ChatTurn, ToolCallRequest
-from inqtrix.runs.shared import (
-    ANSWER_DRAFT_EVENT,
-    answer_artifact_id,
-    answer_draft_id,
-    expand_run_event,
-)
+from inqtrix.runs.shared import answer_artifact_id, answer_draft_id, expand_run_event
 
 from tests.agents.test_kernel_prompt_events import (
     ScriptedToolLLM,
@@ -530,7 +526,7 @@ def test_deep_review_pulls_the_retained_material_and_the_revision_gets_the_named
             payload["web_search_ledger"]["searches"]["query_warranty"]["source_run_id"] = handle.run_id
             handle.complete(payload)
 
-        origin = store.submit(question="Garantiebedingungen?", stack_name="default",
+        origin = store.submit(workflow_contract=1, question="Garantiebedingungen?", stack_name="default",
                               work=seed, mode="research", kind="standard")["run_id"]
         wait_status(client, origin, {"completed"})
         llm._turns = [ChatTurn(text="", tool_calls=(ToolCallRequest(
@@ -580,7 +576,7 @@ def _seeded_report(client, payload: dict) -> str:
             search["source_run_id"] = handle.run_id
         handle.complete(payload)
 
-    origin = store.submit(question="Garantiebedingungen?", stack_name="default",
+    origin = store.submit(workflow_contract=1, question="Garantiebedingungen?", stack_name="default",
                           work=seed, mode="research", kind="standard")["run_id"]
     wait_status(client, origin, {"completed"})
     return origin

@@ -6,7 +6,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from inqtrix.observability.context import bind_log_context, reset_log_context
+from inqtrix import aio
+from inqtrix.observability.context import bind_log_context
 from inqtrix.runs.upload_operations import UploadAttemptSuperseded
 from inqtrix.services.upload_operation_service import (
     UploadBytesRequired,
@@ -52,46 +53,45 @@ class UploadWorkerLoop(
             heartbeat_seconds=heartbeat_seconds,
             claim_idle_seconds=claim_idle_seconds,
             claim_guard=claim_guard,
-            thread_prefix="inqtrix-upload",
         )
         self._service = service
 
     def _entity_id(self, job: "QueuedUploadOperation") -> str:
         return job.operation_id
 
-    def _stale_dispatch(self) -> list[tuple[str, str]]:
+    async def _stale_dispatch(self) -> list[tuple[str, str]]:
         # Uploads execute here, so preparations skipped for want of a parser
         # are queued and dispatched here too; failing that never blocks the
         # stale pass below.
         try:
-            for operation_id, tenant_id in self._service.queue_missing_preparations():
-                self._enqueue_dispatch(operation_id, tenant_id)
+            for operation_id, tenant_id in await self._service.aqueue_missing_preparations():
+                await self._enqueue_dispatch(operation_id, tenant_id)
         except Exception as exc:
             log.warning(
                 "Missing upload preparations could not be queued (error_type=%s).",
                 type(exc).__name__,
             )
-        return self._store.stale_dispatches(
-            older_than_seconds=_RECONCILE_MIN_AGE_SECONDS
+        return await self._store.astale_dispatches(
+            older_than_seconds=_RECONCILE_MIN_AGE_SECONDS,
         )
 
-    def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
+    async def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
         del watched
         return set()
 
-    def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
-        self._queue.enqueue(operation_id=entity_id, tenant_id=tenant_id)
+    async def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
+        await self._queue.enqueue(operation_id=entity_id, tenant_id=tenant_id)
 
     def _execute(
         self,
         job: "QueuedUploadOperation",
         claimed: "ClaimedUploadOperation",
         cancel_event: threading.Event,
-    ) -> None:
+    ) -> bool:
         del cancel_event
         ack = False
         # Like the run and indexing workers: every line of this job names it.
-        log_tokens = bind_log_context(run_id=job.operation_id, tenant=job.tenant_id)
+        bind_log_context(run_id=job.operation_id, tenant=job.tenant_id)
         try:
             try:
                 self._service.execute_claimed(claimed)
@@ -105,7 +105,7 @@ class UploadWorkerLoop(
                     "Upload operation %s was taken over by a newer attempt.",
                     job.operation_id,
                 )
-                return
+                return False
             except Exception as exc:
                 # The service persists a typed failure or retry before raising.
                 log.warning(
@@ -127,10 +127,10 @@ class UploadWorkerLoop(
                     "remains available for redelivery.",
                     job.operation_id,
                 )
-                return
-            self._queue.ack(job.message_id)
+                return False
+            aio.call_from_thread(self._queue.ack(job.message_id))
             ack = True
-        except Exception as final_exc:  # noqa: BLE001 — Futures here are unobserved
+        except Exception as final_exc:  # noqa: BLE001 - the one place that says what failed
             log.error(
                 "Worker %s: terminal phase for upload operation %s failed "
                 "(error_type=%s); redelivery remains responsible.",
@@ -139,6 +139,4 @@ class UploadWorkerLoop(
                 type(final_exc).__name__,
             )
             _count_worker_job("uploads", "finalization_failed")
-        finally:
-            self._finish_active(job, allow_successor=ack)
-            reset_log_context(log_tokens)
+        return ack

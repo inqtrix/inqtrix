@@ -8,25 +8,31 @@ no seam skipped. Plus the pure interrupt-translation contract.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
-from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from inqtrix.providers.attempts import report_retry
+from inqtrix.agents.kernel.compaction import COMPACTION_STATE
 from inqtrix.agents.kernel.interrupts import (
     CLARIFICATION_INTERRUPT,
     TOOL_APPROVAL_INTERRUPT,
     ask_user_clarification_id,
     translate_kernel_interrupt,
 )
+from inqtrix.agents.kernel.middleware import KERNEL_SUMMARY_PROMPT
+from inqtrix.capabilities.contracts import CapabilityContext
+from inqtrix.harness.contracts.events import CONTEXT_COMPACTED_EVENT
 from inqtrix.providers.base import ChatTurn, LLMProvider, ToolCallRequest
 from inqtrix.server.routes import create_router, register_routes
 from inqtrix.settings import (
@@ -37,6 +43,7 @@ from inqtrix.settings import (
     Settings,
     StorageSettings,
 )
+from inqtrix.untrusted_content import UNTRUSTED_FENCE_OPEN
 
 
 class ScriptedToolLLM(LLMProvider):
@@ -73,28 +80,18 @@ class ScriptedToolLLM(LLMProvider):
 
 
 class RetryNotifyingToolLLM(ScriptedToolLLM):
-    """Kernel provider that exposes one retry through the shared seam."""
+    """Kernel provider that reports one retry where a provider reports its retries."""
 
     def __init__(self, turns: list[ChatTurn]) -> None:
         super().__init__(turns)
-        self._retry_callback: Any = None
         self._retry_emitted = False
-
-    @contextmanager
-    def observe_retries(self, callback: Any) -> Any:
-        previous = self._retry_callback
-        self._retry_callback = callback
-        try:
-            yield self
-        finally:
-            self._retry_callback = previous
 
     def chat(
         self, messages: Any, *, tools: Any = None, model: Any = None, **kwargs: Any
     ) -> ChatTurn:
-        if not self._retry_emitted and self._retry_callback is not None:
+        if not self._retry_emitted:
             self._retry_emitted = True
-            self._retry_callback({
+            report_retry("model", {
                 "attempt": 1,
                 "max_attempts": 3,
                 "delay_seconds": 0.5,
@@ -106,6 +103,37 @@ class RetryNotifyingToolLLM(ScriptedToolLLM):
             tools=tools,
             model=model,
             **kwargs,
+        )
+
+
+class SummarizingToolLLM(ScriptedToolLLM):
+    """Scripted kernel turns; every compaction summary is numbered and recorded.
+
+    Summaries go through the same provider as the kernel's turns, so they
+    are told apart by the summary prompt and never consume a scripted turn.
+    """
+
+    _SUMMARY_HEAD = KERNEL_SUMMARY_PROMPT[:60]
+
+    def __init__(self, turns: list[ChatTurn]) -> None:
+        super().__init__(turns)
+        self.summary_requests: list[str] = []
+
+    def chat(
+        self, messages: Any, *, tools: Any = None, model: Any = None, **kwargs: Any
+    ) -> ChatTurn:
+        prompt = str(list(messages)[-1].get("content", "")) if messages else ""
+        if not prompt.startswith(self._SUMMARY_HEAD):
+            return super().chat(messages, tools=tools, model=model, **kwargs)
+        self.summary_requests.append(prompt)
+        return ChatTurn(
+            text=f"Zusammenfassung {len(self.summary_requests)}.",
+            tool_calls=(),
+            finish_reason="stop",
+            model="high-model",
+            prompt_tokens=30,
+            completion_tokens=5,
+            raw=None,
         )
 
 
@@ -167,12 +195,26 @@ def _two_read_calls_turn() -> ChatTurn:
     )
 
 
+def _noting_turn(note: str, call: ToolCallRequest) -> ChatTurn:
+    """A tool call next to a long working note, which a compaction can condense."""
+    return ChatTurn(
+        text=f"{note} " + "Zwischenstand der Recherche. " * 100,
+        tool_calls=(call,),
+        finish_reason="tool_calls",
+        model="high-model",
+        prompt_tokens=40,
+        completion_tokens=12,
+        raw=None,
+    )
+
+
 def make_kernel_client(
     llm: ScriptedToolLLM,
     *,
     max_tokens_per_run: int = 0,
     max_tool_calls: int = 30,
     max_iterations: int = 73,
+    platform_overrides: dict[str, Any] | None = None,
 ) -> TestClient:
     settings = Settings(
         models=ModelSettings(),
@@ -185,6 +227,7 @@ def make_kernel_client(
         INQTRIX_AGENT_KERNEL_ENABLED=True,
         INQTRIX_AGENT_KERNEL_MAX_TOOL_CALLS=max_tool_calls,
         INQTRIX_AGENT_KERNEL_MAX_ITERATIONS=max_iterations,
+        **(platform_overrides or {}),
     )
     if max_tokens_per_run:
         settings.quota.max_tokens_per_run = max_tokens_per_run
@@ -194,7 +237,7 @@ def make_kernel_client(
 def _client_for(settings: Settings, llm: ScriptedToolLLM) -> TestClient:
     app = FastAPI()
     router = create_router()
-    register_routes(
+    container = register_routes(
         router,
         providers=SimpleNamespace(llm=llm, search=None),
         strategies=SimpleNamespace(),
@@ -204,6 +247,7 @@ def _client_for(settings: Settings, llm: ScriptedToolLLM) -> TestClient:
     app.include_router(router)
     client = TestClient(app)
     client.llm = llm  # type: ignore[attr-defined]
+    client.container = container  # type: ignore[attr-defined]
     return client
 
 
@@ -467,7 +511,7 @@ def test_tool_limit_partial_requires_explicit_choice_and_calls_no_model():
         # "Auftrag." carries no resolvable language signal, so the receipt
         # is written in the neutral fallback rather than silently in German.
         assert "Partial result" in result["answer"]
-        assert "No complete synthesis was simulated" in result["answer"]
+        assert "No final answer was produced" in result["answer"]
         decisions = [
             event
             for event in run_events(client, run_id)
@@ -503,7 +547,7 @@ def test_step_limit_extensions_use_cumulative_checkpoint_coordinate():
             # is written in the neutral fallback (English), never silently
             # in German. The DE/EN pair itself is pinned as a unit in
             # tests/agents/test_limit_contract.py.
-            assert "execution steps" in pending[0]["question"]
+            assert "work steps" in pending[0]["question"]
             response = client.post(
                 f"/v1/runs/{run_id}/clarifications/"
                 f"{pending[0]['clarification_id']}",
@@ -520,6 +564,32 @@ def test_step_limit_extensions_use_cumulative_checkpoint_coordinate():
         ]["limits"]["steps"]
         assert step_limit["used"] <= step_limit["limit"]
         assert step_limit["limit"] <= step_limit["ceiling"]
+
+
+def test_input_from_the_prompt_cache_stays_out_of_the_run_budget():
+    """A long run sends the same text with every call: that is repetition, not work."""
+    cached = {"prompt_tokens": 1000, "cache_read_tokens": 950, "completion_tokens": 10}
+    llm = ScriptedToolLLM(
+        [replace(_ask_turn(), **cached), replace(_answer_turn(), **cached)]
+    )
+    # 1,010 tokens sent per call are far beyond this limit, 60 counted are not.
+    client = make_kernel_client(llm, max_tokens_per_run=200)
+    with client:
+        run_id = client.post(
+            "/v1/runs", json={"question": "Auftrag.", "mode": "agent_kernel"}
+        ).json()["run_id"]
+        wait_status(client, run_id, {"waiting_for_input"})
+        rows = client.get(f"/v1/runs/{run_id}/clarifications").json()["data"]
+        client.post(
+            f"/v1/runs/{run_id}/clarifications/{rows[0]['clarification_id']}",
+            json={"answer": "Egal."},
+        )
+        wait_status(client, run_id, {"completed"})
+        result = client.get(f"/v1/runs/{run_id}/result").json()
+
+    assert result["usage"]["prompt_tokens"] == 100
+    assert result["usage"]["completion_tokens"] == 20
+    assert result["execution"]["limits"]["tokens"]["used"] == 120
 
 
 def test_two_ask_user_rounds_use_distinct_rows():
@@ -631,6 +701,137 @@ def test_token_budget_stops_the_kernel_across_segments():
         # The second scripted turn was never consumed: the abort fired
         # at the model boundary, not after another paid call.
         assert len(llm.chat_calls) == 1
+
+
+def test_a_second_compaction_after_a_park_folds_the_first_and_keeps_the_assignment():
+    """Two compactions across a park: each message archived once, the assignment kept.
+
+    With a tiny trigger the kernel compacts whenever something older than
+    the two newest messages is left. The first compaction condenses the
+    assignment and the first reading; its record is in the checkpoint when
+    the run parks on a question. After the answer the second one builds on
+    that record: it folds the first summary with the second reading and
+    archives only that reading. The last model input still carries the
+    instruction of the first turn, verbatim and outside the summary's fence.
+    """
+    instruction = "Berichtsvorgabe (verbindlich): genau drei Stichpunkte."
+    llm = SummarizingToolLLM(
+        [
+            _noting_turn(
+                "NOTIZ-A1",
+                ToolCallRequest(
+                    id="call_read0001",
+                    name="read_canvas",
+                    arguments={"artifact_id": "missing-a"},
+                ),
+            ),
+            _noting_turn(
+                "NOTIZ-A2",
+                ToolCallRequest(
+                    id="call_read0002",
+                    name="read_canvas",
+                    arguments={"artifact_id": "missing-b"},
+                ),
+            ),
+            _noting_turn(
+                "NOTIZ-A3",
+                ToolCallRequest(
+                    id="call_ask0001",
+                    name="ask_user",
+                    arguments={
+                        "question": "Welches Format soll die Antwort haben?",
+                        "options": ["Kompakt", "Tabelle"],
+                        "default_assumption": "Kompakt",
+                    },
+                ),
+            ),
+            _answer_turn(),
+        ]
+    )
+    client = make_kernel_client(
+        llm,
+        platform_overrides={
+            "INQTRIX_AGENT_KERNEL_CONTEXT_TRIGGER_TOKENS": 10,
+            "INQTRIX_AGENT_KERNEL_CONTEXT_KEEP_MESSAGES": 2,
+        },
+    )
+    with client:
+        run_id = client.post(
+            "/v1/runs",
+            json={
+                "question": f"Fasse den EU AI Act zusammen. {instruction}",
+                "mode": "agent_kernel",
+            },
+        ).json()["run_id"]
+        wait_status(client, run_id, {"waiting_for_input"})
+
+        # Stored when the run parks: the record of the first compaction.
+        saver = client.container.agent_checkpointer.saver()  # type: ignore[attr-defined]
+        parked = saver.get_tuple(
+            {"configurable": {"thread_id": run_id, "checkpoint_ns": ""}}
+        )
+        first = parked.checkpoint["channel_values"][COMPACTION_STATE]
+        assert (first["generation"], first["cutoff"]) == (1, 3)
+
+        (row,) = client.get(f"/v1/runs/{run_id}/clarifications").json()["data"]
+        answered = client.post(
+            f"/v1/runs/{run_id}/clarifications/{row['clarification_id']}",
+            json={"option_id": "q1_o2"},
+        )
+        assert answered.status_code == 200, answered.text
+        wait_status(client, run_id, {"completed"})
+
+        compacted = [
+            event["data"]
+            for event in run_events(client, run_id)
+            if event["type"] == CONTEXT_COMPACTED_EVENT
+        ]
+        sections = [
+            json.loads(
+                asyncio.run(
+                    client.container.agent_source_service.read_archive(  # type: ignore[attr-defined]
+                        section_id, CapabilityContext(principal=None, run_id=run_id)
+                    )
+                )[0].text
+            )
+            for event in compacted
+            for section_id in event["archive_section_ids"]
+        ]
+
+    assert [(e["generation"], e["messages_summarized"]) for e in compacted] == [
+        (1, 3),
+        (2, 2),
+    ]
+    assert compacted[0]["archive_section_ids"] == first["archive_refs"]
+    # Each message is archived once: the second section holds the second
+    # reading only, not again what the first one archived.
+    assert [message["type"] for message in sections[0]] == ["human", "ai", "tool"]
+    assert [message["type"] for message in sections[1]] == ["ai", "tool"]
+    assert "NOTIZ-A2" in json.dumps(sections[1])
+    assert "NOTIZ-A1" not in json.dumps(sections[1])
+    # The second summary folds the first one instead of condensing the
+    # first reading again.
+    (folding,) = [
+        request for request in llm.summary_requests if first["summary"] in request
+    ]
+    assert "NOTIZ-A2" in folding and "NOTIZ-A1" not in folding
+    # The last model input: the first turn's instruction once, verbatim,
+    # outside the fence, next to the user's answer; both sections named.
+    sent = llm.chat_calls[-1]["messages"]
+    (summary,) = [
+        str(message["content"])
+        for message in sent
+        if "The assignment of this run" in str(message.get("content"))
+    ]
+    outside = summary.split(UNTRUSTED_FENCE_OPEN, 1)[0]
+    assert outside.count(instruction) == summary.count(instruction) == 1
+    assert "Tabelle" in outside
+    assert all(
+        section_id in summary
+        for event in compacted
+        for section_id in event["archive_section_ids"]
+    )
+    assert "NOTIZ-A1" not in json.dumps(sent) and "NOTIZ-A2" not in json.dumps(sent)
 
 
 def test_the_shipping_default_registers_the_kernel():
@@ -987,6 +1188,53 @@ def test_partial_answer_writes_reference_titles_without_markdown_escapes():
     )
     assert english.startswith("## Partial result")
     assert "Teilstand" not in english
+
+
+def test_partial_answer_names_what_the_run_already_wrote():
+    from types import SimpleNamespace
+
+    from inqtrix.agents.kernel.algorithm import _partial_limit_answer
+
+    gate = SimpleNamespace(kind="steps")
+    answer = _partial_limit_answer(
+        gate,  # type: ignore[arg-type]
+        [],
+        language="de",
+        documents=["memo [Pilot]  Sonderregeln.md"],
+    )
+    assert "### Bereits im Canvas\n\n- memo (Pilot) Sonderregeln.md" in answer
+    assert "höheren Stufe" in answer
+
+    english = _partial_limit_answer(
+        gate,  # type: ignore[arg-type]
+        [],
+        language="en",
+        documents=["memo.md"],
+    )
+    assert "### Already in the canvas\n\n- memo.md" in english
+
+    nothing_written = _partial_limit_answer(gate, [], language="de")  # type: ignore[arg-type]
+    assert "Bereits im Canvas" not in nothing_written
+
+
+def test_partial_answer_gives_one_document_one_line():
+    """Five passages of one source read as one source, with all five labels."""
+    from types import SimpleNamespace
+
+    from inqtrix.agents.kernel.algorithm import _partial_limit_answer
+
+    answer = _partial_limit_answer(
+        SimpleNamespace(kind="steps"),  # type: ignore[arg-type]
+        [
+            {"label": "K1", "title": "Leitfaden"},
+            {"label": "K2", "title": "Leitfaden"},
+            {"label": "K3", "title": "Richtlinie"},
+        ],
+        language="de",
+    )
+    lines = answer.splitlines()
+    assert "- [K1] [K2] Leitfaden" in lines
+    assert "- [K3] Richtlinie" in lines
 
 
 @pytest.mark.parametrize(

@@ -21,16 +21,11 @@ from pydantic import StrictInt, StrictStr
 
 from inqtrix.agents.context_archive import (
     ARCHIVE_CATALOGUE_PAGE_SIZE, ARCHIVE_CATALOGUE_MAX_PAGE_SIZE,
-    ARCHIVE_READ_WINDOW_CHARS, catalogue_page, encode_archive_data,
+    ARCHIVE_READ_WINDOW_CHARS, archived_result_pointer, catalogue_page, encode_archive_data,
 )
 from inqtrix.project.editor_ports import EDITOR_CONTEXT_COMMENT_PAGE_SIZE
 from inqtrix.project.editor_search import EDITOR_SEARCH_MAX_MATCHES, EDITOR_SEARCH_QUERY_MAX
 
-from inqtrix.agents.algorithm import (
-    ARTIFACT_CREATED_EVENT,
-    ARTIFACT_UPDATED_EVENT,
-    CLARIFICATION_REQUESTED_EVENT,
-)
 from inqtrix.agents.clarification import (
     build_clarification,
     guarded_questions,
@@ -83,6 +78,13 @@ from inqtrix.agents.context_sources import (
 from inqtrix.capabilities.catalog.knowledge import CITE_QUOTE_CHARS_MAX, CITE_QUOTES_MAX
 from inqtrix.quote_limits import CITE_QUOTE_MIN_WORDS
 from inqtrix.urls import normalize_url
+from inqtrix.harness.contracts.events import (
+    ACTIVITY_EVENT,
+    ARTIFACT_CREATED_EVENT,
+    ARTIFACT_UPDATED_EVENT,
+    CLARIFICATION_REQUESTED_EVENT,
+    SKILL_LOADED_EVENT,
+)
 
 log = logging.getLogger(__name__)
 
@@ -90,18 +92,14 @@ _IMPORT_HINT = (
     "Der Agent-Kernel braucht das 'agent'-Extra (uv sync --extra agent)."
 )
 
-TOOL_STARTED_EVENT = "inqtrix.agent.tool.started"
-TOOL_FINISHED_EVENT = "inqtrix.agent.tool.finished"
-"""The two events of one tool row in a run's timeline, joined by their
-``invocation_id``. A delegation row uses the child's origin key as that id."""
 
-SKILL_LOADED_MARKER = "[skill_geladen:{skill_id}@{revision}]"
+SKILL_LOADED_MARKER = "[skill_loaded:{skill_id}@{revision}]"
 """Machine-readable first line of a successful ``load_skill`` result.
 The algorithm reconstructs activated skills from these markers in the
 checkpointed transcript at segment start — a restriction acquired
 before a park must survive the resume (never a security hole)."""
 
-EDITOR_READ_MARKER = "[editor_gelesen:{document_id}@{revision}]"
+EDITOR_READ_MARKER = "[editor_read:{document_id}@{revision}]"
 """Machine-readable first line of a successful editor read/search
 result. The algorithm reconstructs the run's read receipts from
 these markers at segment start (producing-tool check, like the skill
@@ -156,6 +154,25 @@ def tool_message_text(message: Any) -> str:
             for block in content
         )
     return str(content or "")
+
+
+SKILL_LOADED_PREFIX = SKILL_LOADED_MARKER.split("{", 1)[0]
+
+
+def loaded_skill_result(message: Any) -> bool:
+    """Whether *message* is the result of a ``load_skill`` call that loaded a skill.
+
+    Trust is anchored on the producing tool, never on the content alone: other
+    tools relay provider-controlled text verbatim, so a marker-shaped result
+    from them must never count. A refused ``load_skill`` call (unknown skill,
+    one only the user may attach, one that needs approval gates) carries no
+    marker and is no loaded skill either.
+    """
+    return (
+        getattr(message, "type", "") == "tool"
+        and getattr(message, "name", "") == "load_skill"
+        and tool_message_text(message).startswith(SKILL_LOADED_PREFIX)
+    )
 
 
 def failed_tool_message(message: Any) -> bool:
@@ -355,13 +372,12 @@ def _offload_bulky_result(
     )
     if not archive_ids:
         return text
-    pointer = f"read_canvas(artifact_id='{archive_ids[0]}')"
     parts = [text]
     if reference_lines and reference_lines not in text:
         parts.append(f"Evidence (complete):\n{reference_lines}")
     if status_lines and status_lines not in text:
         parts.append(f"Status notes (complete):\n{status_lines}")
-    parts.append("The complete tool result is above. Retained original: " + pointer + ".")
+    parts.append(archived_result_pointer(archive_ids[0]))
     return "\n\n".join(parts)
 
 
@@ -642,8 +658,6 @@ except ImportError as _exc:  # pragma: no cover - env-dependent
     _AGENT_EXTRA_ERROR = _exc
 
 
-
-
 @dataclass(frozen=True)
 class ChildScope:
     """What a child run inherits from the run that starts it.
@@ -781,7 +795,7 @@ def submit_or_find_child(
         None,
     )
     if child is None:
-        from inqtrix.server.runs import RunQueueFull
+        from inqtrix.runs.records import RunQueueFull
 
         resolve_payload: dict[str, Any] = {
             "mode": mode,
@@ -1405,8 +1419,8 @@ def build_kernel_tools() -> list[Any]:
         )
         ledger_note = (
             "\n\nWeb search ledger: "
-            f"{len(registered_rows)} sources delivered by Azure fully "
-            "registered."
+            f"{len(registered_rows)} sources delivered by the search provider "
+            "fully registered."
         )
         answer = normalize_agent_markdown(
             output.answer or "(no answer text)"
@@ -2710,7 +2724,7 @@ def build_kernel_tools() -> list[Any]:
                 "run_web_research blocked by the effective agent tier; use web_instant."
             )
             deps.emit(
-                "inqtrix.agent.activity",
+                ACTIVITY_EVENT,
                 {
                     "scope": "task",
                     "phase": "execution",
@@ -3019,7 +3033,7 @@ def build_kernel_tools() -> list[Any]:
         deps.skill_answers[record.id] = answers
         deps.activate_skill(record)
         deps.emit(
-            "inqtrix.agent.skill.loaded",
+            SKILL_LOADED_EVENT,
             {"skill_id": record.id, "label": record.label},
         )
         marker = SKILL_LOADED_MARKER.format(

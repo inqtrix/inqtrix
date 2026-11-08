@@ -4,7 +4,6 @@ const TERMINAL_STATUSES = new Set<ResearchRunStatus>([
   'completed',
   'failed',
   'cancelled',
-  'expired',
 ])
 
 export function isTerminalRunStatus(status: ResearchRunStatus) {

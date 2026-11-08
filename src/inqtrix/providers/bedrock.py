@@ -6,18 +6,22 @@ inference endpoint for Bedrock; it provides structured request/response
 formats, native reasoning (thinking) support, and consistent error
 handling across all supported models.
 
-Authentication is handled through **AWS named profiles** (configured
-in ``~/.aws/config`` / ``~/.aws/credentials``).  Pass the profile
-name to the constructor or let boto3 resolve credentials from the
-standard AWS credential chain (env vars, instance role, etc.).
+Authentication is either a **Bedrock API key** or **AWS credentials**.
+An ``api_key`` passed to the constructor signs every call of this provider
+as a bearer token, held by the provider's own botocore session. Without
+it, boto3 resolves credentials as usual: a named profile, the standard AWS
+credential chain (env vars, instance role, etc.), or the API key boto3
+itself reads from ``AWS_BEARER_TOKEN_BEDROCK``.
 
 Key design decisions mirror :mod:`inqtrix.providers.anthropic`:
 
 * **Retry with jitter** — Bedrock returns ``ThrottlingException``
-  under sustained load.  The provider wraps boto3 calls in its own
-  retry loop with jittered exponential backoff.  boto3 built-in
-  retries are **disabled** to avoid double-retry and to allow
-  deadline-aware backoff.
+  under sustained load.  Each boto3 call runs on the provider lane of the
+  process loop and is one attempt of the shared retry loop
+  (:func:`~inqtrix.providers.attempts.call_with_retries`) with jittered
+  exponential backoff.  boto3 built-in retries are **disabled** to avoid
+  double-retry and to allow deadline-aware backoff.  The sync methods are
+  faces of the async ones.
 
 * **Per-call reasoning control** — Extended thinking is valuable for
   complex reasoning calls but wastes tokens on short helper calls.  Like
@@ -38,12 +42,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from bisect import bisect_right
 from collections import OrderedDict
 from typing import Any
 
+from inqtrix import aio
 from inqtrix.constants import (
     DEFAULT_LLM_MAX_OUTPUT_TOKENS,
     REASONING_TIMEOUT,
@@ -51,35 +57,48 @@ from inqtrix.constants import (
 from inqtrix.exceptions import (
     AgentModelCapacityError,
     AgentRateLimited,
-    AgentTimeout,
+    AgentRequiredToolCallMissing,
     BedrockAPIError,
 )
+from inqtrix.providers._bedrock_messages import (
+    chat_turn,
+    converse_tool_choice,
+    to_converse,
+    to_converse_tool,
+    with_instruction,
+)
+from inqtrix.providers._claude import (
+    THINKING_BINDING_BETA,
+    _first_warning,
+    model_supports_effort,
+    models_rejecting_sampling,
+    output_budget,
+    thinking_and_effort,
+    tool_forcing_allowed,
+    with_block_binding,
+)
+from inqtrix.providers.attempts import (
+    AsyncNativeLLMProvider,
+    call_with_retries,
+    estimate_request_tokens,
+)
 from inqtrix.providers.base import (
-    LLMProvider,
+    ChatTurn,
     LLMResponse,
-    MAX_PROVIDER_ATTEMPTS,
     StructuredLLMResponse,
-    _NonFatalNoticeMixin,
-    _RetryNoticeMixin,
-    _THINKING_MIN_MAX_TOKENS,
     _check_deadline,
-    _check_provider_cancel,
-    _check_provider_operation_deadline,
     _operation_deadline,
     model_capacity_reason,
-    _retry_delay_seconds,
-    _sleep_before_retry,
     extract_usage_tokens,
     cache_usage_details,
-    normalize_reasoning_effort,
     parse_structured_response_content,
-    validate_reasoning_effort,
 )
 from inqtrix.providers._schema import strictify_json_schema
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
 
 import boto3  # type: ignore[import-untyped]
+import botocore.session  # type: ignore[import-untyped]
 from botocore.config import Config as BotoConfig  # type: ignore[import-untyped]
 from botocore.exceptions import (  # type: ignore[import-untyped]
     ClientError,
@@ -89,19 +108,36 @@ from botocore.exceptions import (  # type: ignore[import-untyped]
     EndpointConnectionError,
     ReadTimeoutError,
 )
+from botocore.tokens import FrozenAuthToken  # type: ignore[import-untyped]
 
 log = logging.getLogger(__name__)
 
+API_KEY_ENV = "AWS_BEARER_TOKEN_BEDROCK"
+"""The variable boto3 itself reads a Bedrock API key from (process environment only)."""
+
+
+class _ApiKey:
+    """Hands one Bedrock API key to the botocore session of one provider.
+
+    Registered as that session's token provider, it signs the provider's calls
+    as a bearer token without touching the process environment, so other AWS
+    clients in the process keep their own credentials.
+    """
+
+    def __init__(self, key: str) -> None:
+        self._token = FrozenAuthToken(key)
+
+    def load_token(self, **kwargs: Any) -> FrozenAuthToken:
+        """The key, for whichever service botocore asks it for."""
+        return self._token
+
 # ---------------------------------------------------------------------------
-# Retry & backoff constants
+# Transient Converse failures
 #
 # Bedrock returns ThrottlingException under sustained load — especially
-# when many parallel claim-extraction threads hit the API at once. The
-# following constants control the retry loop in
-# _converse_with_retry.
-#
-# Shared backoff constants (_BACKOFF_BASE_SECONDS, _BACKOFF_MAX_SECONDS,
-# _JITTER_RANGE, _THINKING_MIN_MAX_TOKENS) are imported from base.py.
+# when many parallel claim-extraction calls hit the API at once. These
+# error codes and transport failures are the ones the shared retry loop
+# repeats (_is_transient); the backoff timing comes from base.py.
 # ---------------------------------------------------------------------------
 _RETRYABLE_BEDROCK_ERRORS = frozenset({
     "ThrottlingException",
@@ -110,8 +146,6 @@ _RETRYABLE_BEDROCK_ERRORS = frozenset({
     "ServiceUnavailableException",
     "ModelNotReadyException",
 })
-_MAX_BEDROCK_ATTEMPTS = MAX_PROVIDER_ATTEMPTS
-_MAX_BEDROCK_TRANSPORT_ATTEMPTS = MAX_PROVIDER_ATTEMPTS
 _RETRYABLE_BEDROCK_TRANSPORT_ERRORS = (
     BotoConnectionError,
     ConnectionClosedError,
@@ -142,39 +176,21 @@ _TRANSPORT_TIMEOUT_RUNGS: tuple[float, ...] = (
 )
 _MAX_TRANSPORT_CLIENTS = 8
 
-# ---------------------------------------------------------------------------
-# Effort capability blacklist
-#
-# Mirrors the Anthropic-direct adapter: ``output_config.effort`` is supported
-# on Opus 4.5+ / Sonnet 4.6+ / Mythos, but rejected by Haiku-class models.
-# The Bedrock model id format is e.g. ``eu.anthropic.claude-haiku-4-5-...``,
-# so a substring match on "haiku" still works as a low-maintenance check.
-# ---------------------------------------------------------------------------
-_EFFORT_UNSUPPORTED_FRAGMENTS: tuple[str, ...] = ("haiku",)
 _STRUCTURED_OUTPUT_MODEL_FRAGMENTS: tuple[str, ...] = (
+    "claude-fable-5",
     "claude-haiku-4-5",
+    "claude-haiku-5",
     "claude-mythos",
     "claude-opus-4-5",
     "claude-opus-4-6",
     "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
     "claude-sonnet-4-5",
     "claude-sonnet-4-6",
+    "claude-sonnet-5",
 )
 
-
-def _model_supports_effort(model: str) -> bool:
-    """Return True when the given Bedrock model id accepts output_config.effort."""
-    if not model:
-        return True
-    lowered = model.lower()
-    return not any(fragment in lowered for fragment in _EFFORT_UNSUPPORTED_FRAGMENTS)
-
-
-# Effort levels Bedrock Converse accepts in
-# ``additionalModelRequestFields["output_config"]["effort"]`` for Claude models.
-# Matches the Anthropic set: no ``minimal``, but ``max`` is available. ``none``
-# (off) and ``""`` (inherit) are handled separately.
-_BEDROCK_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
 
 def _model_supports_structured_output(model: str) -> bool:
@@ -187,10 +203,36 @@ def _model_supports_structured_output(model: str) -> bool:
     )
 
 
+def _client_error_code(exc: BaseException) -> str:
+    """The Converse error code of a boto3 ``ClientError``, else ``""``."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return ""
+    return str((response.get("Error") or {}).get("Code") or "")
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Whether a failed Converse call is worth another attempt."""
+    if isinstance(exc, ClientError):
+        return _client_error_code(exc) in _RETRYABLE_BEDROCK_ERRORS
+    return isinstance(exc, _RETRYABLE_BEDROCK_TRANSPORT_ERRORS)
+
+
+def _retry_error_code(exc: BaseException) -> str:
+    """The Converse error code for a retry notice, else the exception name."""
+    return _client_error_code(exc) or type(exc).__name__
+
+
+def _retry_request_id(exc: BaseException) -> str:
+    """The request-id of a failed Converse call, for its retry notice."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return ""
+    return str((response.get("ResponseMetadata") or {}).get("RequestId") or "")
+
+
 class BedrockLLM(
-    _RetryNoticeMixin,
-    _NonFatalNoticeMixin,
-    LLMProvider,
+    AsyncNativeLLMProvider,
 ):
     """Call Amazon Bedrock Converse directly via boto3.
 
@@ -221,6 +263,7 @@ class BedrockLLM(
     def __init__(
         self,
         *,
+        api_key: str | None = None,
         profile_name: str | None = None,
         region_name: str = "eu-central-1",
         default_model: str = "",
@@ -252,6 +295,13 @@ class BedrockLLM(
         decide credentials, region, model roles, and token budgets.
 
         Args:
+            api_key: Optional Bedrock API key. Set, every call of this
+                provider carries it as a bearer token instead of being
+                signed with AWS credentials; the process environment stays
+                untouched. Without it, boto3 still signs with
+                ``AWS_BEARER_TOKEN_BEDROCK`` when that variable is set in the
+                process environment. A blank key, here or in that variable,
+                counts as none.
             profile_name: Optional AWS named profile from
                 ``~/.aws/config`` or ``~/.aws/credentials``. When omitted,
                 boto3 falls back to the default AWS credential chain.
@@ -300,8 +350,9 @@ class BedrockLLM(
                 Retries share this one budget.
 
         Raises:
-            ValueError: If both ``temperature`` and ``thinking`` are set,
-                or if ``effort`` is not one of the accepted values.
+            ValueError: If both ``temperature`` and ``thinking`` are set, if
+                both ``api_key`` and ``profile_name`` are set, or if
+                ``effort`` is not one of the accepted values.
 
         Example:
             >>> from inqtrix import BedrockLLM
@@ -318,6 +369,24 @@ class BedrockLLM(
                 "temperature and thinking are mutually exclusive — "
                 "the Bedrock API (Claude models) rejects requests that set both."
             )
+        api_key = (api_key or "").strip() or None
+        if api_key and profile_name:
+            raise ValueError(
+                "api_key and profile_name are mutually exclusive: a Bedrock API "
+                "key replaces the AWS credentials of a profile."
+            )
+        if temperature is not None:
+            rejecting = models_rejecting_sampling([
+                default_model, classify_model, claim_extract_model, evaluate_model,
+                plan_model, answer_model, direct_chat_model, tier_high_model,
+                tier_mid_model, tier_fast_model, *(selectable_models or []),
+            ])
+            if rejecting:
+                raise ValueError(
+                    "temperature is not accepted by "
+                    + ", ".join(rejecting)
+                    + "; leave INQTRIX_TEMPERATURE unset for these models."
+                )
         if effort is not None and effort not in {"low", "medium", "high", "xhigh", "max"}:
             raise ValueError(
                 "effort must be one of 'low', 'medium', 'high', 'xhigh', or 'max'."
@@ -354,10 +423,24 @@ class BedrockLLM(
 
         # Disable boto3 built-in retries — we run our own retry loop
         # with deadline enforcement and jittered backoff.
-        session = boto3.Session(
-            profile_name=profile_name,
-            region_name=region_name,
+        self._uses_api_key = bool(api_key)
+        # boto3 signs with AWS_BEARER_TOKEN_BEDROCK whenever the variable is
+        # present, even blank, and Bedrock refuses a blank key. Such a
+        # variable counts as unset here, as it does in the settings.
+        self._blank_env_key = (
+            not api_key
+            and API_KEY_ENV in os.environ
+            and not os.environ[API_KEY_ENV].strip()
         )
+        if api_key:
+            core = botocore.session.Session()
+            core.register_component("token_provider", _ApiKey(api_key))
+            session = boto3.Session(botocore_session=core, region_name=region_name)
+        else:
+            session = boto3.Session(
+                profile_name=profile_name,
+                region_name=region_name,
+            )
         self._session = session
         self._client_lock = threading.Lock()
         self._clients_by_read_timeout: OrderedDict[float, Any] = OrderedDict()
@@ -374,15 +457,65 @@ class BedrockLLM(
         )
         for warning in self._effort_config_warnings:
             log.warning(warning)
+        self._log_authentication(profile=profile_name, region_name=region_name)
+
+    def _log_authentication(self, *, profile: str | None, region_name: str) -> None:
+        """Say once how this provider's calls authenticate, never with the key."""
+        if self._uses_api_key:
+            log.info(
+                "BedrockLLM: Bedrock calls authenticate with the configured API key (region=%s).",
+                region_name,
+            )
+            return
+        if self._blank_env_key:
+            log.warning(
+                "CONFIG: BedrockLLM: AWS_BEARER_TOKEN_BEDROCK is set but empty, so Bedrock "
+                "calls authenticate through the AWS credential chain instead "
+                "(profile=%s, region=%s). Remove the variable or give it a key.",
+                profile or "-",
+                region_name,
+            )
+            return
+        if os.environ.get(API_KEY_ENV):
+            if profile:
+                log.warning(
+                    "CONFIG: BedrockLLM: AWS_BEARER_TOKEN_BEDROCK is set, so boto3 signs "
+                    "Bedrock calls with that API key; profile %s is not used for them.",
+                    profile,
+                )
+            log.info(
+                "BedrockLLM: Bedrock calls authenticate with the API key from "
+                "AWS_BEARER_TOKEN_BEDROCK (region=%s).",
+                region_name,
+            )
+            return
+        log.info(
+            "BedrockLLM: Bedrock calls authenticate through the AWS credential chain "
+            "(profile=%s, region=%s).",
+            profile or "-",
+            region_name,
+        )
 
     def _build_client(self, read_timeout: float) -> Any:
-        """Build one retry-free transport client for a deadline-bound class."""
+        """Build one retry-free transport client for a deadline-bound class.
+
+        With an API key the client prefers bearer authentication, which the
+        session's token provider answers with that key. With a blank
+        ``AWS_BEARER_TOKEN_BEDROCK`` it prefers SigV4, so boto3 does not send
+        the blank value as a key.
+        """
+        preference = (
+            {"auth_scheme_preference": "httpBearerAuth"} if self._uses_api_key
+            else {"auth_scheme_preference": "sigv4"} if self._blank_env_key
+            else {}
+        )
         return self._session.client(
             "bedrock-runtime",
             config=BotoConfig(
                 retries={"max_attempts": 0},
                 connect_timeout=read_timeout,
                 read_timeout=read_timeout,
+                **preference,
             ),
         )
 
@@ -443,7 +576,7 @@ class BedrockLLM(
         for role, model in roles:
             if not model:
                 continue
-            if _model_supports_effort(model):
+            if model_supports_effort(model):
                 continue
             warnings.append(
                 f"BedrockLLM: effort='{self._effort}' is not sent for {role}='{model}' "
@@ -527,7 +660,7 @@ class BedrockLLM(
             original=original,
         )
 
-    def _converse_with_retry(
+    async def _aconverse(
         self,
         *,
         params: dict[str, Any],
@@ -535,147 +668,72 @@ class BedrockLLM(
         deadline: float | None = None,
         operation: str = "converse",
     ) -> dict[str, Any]:
-        """Call Bedrock Converse with retry and deadline enforcement.
+        """Call Bedrock Converse through the shared retry loop.
 
-        Implements jittered exponential backoff for transient errors
-        (ThrottlingException, ServiceUnavailableException, etc.).
-        The client-level ``read_timeout`` (set at creation) prevents
-        individual calls from hanging; deadline enforcement handles
-        the tighter agent time budget.
+        boto3 is sync: each request runs on the provider lane of the process
+        loop and is one attempt of the shared retry loop, which repeats the
+        transient Converse errors (``ThrottlingException``,
+        ``ServiceUnavailableException``, ...) and transport failures within
+        one operation deadline. The client's ``read_timeout`` bounds the
+        thread; the attempt's deadline ends the wait even while the thread
+        still runs. A ``ThrottlingException`` that outlasts its attempts
+        becomes ``AgentRateLimited``.
         """
-        self._clear_retry_notices()
         use_model = str(params.get("modelId") or self._default_model)
         operation_deadline = _operation_deadline(timeout, deadline)
-        def _sleep(delay: float) -> None:
-            try:
-                _sleep_before_retry(delay, operation_deadline)
-            except AgentTimeout:
-                _check_provider_operation_deadline(
-                    operation_deadline,
-                    deadline,
-                    label="Bedrock call",
+
+        async def send() -> dict[str, Any]:
+            client, _read_timeout = self._client_for_deadline(operation_deadline)
+            response = await aio.run_provider_blocking(client.converse, **params)
+            return response if isinstance(response, dict) else {}
+
+        try:
+            # The requests run on the provider lane of the process loop. A
+            # caller on a loop of its own (a library user's asyncio, a
+            # notebook) hands the whole call over, as every provider without
+            # an async client does.
+            return await aio.on_process_loop(call_with_retries(
+                send,
+                provider_label="Bedrock",
+                model=use_model,
+                operation=operation,
+                deadline=operation_deadline,
+                outer_deadline=deadline,
+                timeout_label="Bedrock call",
+                configured_timeout_seconds=timeout,
+                error_code_for=_retry_error_code,
+                request_id_for=_retry_request_id,
+                transient_for=_is_transient,
+                estimated_input_tokens=estimate_request_tokens(params),
+                max_output_tokens=int(params.get("inferenceConfig", {}).get("maxTokens") or 0) or None,
+            ))
+        except ClientError as exc:
+            details = self._extract_error_details(exc)
+            if details.get("error_code") == "ThrottlingException":
+                raise AgentRateLimited(use_model, exc) from exc
+            api_error = self._build_api_error(
+                model=use_model, details=details, original=exc)
+            if (capacity_reason := model_capacity_reason(api_error)) is not None:
+                log.warning(
+                    "ALGO-FAIL model_capacity "
+                    "(model=%s, error_type=%s)",
+                    use_model,
+                    type(api_error).__name__,
                 )
-                raise
-
-        for attempt in range(_MAX_BEDROCK_ATTEMPTS):
-            _check_provider_cancel(label="Bedrock call")
-            _check_provider_operation_deadline(
-                operation_deadline,
-                deadline,
-                label="Bedrock call",
-            )
-            client, transport_timeout_seconds = self._client_for_deadline(
-                operation_deadline
-            )
-            effective_timeout_seconds = max(
-                0.0,
-                operation_deadline - time.monotonic(),
-            )
-
-            try:
-                response = client.converse(**params)
-                return response if isinstance(response, dict) else {}
-            except ClientError as exc:
-                details = self._extract_error_details(exc)
-                error_code = details.get("error_code", "")
-
-                if error_code == "ThrottlingException":
-                    if attempt >= (_MAX_BEDROCK_ATTEMPTS - 1):
-                        raise AgentRateLimited(use_model, exc) from exc
-                    # Retryable — fall through to backoff below.
-
-                api_error = self._build_api_error(
-                    model=use_model, details=details, original=exc)
-                if (capacity_reason := model_capacity_reason(api_error)) is not None:
-                    log.warning(
-                        "ALGO-FAIL model_capacity "
-                        "(model=%s, error_type=%s)",
-                        use_model,
-                        type(api_error).__name__,
-                    )
-                    raise AgentModelCapacityError(
-                        use_model,
-                        "llm_complete",
-                        str(api_error),
-                        reason=capacity_reason,
-                        original=api_error,
-                    ) from exc
-
-                if error_code in _RETRYABLE_BEDROCK_ERRORS and attempt < (_MAX_BEDROCK_ATTEMPTS - 1):
-                    delay = _retry_delay_seconds(attempt)
-                    self._append_retry_notice({
-                        "provider": "Bedrock",
-                        "model": use_model,
-                        "operation": operation,
-                        "error_code": error_code,
-                        "attempt": attempt + 1,
-                        "max_attempts": _MAX_BEDROCK_ATTEMPTS,
-                        "delay_seconds": round(delay, 3),
-                        "configured_timeout_seconds": round(timeout, 3),
-                        "effective_timeout_seconds": round(
-                            effective_timeout_seconds, 3
-                        ),
-                        "transport_timeout_seconds": round(
-                            transport_timeout_seconds, 3
-                        ),
-                    })
-                    log.warning(
-                        "Bedrock transient error (%s, code=%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
-                        use_model,
-                        error_code,
-                        details.get("request_id") or "-",
-                        attempt + 1,
-                        _MAX_BEDROCK_ATTEMPTS,
-                        delay,
-                    )
-                    _sleep(delay)
-                    continue
-
-                raise api_error from exc
-            except _RETRYABLE_BEDROCK_TRANSPORT_ERRORS as exc:
-                details = {"error_code": type(exc).__name__}
-                api_error = self._build_api_error(
-                    model=use_model,
-                    details=details,
-                    original=exc,
-                )
-                if attempt < (_MAX_BEDROCK_TRANSPORT_ATTEMPTS - 1):
-                    delay = _retry_delay_seconds(attempt)
-                    self._append_retry_notice({
-                        "provider": "Bedrock",
-                        "model": use_model,
-                        "operation": operation,
-                        "error_code": type(exc).__name__,
-                        "attempt": attempt + 1,
-                        "max_attempts": _MAX_BEDROCK_TRANSPORT_ATTEMPTS,
-                        "delay_seconds": round(delay, 3),
-                        "configured_timeout_seconds": round(timeout, 3),
-                        "effective_timeout_seconds": round(
-                            effective_timeout_seconds, 3
-                        ),
-                        "transport_timeout_seconds": round(
-                            transport_timeout_seconds, 3
-                        ),
-                    })
-                    log.warning(
-                        "Bedrock transport error "
-                        "(model=%s, error_type=%s, attempt=%d/%d). "
-                        "Retrying in %.2fs.",
-                        use_model,
-                        type(exc).__name__,
-                        attempt + 1,
-                        _MAX_BEDROCK_TRANSPORT_ATTEMPTS,
-                        delay,
-                    )
-                    _sleep(delay)
-                    continue
-                raise api_error from exc
-
-        raise self._build_api_error(  # pragma: no cover
-            model=use_model,
-            message="Bedrock request exhausted retries without a final response.",
-            original=RuntimeError("retries exhausted"),
-        )
+                raise AgentModelCapacityError(
+                    use_model,
+                    "llm_complete",
+                    str(api_error),
+                    reason=capacity_reason,
+                    original=api_error,
+                ) from exc
+            raise api_error from exc
+        except _RETRYABLE_BEDROCK_TRANSPORT_ERRORS as exc:
+            raise self._build_api_error(
+                model=use_model,
+                details={"error_code": type(exc).__name__},
+                original=exc,
+            ) from exc
 
     # ------------------------------------------------------------------ #
     # Response extraction
@@ -741,38 +799,39 @@ class BedrockLLM(
             A ``(thinking, effort)`` tuple destined for
             ``additionalModelRequestFields``.
         """
-        token = normalize_reasoning_effort(reasoning_effort)
-        if token == "":
-            thinking = self._thinking if self._thinking is not None else None
-            effort = (
-                self._effort
-                if (self._effort is not None and _model_supports_effort(use_model))
-                else None
-            )
-            return thinking, effort
-        if token == "none":
-            return None, None
-        effort, warnings = validate_reasoning_effort(
-            token,
-            supported_levels=_BEDROCK_EFFORT_LEVELS,
-            label=f"BedrockLLM({use_model})",
+        return thinking_and_effort(
+            reasoning_effort,
+            model=use_model,
+            inherit_thinking=self._thinking,
+            inherit_effort=self._effort,
+            label="BedrockLLM",
         )
-        for warning in warnings:
-            log.warning("CONFIG: %s", warning)
-        if effort in ("", "none"):
-            return None, None
-        if _model_supports_effort(use_model):
-            return {"type": "adaptive"}, effort
-        log.warning(
-            "CONFIG: BedrockLLM: reasoning_effort=%r requested on model=%s, "
-            "which does not accept output_config.effort (Haiku class); using "
-            "adaptive thinking without an effort cap.",
-            token,
-            use_model,
-        )
-        return {"type": "adaptive"}, None
 
-    def complete(
+    @staticmethod
+    def _model_request_fields(
+        thinking_cfg: dict[str, Any] | None,
+        effort_value: str | None,
+        *,
+        beta: str | None = None,
+    ) -> dict[str, Any]:
+        """The ``additionalModelRequestFields`` entry of one call, or ``{}``.
+
+        Converse routes Claude's own request fields through this dict: ``thinking``,
+        ``output_config`` with the effort, and ``anthropic_beta``. The per-call
+        resolver already dropped effort for models that reject it (Haiku class)
+        and for none / inherit-without-effort calls.
+        See https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
+        """
+        fields: dict[str, Any] = {}
+        if thinking_cfg is not None:
+            fields["thinking"] = thinking_cfg
+        if effort_value is not None:
+            fields["output_config"] = {"effort": effort_value}
+        if beta is not None:
+            fields["anthropic_beta"] = [beta]
+        return {"additionalModelRequestFields": fields} if fields else {}
+
+    async def acomplete(
         self,
         prompt: str,
         *,
@@ -805,7 +864,7 @@ class BedrockLLM(
             AgentRateLimited: If Bedrock throttles the request fatally.
             BedrockAPIError: If a non-retryable Bedrock error occurs.
         """
-        return self.complete_with_metadata(
+        response = await self.acomplete_with_metadata(
             prompt,
             system=system,
             model=model,
@@ -814,9 +873,10 @@ class BedrockLLM(
             state=state,
             deadline=deadline,
             reasoning_effort=reasoning_effort,
-        ).content
+        )
+        return response.content
 
-    def complete_with_metadata(
+    async def acomplete_with_metadata(
         self,
         prompt: str,
         *,
@@ -834,7 +894,7 @@ class BedrockLLM(
         visible content and token usage. When thinking is enabled, the
         method raises ``maxTokens`` so hidden reasoning does not crowd out
         the visible answer. Request execution itself is delegated to
-        ``_converse_with_retry()``, which owns deadline-aware retry logic
+        ``_aconverse()``, whose calls are attempts of the shared retry loop
         for throttling and transient Bedrock failures.
 
         Args:
@@ -865,22 +925,10 @@ class BedrockLLM(
             _check_deadline(deadline)
 
         use_model = model or self._default_model
-        max_tokens = max_output_tokens or self._default_max_tokens
         thinking_cfg, effort_value = self._call_thinking_and_effort(
             reasoning_effort, use_model=use_model
         )
-        use_thinking = thinking_cfg is not None
-        if use_thinking:
-            budget = thinking_cfg.get("budget_tokens")
-            if isinstance(budget, int) and budget >= max_tokens:
-                max_tokens = budget + 1024
-            if max_tokens < _THINKING_MIN_MAX_TOKENS:
-                log.debug(
-                    "maxTokens auto-raised from %d to %d (thinking enabled)",
-                    max_tokens,
-                    _THINKING_MIN_MAX_TOKENS,
-                )
-                max_tokens = _THINKING_MIN_MAX_TOKENS
+        max_tokens = output_budget(max_output_tokens or self._default_max_tokens, thinking_cfg)
 
         params: dict[str, Any] = {
             "modelId": use_model,
@@ -891,21 +939,9 @@ class BedrockLLM(
             params["system"] = [{"text": system}]
         if self._temperature is not None:
             params["inferenceConfig"]["temperature"] = self._temperature
-        # Bedrock Converse routes Anthropic-specific fields through
-        # additionalModelRequestFields; both `thinking` and `output_config`
-        # (which carries `effort`) live in the same dict. The per-call resolver
-        # already dropped effort for models that reject it (Haiku class) and for
-        # none / inherit-without-effort calls.
-        # See https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
-        additional_fields: dict[str, Any] = {}
-        if use_thinking:
-            additional_fields["thinking"] = thinking_cfg
-        if effort_value is not None:
-            additional_fields["output_config"] = {"effort": effort_value}
-        if additional_fields:
-            params["additionalModelRequestFields"] = additional_fields
+        params.update(self._model_request_fields(thinking_cfg, effort_value))
 
-        raw = self._converse_with_retry(
+        raw = await self._aconverse(
             params=params,
             timeout=timeout,
             deadline=deadline,
@@ -929,6 +965,114 @@ class BedrockLLM(
             track_tokens(state, response)
         return response
 
+    def supports_tool_calls(self, *, model: str | None = None) -> bool:
+        """Whether the kernel can run on *model*: Converse tool use, mapped for Claude.
+
+        Converse takes tools for other model families too, but this adapter maps
+        only Claude's request rules and reasoning blocks, so on any other model the
+        kernel reports itself unavailable instead of failing mid-run. An application
+        inference profile ARN does not name its model and counts as another model.
+        """
+        return "claude" in (model or self._default_model).lower()
+
+    async def achat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+        tool_choice: str | None = None,
+    ) -> ChatTurn:
+        """Run one tool-calling turn through Converse.
+
+        The OpenAI-shaped conversation becomes the Converse shape (``system``
+        blocks, ``toolUse`` in the assistant turn, every tool result of a turn as a
+        ``toolResult`` block in one user message); Claude's reasoning blocks go
+        back unchanged with the turn that produced them. ``tool_choice``
+        ``required`` forces a tool where the model and the request's thinking allow
+        it; elsewhere the turn gets ``auto`` and an instruction in the system
+        prompt, and a text answer raises
+        :class:`~inqtrix.exceptions.AgentRequiredToolCallMissing` for the kernel's
+        bounded correction. Converse has no ``none`` choice: such a turn gets
+        ``auto`` with one WARNING per model, and the kernel's admission still
+        refuses a call it does not allow. On a model whose thinking blocks are
+        bound to an unchanged prefix, a request that returns blocks asks Bedrock to
+        drop a block whose prefix changed.
+
+        Raises:
+            AgentTimeout: The run deadline has passed.
+            AgentRateLimited: Bedrock kept throttling the request.
+            BedrockAPIError: The call failed after retrying.
+            AgentStructuredOutputError: A guardrail or a content filter stopped the
+                answer, or Bedrock could not read it.
+            AgentToolArgumentsError: The output limit stopped the turn while it
+                wrote tool calls, or a tool call's input is no JSON object.
+            AgentRequiredToolCallMissing: A turn that had to call a tool answered in text.
+            ValueError: The conversation has no Converse form.
+        """
+        if deadline is not None:
+            _check_deadline(deadline)
+        use_model = model or self._default_model
+        thinking_cfg, effort_value = self._call_thinking_and_effort(
+            reasoning_effort, use_model=use_model
+        )
+        max_tokens = output_budget(max_output_tokens or self._default_max_tokens, thinking_cfg)
+        system, wire_messages, returns_reasoning = to_converse(messages)
+        tool_names = [str((tool.get("function") or tool).get("name") or "") for tool in tools or []]
+        choice, instruction, none_as_auto = converse_tool_choice(
+            tool_choice,
+            tool_names=tool_names,
+            forced_allowed=tool_forcing_allowed(use_model, thinking_cfg),
+        )
+        if none_as_auto and _first_warning("BedrockLLM", use_model, "tool_choice_none"):
+            log.warning(
+                "CONFIG: BedrockLLM: Converse has no tool_choice 'none'; "
+                "model=%s gets 'auto' on such turns.",
+                use_model,
+            )
+        if instruction:
+            system = with_instruction(system, instruction)
+        thinking_cfg, bound = with_block_binding(
+            thinking_cfg, model=use_model, returns_thinking=returns_reasoning
+        )
+        params: dict[str, Any] = {
+            "modelId": use_model,
+            "messages": wire_messages,
+            "inferenceConfig": {"maxTokens": max_tokens},
+        }
+        if system:
+            params["system"] = system
+        if tools:
+            params["toolConfig"] = {"tools": [to_converse_tool(tool) for tool in tools]}
+            if choice is not None:
+                params["toolConfig"]["toolChoice"] = choice
+        if self._temperature is not None:
+            params["inferenceConfig"]["temperature"] = self._temperature
+        params.update(self._model_request_fields(
+            thinking_cfg, effort_value, beta=THINKING_BINDING_BETA if bound else None
+        ))
+
+        raw = await self._aconverse(
+            params=params, timeout=timeout, deadline=deadline, operation="chat"
+        )
+        prompt_tokens, completion_tokens = self._extract_usage(raw)
+        turn = chat_turn(
+            raw,
+            model=use_model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cache=self._cache_usage(raw),
+        )
+        if instruction and not turn.tool_calls:
+            raise AgentRequiredToolCallMissing(
+                use_model, turn=turn, tool_names=tuple(tool_names)
+            )
+        return turn
+
     def supports_structured_output(self, *, model: str | None = None) -> bool:
         """Return whether the selected Bedrock model supports JSON schemas.
 
@@ -942,7 +1086,7 @@ class BedrockLLM(
         """
         return _model_supports_structured_output(model or self._default_model)
 
-    def complete_structured(
+    async def acomplete_structured(
         self,
         prompt: str,
         *,
@@ -989,22 +1133,10 @@ class BedrockLLM(
             _check_deadline(deadline)
 
         use_model = model or self._default_model
-        max_tokens = max_output_tokens or self._default_max_tokens
         thinking_cfg, effort_value = self._call_thinking_and_effort(
             reasoning_effort, use_model=use_model
         )
-        use_thinking = thinking_cfg is not None
-        if use_thinking:
-            budget = thinking_cfg.get("budget_tokens")
-            if isinstance(budget, int) and budget >= max_tokens:
-                max_tokens = budget + 1024
-            if max_tokens < _THINKING_MIN_MAX_TOKENS:
-                log.debug(
-                    "maxTokens auto-raised from %d to %d (thinking enabled)",
-                    max_tokens,
-                    _THINKING_MIN_MAX_TOKENS,
-                )
-                max_tokens = _THINKING_MIN_MAX_TOKENS
+        max_tokens = output_budget(max_output_tokens or self._default_max_tokens, thinking_cfg)
 
         params: dict[str, Any] = {
             "modelId": use_model,
@@ -1033,16 +1165,9 @@ class BedrockLLM(
             params["system"] = [{"text": system}]
         if self._temperature is not None:
             params["inferenceConfig"]["temperature"] = self._temperature
+        params.update(self._model_request_fields(thinking_cfg, effort_value))
 
-        additional_fields: dict[str, Any] = {}
-        if use_thinking:
-            additional_fields["thinking"] = thinking_cfg
-        if effort_value is not None:
-            additional_fields["output_config"] = {"effort": effort_value}
-        if additional_fields:
-            params["additionalModelRequestFields"] = additional_fields
-
-        raw = self._converse_with_retry(
+        raw = await self._aconverse(
             params=params,
             timeout=timeout,
             deadline=deadline,

@@ -12,7 +12,6 @@ from inqtrix.constants import (
 )
 from inqtrix.parity import (
     DEFAULT_ANALYSIS_TIMEOUT,
-    DEFAULT_QUESTIONS_FILE,
     DEFAULT_TIMEOUT,
     ParityTolerance,
     QuestionSpec,
@@ -28,6 +27,9 @@ from inqtrix.parity import (
     normalize_test_result,
     resolve_analysis_model_name,
 )
+
+
+TRACKED_QUESTIONS_FILE = Path(__file__).parent / "fixtures" / "parity" / "questions.json"
 
 
 def _result(question_id: str, *, confidence: int = 7, rounds: int = 2) -> dict:
@@ -92,8 +94,8 @@ def _result(question_id: str, *, confidence: int = 7, rounds: int = 2) -> dict:
 
 class TestParityQuestions:
 
-    def test_canonical_questions_file_loads(self):
-        questions = load_questions(DEFAULT_QUESTIONS_FILE)
+    def test_questions_file_loads(self):
+        questions = load_questions(TRACKED_QUESTIONS_FILE)
         assert [question.id for question in questions] == [
             "q001",
             "q002",
@@ -103,10 +105,11 @@ class TestParityQuestions:
             "q006",
         ]
 
-    def test_contract_report_for_canonical_questions_has_no_errors(self):
-        questions = load_questions(DEFAULT_QUESTIONS_FILE)
+    def test_contract_report_for_tracked_questions_has_no_errors(self):
+        questions = load_questions(TRACKED_QUESTIONS_FILE)
         report = build_contract_report(questions=questions)
         assert report["summary"]["errors"] == 0
+        assert report["summary"]["question_count"] == 6
 
 
 class TestImportBaselines:

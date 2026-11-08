@@ -15,6 +15,7 @@ PACKAGE_ROOT = (
 ALLOWED_INTERNAL_IMPORTS = {
     "__init__": {"app", "settings"},
     "__main__": {"cli"},
+    "backend_replicas": set(),
     "app": {
         "http_proxy",
         "identity_edge",
@@ -24,11 +25,18 @@ ALLOWED_INTERNAL_IMPORTS = {
         "static",
         "websocket_proxy",
     },
-    "cli": {"app", "logging", "settings"},
+    "cli": {"app", "logging", "open_files", "settings"},
     "headers": {"settings"},
-    "http_proxy": {"headers", "identity_edge", "logging", "settings"},
+    "http_proxy": {
+        "backend_replicas",
+        "headers",
+        "identity_edge",
+        "logging",
+        "settings",
+    },
     "identity_edge": {"settings"},
     "logging": set(),
+    "open_files": set(),
     # A leaf on purpose: the baseline header policy depends on nothing, so it
     # cannot be weakened by a change elsewhere in the edge.
     "security_headers": set(),

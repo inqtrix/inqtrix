@@ -1,8 +1,7 @@
 """Knowledge-engine quickstart on the Azure OpenAI + Perplexity stack.
 
-Same provider construction as ``azure_openai_perplexity.py`` (Option A,
-API key — see that sibling for the Service Principal / Managed Identity
-options B-E), plus the knowledge engine switched on: in-memory vector
+Same provider construction as ``azure_openai_perplexity.py`` (API key
+authentication), plus the knowledge engine switched on: in-memory vector
 store (no external services, contents lost on restart) and Azure
 deployment-based embeddings. The server then registers the
 ``/v1/knowledge/*`` routes and the ``mode=knowledge`` run algorithm.
@@ -46,7 +45,7 @@ End-to-end curl sequence
     curl -X POST http://localhost:5100/v1/knowledge/collections/<collection_id>/documents \
         -H 'Content-Type: application/json' \
         -d '{"title": "Notfallmanagement",
-             "text": "Institutionen muessen ein Notfallmanagement etablieren...",
+             "text": "Institutionen müssen ein Notfallmanagement etablieren...",
              "metadata": {"source": "demo"}}'
 
    Returns 201 with the document payload. Alternative for uploaded
@@ -139,9 +138,8 @@ def _build_providers() -> ProviderContext:
         # Three model tiers (Azure DEPLOYMENT names -- replace with yours).
         # Nodes map: answer -> high, plan/evaluate/direct_chat -> mid,
         # classify/claim_extract -> fast. The knowledge gate, rerank, and
-        # decompose calls run on the fast tier. Auth options B-E (Service
-        # Principal, Managed Identity) are documented in the sibling
-        # azure_openai_perplexity.py — the construction here is identical.
+        # decompose calls run on the fast tier. The construction here is
+        # identical to the sibling azure_openai_perplexity.py.
         default_model="gpt-5.4",
         tier_high_model="gpt-5.4",       tier_high_effort="medium",
         tier_mid_model="gpt-5.4",        tier_mid_effort="none",

@@ -23,7 +23,7 @@ from inqtrix.providers.base import ChatTurn, ToolCallRequest
 from inqtrix.server.request_context import RequestContextMiddleware
 from tests._uvicorn_helpers import serving, websocket_attempt
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from tests.agents.test_kernel_walking_skeleton import (  # noqa: E402
     ScriptedToolLLM,

@@ -2,7 +2,9 @@
 
 The queue port is exercised with fakeredis (stream commands included),
 so claim/ack/heartbeat/reclaim/dead-letter semantics are pinned without
-a running broker — the suite stays zero-infrastructure.
+a running broker — the suite stays zero-infrastructure. The fake answers a
+blocking read at once and never binds to a loop, so what depends on either
+is proved against a real server in ``tests/worker/test_async_claim.py``.
 """
 
 from __future__ import annotations
@@ -18,63 +20,81 @@ GROUP = "workers"
 
 @pytest.fixture()
 def client():
-    return fakeredis.FakeRedis(decode_responses=True)
+    return fakeredis.FakeAsyncRedis(decode_responses=True)
 
 
 def make_queue(client, consumer: str = "worker-a") -> ValkeyRunQueue:
     return ValkeyRunQueue(client=client, consumer=consumer)
 
 
-def test_enqueue_claim_ack_roundtrip(client):
+@pytest.mark.asyncio
+async def test_enqueue_claim_ack_roundtrip(client):
     queue = make_queue(client)
-    queue.ensure_group()
-    queue.enqueue(run_id="run_1", tenant_id="default")
+    await queue.ensure_group()
+    await queue.enqueue(run_id="run_1", tenant_id="default")
 
-    jobs = queue.claim_new(block_ms=1)
+    jobs = await queue.claim_new(block_ms=1)
     assert len(jobs) == 1
     job = jobs[0]
     assert job.run_id == "run_1"
     assert job.tenant_id == "default"
     assert job.delivery_count == 1
 
-    queue.ack(job.message_id)
-    assert client.xpending(STREAM, GROUP)["pending"] == 0
-    assert queue.claim_new(block_ms=1) == []
+    await queue.ack(job.message_id)
+    assert (await client.xpending(STREAM, GROUP))["pending"] == 0
+    assert await queue.claim_new(block_ms=1) == []
 
 
-def test_ensure_group_is_idempotent(client):
+@pytest.mark.asyncio
+async def test_ensure_group_is_idempotent(client):
     queue = make_queue(client)
-    queue.ensure_group()
-    queue.ensure_group()
+    await queue.ensure_group()
+    await queue.ensure_group()
 
 
-def test_claim_pending_drains_own_backlog_after_crash(client):
+@pytest.mark.asyncio
+async def test_claim_pending_drains_own_backlog_after_crash(client):
     queue = make_queue(client)
-    queue.ensure_group()
-    queue.enqueue(run_id="run_1", tenant_id="default")
-    claimed = queue.claim_new(block_ms=1)
+    await queue.ensure_group()
+    await queue.enqueue(run_id="run_1", tenant_id="default")
+    claimed = await queue.claim_new(block_ms=1)
     assert claimed and claimed[0].run_id == "run_1"
 
     # Simulated process restart: same consumer name, fresh object.
     restarted = make_queue(client)
-    backlog = restarted.claim_pending()
+    backlog = await restarted.claim_pending()
     assert [job.run_id for job in backlog] == ["run_1"]
 
 
-def test_reclaim_takes_over_idle_entries_and_counts_delivery(client):
+@pytest.mark.asyncio
+async def test_reclaim_takes_over_idle_entries_and_counts_delivery(client):
     owner = make_queue(client, consumer="worker-a")
-    owner.ensure_group()
-    owner.enqueue(run_id="run_1", tenant_id="default")
-    assert owner.claim_new(block_ms=1)
+    await owner.ensure_group()
+    await owner.enqueue(run_id="run_1", tenant_id="default")
+    assert await owner.claim_new(block_ms=1)
 
     thief = make_queue(client, consumer="worker-b")
-    jobs = thief.reclaim(min_idle_ms=0)
+    jobs = await thief.reclaim(min_idle_ms=0)
     assert len(jobs) == 1
     assert jobs[0].run_id == "run_1"
     assert jobs[0].delivery_count == 2
 
 
-def test_heartbeat_keeps_ownership_and_pending_state(client):
+@pytest.mark.asyncio
+async def test_reclaim_takes_no_more_than_it_can_start(client):
+    owner = make_queue(client, consumer="worker-a")
+    await owner.ensure_group()
+    for number in range(5):
+        await owner.enqueue(run_id=f"run_{number}", tenant_id="default")
+    assert len(await owner.claim_new(block_ms=1, count=5)) == 5
+
+    jobs = await make_queue(client, consumer="worker-b").reclaim(min_idle_ms=0, count=2)
+
+    assert [job.run_id for job in jobs] == ["run_0", "run_1"]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_keeps_ownership_and_pending_state(client):
     """Heartbeats must keep the entry pending under the same consumer.
 
     fakeredis deviates from real Valkey here: XCLAIM JUSTID wrongly
@@ -84,21 +104,22 @@ def test_heartbeat_keeps_ownership_and_pending_state(client):
     fake CAN verify: ownership and pending state survive heartbeats.
     """
     queue = make_queue(client)
-    queue.ensure_group()
-    queue.enqueue(run_id="run_1", tenant_id="default")
-    job = queue.claim_new(block_ms=1)[0]
+    await queue.ensure_group()
+    await queue.enqueue(run_id="run_1", tenant_id="default")
+    job = (await queue.claim_new(block_ms=1))[0]
 
-    queue.heartbeat([job.message_id])
-    queue.heartbeat([job.message_id])
+    await queue.heartbeat([job.message_id])
+    await queue.heartbeat([job.message_id])
 
-    pending = client.xpending_range(
+    pending = await client.xpending_range(
         STREAM, GROUP, min=job.message_id, max=job.message_id, count=1
     )
     assert len(pending) == 1
     assert pending[0]["consumer"] == "worker-a"
 
 
-def test_client_uses_a_blocking_safe_socket_timeout(monkeypatch):
+@pytest.mark.asyncio
+async def test_client_uses_a_blocking_safe_socket_timeout(monkeypatch):
     """Regression guard for the latent durable-worker hang.
 
     A blocking ``XREADGROUP ... BLOCK 5000`` holds the socket open for the
@@ -116,44 +137,46 @@ def test_client_uses_a_blocking_safe_socket_timeout(monkeypatch):
 
     def fake_from_url(url, **kwargs):
         captured.update(kwargs)
-        return fakeredis.FakeRedis(decode_responses=True)
+        return fakeredis.FakeAsyncRedis(decode_responses=True)
 
-    import valkey
+    from valkey.asyncio import Valkey
 
-    monkeypatch.setattr(valkey.Valkey, "from_url", staticmethod(fake_from_url))
-    ValkeyRunQueue(url="redis://ignored")
+    monkeypatch.setattr(Valkey, "from_url", staticmethod(fake_from_url))
+    assert ValkeyRunQueue(url="redis://ignored")._client is not None
 
     assert captured["socket_keepalive"] is True
     assert captured["socket_timeout"] > _CLAIM_BLOCK_MS / 1000
 
 
-def test_dead_letter_moves_payload_and_acks(client):
+@pytest.mark.asyncio
+async def test_dead_letter_moves_payload_and_acks(client):
     queue = make_queue(client)
-    queue.ensure_group()
-    queue.enqueue(run_id="run_1", tenant_id="default")
-    job = queue.claim_new(block_ms=1)[0]
+    await queue.ensure_group()
+    await queue.enqueue(run_id="run_1", tenant_id="default")
+    job = (await queue.claim_new(block_ms=1))[0]
 
-    queue.dead_letter(job, reason="max_attempts_exceeded")
+    await queue.dead_letter(job, reason="max_attempts_exceeded")
 
-    assert client.xpending(STREAM, GROUP)["pending"] == 0
-    dead = client.xrange(DEAD_STREAM)
+    assert (await client.xpending(STREAM, GROUP))["pending"] == 0
+    dead = await client.xrange(DEAD_STREAM)
     assert len(dead) == 1
     assert dead[0][1]["run_id"] == "run_1"
     assert dead[0][1]["reason"] == "max_attempts_exceeded"
 
 
-def test_group_info_reports_consumers_and_depth(client):
+@pytest.mark.asyncio
+async def test_group_info_reports_consumers_and_depth(client):
     queue = make_queue(client)
-    assert queue.group_info() is None, "no stream yet reads as no group"
-    queue.ensure_group()
-    queue.enqueue(run_id="run_gi", tenant_id="default")
-    info = queue.group_info()
+    assert await queue.group_info() is None, "no stream yet reads as no group"
+    await queue.ensure_group()
+    await queue.enqueue(run_id="run_gi", tenant_id="default")
+    info = await queue.group_info()
     assert info is not None
     assert info["depth"] == 1
     assert info["consumers"] == 0, "nobody claimed yet"
-    claimed = queue.claim_new(block_ms=1)
+    claimed = await queue.claim_new(block_ms=1)
     assert claimed, "the enqueued dispatch must be claimable"
-    info_after = queue.group_info()
+    info_after = await queue.group_info()
     assert info_after is not None
     assert info_after["consumers"] >= 1
     assert info_after["pending"] >= 1

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import get_args
 from urllib.parse import urlsplit
 
+import yaml
+
 from inqtrix.settings import AuthSettings
 
 from .compose import DeployConfig, DeployError
@@ -57,7 +59,8 @@ name a profile is gated on must have a line to uncomment.
 """
 _SECRET_KEY_RE = re.compile(
     r"(?:^|_)(?:PASSWORD|PASSWD|SECRET|PEPPER|TOKEN|API_KEY|ACCESS_KEY|"
-    r"PRIVATE_KEY|CLIENT_SECRET|KEY_SEED|CREDENTIAL)(?:_|$)",
+    # The extra provider headers may carry a gateway key.
+    r"PRIVATE_KEY|CLIENT_SECRET|KEY_SEED|CREDENTIAL|EXTRA_?HEADERS)(?:_|$)",
     re.IGNORECASE,
 )
 _SENSITIVE_NAME_RE = re.compile(
@@ -65,10 +68,13 @@ _SENSITIVE_NAME_RE = re.compile(
     r"PRIVATE_?KEY|KEY_?SEED|CREDENTIAL|AUTHORIZATION|DATABASE_URL|VALKEY_URL|"
     # Langfuse/observability secrets whose names do not end in the
     # generic suffixes: crypto salt, encryption key, the OTLP header
-    # values (generic and per signal; they embed Basic-auth keys), and
-    # the replay-CLI key pair.
+    # values (generic and per signal; they embed Basic-auth keys), the
+    # extra provider headers (they may carry a gateway key), the
+    # replay-CLI key pair, and the key ids that travel with their secrets.
     r"SALT|ENCRYPTION_?KEY|OTLP_?(?:(?:TRACES|METRICS|LOGS)_)?HEADERS|"
-    r"REPLAY_?AUTH)$",
+    r"EXTRA_?HEADERS|REPLAY_?AUTH|ACCESS_?KEY_?ID|PUBLIC_?KEY)$"
+    # A bearer token named after its service: AWS_BEARER_TOKEN_BEDROCK.
+    r"|(?:^|_)BEARER_?TOKEN(?:_|$)",
     re.IGNORECASE,
 )
 _YAML_KEY_RE = re.compile(
@@ -77,6 +83,7 @@ _YAML_KEY_RE = re.compile(
 _ENV_LIST_RE = re.compile(
     r"^(?P<indent>\s*-\s*)(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$"
 )
+_ENV_ASSIGNMENT_RE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*)=")
 _CREDENTIAL_URL_RE = re.compile(
     r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)"
     r"(?P<userinfo>[^\s/@]+)@"
@@ -735,6 +742,83 @@ def sensitive_values(config: DeployConfig) -> tuple[str, ...]:
         if value and len(value) >= 4 and _SENSITIVE_NAME_RE.search(key)
     }
     return tuple(sorted(sensitive, key=len, reverse=True))
+
+
+class _Redacted(str):
+    """The placeholder of a redacted value, written double-quoted."""
+
+
+class _RedactingDumper(yaml.SafeDumper):
+    """Writes the redacted configuration; a placeholder stays visibly quoted."""
+
+
+_RedactingDumper.add_representer(
+    _Redacted,
+    lambda dumper, data: dumper.represent_scalar("tag:yaml.org,2002:str", str(data), style='"'),
+)
+_REDACTED = _Redacted("***REDACTED***")
+# Wide enough that no value is folded over lines.
+_UNFOLDED_WIDTH = 2**31 - 1
+
+
+def redact_compose_config(rendered: str, secret_values: Iterable[str]) -> str:
+    """Redact a rendered compose configuration as YAML, not line by line.
+
+    A compose provider may fold a long value over several lines of its output
+    (podman-compose does): a line-based redaction then misses the continuation
+    lines, and the folded value no longer matches as one string. Loaded, every
+    value is whole again: a sensitive key, a sensitive ``KEY=value`` list entry
+    and every known secret value are replaced, and the result is written
+    without folding.
+
+    Raises:
+        DeployError: The output is not YAML; nothing of it is printed then.
+    """
+    try:
+        document = yaml.safe_load(rendered)
+    except yaml.YAMLError:
+        raise DeployError(
+            "the rendered configuration is not YAML; nothing of it is printed"
+        ) from None
+    return yaml.dump(
+        _redacted(document, tuple(secret_values)),
+        Dumper=_RedactingDumper,
+        sort_keys=False,
+        allow_unicode=True,
+        width=_UNFOLDED_WIDTH,
+    )
+
+
+def _redacted(node: object, secret_values: tuple[str, ...]) -> object:
+    if isinstance(node, dict):
+        return {
+            key: (
+                _REDACTED
+                if isinstance(key, str) and value is not None and _SENSITIVE_NAME_RE.search(key)
+                else _redacted(value, secret_values)
+            )
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_redacted_entry(item, secret_values) for item in node]
+    if isinstance(node, str):
+        return _redacted_string(node, secret_values)
+    return node
+
+
+def _redacted_entry(item: object, secret_values: tuple[str, ...]) -> object:
+    """One list entry; an environment list holds ``KEY=value`` strings."""
+    if isinstance(item, str):
+        assignment = _ENV_ASSIGNMENT_RE.match(item)
+        if assignment and _SENSITIVE_NAME_RE.search(assignment.group("key")):
+            return f"{assignment.group('key')}=***REDACTED***"
+    return _redacted(item, secret_values)
+
+
+def _redacted_string(text: str, secret_values: tuple[str, ...]) -> str:
+    for value in secret_values:
+        text = text.replace(value, "***REDACTED***")
+    return _CREDENTIAL_URL_RE.sub(lambda match: f"{match.group('scheme')}***:***@", text)
 
 
 def redact_text(text: str, secret_values: Iterable[str]) -> str:

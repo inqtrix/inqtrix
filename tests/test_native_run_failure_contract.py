@@ -23,7 +23,7 @@ from inqtrix.exceptions import (
 )
 from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.execution_failures import classify_execution_failure
-from inqtrix.server.runs import RunStore
+from inqtrix.runs.memory_store import RunStore
 from inqtrix.services.run_service import RunService
 from inqtrix.settings import AgentSettings
 
@@ -126,6 +126,8 @@ class _Registry:
 
 
 class _RaisingAlgorithm:
+    contract_version = 1
+
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
@@ -135,6 +137,8 @@ class _RaisingAlgorithm:
 
 
 class _ReturnedFailureAlgorithm:
+    contract_version = 1
+
     def run(self, _request, *, runtime, context) -> AgentResult:
         del runtime, context
         return AgentResult(
@@ -179,6 +183,8 @@ def _submit_child(algorithm: object) -> tuple[RunService, dict]:
         run_store=store,
     )
     parent = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Parent agent",
         stack_name="default",
         work=lambda handle: handle.wait("waiting_for_input"),

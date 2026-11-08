@@ -40,8 +40,8 @@ class ValkeyDeletionQueue(StreamJobQueue[QueuedDeletionOperation]):
             client=client,
         )
 
-    def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
-        self._enqueue(entity_id=operation_id, tenant_id=tenant_id)
+    async def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
+        await self._enqueue(entity_id=operation_id, tenant_id=tenant_id)
 
     def _make_job(
         self,

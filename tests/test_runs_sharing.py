@@ -1,7 +1,7 @@
 """Shared-in run enforcement (store matrix + recipient HTTP path).
 
 The store half pins live direct-share resolution on the in-memory
-:class:`~inqtrix.server.runs.RunStore`: the listing union with the
+:class:`~inqtrix.runs.memory_store.RunStore`: the listing union with the
 additive ``access`` annotation, the workspace-namespace bypass for
 shared-in rows, view-grantees blocked from cancel (deny before
 mutate), edit-grantees allowed, and the SSE replay admitted. The HTTP
@@ -37,7 +37,8 @@ from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
 from inqtrix.server.routers import runs as runs_router
 from inqtrix.server.routers.shares import build_router as build_shares_router
-from inqtrix.server.runs import RunNotFound, RunStore
+from inqtrix.exceptions import RunNotFound
+from inqtrix.runs.memory_store import RunStore
 from inqtrix.settings import Settings, StorageSettings
 from inqtrix.user_events import MemoryUserEventStore
 
@@ -94,6 +95,8 @@ def submit_completed(
     workspace_id: str | None = None,
 ) -> str:
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Testfrage?",
         stack_name="default",
         work=lambda handle: handle.complete({"answer": "ok"}),
@@ -141,6 +144,7 @@ async def test_memory_run_retention_revokes_share_and_invalidates_atomically():
     )
     store.bind_authority_coordinator(authority)
     imported = store.import_completed_run(
+        mode="research",
         source_run_id="external-run",
         question="Imported",
         stack_name="default",
@@ -276,6 +280,8 @@ def test_view_cancel_denies_before_mutating_running_run():
         handle.complete({"answer": "done"})
 
     run_id = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="Testfrage?",
         stack_name="default",
         work=blocking_work,
@@ -581,7 +587,7 @@ def test_json_polling_is_a_one_shot_read_not_a_stream_viewer(monkeypatch):
     histogram join per poll, biasing the 5b evidence gate. Killing
     mutant: dropping ``stream=not wants_json`` from the router call.
     """
-    from inqtrix.server.runs import RunStore
+    from inqtrix.runs.memory_store import RunStore
 
     seen: list[bool] = []
     original = RunStore.subscribe
@@ -815,6 +821,8 @@ def test_http_children_follow_parent_view_share(monkeypatch):
         store = client.run_store  # type: ignore[attr-defined]
         release_parent = threading.Event()
         parent = store.submit(
+            mode="research",
+            workflow_contract=1,
             question="Agentenauftrag",
             stack_name="default",
             work=lambda handle: (
@@ -827,6 +835,8 @@ def test_http_children_follow_parent_view_share(monkeypatch):
         )
         release_parent.set()
         child = store.submit(
+            mode="research",
+            workflow_contract=1,
             question="Teilaufgabe",
             stack_name="default",
             work=lambda handle: handle.complete({"answer": "teil"}),

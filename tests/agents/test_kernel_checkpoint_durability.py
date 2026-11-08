@@ -15,10 +15,11 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from langgraph.checkpoint.memory import InMemorySaver
 
+from inqtrix.agents.checkpointing import checkpoint_serializer
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
 
 from tests.agents.test_kernel_prompt_events import (
@@ -42,8 +43,8 @@ class HeldCheckpointSaver(InMemorySaver):
     hang the run.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, serde: Any = None) -> None:
+        super().__init__(serde=serde)
         self._lock = threading.Lock()
         self._armed = False
         self._held = False
@@ -111,10 +112,11 @@ def submit(client) -> str:
 
 
 def test_tool_step_starts_after_the_model_step_checkpoint_is_stored(monkeypatch):
-    saver = HeldCheckpointSaver()
-    # The kernel builds its volatile saver on first use from this name.
+    saver = HeldCheckpointSaver(serde=checkpoint_serializer())
+    # The kernel builds its volatile saver on first use from this name,
+    # always with its own serializer.
     monkeypatch.setattr(
-        "langgraph.checkpoint.memory.InMemorySaver", lambda: saver
+        "langgraph.checkpoint.memory.InMemorySaver", lambda *, serde: saver
     )
     search = CheckpointProbingSearch(saver)
     llm = ScriptedToolLLM([_web_turn(), _text_turn("Fertig.")])

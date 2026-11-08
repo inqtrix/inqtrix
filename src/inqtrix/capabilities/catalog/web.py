@@ -9,13 +9,13 @@ small-gap tool; a full report goes through ``research``.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from inqtrix import aio
 from inqtrix.capabilities.contracts import (
     CapabilityContext,
     CapabilityDefinition,
@@ -27,7 +27,7 @@ from inqtrix.runtime_logging import (
     sanitize_grounded_search_result,
 )
 from inqtrix.search_result import GroundedSearchResult
-from inqtrix.providers.base import observe_provider_retries
+from inqtrix.providers.attempts import observe_retries
 from inqtrix.observability.context import bind_purpose
 
 if TYPE_CHECKING:
@@ -104,8 +104,9 @@ def build_web_capabilities(
                 "recency must be '', 'day', 'week', 'month' or 'year'.",
                 http_status=400,
             )
-        # SearchProvider.search is synchronous (blocking HTTP); keep it off
-        # the event loop.
+        # The search runs through its sync face, off the loop: the retry
+        # callback is bound on this thread, and the sync face waits for the
+        # process loop.
         def _search_with_notice() -> tuple[GroundedSearchResult, object]:
             active_search = context.search_provider or search_provider
             callback = None
@@ -115,21 +116,18 @@ def build_web_capabilities(
                     "operation": "web.search.instant",
                     "query": payload.query,
                 })
-            with bind_purpose("web_instant"), observe_provider_retries(active_search, callback):
+            with bind_purpose("web_instant"), observe_retries("search", callback):
                 result = active_search.search(
                     payload.query,
                     search_context_size="low",
                     recency_filter=payload.recency or None,
                 )
-            consumer = getattr(
-                active_search, "consume_nonfatal_notice_detail", None
-            )
-            notice = consumer() if callable(consumer) else None
+            notice = next((item.as_detail() for item in result.notices), None)
             return result, notice
 
         started_at = datetime.now(timezone.utc).isoformat()
         started_monotonic = time.perf_counter()
-        result, notice = await asyncio.to_thread(_search_with_notice)
+        result, notice = await aio.run_provider_blocking(_search_with_notice)
         result = sanitize_grounded_search_result(result)
         finished_at = datetime.now(timezone.utc).isoformat()
         duration_ms = max(

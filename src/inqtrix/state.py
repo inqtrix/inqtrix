@@ -245,8 +245,8 @@ def check_cancel_event(state: dict[str, Any]) -> None:
     intra-node checkpoints (between fan-outs, per answer section).
     Provider-level cancellation (retry attempts, backoff sleeps) runs
     through :func:`inqtrix.providers.base.provider_cancel_scope` on the
-    same event. Two reasons, both best-effort (an in-flight provider
-    HTTP attempt is not interrupted mid-request):
+    same event, which also ends a provider call its sync face waits for.
+    Two reasons:
 
     * the per-run cancel event was set (client disconnect / native run
       cancellation), or

@@ -1,6 +1,8 @@
 import { chmod, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
+import { ignoreMissing } from './cleanup-step.mjs'
+
 export async function writePrivateJsonFixture(path, value) {
   const directory = dirname(path)
   const temporaryPath = `${path}.tmp`
@@ -14,7 +16,7 @@ export async function writePrivateJsonFixture(path, value) {
     await rename(temporaryPath, path)
     await chmod(path, 0o600)
   } catch (error) {
-    await unlink(temporaryPath).catch(() => undefined)
+    await unlink(temporaryPath).catch(ignoreMissing)
     throw error
   }
 }

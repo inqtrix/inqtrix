@@ -38,15 +38,8 @@ This example calls two independent APIs directly:
 2. **Perplexity Sonar API** — via ``PerplexitySearch``, using the
      OpenAI Python SDK pointed at ``https://api.perplexity.ai``.
 
-Authentication for Azure OpenAI supports three common modes:
-
-* **API key** (default below) — the simplest path.  Get a key from
-    the Azure Portal under your resource's "Keys and Endpoint".
-* **Service Principal (Entra ID)** — for CI/CD, automation, and
-    environments without interactive login.  Requires the
-    ``azure-identity`` package (included in core dependencies).
-* **DefaultAzureCredential** — for local development with ``az login``,
-    Managed Identity, or VS Code Azure sign-in.
+Authentication for Azure OpenAI uses the resource's **API key**.  Get
+a key from the Azure Portal under your resource's "Keys and Endpoint".
 
 Use this example when:
 - you have an Azure OpenAI resource with a model deployment
@@ -58,16 +51,13 @@ Required environment variables (in .env or process env):
 - PERPLEXITY_API_KEY
 - AZURE_OPENAI_API_KEY          (for API-key auth)
 - AZURE_OPENAI_ENDPOINT         (e.g. https://mein-openai.openai.azure.com/)
-- AZURE_OPENAI_DEPLOYMENT_NAME  (the deployment name, NOT the model name)
 
 Optional:
-- AZURE_OPENAI_CLAIM_EXTRACT_DEPLOYMENT_NAME  (cheaper deployment for claim extraction)
-- HTTPS_PROXY                             (for corporate proxy environments)
+- HTTPS_PROXY                   (for corporate proxy environments)
 
-For Service Principal auth (instead of API key):
-- AZURE_TENANT_ID
-- AZURE_CLIENT_ID
-- AZURE_CLIENT_SECRET
+The Azure deployment names are set in ``main()`` as three model tiers (high
+for the answer, mid for plan / evaluate / direct chat, fast for classify and
+claim extraction); replace them with your deployment names.
 
 Terminal rendering
 ------------------
@@ -175,12 +165,8 @@ def main() -> None:
     # underlying model name (e.g. "gpt-4o").  If your deployment is
     # called "my-gpt4o-deployment", use that string here.
     #
-    # Authentication — choose ONE of the three options below:
-    #
-    # ── Option A: API Key (default, uncommented) ────────────────────
-    #
-    # The simplest path.  Get your key from the Azure Portal:
-    # Resource → "Keys and Endpoint" → KEY1 or KEY2.
+    # Authentication: the resource's API key.  Get it from the Azure
+    # Portal: Resource → "Keys and Endpoint" → KEY1 or KEY2.
     #
     azure_api_key = _require_env("AZURE_OPENAI_API_KEY")
 
@@ -209,73 +195,6 @@ def main() -> None:
         #   original gpt-5, "xhigh" only on gpt-5.1-codex-max, etc.) are enforced
         #   by Azure with HTTP 400. See docs/configuration/providers.md.
     )
-
-    # ── Option B: Service Principal — direct constructor args ──────
-    #
-    # Recommended for CI/CD, automation, or environments without
-    # interactive login. The provider builds the ``ClientSecretCredential``
-    # and token provider internally, so you do not need to import
-    # ``azure.identity`` yourself. Requires: uv sync
-    #
-    # Uncomment the block below and comment out Option A above.
-    #
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     tenant_id=os.environ["AZURE_TENANT_ID"],
-    #     client_id=os.environ["AZURE_CLIENT_ID"],
-    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # ── Option C: Service Principal — manual token provider ────────
-    #
-    # Same effect as Option B, but you build the token provider
-    # yourself. Use this when you need custom credential settings
-    # (token caching, regional authority, additional scopes, etc.).
-    #
-    # from azure.identity import ClientSecretCredential, get_bearer_token_provider
-    #
-    # credential = ClientSecretCredential(
-    #     tenant_id=os.environ["AZURE_TENANT_ID"],
-    #     client_id=os.environ["AZURE_CLIENT_ID"],
-    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
-    # )
-    # token_provider = get_bearer_token_provider(
-    #     credential,
-    #     "https://cognitiveservices.azure.com/.default",
-    # )
-    #
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     azure_ad_token_provider=token_provider,
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # ── Option D: Existing token provider ──────────────────────────
-    #
-    # If your application already centralizes Azure auth, you can pass
-    # a prebuilt bearer-token provider directly.
-    #
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     azure_ad_token_provider=existing_token_provider,
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
-
-    # ── Option E: DefaultAzureCredential (local dev / Managed Identity) ─
-    #
-    # Uses your ``az login`` session, VS Code credentials, Managed
-    # Identity, etc.  Simplest for local development. Pass the
-    # credential directly — the provider builds the token provider for
-    # you.
-    #
-    # from azure.identity import DefaultAzureCredential
-    #
-    # llm = AzureOpenAILLM(
-    #     azure_endpoint=azure_endpoint,
-    #     credential=DefaultAzureCredential(),
-    #     # tier_high_model / tier_mid_model / tier_fast_model as in Option A
-    # )
 
     # ── Proxy (optional) ────────────────────────────────────────────
     #

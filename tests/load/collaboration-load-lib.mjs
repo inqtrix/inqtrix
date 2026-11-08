@@ -771,6 +771,31 @@ export function assertSoakPreflight(
   }
 }
 
+const UNTRUSTED_CERTIFICATE_CODES = new Set([
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+])
+
+/** The way out of a TLS failure of the probe, by its cause code, or ''. */
+export function tlsFailureHint(code) {
+  if (UNTRUSTED_CERTIFICATE_CODES.has(code)) {
+    return 'The certificate is not trusted: set NODE_EXTRA_CA_CERTS to the certificate file, or to the file of the local CA that signed it; --allow-insecure-tls covers only the WebSocket connections.'
+  }
+  if (code === 'ERR_TLS_CERT_ALTNAME_INVALID') {
+    return 'The certificate does not name this host: reach the stack under a name the certificate was issued for.'
+  }
+  if (code === 'CERT_HAS_EXPIRED' || code === 'CERT_NOT_YET_VALID') {
+    return 'The certificate is outside its validity period: issue a new one.'
+  }
+  if (code === 'ERR_SSL_WRONG_VERSION_NUMBER') {
+    return 'The port does not speak TLS: check that the URL uses https:// only for an HTTPS port.'
+  }
+  return ''
+}
+
 export async function measureApiProbe(
   probe,
   fetchImplementation = fetch,
@@ -804,9 +829,16 @@ export async function measureApiProbe(
         redirect: 'error',
         signal: AbortSignal.timeout(API_PROBE_TIMEOUT_MS),
       })
-    } catch {
+    } catch (error) {
+      // The probe uses the built-in fetch, which --allow-insecure-tls does not
+      // reach (it covers the WebSocket connections). Over HTTPS the error
+      // carries the cause code and the way out that fits it.
+      const code = error?.cause?.code ?? error?.code
+      const hint = typeof code === 'string' ? tlsFailureHint(code) : ''
       throw new Error(
-        `API probe request ${index + 1}/${API_PROBE_SAMPLES} failed before receiving a response.`,
+        `API probe request ${index + 1}/${API_PROBE_SAMPLES} failed before receiving a response`
+        + (typeof code === 'string' ? ` (${code})` : '')
+        + (hint ? `. ${hint}` : '.'),
       )
     }
     if (!response.ok) {

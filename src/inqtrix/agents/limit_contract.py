@@ -25,16 +25,6 @@ from inqtrix.agents.control_ports import (
     ClarificationRecord,
 )
 
-LIMIT_REACHED_EVENT = "inqtrix.agent.limit.reached"
-"""Audit/event signal emitted when a run parks at a recoverable limit."""
-LIMIT_DECIDED_EVENT = "inqtrix.agent.limit.decided"
-"""Audit signal emitted when a terminal partial/cancel choice is applied.
-
-Extensions are already durably visible through the canonical
-``clarification.answered`` event and row. Emitting a second apply event on
-every checkpoint redelivery would make an exactly-once claim the event stream
-cannot guarantee.
-"""
 
 LIMIT_CHOICE_EXTEND = "extend"
 LIMIT_CHOICE_PARTIAL = "partial"
@@ -176,7 +166,7 @@ def create_or_get_limit_gate(
             ceiling=gate.ceiling,
         )
         if gate.extendable
-        else t(words, "agent_limit_ceiling_fixed", ceiling=gate.ceiling)
+        else t(words, "agent_limit_ceiling_fixed")
     )
     reached_text = t(
         words,

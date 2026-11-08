@@ -342,7 +342,7 @@ from tests.agents.test_kernel_evidence_read import deps  # noqa: E402,F401 (fixt
 
 
 def test_a_canvas_with_an_unreadable_citation_is_handed_back(deps):  # noqa: F811
-    pytest.importorskip("deepagents")
+    pytest.importorskip("langchain")
     from inqtrix.agents.kernel.deps import run_coro, set_kernel_deps
     from inqtrix.agents.kernel.tools import build_kernel_tools
 

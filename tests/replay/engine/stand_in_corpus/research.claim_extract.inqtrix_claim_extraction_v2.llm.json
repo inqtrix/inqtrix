@@ -1,0 +1,7 @@
+[
+ {
+  "content": "{\"claims\": [{\"claim_text\": \"Das Modellgerät arbeitet in zwei Stufen.\", \"evidence_snippet\": \"arbeitet in zwei Stufen\", \"claim_type\": \"fact\", \"polarity\": \"affirmed\", \"needs_primary\": false, \"provider_refs\": [\"1\"]}, {\"claim_text\": \"Eine Kennzahl über drei gilt als gut.\", \"evidence_snippet\": \"Kennzahl über drei\", \"claim_type\": \"fact\", \"polarity\": \"affirmed\", \"needs_primary\": false, \"provider_refs\": [\"2\"]}], \"source_roles\": [{\"ref\": \"1\", \"role\": \"official_primary\", \"reason\": \"Erfundene Quelle für den Test\"}, {\"ref\": \"2\", \"role\": \"official_primary\", \"reason\": \"Erfundene Quelle für den Test\"}]}",
+  "prompt_tokens": 120,
+  "completion_tokens": 40
+ }
+]

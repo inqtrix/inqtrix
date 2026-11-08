@@ -12,11 +12,12 @@
 // product-lifecycle IPC channel and are deleted through the visible UI
 // (the central ledger pass stays 404-tolerant crash safety).
 
-import { chmod, mkdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { chromium, firefox, webkit } from '@playwright/test'
 
+import { writeScenarioSidecar } from '../../tests/verification/fixtures/scenario-sidecar.mjs'
 import {
   assertFixture as assert,
   fetchActorJson as fetchJson,
@@ -34,10 +35,10 @@ import {
 import {
   VerificationLifecycleClient,
 } from '../../tests/verification/fixtures/lifecycle-client.mjs'
+import { httpsErrorsIgnored } from '../../tests/verification/fixtures/https-errors.mjs'
 
-const baseURL = process.env.INQTRIX_E2E_BASE_URL ?? 'http://127.0.0.1:8080'
-const ignoreHTTPSErrors =
-  process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1'
+const baseURL = process.env.INQTRIX_E2E_BASE_URL ?? 'http://localhost:8080'
+const ignoreHTTPSErrors = httpsErrorsIgnored()
 const testerEmail = requiredEnvironment('INQTRIX_E2E_TESTER_EMAIL')
 const userPassword = requiredEnvironment('INQTRIX_E2E_USER_PASSWORD')
 const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH
@@ -58,6 +59,10 @@ const INTERFACE_LOCALE = 'de'
 const COMPOSER_LABEL = 'Nachricht an das Modell... @ für Kontext'
 const SEND_LABEL = 'Nachricht senden'
 const MODEL_PICKER_LABEL = 'Chatmodell auswählen'
+/** The picker files every chat model under its speed tier (HIGH, MID,
+ * FAST); the first model under FAST is the cheapest the stack offers. A
+ * fixed model name goes stale whenever the stack's model cards change. */
+const FASTEST_TIER_HEADING = 'FAST'
 const NEW_CHAT_LABEL = 'Neuer Chat'
 const DELETE_THREAD_LABEL = 'Gespräch löschen'
 const SYNC_ERROR_LABEL = 'Server-Synchronisierung fehlgeschlagen'
@@ -105,32 +110,38 @@ try {
   for (const target of BROWSERS) {
     await runBrowserPass(target)
   }
-  exitCode = SCENARIOS.every((id) => cellFailures.get(id).length === 0) ? 0 : 1
 } catch (error) {
   progress(`Engine-Fehler: ${sanitize(String(error?.message ?? error))}`)
-  exitCode = 1
 } finally {
   for (const id of SCENARIOS) {
     for (const failure of cellFailures.get(id)) {
       progress(`ROT ${id}: ${sanitize(failure)}`)
     }
   }
-  await writeScenarioSidecar(
-    SCENARIOS.map((id) => ({
-      id,
-      status: cellFailures.get(id).length === 0 ? 'passed' : 'failed',
-    })),
-  )
+  // A scenario passes only once every browser it applies to measured it.
+  const verdicts = SCENARIOS.map((id) => {
+    if (cellFailures.get(id).length > 0) {
+      return { id, reason: sanitize(cellFailures.get(id)[0]).slice(0, 240), status: 'failed' }
+    }
+    const unmeasured = applicableBrowsers(id).filter((name) => !cellPassed(id, name))
+    return unmeasured.length === 0
+      ? { id, status: 'passed' }
+      : { id, reason: `not measured in ${unmeasured.join(', ')}`, status: 'not_run' }
+  })
+  exitCode = verdicts.every((verdict) => verdict.status === 'passed') ? 0 : 1
+  try {
+    await writeScenarioSidecar(verdicts)
+  } catch (error) {
+    exitCode = 1
+    progress(`Ergebnisdatei nicht geschrieben: ${sanitize(String(error?.message ?? error))}`)
+  }
 }
 
 process.exit(exitCode)
 
 async function runBrowserPass(target) {
   progress(`${target.name}: Browser starten`)
-  const browser = await target.launcher.launch({
-    headless: true,
-    ...target.options,
-  })
+  let browser
   let tester
   // Findings inside the deliberate offline window are expected and are
   // reported separately instead of failing the hygiene cell.
@@ -139,6 +150,11 @@ async function runBrowserPass(target) {
   let errorsBeforeOffline = 0
   let errorsAfterOffline = 0
   try {
+    // Inside the pass: a browser that does not start reddens its cells.
+    browser = await target.launcher.launch({
+      headless: true,
+      ...target.options,
+    })
     const sessionFixtures = createSessionFixtures({
       baseURL,
       browser,
@@ -206,14 +222,19 @@ async function runBrowserPass(target) {
     const message = `${target.name}: ${String(error?.message ?? error)}`
     progress(`Durchlauf-Fehler: ${sanitize(message)}`)
     for (const id of SCENARIOS) {
-      if (id === 'prompt.live-mobile-viewport' && target.name !== 'chromium') {
-        continue
-      }
+      if (!applicableBrowsers(id).includes(target.name)) continue
       if (!cellPassed(id, target.name)) cellFailures.get(id).push(message)
     }
   } finally {
-    await browser.close().catch(() => null)
+    await browser?.close().catch(() => null)
   }
+}
+
+/** The browsers a scenario is measured in: the mobile viewport only in Chromium. */
+function applicableBrowsers(id) {
+  return id === 'prompt.live-mobile-viewport'
+    ? ['chromium']
+    : BROWSERS.map((target) => target.name)
 }
 
 function cellPassed(id, browserName) {
@@ -252,19 +273,8 @@ async function runChatCells(target, tester, state, beforeOffline, afterOffline) 
       .catch(() => null)
     await composer.first().waitFor({ state: 'visible', timeout: 20_000 })
 
-    // Cost control: the cell pins the cheapest chat model explicitly. The
-    // trigger's accessible name is dynamic ("<title>: <active model>"),
-    // so the anchor matches on the stable title prefix.
-    await page
-      .locator(`[aria-label^="${MODEL_PICKER_LABEL}"]:visible`)
-      .first()
-      .click()
-    const nano = page.getByRole('menuitem', { name: /nano/i })
-      .or(page.getByRole('option', { name: /nano/i }))
-      .or(page.getByRole('button', { name: /nano/i }))
-    await nano.first().waitFor({ state: 'visible', timeout: 10_000 })
-    await nano.first().click()
-    await page.keyboard.press('Escape').catch(() => null)
+    // Cost control: the cell pins the cheapest chat model explicitly.
+    await pinFastestChatModel(page)
 
     progress(`${browserName}: Frage senden`)
     await composer.first().fill(question)
@@ -391,17 +401,8 @@ async function runChatCells(target, tester, state, beforeOffline, afterOffline) 
     progress(`${browserName}: Offline-Senden und Recovery`)
     // The reload resets the composer model to the server default, a
     // known defect. Re-pin the cheap model deliberately so the offline
-    // attempt and its retry stay on Nano.
-    await page
-      .locator(`[aria-label^="${MODEL_PICKER_LABEL}"]:visible`)
-      .first()
-      .click()
-    const nanoRepin = page.getByRole('menuitem', { name: /nano/i })
-      .or(page.getByRole('option', { name: /nano/i }))
-      .or(page.getByRole('button', { name: /nano/i }))
-    await nanoRepin.first().waitFor({ state: 'visible', timeout: 10_000 })
-    await nanoRepin.first().click()
-    await page.keyboard.press('Escape').catch(() => null)
+    // attempt and its retry stay on the fastest tier.
+    await pinFastestChatModel(page)
     beforeOffline()
     state.offlineWindow = true
     await tester.context.setOffline(true)
@@ -738,6 +739,30 @@ async function awaitResponseFor(page, predicate, action, timeoutMs) {
   return outcome.response
 }
 
+/**
+ * Pin the cheapest chat model: open the picker, choose the first model
+ * under the fastest tier, close the picker. The picker stays open after a
+ * choice (its reasoning row belongs to the chosen model), and an open
+ * picker hides the rest of the page from the accessibility tree, so it is
+ * closed on every path: a failed pin must not turn the following cells red.
+ * The trigger's accessible name is dynamic ("<title>: <active model>"), so
+ * the anchor matches on the stable title prefix.
+ */
+async function pinFastestChatModel(page) {
+  await page
+    .locator(`[aria-label^="${MODEL_PICKER_LABEL}"]:visible`)
+    .first()
+    .click()
+  try {
+    const heading = page.getByRole('menu')
+      .getByText(FASTEST_TIER_HEADING, { exact: true })
+    await heading.waitFor({ state: 'visible', timeout: 10_000 })
+    await heading.locator('xpath=following::*[@role="menuitem"][1]').click()
+  } finally {
+    await page.keyboard.press('Escape').catch(() => null)
+  }
+}
+
 async function confirmDialogIfPresent(page) {
   // Some destructive actions confirm through a dialog; absence is fine.
   const dialog = page.getByRole('dialog')
@@ -816,14 +841,3 @@ async function waitFor(probe, timeoutMs, label) {
   )
 }
 
-/** Sidecar contract of tests/verification/scenario-results.ts:
- * atomic write, mode 0600, {schemaVersion: 1, scenarios}. */
-async function writeScenarioSidecar(scenarios) {
-  const path = process.env.INQTRIX_VERIFICATION_SCENARIO_RESULTS_PATH
-  if (!path) return
-  const temporaryPath = `${path}.tmp`
-  const payload = `${JSON.stringify({ scenarios, schemaVersion: 1 }, null, 2)}\n`
-  await writeFile(temporaryPath, payload, { encoding: 'utf8', mode: 0o600 })
-  await rename(temporaryPath, path)
-  await chmod(path, 0o600)
-}

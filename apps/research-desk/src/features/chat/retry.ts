@@ -1,5 +1,8 @@
 import type { ChatCompletionMessage } from '@/api/inqtrixClient'
-import { contentWithAttachmentContext } from '@/features/project/attachmentContext'
+import {
+  currentMessageContent,
+  historyRequestMessages,
+} from '@/features/chat/conversationContext'
 import type { ChatMessageRecord } from '@/features/project/types'
 import type { ChatModelTier } from '@/features/researchRuns/types'
 
@@ -46,16 +49,14 @@ export function buildChatRetryMessages(
   target: ChatRetryTarget,
   mode: ChatRetryMode,
 ): ChatCompletionMessage[] {
-  const messages = target.history
-    .filter((message) => message.contentMarkdown.trim().length > 0)
-    .slice(-20)
-    .map((message) => ({
-      content: message.contentMarkdown,
-      role: message.role,
-    }))
-
+  const messages = historyRequestMessages(target.history)
   messages.push({
-    content: retryUserContent(target.userMessage, target.assistantMessage.contentMarkdown, mode),
+    content: retryUserContent(
+      target.userMessage,
+      target.history,
+      target.assistantMessage.contentMarkdown,
+      mode,
+    ),
     role: 'user',
   })
   return messages
@@ -63,12 +64,15 @@ export function buildChatRetryMessages(
 
 function retryUserContent(
   userMessage: ChatMessageRecord,
+  history: readonly ChatMessageRecord[],
   previousAnswer: string,
   mode: ChatRetryMode,
 ): string {
-  const originalRequest = userMessage.attachments && userMessage.attachments.length > 0
-    ? contentWithAttachmentContext(userMessage.contentMarkdown, userMessage.attachments)
-    : userMessage.contentMarkdown
+  const originalRequest = currentMessageContent(
+    userMessage.contentMarkdown,
+    history,
+    userMessage.attachments ?? [],
+  )
 
   if (mode === 'plain') return originalRequest
 

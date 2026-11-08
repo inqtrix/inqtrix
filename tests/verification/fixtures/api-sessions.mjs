@@ -1,10 +1,12 @@
 import { request } from '@playwright/test'
 
 import { assertFixture } from './api.mjs'
+import { attemptCleanup } from './cleanup-step.mjs'
+import { httpsErrorsIgnored } from './https-errors.mjs'
 
 export function createApiSessionFixtures({
   baseURL,
-  ignoreHTTPSErrors,
+  ignoreHTTPSErrors = httpsErrorsIgnored(),
   lifecycle,
   runId,
 }) {
@@ -60,7 +62,7 @@ export function createApiSessionFixtures({
       return actor
     } catch (error) {
       if (!lifecycleSession) {
-        await logoutUnregisteredApiSession(api).catch(() => undefined)
+        await attemptCleanup('unregistered session', () => logoutUnregisteredApiSession(api))
       }
       await api.dispose().catch(() => undefined)
       throw error
@@ -87,7 +89,7 @@ export function createApiSessionFixtures({
 
   async function closeAll() {
     for (const actor of [...actors].reverse()) {
-      await logoutActor(actor).catch(() => undefined)
+      await attemptCleanup('logout', () => logoutActor(actor))
     }
   }
 

@@ -12,7 +12,8 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
-import { Writable } from 'node:stream'
+import { PassThrough, Writable } from 'node:stream'
+import { setTimeout as delay } from 'node:timers/promises'
 import { describe, test } from 'node:test'
 
 import type { VerificationAdapter } from './adapter.ts'
@@ -23,9 +24,15 @@ import {
 import { collaborationPlaywrightAdapter } from './adapters/collaboration-playwright.ts'
 import { editorSystemLiveAdapter } from './adapters/editor-system-live.ts'
 import { ownerSetupLiveAdapter } from './adapters/owner-setup-live.ts'
+import {
+  eraseAccountsOfRun,
+  runLoadAccountBelongsToRun,
+  runLoadAccountPrefix,
+  runLoadAdapter,
+} from './adapters/run-load.ts'
 import { playwrightPreflight } from './adapters/shared.ts'
 import { CleanupLedger } from './cleanup-ledger.ts'
-import { parseCliArguments } from './cli.ts'
+import { parseCliArguments, printSummary } from './cli.ts'
 import { runCommand } from './command-runner.ts'
 import {
   type EngineResult,
@@ -107,7 +114,7 @@ describe('verification inventory', () => {
     )
   })
 
-  test('defines twelve profiles over exactly eight reusable engines', () => {
+  test('defines thirteen profiles over exactly nine reusable engines', () => {
     assert.deepEqual(VERIFICATION_PROFILES, [
       'ui-fixture',
       'owner-setup',
@@ -120,6 +127,7 @@ describe('verification inventory', () => {
       'load-soak',
       'load-ramp',
       'load-capacity',
+      'run-load',
       'edge-conformance',
     ])
     assert.deepEqual(VERIFICATION_ENGINES, [
@@ -130,6 +138,7 @@ describe('verification inventory', () => {
       'agent-desk-live',
       'chat-prompt-live',
       'collaboration-load',
+      'run-load',
       'web-edge-containers',
     ])
     for (const profile of VERIFICATION_PROFILES) {
@@ -596,6 +605,50 @@ describe('verification inventory', () => {
       )
       assert.equal(
         alignedChecks.find((check) => check.id === 'load-podman-clock')?.status,
+        'passed',
+      )
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
+  test('explicit Podman load-smoke needs no clock check on a host without a Podman VM', async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-load-smoke-no-vm-'))
+    try {
+      const binaryDirectory = join(repositoryRoot, 'bin')
+      const podmanPath = join(binaryDirectory, 'podman')
+      mkdirSync(binaryDirectory)
+      writeFileSync(
+        podmanPath,
+        [
+          '#!/bin/sh',
+          'case "$1" in',
+          '  version|info) exit 0 ;;',
+          '  machine) echo "Error: vm podman-machine-default not found: VM does not exist" >&2; exit 125 ;;',
+          '  *) exit 23 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o700 },
+      )
+      chmodSync(podmanPath, 0o700)
+      const context = await createRunContext({
+        containerEngine: 'podman',
+        environment: {
+          INQTRIX_E2E_ADMIN_EMAIL: 'owner@example.invalid',
+          INQTRIX_E2E_ADMIN_PASSWORD: 'admin-private-value',
+          INQTRIX_E2E_USER_PASSWORD: 'temporary-user-private-value',
+          PATH: `${binaryDirectory}${delimiter}${process.env.PATH ?? ''}`,
+        },
+        profile: 'load-smoke',
+        repositoryRoot,
+        runId: 'inqv-load-smoke-no-vm-01',
+      })
+
+      const checks = await collaborationLoadAdapter.preflight(context)
+
+      assert.equal(
+        checks.find((check) => check.id === 'load-podman-clock')?.status,
         'passed',
       )
     } finally {
@@ -1404,6 +1457,43 @@ describe('report redaction and cleanup', () => {
     }
   })
 
+  test('gives a child the time its command asks for before killing it', async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-child-grace-'))
+    const windDown = (graceMs: number) => async (): Promise<EngineResult> => {
+      const abortController = new AbortController()
+      const context = await createRunContext({
+        abortSignal: abortController.signal,
+        environment: {},
+        profile: 'ui-fixture',
+        repositoryRoot,
+        runId: `inqv-child-grace-${graceMs}`,
+      })
+      const ledger = new CleanupLedger(context.reportDirectory, createRedactor({}))
+      const started = runCommand(context, ledger, {
+        args: [
+          '-e',
+          // Takes a moment to wind down after SIGTERM, then ends on its own.
+          'process.on("SIGTERM",()=>setTimeout(()=>process.exit(0),400));console.log("up");setInterval(()=>{},1000)',
+        ],
+        command: process.execPath,
+        engine: 'ui-fixture-playwright',
+        output: { stderr: new PassThrough().resume(), stdout: new PassThrough().resume() },
+        terminationGraceMs: graceMs,
+      })
+      await delay(400)
+      abortController.abort()
+      const outcome = await started
+      await ledger.cleanupAll()
+      return outcome
+    }
+    try {
+      assert.equal((await windDown(20)())?.signal, 'SIGKILL')
+      assert.equal((await windDown(5_000)())?.signal, null)
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
   test('cleans registered resources in reverse order and persists no secret labels', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'inqtrix-cleanup-ledger-'))
     try {
@@ -1467,7 +1557,7 @@ describe('report redaction and cleanup', () => {
         runId: 'inqv-test-run-0001',
       }, [adapter])
       assert.equal(report.status, 'blocked')
-      assert.equal(report.schemaVersion, 4)
+      assert.equal(report.schemaVersion, 6)
       assert.equal(report.inqtrixVersion, '0.2.0')
       assert.equal(executions, 0)
       assert(
@@ -1538,10 +1628,17 @@ describe('report redaction and cleanup', () => {
           engine: 'editor-system-live',
           exitCode: readyFails ? 1 : 0,
           finishedAt: now,
-          scenarios: [{
-            id: 'system.multiuser-live-matrix',
-            status: readyFails ? 'failed' : 'passed',
-          }],
+          scenarios: [
+            {
+              id: 'system.multiuser-live-matrix',
+              status: readyFails ? 'failed' : 'passed',
+            },
+            ...(readyFails ? [] : [{
+              id: 'system.guest-link-matrix',
+              reason: 'Guest links need HTTPS.',
+              status: 'skipped' as const,
+            }]),
+          ],
           signal: null,
           startedAt: now,
           status: readyFails ? 'failed' : 'passed',
@@ -1669,17 +1766,13 @@ describe('report redaction and cleanup', () => {
       }, [adapter])
       assert.equal(report.status, 'interrupted')
       assert.equal(report.adapters[0]?.status, 'interrupted')
-      assert.equal(
-        report.scenarios.find((scenario) => (
-          scenario.id === 'ui.lifecycle-isolation'
-        ))?.status,
-        'failed',
-      )
+      // Nothing was measured, so nothing is blamed: the engine's status
+      // carries the verdict.
       assert(
         report.scenarios
           .filter((scenario) => (
             scenario.engine === 'ui-fixture-playwright'
-            && scenario.id !== 'ui.lifecycle-isolation'
+            && scenario.status !== 'not_applicable'
           ))
           .every((scenario) => scenario.status === 'not_run'),
       )
@@ -1741,7 +1834,10 @@ describe('report redaction and cleanup', () => {
           engine: 'editor-system-live',
           exitCode: 0,
           finishedAt: now,
-          scenarios: [{ id: 'system.multiuser-live-matrix', status: 'passed' }],
+          scenarios: [
+            { id: 'system.multiuser-live-matrix', status: 'passed' },
+            { id: 'system.guest-link-matrix', status: 'passed' },
+          ],
           signal: null,
           startedAt: now,
           status: 'passed',
@@ -2433,11 +2529,14 @@ describe('report redaction and cleanup', () => {
       }, [adapter])
       assert.equal(report.status, 'failed')
       assert.equal(report.adapters[0]?.status, 'failed')
-      assert.equal(report.scenarios.find((scenario) => scenario.engine === adapter.engine)?.status, 'failed')
+      // No pass is inferred, and no scenario is blamed in place of one that
+      // was never measured.
       assert(
         report.scenarios
-          .filter((scenario) => scenario.engine === 'ui-fixture-playwright')
-          .slice(1)
+          .filter((scenario) => (
+            scenario.engine === 'ui-fixture-playwright'
+            && scenario.status !== 'not_applicable'
+          ))
           .every((scenario) => scenario.status === 'not_run'),
       )
     } finally {
@@ -2729,6 +2828,7 @@ describe('temporary account cleanup', () => {
   test('erases the account and waits for its erasure without a workspace', async () => {
     const requests: Array<{ method: string; path: string; workspace: string | null }> = []
     const reads = [{ status: 'running' }, { status: 'deleted' }]
+    const listings = [[{ email: 'temporary@example.invalid', id: 'account-1' }], []]
     const actor = cleanupActor(async (path, options) => {
       requests.push({
         method: options.method,
@@ -2736,9 +2836,7 @@ describe('temporary account cleanup', () => {
         workspace: options.headers['X-Inqtrix-Workspace-Id'] ?? null,
       })
       if (path === '/v1/admin/users') {
-        return scriptedResponse(200, {
-          users: [{ email: 'temporary@example.invalid', id: 'account-1' }],
-        })
+        return scriptedResponse(200, { users: listings.shift() })
       }
       if (options.method === 'DELETE') {
         return scriptedResponse(202, { operation_id: 'del_1' })
@@ -2755,7 +2853,27 @@ describe('temporary account cleanup', () => {
       // which would read as finished.
       { method: 'GET', path: '/v1/deletion-operations/del_1', workspace: null },
       { method: 'GET', path: '/v1/deletion-operations/del_1', workspace: null },
+      { method: 'GET', path: '/v1/admin/users', workspace: 'workspace' },
     ])
+  })
+
+  test('an account still listed after its erasure fails the cleanup', async () => {
+    const actor = cleanupActor(async (path, options) => {
+      if (path === '/v1/admin/users') {
+        return scriptedResponse(200, {
+          users: [{ email: 'temporary@example.invalid', id: 'account-1' }],
+        })
+      }
+      if (options.method === 'DELETE') {
+        return scriptedResponse(404, { error: { type: 'not_found' } })
+      }
+      return scriptedResponse(200, {})
+    })
+
+    await assert.rejects(
+      eraseTemporaryAccount(actor, 'temporary@example.invalid'),
+      /still listed/,
+    )
   })
 
   test('a failed request reports how it failed and no header', async () => {
@@ -2770,5 +2888,669 @@ describe('temporary account cleanup', () => {
       assert.equal(error.message, 'Product cleanup request timed out.')
       return true
     })
+  })
+})
+
+describe('run-load profile', () => {
+  const BASELINE_VARIABLE = 'INQTRIX_RUN_LOAD_BASELINE'
+  const SCENARIOS_WITHOUT_BASE = [
+    'run-load.provisioned',
+    'run-load.workload-completed',
+    'run-load.stand-in-covered',
+    'run-load.events-complete',
+    'run-load.load-applied',
+    'run-load.report-written',
+    'run-load.no-residue',
+    'run-load.connection-budget',
+  ]
+  const FIRST_RUN = 'inqv-accounts-first-01'
+  const SECOND_RUN = 'inqv-accounts-second-02'
+  const OWN_PREFIX = 'inqv-rl-accounts-first-01-fd4c7d9e6b9e3e20-u'
+
+  function withoutBaseline<T>(run: () => Promise<T>): Promise<T> {
+    return withBaselineVariable(undefined, run)
+  }
+
+  async function withBaselineVariable<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const previous = process.env[BASELINE_VARIABLE]
+    if (value === undefined) delete process.env[BASELINE_VARIABLE]
+    else process.env[BASELINE_VARIABLE] = value
+    try {
+      return await run()
+    } finally {
+      if (previous === undefined) delete process.env[BASELINE_VARIABLE]
+      else process.env[BASELINE_VARIABLE] = previous
+    }
+  }
+
+  function fakeAdapter(
+    scenarios: readonly string[],
+    onExecute?: (ledger: CleanupLedger) => Promise<void>,
+  ): VerificationAdapter {
+    return {
+      engine: 'run-load',
+      profiles: ['run-load'],
+      async preflight() {
+        return []
+      },
+      async execute(_context, ledger) {
+        await onExecute?.(ledger)
+        const now = new Date().toISOString()
+        return {
+          durationMs: 1,
+          engine: 'run-load',
+          exitCode: 0,
+          finishedAt: now,
+          scenarios: scenarios.map((id) => ({ id, status: 'passed' as const })),
+          signal: null,
+          startedAt: now,
+          status: 'passed',
+        }
+      },
+    }
+  }
+
+  function accountsWorld(options: {
+    deleteStatus?: number
+    emails: string[]
+    keep?: readonly string[]
+    refusals?: number
+  }) {
+    let refusals = options.refusals ?? 0
+    const listed = new Map(options.emails.map((email, index) => [email, `account-${index}`]))
+    const deleted: string[] = []
+    const actor = {
+      api: {
+        fetch: async (path: string, request: { method: string }) => {
+          const reply = (status: number, body: unknown) => ({
+            json: async () => body,
+            status: () => status,
+          })
+          if (path === '/v1/admin/users') {
+            return reply(200, {
+              users: [...listed].map(([email, id]) => ({ email, id })),
+            })
+          }
+          if (request.method === 'DELETE') {
+            const id = path.split('/').at(-1) as string
+            deleted.push(id)
+            if (refusals > 0) {
+              refusals -= 1
+              return reply(409, { error: { type: 'erasure_refused' } })
+            }
+            if (options.deleteStatus) {
+              return reply(options.deleteStatus, { error: { type: 'erasure_refused' } })
+            }
+            for (const [email, candidate] of listed) {
+              if (candidate === id && !options.keep?.includes(email)) listed.delete(email)
+            }
+            return reply(202, { operation_id: `del_${id}` })
+          }
+          return reply(200, { status: 'deleted' })
+        },
+      },
+      csrf: 'csrf',
+      userId: 'admin',
+      workspaceId: 'workspace',
+    } as unknown as CleanupActor
+    return { actor, deleted, listed }
+  }
+
+  test('is registered with its own engine', () => {
+    assert.deepEqual(selectAdapters('run-load').map((adapter) => adapter.engine), ['run-load'])
+    assert.equal(selectAdapters('run-load')[0], runLoadAdapter)
+    assert.deepEqual(PROFILE_ENGINE_ORDER['run-load'], ['run-load'])
+  })
+
+  test('has an npm entrypoint pinned to Podman and its tests in the tooling gate', () => {
+    const scripts = (JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+    ) as { scripts: Record<string, string> }).scripts
+    assert.equal(
+      scripts['verify:run-load'],
+      'npm run verify:orchestrator -- --profile run-load --container-engine podman',
+    )
+    assert.match(scripts['verify:tooling'] ?? '', /tests\/load\/run-load\/run-load-lib\.test\.mjs/)
+  })
+
+  test('an account prefix carries the digest of exactly one run', () => {
+    assert.equal(runLoadAccountPrefix(FIRST_RUN), OWN_PREFIX)
+    assert.equal(
+      runLoadAccountPrefix(SECOND_RUN),
+      'inqv-rl-accounts-second-02-71b27dd362f910dd-u',
+    )
+  })
+
+  test('only exactly this run\'s addresses belong to it', () => {
+    assert.equal(runLoadAccountBelongsToRun(`${OWN_PREFIX}1@example.invalid`, FIRST_RUN), true)
+    assert.equal(runLoadAccountBelongsToRun(`${OWN_PREFIX}600@example.invalid`, FIRST_RUN), true)
+    assert.equal(runLoadAccountBelongsToRun(`${OWN_PREFIX}1@example.invalid`, SECOND_RUN), false)
+    for (const email of [
+      'owner@example.invalid',
+      `${OWN_PREFIX}@example.invalid`,
+      `${OWN_PREFIX}1@example.org`,
+      `${OWN_PREFIX}1@example.invalix`,
+      `${OWN_PREFIX}1x@example.invalid`,
+      `${OWN_PREFIX}12345@example.invalid`,
+      `x${OWN_PREFIX}1@example.invalid`,
+      'inqv-rl-accounts-first-01-0000000000000000-u1@example.invalid',
+      ...temporaryUserDescriptors(FIRST_RUN).map((user) => user.email),
+      undefined,
+      null,
+    ]) assert.equal(runLoadAccountBelongsToRun(email, FIRST_RUN), false, String(email))
+  })
+
+  test('erases exactly the accounts of its run', async () => {
+    const own = [`${OWN_PREFIX}1@example.invalid`, `${OWN_PREFIX}2@example.invalid`]
+    const foreign = [
+      'owner@example.invalid',
+      `${runLoadAccountPrefix(SECOND_RUN)}1@example.invalid`,
+      ...temporaryUserDescriptors(FIRST_RUN).map((user) => user.email),
+    ]
+    const world = accountsWorld({ emails: [...foreign, ...own] })
+
+    assert.equal(await eraseAccountsOfRun(world.actor, FIRST_RUN), 2)
+
+    assert.deepEqual(
+      [...world.deleted].sort(),
+      [`account-${foreign.length}`, `account-${foreign.length + 1}`],
+    )
+    assert.deepEqual([...world.listed.keys()].sort(), [...foreign].sort())
+  })
+
+  test('finds nothing after a run that erased its accounts itself', async () => {
+    const world = accountsWorld({ emails: ['owner@example.invalid'] })
+    assert.equal(await eraseAccountsOfRun(world.actor, FIRST_RUN), 0)
+    assert.deepEqual(world.deleted, [])
+  })
+
+  test('an erasure refused while a run still stops is tried again', async () => {
+    const world = accountsWorld({
+      emails: [`${OWN_PREFIX}1@example.invalid`],
+      refusals: 2,
+    })
+    assert.equal(await eraseAccountsOfRun(world.actor, FIRST_RUN, { retryMs: 1 }), 1)
+    assert.equal(world.deleted.length, 3)
+    assert.equal(world.listed.size, 0)
+  })
+
+  test('registers the erasure before the engine starts and allows it time to wind down', async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-run-load-execute-'))
+    const engineDirectory = join(repositoryRoot, 'tests', 'load', 'run-load')
+    mkdirSync(engineDirectory, { recursive: true })
+    const seen = join(repositoryRoot, 'seen.txt')
+    // The stand-in for the engine reports what the ledger held when it was started.
+    writeFileSync(join(engineDirectory, 'run-load.mjs'), [
+      "import { writeFileSync } from 'node:fs'",
+      `writeFileSync(${JSON.stringify(seen)}, process.env.INQTRIX_RUN_LOAD_ACCOUNT_PREFIX ?? '')`,
+    ].join('\n'))
+    try {
+      const context = await createRunContext({
+        environment: {},
+        profile: 'run-load',
+        repositoryRoot,
+        runId: FIRST_RUN,
+      })
+      const registered: string[] = []
+      const ledger = new CleanupLedger(context.reportDirectory, createRedactor({}))
+      const register = ledger.register.bind(ledger)
+      ledger.register = (async (kind: string, label: string, step: () => Promise<void>) => {
+        registered.push(`${label} before ${existsSync(seen) ? 'after start' : 'start'}`)
+        return await register(kind as never, label, step)
+      }) as typeof ledger.register
+      await runLoadAdapter.execute(context, ledger)
+      assert.equal(readFileSync(seen, 'utf8'), runLoadAccountPrefix(FIRST_RUN))
+      assert.equal(registered[0], 'run-load temporary accounts for current run before start')
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
+  test('a refused erasure makes the run cleanup_failed', async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-run-load-refused-'))
+    const world = accountsWorld({
+      deleteStatus: 409,
+      emails: [`${OWN_PREFIX}1@example.invalid`],
+    })
+    try {
+      const report = await withoutBaseline(() => runVerification({
+        environment: {},
+        profile: 'run-load',
+        repositoryRoot,
+        runId: FIRST_RUN,
+      }, [fakeAdapter(SCENARIOS_WITHOUT_BASE, async (ledger) => {
+        await ledger.register(
+          'resource',
+          'run-load temporary accounts for current run',
+          async () => {
+            await eraseAccountsOfRun(world.actor, FIRST_RUN, { deadlineMs: 0 })
+          },
+        )
+      })]))
+      assert.equal(report.status, 'cleanup_failed')
+      assert.equal(report.cleanup.failed, 1)
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
+  test('an account still listed after its erasure fails the cleanup', async () => {
+    const email = `${OWN_PREFIX}1@example.invalid`
+    const world = accountsWorld({ emails: [email], keep: [email] })
+    await assert.rejects(eraseAccountsOfRun(world.actor, FIRST_RUN, { deadlineMs: 0 }), /left 1 accounts/)
+  })
+
+  test('the base scenario counts only with a base report', () => {
+    const ids = (environment: NodeJS.ProcessEnv) => scenariosForProfile('run-load', environment)
+      .map((scenario) => scenario.id)
+    assert.deepEqual(ids({}), SCENARIOS_WITHOUT_BASE)
+    assert.deepEqual(ids({ [BASELINE_VARIABLE]: '   ' }), SCENARIOS_WITHOUT_BASE)
+    assert.deepEqual(
+      ids({ [BASELINE_VARIABLE]: 'base.json' }),
+      [...SCENARIOS_WITHOUT_BASE, 'run-load.baseline-holds'],
+    )
+  })
+
+  test('without a base report a run can pass and the base scenario stays not_run', async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-run-load-no-base-'))
+    try {
+      const report = await withoutBaseline(() => runVerification({
+        environment: {},
+        profile: 'run-load',
+        repositoryRoot,
+        runId: 'inqv-run-load-no-base-01',
+      }, [fakeAdapter(SCENARIOS_WITHOUT_BASE)]))
+      assert.equal(report.status, 'passed')
+      const statuses = Object.fromEntries(
+        report.scenarios
+          .filter((scenario) => scenario.engine === 'run-load')
+          .map((scenario) => [scenario.id, scenario.status]),
+      )
+      assert.equal(statuses['run-load.baseline-holds'], 'not_run')
+      for (const id of SCENARIOS_WITHOUT_BASE) assert.equal(statuses[id], 'passed', id)
+      assert.equal(report.logInspection.status, 'not_run')
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
+  test('with a base report a run that does not report on it fails', async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-run-load-base-'))
+    try {
+      const silent = await withBaselineVariable('base.json', () => runVerification({
+        environment: {},
+        profile: 'run-load',
+        repositoryRoot,
+        runId: 'inqv-run-load-base-silent-01',
+      }, [fakeAdapter(SCENARIOS_WITHOUT_BASE)]))
+      assert.equal(silent.status, 'failed')
+      const reported = await withBaselineVariable('base.json', () => runVerification({
+        environment: {},
+        profile: 'run-load',
+        repositoryRoot,
+        runId: 'inqv-run-load-base-reported-01',
+      }, [fakeAdapter([...SCENARIOS_WITHOUT_BASE, 'run-load.baseline-holds'])]))
+      assert.equal(reported.status, 'passed')
+      assert.equal(
+        reported.scenarios.find((scenario) => scenario.id === 'run-load.baseline-holds')?.status,
+        'passed',
+      )
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
+  describe('preflight', () => {
+    const CONFIGURED = {
+      INQTRIX_E2E_ADMIN_EMAIL: 'owner@example.invalid',
+      INQTRIX_E2E_ADMIN_PASSWORD: 'admin-private-value',
+      INQTRIX_E2E_USER_PASSWORD: 'temporary-user-private-value',
+      INQTRIX_RUN_LOAD_STAGE: 'smoke',
+    }
+
+    async function liveStack<T>(status: number, use: (baseURL: string) => Promise<T>): Promise<T> {
+      const server = createServer((request, response) => {
+        response.statusCode = request.url === '/health' ? status : 404
+        response.end('{}')
+      })
+      await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen))
+      const { port } = server.address() as { port: number }
+      try {
+        return await use(`http://127.0.0.1:${port}`)
+      } finally {
+        server.closeAllConnections()
+        await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      }
+    }
+
+    function prepareRepository(): { binaryDirectory: string; calls: string; repositoryRoot: string } {
+      const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-run-load-preflight-'))
+      mkdirSync(join(repositoryRoot, 'tests/load/run-load'), { recursive: true })
+      for (const name of ['run-load.mjs', 'run-load-lib.mjs', 'scenarios.json']) {
+        writeFileSync(join(repositoryRoot, 'tests/load/run-load', name), '')
+      }
+      const binaryDirectory = join(repositoryRoot, 'bin')
+      const calls = join(repositoryRoot, 'podman-calls')
+      mkdirSync(binaryDirectory)
+      writeFileSync(
+        join(binaryDirectory, 'podman'),
+        [
+          '#!/bin/sh',
+          'printf "%s\\n" "$1" >> "$INQTRIX_FAKE_PODMAN_CALLS"',
+          'case "$1" in',
+          '  version|info) exit 0 ;;',
+          '  *) exit 23 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o700 },
+      )
+      chmodSync(join(binaryDirectory, 'podman'), 0o700)
+      return { binaryDirectory, calls, repositoryRoot }
+    }
+
+    const statusOf = (checks: { id: string; status: string }[], id: string) => (
+      checks.find((check) => check.id === id)?.status
+    )
+
+    test('names every missing input without touching a container', async () => {
+      const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-run-load-missing-'))
+      try {
+        const context = await createRunContext({
+          environment: { INQTRIX_E2E_BASE_URL: 'http://127.0.0.1:9' },
+          profile: 'run-load',
+          repositoryRoot,
+          runId: 'inqv-run-load-missing-01',
+        })
+        const checks = await runLoadAdapter.preflight(context)
+        for (const id of [
+          'admin-email',
+          'admin-password',
+          'container-engine-selected',
+          'engine-entrypoint',
+          'engine-library',
+          'engine-scenarios',
+          'live-stack-reachable',
+          'run-load-podman',
+          'stage',
+          'user-password',
+        ]) assert.equal(statusOf(checks, id), 'failed', id)
+        assert.equal(statusOf(checks, 'base-url'), 'passed')
+        assert.equal(statusOf(checks, 'baseline-report'), 'passed')
+      } finally {
+        rmSync(repositoryRoot, { force: true, recursive: true })
+      }
+    })
+
+    test('passes when configured, and asks Podman only whether it is there', async () => {
+      const { binaryDirectory, calls, repositoryRoot } = prepareRepository()
+      try {
+        await liveStack(200, async (baseURL) => {
+          const context = await createRunContext({
+            containerEngine: 'podman',
+            environment: {
+              ...CONFIGURED,
+              INQTRIX_E2E_BASE_URL: baseURL,
+              INQTRIX_FAKE_PODMAN_CALLS: calls,
+              PATH: `${binaryDirectory}${delimiter}${process.env.PATH ?? ''}`,
+            },
+            profile: 'run-load',
+            repositoryRoot,
+            runId: 'inqv-run-load-configured-01',
+          })
+          const checks = await runLoadAdapter.preflight(context)
+          assert.deepEqual(checks.filter((check) => check.status === 'failed'), [])
+          assert.equal(statusOf(checks, 'live-stack-reachable'), 'passed')
+          assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), ['version', 'info'])
+        })
+      } finally {
+        rmSync(repositoryRoot, { force: true, recursive: true })
+      }
+    })
+
+    test('refuses what the engine cannot work with', async () => {
+      const { binaryDirectory, calls, repositoryRoot } = prepareRepository()
+      const fixture = join(repositoryRoot, 'fixture.json')
+      const baseline = join(repositoryRoot, 'base.json')
+      writeFileSync(fixture, '{}')
+      writeFileSync(baseline, '{}')
+      try {
+        await liveStack(503, async (baseURL) => {
+          const preflight = async (runId: string, environment: NodeJS.ProcessEnv, options = {}) => (
+            await runLoadAdapter.preflight(await createRunContext({
+              containerEngine: 'podman',
+              environment: {
+                ...CONFIGURED,
+                INQTRIX_E2E_BASE_URL: baseURL,
+                INQTRIX_FAKE_PODMAN_CALLS: calls,
+                PATH: `${binaryDirectory}${delimiter}${process.env.PATH ?? ''}`,
+                ...environment,
+              },
+              profile: 'run-load',
+              repositoryRoot,
+              runId,
+              ...options,
+            }))
+          )
+          const unhealthy = await preflight('inqv-run-load-refuse-01', {})
+          assert.equal(statusOf(unhealthy, 'live-stack-reachable'), 'failed')
+          assert.equal(
+            statusOf(await preflight('inqv-run-load-refuse-02', { INQTRIX_RUN_LOAD_STAGE: 'l3' }), 'stage'),
+            'failed',
+          )
+          for (const [index, stage] of ['smoke', 'l05', 'l1', 'l2'].entries()) {
+            assert.equal(
+              statusOf(await preflight(`inqv-run-load-stage-0${index}`, { INQTRIX_RUN_LOAD_STAGE: stage }), 'stage'),
+              'passed',
+            )
+          }
+          assert.equal(
+            statusOf(
+              await preflight('inqv-run-load-refuse-03', { INQTRIX_RUN_LOAD_BASELINE: join(repositoryRoot, 'gone.json') }),
+              'baseline-report',
+            ),
+            'failed',
+          )
+          assert.equal(
+            statusOf(
+              await preflight('inqv-run-load-refuse-04', { INQTRIX_RUN_LOAD_BASELINE: baseline }),
+              'baseline-report',
+            ),
+            'passed',
+          )
+          assert.equal(
+            statusOf(await preflight('inqv-run-load-fault-01', { INQTRIX_RUN_LOAD_FAULT: 'unplug-everything' }), 'fault'),
+            'failed',
+          )
+          assert.equal(
+            statusOf(await preflight('inqv-run-load-fault-02', { INQTRIX_RUN_LOAD_FAULT: 'worker-stop' }), 'fault'),
+            'passed',
+          )
+          assert.equal(
+            statusOf(
+              await preflight('inqv-run-load-fault-03', {
+                INQTRIX_RUN_LOAD_BASELINE: baseline,
+                INQTRIX_RUN_LOAD_FAULT: 'worker-stop',
+              }),
+              'fault-without-base',
+            ),
+            'failed',
+          )
+          assert.equal(
+            statusOf(await preflight('inqv-run-load-refuse-05', {}, { fixturePath: fixture }), 'generated-accounts'),
+            'failed',
+          )
+          assert.equal(
+            statusOf(
+              await preflight('inqv-run-load-refuse-06', { INQTRIX_RUN_LOAD_PROJECT: 'a b;c' }),
+              'compose-project',
+            ),
+            'failed',
+          )
+          assert.equal(
+            statusOf(
+              await preflight('inqv-run-load-refuse-07', { INQTRIX_E2E_BASE_URL: 'http://user:pass@localhost:1' }),
+              'base-url',
+            ),
+            'failed',
+          )
+          assert.equal(
+            statusOf(
+              // Only the fake directory on the path: this asks no real engine anything.
+              await preflight('inqv-run-load-refuse-08', { PATH: binaryDirectory }, { containerEngine: 'docker' }),
+              'run-load-podman',
+            ),
+            'failed',
+          )
+        })
+      } finally {
+        rmSync(repositoryRoot, { force: true, recursive: true })
+      }
+    })
+  })
+})
+
+describe('scenario results an engine hands over', () => {
+  const PROFILE = 'agent-desk' as const
+  const ENGINE = 'agent-desk-live' as const
+  const IDS = scenariosForProfile(PROFILE).map((scenario) => scenario.id)
+
+  // A real child process writes the result file the way an engine does; the
+  // orchestrator reads it, decides the engine and fills the report.
+  async function runChild(
+    scenarios: readonly Record<string, string>[],
+    exitCode: number,
+    runId: string,
+  ) {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), 'inqtrix-scenario-handover-'))
+    const payload = JSON.stringify({ scenarios, schemaVersion: 1 })
+    const adapter: VerificationAdapter = {
+      engine: ENGINE,
+      profiles: [PROFILE],
+      async preflight() {
+        return []
+      },
+      async execute(context, ledger) {
+        return await runCommand(context, ledger, {
+          args: [
+            '-e',
+            'require("node:fs").writeFileSync(process.env.INQTRIX_VERIFICATION_SCENARIO_RESULTS_PATH,'
+              + ` ${JSON.stringify(payload)}); process.exit(${exitCode})`,
+          ],
+          command: process.execPath,
+          engine: ENGINE,
+          output: { stderr: new PassThrough().resume(), stdout: new PassThrough().resume() },
+        })
+      },
+    }
+    try {
+      return await runVerification({
+        environment: {},
+        profile: PROFILE,
+        repositoryRoot,
+        runId,
+      }, [adapter])
+    } finally {
+      rmSync(repositoryRoot, { force: true, recursive: true })
+    }
+  }
+
+  function reportedFor(report: Awaited<ReturnType<typeof runChild>>) {
+    return new Map(report.scenarios
+      .filter((scenario) => IDS.includes(scenario.id))
+      .map((scenario) => [scenario.id, scenario]))
+  }
+
+  test('an engine that ends early keeps what it measured and blames nothing in its place', async () => {
+    const [measured, unmeasured] = IDS
+    const report = await runChild([
+      { id: measured!, status: 'passed' },
+      { id: unmeasured!, reason: 'The run stopped before this turn.', status: 'not_run' },
+    ], 1, 'inqv-handover-early-01')
+    const reported = reportedFor(report)
+    assert.equal(report.status, 'failed')
+    assert.equal(report.adapters[0]?.status, 'failed')
+    assert.equal(reported.get(measured!)?.status, 'passed')
+    assert.equal(reported.get(unmeasured!)?.status, 'not_run')
+    assert.equal(reported.get(unmeasured!)?.reason, 'The run stopped before this turn.')
+    assert.deepEqual([...reported.values()].filter((scenario) => scenario.status === 'failed'), [])
+  })
+
+  test('a skip the inventory does not allow keeps a passing engine red and shows its reason', async () => {
+    // Only a scenario the inventory names may count a skip; the guest-link
+    // matrix is one (system-smoke covers that case).
+    assert(scenariosForProfile(PROFILE).every((scenario) => !scenario.mayBeSkipped))
+    const [skipped, ...rest] = IDS
+    const report = await runChild([
+      { id: skipped!, reason: 'Guest links need HTTPS.', status: 'skipped' },
+      ...rest.map((id) => ({ id, status: 'passed' })),
+    ], 0, 'inqv-handover-skip-01')
+    const reported = reportedFor(report)
+    assert.equal(report.adapters[0]?.status, 'failed')
+    assert.equal(reported.get(skipped!)?.status, 'skipped')
+    assert.equal(reported.get(skipped!)?.reason, 'Guest links need HTTPS.')
+    assert.equal(report.schemaVersion, 6)
+    // The engine exited 0: the report and the summary name the cause.
+    assert.equal(
+      report.adapters[0]?.scenarioGap,
+      `${skipped} skipped, which it may not be: Guest links need HTTPS.`,
+    )
+    const lines: string[] = []
+    printSummary(report, false, { write: (text: string) => { lines.push(text); return true } })
+    assert.match(lines.join(''), new RegExp(`agent-desk-live: red although it exited 0 \\(${skipped} skipped, which it may not be`))
+  })
+
+  test('a skip without its reason makes the result file unreadable and the engine red', async () => {
+    const [skipped, ...rest] = IDS
+    const report = await runChild([
+      { id: skipped!, status: 'skipped' },
+      ...rest.map((id) => ({ id, status: 'passed' })),
+    ], 0, 'inqv-handover-skip-02')
+    assert.equal(report.adapters[0]?.status, 'failed')
+    assert([...reportedFor(report).values()].every((scenario) => scenario.status === 'not_run'))
+    // A discarded result file keeps every scenario at not_run; the engine
+    // names the cause.
+    assert.equal(report.adapters[0]?.scenarioResultsProblem, `${skipped} is skipped without a reason`)
+  })
+
+  test('a result file naming a scenario of another engine is discarded with that reason', async () => {
+    const report = await runChild([
+      ...IDS.map((id) => ({ id, status: 'passed' })),
+      { id: 'system.guest-link-matrix', status: 'passed' },
+    ], 0, 'inqv-handover-foreign-01')
+    assert.equal(report.adapters[0]?.status, 'failed')
+    assert.equal(
+      report.adapters[0]?.scenarioResultsProblem,
+      'system.guest-link-matrix is no scenario of this engine in this profile',
+    )
+  })
+
+  test('the summary lists stated skips and names a discarded result file at its engine', async () => {
+    const [skipped, ...rest] = IDS
+    const discarded = await runChild([
+      { id: skipped!, status: 'skipped' },
+      ...rest.map((id) => ({ id, status: 'passed' })),
+    ], 0, 'inqv-handover-summary-01')
+    const lines: string[] = []
+    printSummary(discarded, false, { write: (text: string) => { lines.push(text); return true } })
+    const summary = lines.join('')
+    assert.match(summary, new RegExp(`agent-desk-live: result file discarded \\(${skipped} is skipped without a reason\\)`))
+    const stated = await runChild([
+      { id: skipped!, reason: 'Guest links need HTTPS.', status: 'skipped' },
+      ...rest.map((id) => ({ id, status: 'passed' })),
+    ], 0, 'inqv-handover-summary-02')
+    lines.length = 0
+    printSummary(stated, false, { write: (text: string) => { lines.push(text); return true } })
+    assert.match(lines.join(''), new RegExp(`skipped scenarios: 1\\n    ${skipped}: Guest links need HTTPS\\.`))
+  })
+
+  test('an engine that passes with an unmeasured scenario stays red', async () => {
+    const [unmeasured, ...rest] = IDS
+    const report = await runChild([
+      { id: unmeasured!, status: 'not_run' },
+      ...rest.map((id) => ({ id, status: 'passed' })),
+    ], 0, 'inqv-handover-unmeasured-01')
+    assert.equal(report.adapters[0]?.status, 'failed')
+    assert.equal(reportedFor(report).get(unmeasured!)?.status, 'not_run')
   })
 })

@@ -37,6 +37,7 @@ import {
 } from '../fixtures/project-documents.mjs'
 import { assertVerificationRunId } from '../fixtures/run-scope.mjs'
 import { grantAndAccept } from '../fixtures/shares.mjs'
+import { httpsErrorsIgnored } from '../fixtures/https-errors.mjs'
 
 const runId = requiredEnvironment('INQTRIX_VERIFICATION_RUN_ID')
 const reportDirectory = requiredEnvironment('INQTRIX_VERIFICATION_REPORT_DIR')
@@ -50,10 +51,9 @@ const containerEngine = requiredContainerEngine(
   requiredEnvironment('INQTRIX_E2E_CONTAINER_ENGINE'),
 )
 const baseURL = normalizeSystemSmokeBaseURL(
-  process.env.INQTRIX_E2E_BASE_URL ?? 'http://127.0.0.1:8080',
+  process.env.INQTRIX_E2E_BASE_URL ?? 'http://localhost:8080',
 )
-const ignoreHTTPSErrors =
-  process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1'
+const ignoreHTTPSErrors = httpsErrorsIgnored()
 
 assertVerificationRunId(runId)
 

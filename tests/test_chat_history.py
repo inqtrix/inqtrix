@@ -22,7 +22,7 @@ from inqtrix.project.chat_ports import (
     ThreadGroupNotFound,
     ThreadNotFound,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.services.chat_history_service import (
     ChatHistoryService,
     ChatValidationError,

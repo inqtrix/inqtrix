@@ -1208,7 +1208,7 @@ def _status_values_sql(statuses: set[str]) -> str:
 
 def _v02_run_terminal_statuses_sql() -> str:
     """Return the run terminal statuses used by legacy terminalization."""
-    from inqtrix.server.runs import TERMINAL_RUN_STATUSES
+    from inqtrix.runs.records import TERMINAL_RUN_STATUSES
 
     return _status_values_sql(
         {status.value for status in TERMINAL_RUN_STATUSES}
@@ -1223,7 +1223,7 @@ def _v02_index_terminal_statuses_sql() -> str:
     has no corresponding run state. Keeping the predicates separate prevents
     upgrade maintenance from rewriting a valid terminal index job.
     """
-    from inqtrix.server.indexing import TERMINAL_INDEXING_STATUSES
+    from inqtrix.runs.indexing_records import TERMINAL_INDEXING_STATUSES
 
     return _status_values_sql(
         {status.value for status in TERMINAL_INDEXING_STATUSES}
@@ -1253,7 +1253,7 @@ def _v02_index_failure_payload(
     finished_at: float,
 ) -> dict[str, Any]:
     """Build the normal indexing failure payload from a locked legacy row."""
-    from inqtrix.server.indexing import (
+    from inqtrix.runs.indexing_records import (
         IndexingJobRecord,
         IndexingJobStatus,
         build_indexing_job_summary,

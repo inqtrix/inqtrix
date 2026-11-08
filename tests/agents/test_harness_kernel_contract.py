@@ -1,19 +1,19 @@
-"""deepagents contract tests for the kernel seam.
+"""Contract tests for the kernel seam on LangChain's agent loop.
 
-These tests ARE the deepagents upgrade gate: they freeze the exact
-behavior the kernel runtime depends on — built-in tool exclusion via the
-``inqtrix:kernel`` harness profile, the HITL interrupt payload and
-resume-decision shapes, and park/resume across a REBUILT agent (a parked
-run resumes in another worker process with a fresh compiled graph over
-the shared checkpointer). A deepagents bump that changes any of these
-must fail here before it can reach production.
+These tests ARE the upgrade gate of the agent framework: they freeze the
+exact behavior the kernel runtime depends on — a tool surface of Inqtrix
+tools and the planner only, the HITL interrupt payload and resume-decision
+shapes, and park/resume across a REBUILT agent (a parked run resumes in
+another worker process with a fresh compiled graph over the shared
+checkpointer). A framework bump that changes any of these must fail here
+before it can reach production.
 """
 
 from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("deepagents")
+pytest.importorskip("langchain")
 
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
@@ -27,18 +27,6 @@ from inqtrix.agents.kernel.middleware import (
     KernelToolBudgetMiddleware,
 )
 from inqtrix.providers.base import ChatTurn, LLMProvider, ToolCallRequest
-
-
-def test_deepagents_version_is_pinned_to_contracted_range():
-    import importlib.metadata
-
-    version = importlib.metadata.version("deepagents")
-    parts = tuple(int(p) for p in version.split(".")[:3])
-    assert (0, 7, 13) <= parts < (0, 8, 0), (
-        f"deepagents {version} is outside the contracted >=0.7.13,<0.8 "
-        "range — re-run these contract tests deliberately and update the "
-        "pin, never bump silently."
-    )
 
 
 class _ScriptedProvider(LLMProvider):
@@ -116,7 +104,7 @@ def test_supersteps_per_tool_turn_is_pinned():
     """Derives ``_SUPERSTEPS_PER_TOOL_TURN`` by measuring the compiled graph.
 
     The kernel prices its recursion ceilings in TOOL TURNS times this
-    constant, so the constant must track the real graph: a deepagents
+    constant, so the constant must track the real graph: a framework
     upgrade or a new kernel middleware that adds a node silently shrinks
     every published turn budget unless this measurement fails first. The
     probe finds the minimal ``recursion_limit`` that lets a run with N
@@ -202,6 +190,14 @@ def test_supersteps_per_tool_turn_is_pinned():
         f"but the clamp only buys {schnell_clamp} — the tier dies on an "
         "ordinary knowledge+web trajectory."
     )
+    # A named document costs more turns than a search: the todo list, one
+    # search, four windows of 20,000 characters, citing and the canvas came to
+    # seven tool turns in a measured run, and the answer has to fit after them.
+    document_task = answer_only + 7 * measured_per_turn
+    assert document_task <= schnell_clamp, (
+        f"a document task needs recursion_limit {document_task} but the clamp "
+        f"only buys {schnell_clamp}: it stops with the memo written and no answer."
+    )
     # ...which a literal clamp of 8 does not afford: 8 buys not even the
     # bare answer run.
     assert one_call > 8, (
@@ -209,6 +205,37 @@ def test_supersteps_per_tool_turn_is_pinned():
         "behind the schnell clamp has changed; re-derive the clamp instead "
         "of trusting it."
     )
+
+
+def test_the_schnell_tier_stays_bounded_at_twelve_model_calls():
+    from types import SimpleNamespace
+
+    from inqtrix.agents.kernel.algorithm import configured_kernel_limits
+
+    platform = SimpleNamespace(
+        kernel_max_tool_calls=30,
+        kernel_max_iterations=120,
+        kernel_max_tool_calls_extension_ceiling=60,
+        kernel_max_iterations_extension_ceiling=240,
+    )
+
+    tool_base, tool_ceiling, step_base, step_ceiling = configured_kernel_limits(
+        platform, depth="normal", tier="schnell"
+    )
+
+    # Eleven tool turns and the answer, at eight steps each. No extension.
+    assert (step_base, step_ceiling) == (96, 96)
+    assert (tool_base, tool_ceiling) == (30, 30)
+
+
+def test_a_caller_without_its_own_limit_gets_the_generous_default():
+    """A kernel run prices its own ceiling. Any other caller relies on the 9 999
+    steps ``create_agent`` sets; LangGraph's own 25 would stop it after three turns."""
+    agent = build_kernel_agent(
+        build_tool_chat_model(_ScriptedProvider([])), tools=[echo_tool], system_prompt="Test."
+    )
+
+    assert agent.config["recursion_limit"] == 9_999
 
 
 def test_kernel_toolset_is_inqtrix_tools_plus_todos_only():
@@ -222,11 +249,10 @@ def test_kernel_toolset_is_inqtrix_tools_plus_todos_only():
     agent.invoke(_user_input("Hallo"))
 
     exposed = {t["function"]["name"] for t in provider.calls[0]["tools"]}
-    # Filesystem built-ins excluded via the inqtrix:kernel profile, the
-    # general-purpose subagent (task tool) disabled, write_todos kept.
+    # The kernel's own tools and the planner, nothing a framework adds.
     assert exposed == {"echo_tool", "write_todos"}, (
-        f"kernel tool surface drifted: {sorted(exposed)} — a deepagents "
-        "upgrade added/renamed built-ins or profile resolution broke."
+        f"kernel tool surface drifted: {sorted(exposed)} — a framework "
+        "upgrade or a middleware added tools the kernel does not vet."
     )
 
 
@@ -262,18 +288,10 @@ def test_todos_survive_checkpoint_and_rebuilt_agent():
     assert len(provider.calls) == 2
 
 
-def test_excluded_filesystem_tool_cannot_execute(monkeypatch):
-    from deepagents.backends import StateBackend
-
-    executed = []
-
-    def record_read(*args, **kwargs):
-        executed.append((args, kwargs))
-        return "Unauthorized filesystem content"
-
-    monkeypatch.setattr(StateBackend, "read", record_read)
+def test_a_tool_the_kernel_does_not_offer_cannot_execute():
+    """A call to a filesystem tool, or any other unoffered name, ends as an error result."""
     provider = _ScriptedProvider([
-        _tool_call_turn("call_excluded", "read_file", {"file_path": "/secret"}),
+        _tool_call_turn("call_unoffered", "read_file", {"file_path": "/secret"}),
         _text_turn("Access refused."),
     ])
     agent = build_kernel_agent(
@@ -282,10 +300,10 @@ def test_excluded_filesystem_tool_cannot_execute(monkeypatch):
     state = agent.invoke(_user_input("Read the file."))
     replies = [m for m in state["messages"] if m.type == "tool"]
     assert len(replies) == 1
-    assert replies[0].tool_call_id == "call_excluded"
+    assert replies[0].tool_call_id == "call_unoffered"
     assert replies[0].status == "error"
-    assert replies[0].content == "Error: read_file is not available."
-    assert executed == []
+    assert "read_file is not a valid tool" in replies[0].content
+    assert "Unauthorized" not in replies[0].content
 
 
 def test_kernel_tool_budget_allows_30_and_rejects_31() -> None:
@@ -542,79 +560,20 @@ def test_resume_reject_skips_tool_and_continues():
     assert final.content == "Verstanden, ohne Tool beantwortet."
 
 
-def test_summarization_replacement_contract():
-    """Upgrade gate: the kernel REPLACES the base-stack summarization.
+def test_the_kernel_compacts_with_its_own_middleware_only():
+    """The base-stack summarization is gone; the kernel's own compaction stays.
 
-    Three pinned facts, each of which a deepagents upgrade could silently
-    break: (1) the kernel harness profile excludes the base summarization
-    CLASS (exact-type matching preserves subclasses); (2) the kernel's
-    subclass reports its own ``.name`` — the string alias
-    ``"SummarizationMiddleware"`` must NOT match it, or the profile would
-    strip our replacement too; (3) the subclass keeps the seams the
-    kernel overrides (a rename upstream must fail here, not in
-    production).
+    The base would leave its state channel in the graph.
     """
-    from deepagents.middleware.summarization import (
-        _DeepAgentsSummarizationMiddleware,
-    )
+    from inqtrix.agents.kernel.compaction import COMPACTION_STATE
 
-    from inqtrix.agents.harness import (
-        _kernel_summarization_middleware_cls,
-        _register_kernel_harness_profile,
-    )
-
-    _register_kernel_harness_profile()
-    from deepagents.profiles.harness.harness_profiles import (
-        _get_harness_profile,
-    )
-
-    from inqtrix.agents.kernel.chat_bridge import (
-        KERNEL_MODEL_IDENTIFIER,
-        KERNEL_MODEL_PROVIDER,
-    )
-
-    profile = _get_harness_profile(
-        f"{KERNEL_MODEL_PROVIDER}:{KERNEL_MODEL_IDENTIFIER}"
-    )
-    assert _DeepAgentsSummarizationMiddleware in profile.excluded_middleware
-
-    cls = _kernel_summarization_middleware_cls()
-    assert issubclass(cls, _DeepAgentsSummarizationMiddleware)
-    # The subclass must not inherit the public alias (string exclusions
-    # match `.name`): deepagents documents the fallback to __name__.
-    assert cls.__name__ == "KernelSummarizationMiddleware"
-    for seam in (
-        "_should_summarize",
-        "_offload_to_backend",
-        "_aoffload_to_backend",
-        "_build_new_messages_with_path",
-        "wrap_model_call",
-        "awrap_model_call",
-    ):
-        assert seam in vars(cls), f"overridden seam {seam} vanished"
-        assert hasattr(_DeepAgentsSummarizationMiddleware, seam), (
-            f"upstream seam {seam} renamed — the kernel override is dead"
-        )
-
-
-def test_compiled_graph_uses_one_kernel_summarization(monkeypatch):
-    from deepagents.middleware.summarization import (
-        _DeepAgentsSummarizationMiddleware,
-    )
-
-    entered = []
-    original = _DeepAgentsSummarizationMiddleware.wrap_model_call
-
-    def observe(middleware, request, handler):
-        entered.append(type(middleware).__name__)
-        return original(middleware, request, handler)
-
-    monkeypatch.setattr(_DeepAgentsSummarizationMiddleware, "wrap_model_call", observe)
     agent = build_kernel_agent(
         build_tool_chat_model(_ScriptedProvider([_text_turn("Done.")])),
         tools=[echo_tool],
         system_prompt="Test.",
         context_keep_messages=1,
     )
+
+    assert COMPACTION_STATE in agent.channels
+    assert "_summarization_event" not in agent.channels
     agent.invoke(_user_input("Answer."))
-    assert entered == ["KernelSummarizationMiddleware"]

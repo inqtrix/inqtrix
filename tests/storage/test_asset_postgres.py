@@ -22,7 +22,7 @@ from inqtrix.project.asset_records_ports import (
     AssetNotFound,
     GroupNotFound,
 )
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 from inqtrix.runs.deletion_operations import DeletionTargetKind
 from inqtrix.runs.deletion_postgres import PostgresDeletionOperationStore
 from inqtrix.runs.upload_operations import (
@@ -31,6 +31,7 @@ from inqtrix.runs.upload_operations import (
     UploadStage,
 )
 from inqtrix.runs.upload_postgres import PostgresUploadOperationStore
+from inqtrix.storage.asset_lifecycle import lock_group_lifecycle
 from inqtrix.storage.asset_records_orm import (
     asset_groups,
     asset_records,
@@ -102,7 +103,13 @@ async def store():
     async with factory() as session:
         async with session.begin():
             await _clear_asset_tables(session)
-    await asset_store.aclose()
+
+
+class _NoQueue:
+    """Registers without anyone to execute it."""
+
+    async def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
+        del operation_id, tenant_id
 
 
 async def _section(
@@ -379,13 +386,13 @@ async def test_upload_start_honours_the_asset_lifecycle_under_its_row_lock(
         worker_id=f"asset-upload-start-{suffix}",
     )
 
-    def start(target):
-        return uploads.start_or_resume(
+    async def start(target):
+        return await uploads.astart_or_resume(
             asset=target, proposed_file=proposed, binding=binding
         )
 
     try:
-        started = await asyncio.to_thread(start, asset)
+        started = await start(asset)
         assert started.record.asset_id == asset.id
         assert started.attempt == 1 and started.already_ready is False
 
@@ -398,7 +405,7 @@ async def test_upload_start_honours_the_asset_lifecycle_under_its_row_lock(
             deletion_error=None,
         )
         with pytest.raises(AssetDeletionInProgress):
-            await asyncio.to_thread(start, deleting)
+            await start(deleting)
 
         # The source authority still knows the asset, its row is gone: the
         # start must say so instead of preparing an upload for nothing.
@@ -410,9 +417,9 @@ async def test_upload_start_honours_the_asset_lifecycle_under_its_row_lock(
                 text("DELETE FROM asset_records WHERE id = :id"), {"id": orphan.id}
             )
         with pytest.raises(AssetNotFound):
-            await asyncio.to_thread(start, orphan)
+            await start(orphan)
     finally:
-        uploads.close()
+        await uploads.aclose()
 
 
 @pytest.mark.asyncio
@@ -585,6 +592,83 @@ async def test_section_cascade_and_group_orphan(store) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_registration_waiting_for_a_lock_lets_the_holder_finish_on_the_same_loop(
+    store,
+) -> None:
+    """The holder's transaction can only commit while the loop keeps running."""
+    await _section(store, "fsec_registration_wait")
+    group = await store.upsert_group(
+        id="fg_registration_wait",
+        section_id="fsec_registration_wait",
+        title="G",
+        created_at=1.0,
+        updated_at=1.0,
+        created_by_user_id=USER_ID,
+        workspace_id=None,
+    )
+    deletion_store = PostgresDeletionOperationStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=_NoQueue(),
+        max_concurrent=1,
+        completed_ttl_seconds=3600,
+        worker_id="asset-registration-wait-test",
+        recover_orphans=False,
+    )
+    holder_engine = build_engine(TEST_DATABASE_URL)
+    registration: asyncio.Task | None = None
+    operation_id: str | None = None
+    try:
+        async with build_session_factory(holder_engine)() as holder:
+            async with holder.begin():
+                await lock_group_lifecycle(
+                    holder,
+                    tenant_id="default",
+                    created_by_user_id=USER_ID,
+                    workspace_id=None,
+                    group_id=group.id,
+                )
+                registration = asyncio.create_task(
+                    deletion_store.asubmit(
+                        target_kind=DeletionTargetKind.GROUP,
+                        target_id=group.id,
+                        manifest=(),
+                        tenant_id="default",
+                        created_by_user_id=USER_ID,
+                        workspace_id=None,
+                        work=lambda handle: None,
+                        total_items=1,
+                    )
+                )
+                # It waits for the lock while the loop serves this transaction.
+                await asyncio.sleep(0.2)
+                assert not registration.done()
+        summary = await asyncio.wait_for(registration, timeout=10)
+        operation_id = str(summary["operation_id"])
+        assert summary["status"] == "queued"
+    finally:
+        if registration is not None and not registration.done():
+            registration.cancel()
+        await deletion_store.aclose()
+        await holder_engine.dispose()
+        if operation_id is not None:
+            cleanup_engine = build_engine(TEST_DATABASE_URL)
+            async with build_session_factory(cleanup_engine)() as session:
+                async with session.begin():
+                    await session.execute(
+                        deletion_operation_events.delete().where(
+                            deletion_operation_events.c.operation_id == operation_id
+                        )
+                    )
+                    await session.execute(
+                        deletion_operations.delete().where(
+                            deletion_operations.c.operation_id == operation_id
+                        )
+                    )
+            await cleanup_engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_group_receipt_fences_upload_and_commits_orphaning_atomically(
     store,
 ) -> None:
@@ -633,8 +717,7 @@ async def test_group_receipt_fences_upload_and_commits_orphaning_atomically(
         handle.complete()
 
     try:
-        summary = await asyncio.to_thread(
-            deletion_store.submit,
+        summary = await deletion_store.asubmit(
             target_kind=DeletionTargetKind.GROUP,
             target_id=group.id,
             manifest=(),
@@ -680,7 +763,7 @@ async def test_group_receipt_fences_upload_and_commits_orphaning_atomically(
         release_worker.set()
         deadline = time.monotonic() + 10
         while True:
-            receipt = deletion_store.get(
+            receipt = await deletion_store.aget(
                 operation_id,
                 tenant_id="default",
                 created_by_user_id=USER_ID,
@@ -704,7 +787,7 @@ async def test_group_receipt_fences_upload_and_commits_orphaning_atomically(
         assert orphaned.server_file_id is None
     finally:
         release_worker.set()
-        deletion_store.close()
+        await deletion_store.aclose()
         if operation_id is not None:
             cleanup_engine = build_engine(TEST_DATABASE_URL)
             cleanup_factory = build_session_factory(cleanup_engine)
@@ -889,10 +972,8 @@ async def _upload_ready_without_text(store, registry, uploads, asset, *, file_id
         parser_id=None,
         created_at=1.0,
     )
-    started = await asyncio.to_thread(
-        lambda: uploads.start_or_resume(
-            asset=asset, proposed_file=file_record, binding=binding
-        )
+    started = await uploads.astart_or_resume(
+        asset=asset, proposed_file=file_record, binding=binding
     )
     operation_id = started.record.operation_id
     await registry.create(file_record)
@@ -911,14 +992,10 @@ async def _upload_ready_without_text(store, registry, uploads, asset, *, file_id
         UploadStage.ASSET_BOUND,
         UploadStage.QUOTA_BOOKED,
     ):
-        assert await asyncio.to_thread(
-            lambda stage=stage: uploads.checkpoint(
-                operation_id, stage=stage, fence_attempt=started.attempt
-            )
+        assert await uploads.acheckpoint(
+            operation_id, stage=stage, fence_attempt=started.attempt
         )
-    assert await asyncio.to_thread(
-        lambda: uploads.complete(operation_id, fence_attempt=started.attempt)
-    )
+    assert await uploads.acomplete(operation_id, fence_attempt=started.attempt)
     return operation_id, file_record
 
 
@@ -982,12 +1059,8 @@ async def test_only_a_skipped_preparation_is_queued_for_parsing(store) -> None:
         )
 
         skipped_op, _ = operations["skipped"]
-        queued = await asyncio.to_thread(
-            lambda: uploads.queue_missing_preparations(limit=10)
-        )
-        record = await asyncio.to_thread(
-            lambda: uploads.get_record(skipped_op, tenant_id="default")
-        )
+        queued = await uploads.aqueue_missing_preparations(limit=10)
+        record = await uploads.aget_record(skipped_op, tenant_id="default")
         skipped = await store.get_asset(assets["skipped"].id)
         async with store._session() as session:
             due_at = (
@@ -999,11 +1072,9 @@ async def test_only_a_skipped_preparation_is_queued_for_parsing(store) -> None:
                     {"id": skipped_op},
                 )
             ).scalar_one()
-        again = await asyncio.to_thread(
-            lambda: uploads.queue_missing_preparations(limit=10)
-        )
+        again = await uploads.aqueue_missing_preparations(limit=10)
     finally:
-        uploads.close()
+        await uploads.aclose()
         await registry_engine.dispose()
 
     assert queued == [(skipped_op, "default")]
@@ -1062,7 +1133,7 @@ async def test_a_parse_failure_is_recorded_with_every_preparation_field_null(
                 )
             ).scalar_one()
     finally:
-        uploads.close()
+        await uploads.aclose()
         await registry_engine.dispose()
 
     assert failed.parse_status == "error"

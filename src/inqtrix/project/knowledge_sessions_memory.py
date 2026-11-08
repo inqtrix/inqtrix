@@ -17,7 +17,7 @@ from inqtrix.project.knowledge_sessions_ports import (
     KnowledgeSessionGroupNotFound,
     KnowledgeSessionNotFound,
 )
-from inqtrix.project.scoped_upsert import ResourceScope, require_memory_scope
+from inqtrix.storage.scoped_upsert import ResourceScope, require_memory_scope
 
 
 class MemoryKnowledgeSessionStore:
@@ -206,9 +206,6 @@ class MemoryKnowledgeSessionStore:
         for session_id, session in list(self._sessions.items()):
             if session.group_id == group_id:
                 self._sessions[session_id] = replace(session, group_id=None)
-
-    async def aclose(self) -> None:
-        return None
 
 
 def _scoped(

@@ -11,6 +11,7 @@ import {
 import type { CleanupHandle, CleanupLedger } from '../cleanup-ledger.ts'
 import type { CleanupDisposition } from '../model.ts'
 import type { RunContext } from '../run-context.ts'
+import { attemptCleanup, ignoreMissing } from './cleanup-step.mjs'
 import {
   agentSessionBelongsToRun,
   documentBelongsToRun,
@@ -22,6 +23,7 @@ import {
 import { resolveFaultControlContainers } from './fault-control-server.mjs'
 import { cleanupVerificationNetworkShape } from './network-shaping.mjs'
 import { requestFailureKind } from './request-failure.mjs'
+import { httpsErrorsIgnored } from './https-errors.mjs'
 
 const PROTOCOL = 'inqtrix-verification-resource-v1'
 const DELETION_TERMINAL_TIMEOUT_MS = 10_000
@@ -489,7 +491,7 @@ async function cleanupStoredSession(
   try {
     api = await request.newContext({
       baseURL: baseURL(context),
-      ignoreHTTPSErrors: context.environment.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1',
+      ignoreHTTPSErrors: httpsErrorsIgnored(context.environment),
       storageState: path,
     })
     const session = await api.get('/api/auth/session')
@@ -513,7 +515,7 @@ async function cleanupStoredSession(
     }
   } finally {
     await api?.dispose()
-    await unlink(path).catch(() => undefined)
+    await unlink(path).catch(ignoreMissing)
   }
 }
 
@@ -525,7 +527,7 @@ async function withCleanupActor(
 ): Promise<void> {
   const api = await request.newContext({
     baseURL: baseURL(context),
-    ignoreHTTPSErrors: context.environment.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1',
+    ignoreHTTPSErrors: httpsErrorsIgnored(context.environment),
   })
   let csrf = ''
   try {
@@ -565,9 +567,9 @@ async function withCleanupActor(
     })
   } finally {
     if (csrf) {
-      await api.post('/api/auth/logout', {
+      await attemptCleanup('cleanup session logout', () => api.post('/api/auth/logout', {
         headers: { 'X-CSRF-Token': csrf },
-      }).catch(() => undefined)
+      }))
     }
     await api.dispose()
   }
@@ -605,6 +607,11 @@ export async function eraseTemporaryAccount(
       timeoutMs: ACCOUNT_ERASURE_TIMEOUT_MS,
       workspace: false,
     })
+  }
+  // Neither a 404 nor a finished operation proves that the account is gone.
+  const after = await actorFetchJson(actor, 'GET', '/v1/admin/users', [200])
+  if (after.users?.some((candidate: { email?: string }) => candidate.email === email)) {
+    throw new Error('Temporary account is still listed after its erasure.')
   }
 }
 
@@ -874,7 +881,7 @@ function resourceLabel(resource: ProductResource): string {
 
 function baseURL(context: RunContext): string {
   const value = context.environment.INQTRIX_E2E_BASE_URL
-    ?? 'http://127.0.0.1:8080'
+    ?? 'http://localhost:8080'
   const parsed = new URL(value)
   if (
     !['http:', 'https:'].includes(parsed.protocol)

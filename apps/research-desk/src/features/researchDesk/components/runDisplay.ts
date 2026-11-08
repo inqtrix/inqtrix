@@ -17,7 +17,6 @@ import type { JobPhase, JobStatus } from '../types'
 export const statusIcon = {
   cancelled: XCircle,
   completed: CheckCircle2,
-  expired: Clock3,
   failed: OctagonAlert,
   queued: Clock3,
   running: LoaderCircle,
@@ -31,7 +30,6 @@ export const statusIcon = {
 export const statusBadgeClassName = {
   cancelled: 'border-destructive/20 bg-destructive/10 text-destructive/85 hover:bg-destructive/10',
   completed: 'border-success/20 bg-success-subtle text-success hover:bg-success-subtle',
-  expired: 'border-muted-foreground/20 bg-muted text-muted-foreground hover:bg-muted',
   failed: 'border-destructive/25 bg-destructive/10 text-destructive hover:bg-destructive/10',
   queued: 'border-border bg-muted text-muted-foreground hover:bg-muted',
   running: 'border-brand/20 bg-brand-subtle text-brand hover:bg-brand-subtle',
@@ -41,6 +39,10 @@ export const statusBadgeClassName = {
     'border-warning/25 bg-warning-subtle text-warning hover:bg-warning-subtle',
   waiting_for_children: 'border-brand/20 bg-brand-subtle text-brand hover:bg-brand-subtle',
 } satisfies Record<JobStatus, string>
+
+/** A run this client can no longer open: no status of its own, so it never ticks. */
+export const unavailableIcon = Clock3
+export const unavailableBadgeClassName = 'border-muted-foreground/20 bg-muted text-muted-foreground hover:bg-muted'
 
 export const phaseIcon = {
   analysis: CheckCircle2,

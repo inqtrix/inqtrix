@@ -22,6 +22,10 @@ Liveness/correctness model (sized by the 2026-06 research pass):
 * Graceful shutdown stops claiming and drains in-flight jobs without
   cancelling them; on drain timeout the process exits and the
   heartbeat silence hands the jobs to another worker.
+* Claim, heartbeat and cancel poll are tasks on the one process loop, so
+  ``_active`` needs no lock: only the loop thread touches it, and it
+  changes hands only at an ``await``. Job bodies stay synchronous on the
+  transition lane until their engines are async.
 
 The claim/heartbeat/reclaim/reconcile/cancel machinery is generic over
 the job kind and lives in :class:`BaseWorkerLoop`; the run worker and
@@ -34,15 +38,19 @@ Visibility takes precedence over cleverness.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Awaitable
 from contextlib import ExitStack
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
+from inqtrix import aio
+from inqtrix.harness.contracts.binding import RunBindingNewer, WorkflowUnavailable
 from inqtrix.storage.migration_contract import SchemaHeadMismatch
 from inqtrix.auth.log_redaction import stable_pseudonym
 from inqtrix.auth.principal import Principal
@@ -51,12 +59,12 @@ from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.execution_failures import terminate_native_run
 from inqtrix.observability.context import (
     bind_log_context,
-    reset_log_context,
 )
 from inqtrix.observability.otel import run_execute_span
 from inqtrix.quota.models import QuotaSubject
-from inqtrix.server.runs import RunHandle
+from inqtrix.runs.records import RunHandle
 from inqtrix.services.run_service import execute_run_request
+from inqtrix.harness.contracts.events import ACTIVITY_EVENT
 
 if TYPE_CHECKING:
     from inqtrix.core.algorithms import AlgorithmRegistry
@@ -78,6 +86,13 @@ _RECONCILE_MIN_AGE_SECONDS = 120.0
 _RECONCILE_COOLDOWN_SECONDS = 600.0
 _CLAIM_BLOCK_MS = 5_000
 _ERROR_BACKOFF_SECONDS = 5.0
+# How often a loop whose run claims stopped looks again whether it should end.
+_CLAIMS_STOPPED_IDLE_SECONDS = 5.0
+# A run that stopped a loop's claims holds them while it still waits for a
+# worker: queued, or running under an owner this process cannot replace.
+# Releasing on ``running`` would take an orphaned run over again after every
+# idle period and spend its deliveries.
+_CLAIMS_BLOCKING_STATUSES = frozenset({"queued", "running"})
 
 TJob = TypeVar("TJob")
 TClaimed = TypeVar("TClaimed")
@@ -106,7 +121,8 @@ class _ActiveJob:
 
     job: Any
     cancel_event: threading.Event
-    future: Future | None = None
+    segment: asyncio.Task[None] | None = None
+    """Keeps the slot until the segment's thread has ended."""
     successor: Any | None = None
     """One queued follow-up dispatch held while a parked segment unwinds."""
     handoff_in_progress: bool = False
@@ -133,7 +149,6 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             stopped heartbeating.
         answer_publisher: The same durable Agent Desk answer publisher used by
             in-process RunService execution.
-        thread_prefix: Executor thread name prefix (for log clarity).
     """
 
     # inqtrix_run_queue_wait_seconds is a RUN metric; only the runs loop
@@ -150,8 +165,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         max_attempts: int,
         heartbeat_seconds: float,
         claim_idle_seconds: float,
-        claim_guard: Callable[[], None] | None = None,
-        thread_prefix: str = "inqtrix-job",
+        claim_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._store = store
         self._queue = queue
@@ -160,16 +174,18 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         self._heartbeat_seconds = heartbeat_seconds
         self._claim_idle_seconds = claim_idle_seconds
         self._claim_guard = claim_guard
-        self._executor = ThreadPoolExecutor(
-            max_workers=concurrency, thread_name_prefix=thread_prefix
-        )
         self._active: dict[str, _ActiveJob] = {}
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._terminated = threading.Event()
+        self._stop = asyncio.Event()
+        self._terminated = asyncio.Event()
+        self._watchers: list[asyncio.Task[None]] = []
         self._reenqueued: dict[str, float] = {}
         self._last_reclaim = 0.0
         self._last_reconcile = 0.0
+        # Runs this process must not execute, by id with their tenant: while
+        # one of them still waits for a worker, no further claims (see
+        # _stop_claiming_for_binding and _release_ended_blocks); the active
+        # entries finish.
+        self._claims_blocked_by: dict[str, str] = {}
 
     # -- subclass hooks --------------------------------------------------- #
 
@@ -179,23 +195,31 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
 
     def _execute(
         self, job: TJob, claimed: TClaimed, cancel_event: threading.Event
-    ) -> None:
-        """Run the claimed job to a terminal state and ack on landing."""
+    ) -> bool:
+        """Run the claimed job to a terminal state and ack on landing.
+
+        Runs on a thread of the transition lane. Returns whether the stream
+        entry was acknowledged, which is what lets a held successor start.
+        """
         raise NotImplementedError
 
-    def _stale_dispatch(self) -> list[tuple[str, str]]:
+    async def _stale_dispatch(self) -> list[tuple[str, str]]:
         """``(entity_id, tenant_id)`` rows stuck queued (reconcile feed)."""
         raise NotImplementedError
 
-    def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
+    async def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
         """Subset of watched ``{entity_id: tenant_id}`` with a pending cancel."""
         raise NotImplementedError
 
-    def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
+    async def _dispatch_status(self, entity_id: str, tenant_id: str) -> str | None:
+        """Authoritative row status of *entity_id*; ``None`` when the row is gone."""
+        raise NotImplementedError
+
+    async def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
         """Re-enqueue one dispatch message (reconciler)."""
         raise NotImplementedError
 
-    def _is_successor_dispatch(self, job: TJob) -> bool:
+    async def _is_successor_dispatch(self, job: TJob) -> bool:
         """Whether *job* is a real queued successor of an active segment.
 
         Durable reindex jobs never park and therefore keep the historical
@@ -206,7 +230,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         del job
         return False
 
-    def _periodic_maintenance(self) -> None:
+    async def _periodic_maintenance(self) -> None:
         """Run subsystem maintenance on the existing reconcile cadence."""
 
 
@@ -222,7 +246,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         )
         self._stop.set()
 
-    def drain(self, timeout: float) -> bool:
+    async def drain(self, timeout: float) -> bool:
         """Wait up to *timeout* seconds for in-flight jobs to finish.
 
         Returns:
@@ -232,13 +256,11 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            with self._lock:
-                if not self._active:
-                    self._terminated.set()
-                    return True
-            time.sleep(0.5)
-        with self._lock:
-            remaining = list(self._active)
+            if not self._active:
+                self._terminated.set()
+                return True
+            await asyncio.sleep(0.5)
+        remaining = list(self._active)
         if remaining:
             log.warning(
                 "Worker %s: drain timed out; %d jobs will be reclaimed by another "
@@ -250,55 +272,42 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         self._terminated.set()
         return not remaining
 
-    def run_forever(self) -> None:
+    async def run_forever(self) -> None:
         """Main loop; returns after :meth:`request_stop`."""
-        self._queue.ensure_group()
-        if not self._wait_for_claim_contract(immediate=True):
+        await self._queue.ensure_group()
+        if not await self._wait_for_claim_contract(immediate=True):
             return
         # Own-PEL drain only finds entries when the consumer name is
         # stable across restarts (container hostname without the pid);
         # with the default boot-unique name, crash recovery runs via
         # the idle-based reclaim instead — this call is then a no-op.
-        for job in self._queue.claim_pending():
+        for job in await self._queue.claim_pending():
             while not self._stop.is_set():
                 try:
-                    self._start(job, takeover=True)
+                    await self._start(job, takeover=True)
                 except WorkerClaimUnavailableError as exc:
-                    self._stop.wait(exc.retry_after_seconds)
+                    await aio.wait_for_event(self._stop, exc.retry_after_seconds)
                     continue
+                except SchemaHeadMismatch as exc:
+                    raise self._claim_fence_hit(exc) from exc
+                except (RunBindingNewer, WorkflowUnavailable) as exc:
+                    self._stop_claiming_for_binding(exc, job=job)
                 break
 
-        heartbeat = threading.Thread(
-            target=self._heartbeat_loop, name="inqtrix-heartbeat", daemon=True
-        )
-        cancel_poll = threading.Thread(
-            target=self._cancel_loop, name="inqtrix-cancel-poll", daemon=True
-        )
-        heartbeat.start()
-        cancel_poll.start()
+        self._watchers = [
+            asyncio.create_task(self._heartbeat_loop(), name="inqtrix-heartbeat"),
+            asyncio.create_task(self._cancel_loop(), name="inqtrix-cancel-poll"),
+        ]
 
         while not self._stop.is_set():
             try:
-                self._tick()
+                await self._tick()
             except WorkerClaimUnavailableError as exc:
-                self._stop.wait(exc.retry_after_seconds)
+                await aio.wait_for_event(self._stop, exc.retry_after_seconds)
             except WorkerClaimGuardError:
                 raise
             except SchemaHeadMismatch as exc:
-                # The in-transaction fence fired: the claim rolled back and
-                # the queue entry stays unacked for an upgraded worker.
-                # Latch the shared guard so every loop of this process
-                # stops claiming immediately -- detection in one domain is
-                # a verdict about the process, not about the job.
-                self._latch_claim_guard(str(exc))
-                log.error(
-                    "Worker %s: schema head changed under this process; no further "
-                    "claims (installed=%s, expected=%s).",
-                    self._store.worker_id,
-                    exc.installed,
-                    exc.expected,
-                )
-                raise WorkerClaimGuardError(str(exc)) from exc
+                raise self._claim_fence_hit(exc) from exc
             except Exception:  # noqa: BLE001 — survive transient outages
                 log.warning(
                     "Worker %s: transient error in the claim loop; retrying in %.0fs.",
@@ -306,36 +315,37 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                     _ERROR_BACKOFF_SECONDS,
                     exc_info=True,
                 )
-                self._stop.wait(_ERROR_BACKOFF_SECONDS)
+                await aio.wait_for_event(self._stop, _ERROR_BACKOFF_SECONDS)
 
-    def _wait_for_claim_contract(self, *, immediate: bool) -> bool:
+    async def _wait_for_claim_contract(self, *, immediate: bool) -> bool:
         """Wait in-process for transient availability; reject fatal drift."""
         while not self._stop.is_set():
             try:
-                self._verify_claim_contract(immediate=immediate)
+                await self._verify_claim_contract(immediate=immediate)
             except WorkerClaimUnavailableError as exc:
-                self._stop.wait(exc.retry_after_seconds)
+                await aio.wait_for_event(self._stop, exc.retry_after_seconds)
                 continue
             return True
         return False
 
-    def _tick(self) -> None:
+    async def _tick(self) -> None:
         """One claim-loop iteration (reclaim, reconcile, claim new)."""
-        self._verify_claim_contract()
+        await self._verify_claim_contract()
+        if self._claims_blocked_by:
+            await self._release_ended_blocks()
         now = time.monotonic()
-        with self._lock:
-            has_capacity = len(self._active) < self._concurrency
+        free_slots = self._concurrency - len(self._active)
         if (
-            now - self._last_reclaim >= self._heartbeat_seconds
-            and has_capacity
+            not self._claims_blocked_by
+            and now - self._last_reclaim >= self._heartbeat_seconds
+            and free_slots > 0
         ):
-            # Reclaim only with free capacity: an over-claimed job
-            # would sit "running" in the database while parked in this
-            # worker's queue, invisible to other reclaimers.
+            # Reclaim only what fits: the slot counter is the one limit of a
+            # loop, and its lane is shared with the other loops of the process.
             self._last_reclaim = now
-            for job in self._queue.reclaim(
+            for job in await self._queue.reclaim(
                 min_idle_ms=int(self._claim_idle_seconds * 1000),
-                count=1,
+                count=free_slots,
             ):
                 log.warning(
                     "Worker %s is taking over job %s after owner heartbeat silence "
@@ -344,14 +354,16 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                     self._entity_id(job),
                     job.delivery_count,
                 )
-                self._start(job, takeover=True)
+                await self._start_claimed(job, takeover=True)
         if now - self._last_reconcile >= _RECONCILE_SECONDS:
             self._last_reconcile = now
-            self._reconcile()
-        with self._lock:
-            free_slots = self._concurrency - len(self._active)
+            await self._reconcile()
+        if self._claims_blocked_by:
+            await aio.wait_for_event(self._stop, _CLAIMS_STOPPED_IDLE_SECONDS)
+            return
+        free_slots = self._concurrency - len(self._active)
         if free_slots < 1:
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
             return
         # Claim as many as this worker can actually run, not one per tick.
         # Every claim costs a queue round trip plus a durable claim write, so
@@ -360,10 +372,39 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         # number while the work sits queued. The count is bounded by free
         # capacity, so a worker still never holds an entry it cannot start,
         # and other workers keep whatever they have room for.
-        for job in self._queue.claim_new(
+        for job in await self._queue.claim_new(
             block_ms=_CLAIM_BLOCK_MS, count=free_slots
         ):
-            self._start(job, takeover=job.delivery_count > 1)
+            await self._start_claimed(job, takeover=job.delivery_count > 1)
+
+    async def _start_claimed(self, job: TJob, *, takeover: bool) -> None:
+        """Start one entry the stream handed out; a run beyond this process stops the claims.
+
+        The other entries of the same batch still start: each one's claim
+        checks its own binding.
+        """
+        try:
+            await self._start(job, takeover=takeover)
+        except (RunBindingNewer, WorkflowUnavailable) as exc:
+            self._stop_claiming_for_binding(exc, job=job)
+
+    def _claim_fence_hit(self, exc: SchemaHeadMismatch) -> WorkerClaimGuardError:
+        """Latch the shared guard for a schema fence hit; the caller raises the result.
+
+        The claim rolled back and the queue entry stays unacked for a worker
+        that matches it. A schema that changed under the process is a verdict
+        about the process, not about the job, so every loop of this process
+        stops.
+        """
+        self._latch_claim_guard(str(exc))
+        log.error(
+            "Worker %s: schema head changed under this process; no further "
+            "claims (installed=%s, expected=%s).",
+            self._store.worker_id,
+            exc.installed,
+            exc.expected,
+        )
+        return WorkerClaimGuardError(str(exc))
 
     def _latch_claim_guard(self, message: str) -> None:
         """Stick the shared guard shut after an in-transaction fence hit."""
@@ -372,7 +413,91 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         if callable(latch):
             latch(message)
 
-    def _verify_claim_contract(self, *, immediate: bool = False) -> None:
+    async def _aclaim(
+        self, entity_id: str, tenant_id: str, *, allow_takeover: bool
+    ) -> TClaimed | None:
+        """Claim one entity through the store; a domain adds what its claim checks."""
+        return await self._store.aclaim_for_execution(
+            entity_id, tenant_id, allow_takeover=allow_takeover
+        )
+
+    def _stop_claiming_for_binding(
+        self,
+        exc: RunBindingNewer | WorkflowUnavailable,
+        *,
+        job: TJob,
+        follow_up: str | None = None,
+    ) -> None:
+        """Stop this loop's claims while a run this process must not execute waits.
+
+        The verdict is about the run's mode or contract, not about the
+        process: only the run claims stop, while indexing, deletions and
+        uploads go on and the shared guard stays open. Another worker has to
+        take the entry, which stays unacknowledged; the active entries of
+        this loop finish. The stop lasts until the run no longer waits for a
+        worker (:meth:`_release_ended_blocks`).
+        """
+        self._claims_blocked_by[self._entity_id(job)] = job.tenant_id
+        held = (
+            f"; the follow-up dispatch for job {follow_up} remains unacknowledged"
+            if follow_up is not None
+            else ""
+        )
+        if isinstance(exc, RunBindingNewer):
+            log.error(
+                "Worker %s: run %s is bound to %s contract %d, newer than the %d "
+                "this process carries; this worker claims no further runs until "
+                "that run is cancelled, ends or parks, its other jobs go on%s.",
+                self._store.worker_id,
+                exc.run_id,
+                exc.mode,
+                exc.bound_contract,
+                exc.worker_contract,
+                held,
+            )
+            return
+        log.warning(
+            "Worker %s: run %s belongs to mode %s, which this process has not "
+            "registered (registered: %s); this worker claims no further runs until "
+            "that run is cancelled, ends or parks, its other jobs go on, and the run "
+            "and its checkpoint stay%s.",
+            self._store.worker_id,
+            exc.run_id,
+            exc.mode,
+            ", ".join(exc.registered) or "none",
+            held,
+        )
+
+    async def _release_ended_blocks(self) -> None:
+        """Give the claims back once no blocking run waits for a worker any more.
+
+        A blocking run with a pending cancel releases them: the next claim
+        ends it in its cancel branch, which comes before the binding check. A
+        run that is gone, has ended or parks (``waiting_*``, outside the
+        stream) releases them as well. A queued run, or one running under an
+        owner this process cannot replace, keeps them. A failing read keeps
+        them too and surfaces through the claim loop's error handling.
+        """
+        cancelled = await self._cancel_requested(dict(self._claims_blocked_by))
+        for entity_id, tenant_id in list(self._claims_blocked_by.items()):
+            if entity_id in cancelled:
+                state = "cancel requested"
+            else:
+                status = await self._dispatch_status(entity_id, tenant_id)
+                if status in _CLAIMS_BLOCKING_STATUSES:
+                    continue
+                state = status or "gone"
+            del self._claims_blocked_by[entity_id]
+            log.info(
+                "Worker %s: run %s no longer holds this worker's claims (%s).",
+                self._store.worker_id,
+                entity_id,
+                state,
+            )
+        if not self._claims_blocked_by:
+            log.info("Worker %s claims runs again.", self._store.worker_id)
+
+    async def _verify_claim_contract(self, *, immediate: bool = False) -> None:
         """Fail closed before pending, reclaim, reconcile, or new claims.
 
         The coalesced call surfaces an already-latched failure and re-probes
@@ -380,8 +505,8 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         in-transaction schema fence (``assert_schema_head``) inside every
         durable-claim transaction. ``immediate=True`` (an uncoalesced probe
         via ``verify_now``) remains only for the startup waits, where no
-        claim transaction exists yet to carry the fence. Plain callable
-        guards remain supported for tests and embedders.
+        claim transaction exists yet to carry the fence. A guard without
+        ``verify_now`` remains supported for tests and embedders.
         """
         guard = self._claim_guard
         if guard is None:
@@ -389,11 +514,11 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         if immediate:
             verify_now = getattr(guard, "verify_now", None)
             if callable(verify_now):
-                verify_now()
+                await verify_now()
                 return
-        guard()
+        await guard()
 
-    def _reconcile(self) -> None:
+    async def _reconcile(self) -> None:
         """Re-enqueue queued rows whose dispatch message got lost.
 
         Re-enqueues each entity at most once per cooldown window: under
@@ -402,7 +527,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         duplicates are absorbed by ack-on-duplicate and the guarded
         claim, but flooding the stream helps nobody).
         """
-        stale = self._stale_dispatch()
+        stale = await self._stale_dispatch()
         now = time.monotonic()
         for entity_id, tenant_id in stale:
             last_sent = self._reenqueued.get(entity_id)
@@ -417,7 +542,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 "message.",
                 entity_id,
             )
-            self._enqueue_dispatch(entity_id, tenant_id)
+            await self._enqueue_dispatch(entity_id, tenant_id)
         if len(self._reenqueued) > 1_000:
             cutoff = now - _RECONCILE_COOLDOWN_SECONDS
             self._reenqueued = {
@@ -425,9 +550,9 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 for entity_id, sent in self._reenqueued.items()
                 if sent >= cutoff
             }
-        self._periodic_maintenance()
+        await self._periodic_maintenance()
 
-    def _dead_letter_exhausted(self, job: TJob, entity_id: str) -> None:
+    async def _dead_letter_exhausted(self, job: TJob, entity_id: str) -> None:
         """Terminalize and dead-letter a job past its delivery budget.
 
         The takeover claim supplies the fence for the terminal write:
@@ -444,19 +569,21 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         idle reclaim redelivers and retries this helper idempotently
         (about ``claim_idle_seconds`` later).
         """
-        claimed = self._store.claim_for_execution(
-            entity_id, job.tenant_id, allow_takeover=True
+        claimed = await self._aclaim(
+            entity_id,
+            job.tenant_id,
+            allow_takeover=True,
         )
         if claimed is not None:
-            self._store.fail(
+            await self._store.afail(
                 entity_id,
                 "Maximale Anzahl Ausfuehrungsversuche erreicht.",
                 error_type="max_retries_exceeded",
                 fence_attempt=claimed.attempt,
             )
-        self._queue.dead_letter(job, reason="max_attempts_exceeded")
+        await self._queue.dead_letter(job, reason="max_attempts_exceeded")
 
-    def _start(self, job: TJob, *, takeover: bool) -> None:
+    async def _start(self, job: TJob, *, takeover: bool) -> None:
         if self._stop.is_set():
             log.info(
                 "Worker %s: dispatch for job %s not claimed after the shutdown "
@@ -469,7 +596,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         # (assert_schema_head inside every _claim_db), so no forced probe is
         # needed here -- the coalesced check below only surfaces an
         # already-latched failure cheaply.
-        self._verify_claim_contract()
+        await self._verify_claim_contract()
         if self._stop.is_set():
             log.info(
                 "Worker %s: dispatch for job %s stopped during the claim check; the "
@@ -480,17 +607,16 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             return
         entity_id = self._entity_id(job)
         while True:
-            with self._lock:
-                active = self._active.get(entity_id)
-                active_message_id = active.job.message_id if active else None
-                successor_message_id = (
-                    active.successor.message_id
-                    if active is not None and active.successor is not None
-                    else None
-                )
-                handoff_in_progress = bool(
-                    active is not None and active.handoff_in_progress
-                )
+            active = self._active.get(entity_id)
+            active_message_id = active.job.message_id if active else None
+            successor_message_id = (
+                active.successor.message_id
+                if active is not None and active.successor is not None
+                else None
+            )
+            handoff_in_progress = bool(
+                active is not None and active.handoff_in_progress
+            )
             if active is None:
                 break
             if job.message_id in {
@@ -517,41 +643,40 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                     self._store.worker_id,
                     entity_id,
                 )
-                self._queue.ack(job.message_id)
+                await self._queue.ack(job.message_id)
                 return
             # A queued row while the previous segment is still active is not
             # a reconciler duplicate: it is the durable resume/child-wake
-            # successor. The status read deliberately happens outside the
-            # worker lock. If it fails, the exception propagates and the
-            # message remains unacked for redelivery — never degrade an
-            # uncertain successor into an ACK.
-            if not self._is_successor_dispatch(job):
+            # successor. The state above may change during this status read.
+            # If it fails, the exception propagates and the message remains
+            # unacked for redelivery — never degrade an uncertain successor
+            # into an ACK.
+            if not await self._is_successor_dispatch(job):
                 log.info(
                     "Worker %s: duplicate dispatch for active job %s acknowledged.",
                     self._store.worker_id,
                     entity_id,
                 )
-                self._queue.ack(job.message_id)
+                await self._queue.ack(job.message_id)
                 return
-            with self._lock:
-                current = self._active.get(entity_id)
-                if current is not active:
-                    # The old execution completed during the row-status read;
-                    # re-evaluate and claim normally instead of losing the
-                    # successor in that handoff window.
-                    continue
-                if current.successor is None and not current.handoff_in_progress:
-                    current.successor = job
-                    log.info(
-                        "Worker %s: follow-up dispatch for parked job %s held until the"
-                        " segment completes.",
-                        self._store.worker_id,
-                        entity_id,
-                    )
-                    return
-            # A successor won the lock between the two reads. Keep the first
-            # one and acknowledge this redundant message.
-            self._queue.ack(job.message_id)
+            current = self._active.get(entity_id)
+            if current is not active:
+                # The old execution completed during the row-status read;
+                # re-evaluate and claim normally instead of losing the
+                # successor in that handoff window.
+                continue
+            if current.successor is None and not current.handoff_in_progress:
+                current.successor = job
+                log.info(
+                    "Worker %s: follow-up dispatch for parked job %s held until the"
+                    " segment completes.",
+                    self._store.worker_id,
+                    entity_id,
+                )
+                return
+            # A successor arrived during the status read. Keep the first one
+            # and acknowledge this redundant message.
+            await self._queue.ack(job.message_id)
             return
         if self._stop.is_set():
             log.info(
@@ -562,10 +687,12 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             )
             return
         if job.delivery_count > self._max_attempts:
-            self._dead_letter_exhausted(job, entity_id)
+            await self._dead_letter_exhausted(job, entity_id)
             return
-        claimed = self._store.claim_for_execution(
-            entity_id, job.tenant_id, allow_takeover=takeover
+        claimed = await self._aclaim(
+            entity_id,
+            job.tenant_id,
+            allow_takeover=takeover,
         )
         if claimed is None:
             log.info(
@@ -574,29 +701,42 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 self._store.worker_id,
                 entity_id,
             )
-            self._queue.ack(job.message_id)
+            await self._queue.ack(job.message_id)
             return
         # Only first deliveries of run dispatches: a reclaimed message
         # keeps its ORIGINAL XADD timestamp, so redeliveries would fold
         # the previous attempt's runtime into "queue wait".
         if self._observes_queue_wait and job.delivery_count <= 1:
             _observe_queue_wait(job.message_id)
-        # Register BEFORE submitting: a fast job's finally-pop must
-        # find the entry, or it would linger in the active set forever.
-        cancel_event = threading.Event()
-        entry = _ActiveJob(job=job, cancel_event=cancel_event)
-        with self._lock:
-            self._active[entity_id] = entry
-        try:
-            entry.future = self._executor.submit(
-                self._execute, job, claimed, cancel_event
-            )
-        except BaseException:
-            with self._lock:
-                self._active.pop(entity_id, None)
-            raise
+        entry = _ActiveJob(job=job, cancel_event=threading.Event())
+        self._active[entity_id] = entry
+        self._start_segment(job, claimed, entry)
 
-    def _finish_active(self, job: TJob, *, allow_successor: bool) -> None:
+    def _start_segment(self, job: TJob, claimed: TClaimed, entry: _ActiveJob) -> None:
+        """Start one execution; its task holds the slot until the thread has ended."""
+        entry.segment = asyncio.create_task(
+            self._run_segment(job, claimed, entry.cancel_event),
+            name=f"inqtrix-segment-{self._entity_id(job)}",
+        )
+
+    async def _run_segment(
+        self, job: TJob, claimed: TClaimed, cancel_event: threading.Event
+    ) -> None:
+        acked = False
+        try:
+            acked = await aio.run_legacy_segment(
+                partial(self._execute, job, claimed, cancel_event)
+            )
+        except Exception:  # noqa: BLE001 - nothing else observes this task
+            log.exception(
+                "Worker %s: segment for job %s ended with an error; redelivery remains "
+                "responsible.",
+                self._store.worker_id,
+                self._entity_id(job),
+            )
+        await self._finish_active(job, allow_successor=acked)
+
+    async def _finish_active(self, job: TJob, *, allow_successor: bool) -> None:
         """Release one execution slot and hand off its held successor.
 
         A successor is activated only after the old stream entry was ACKed.
@@ -606,41 +746,41 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         never observe a false empty slot.
         """
         entity_id = self._entity_id(job)
-        placeholder: _ActiveJob | None = None
-        with self._lock:
-            active = self._active.get(entity_id)
-            if active is None or active.job.message_id != job.message_id:
-                return
-            successor = active.successor
-            if successor is None or not allow_successor:
-                self._active.pop(entity_id, None)
-                if successor is not None:
-                    log.warning(
-                        "Worker %s: follow-up dispatch for job %s remains "
-                        "unacknowledged because the old stream entry was not safely "
-                        "released; redelivery remains responsible.",
-                        self._store.worker_id,
-                        entity_id,
-                    )
-                return
-            placeholder = _ActiveJob(
-                job=successor,
-                cancel_event=threading.Event(),
-                handoff_in_progress=True,
-            )
-            self._active[entity_id] = placeholder
-        self._activate_successor(entity_id, placeholder)
+        active = self._active.get(entity_id)
+        if active is None or active.job.message_id != job.message_id:
+            return
+        successor = active.successor
+        if successor is None or not allow_successor:
+            self._active.pop(entity_id, None)
+            if successor is not None:
+                log.warning(
+                    "Worker %s: follow-up dispatch for job %s remains "
+                    "unacknowledged because the old stream entry was not safely "
+                    "released; redelivery remains responsible.",
+                    self._store.worker_id,
+                    entity_id,
+                )
+            return
+        placeholder = _ActiveJob(
+            job=successor,
+            cancel_event=threading.Event(),
+            handoff_in_progress=True,
+        )
+        self._active[entity_id] = placeholder
+        await self._activate_successor(entity_id, placeholder)
 
-    def _activate_successor(
+    def _drop_placeholder(self, entity_id: str, placeholder: _ActiveJob) -> None:
+        if self._active.get(entity_id) is placeholder:
+            self._active.pop(entity_id, None)
+
+    async def _activate_successor(
         self, entity_id: str, placeholder: _ActiveJob
     ) -> None:
-        """Claim and submit a pre-registered successor placeholder."""
+        """Claim and start a pre-registered successor placeholder."""
         job = placeholder.job
         try:
             if self._stop.is_set():
-                with self._lock:
-                    if self._active.get(entity_id) is placeholder:
-                        self._active.pop(entity_id, None)
+                self._drop_placeholder(entity_id, placeholder)
                 log.info(
                     "Worker %s: follow-up dispatch for job %s not claimed during "
                     "shutdown; redelivery remains responsible.",
@@ -651,11 +791,9 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             # Successor claims carry the same in-transaction fence as every
             # other durable claim; the coalesced check only surfaces an
             # already-latched failure before spending work.
-            self._verify_claim_contract()
+            await self._verify_claim_contract()
             if self._stop.is_set():
-                with self._lock:
-                    if self._active.get(entity_id) is placeholder:
-                        self._active.pop(entity_id, None)
+                self._drop_placeholder(entity_id, placeholder)
                 log.info(
                     "Worker %s: follow-up dispatch for job %s stopped during the claim "
                     "check; redelivery remains responsible.",
@@ -664,12 +802,10 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 )
                 return
             if job.delivery_count > self._max_attempts:
-                self._dead_letter_exhausted(job, entity_id)
-                with self._lock:
-                    if self._active.get(entity_id) is placeholder:
-                        self._active.pop(entity_id, None)
+                await self._dead_letter_exhausted(job, entity_id)
+                self._drop_placeholder(entity_id, placeholder)
                 return
-            claimed = self._store.claim_for_execution(
+            claimed = await self._aclaim(
                 entity_id,
                 job.tenant_id,
                 # A successor is a fresh queued segment. A crash during this
@@ -678,32 +814,19 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 allow_takeover=False,
             )
             if claimed is None:
-                self._queue.ack(job.message_id)
-                with self._lock:
-                    if self._active.get(entity_id) is placeholder:
-                        self._active.pop(entity_id, None)
+                await self._queue.ack(job.message_id)
+                self._drop_placeholder(entity_id, placeholder)
                 return
             # The row is RUNNING now. Open the placeholder for the NEXT
-            # generation before submitting: ThreadPoolExecutor may start a
-            # very fast segment before submit() returns, and that segment can
-            # park/enqueue its own successor immediately. Leaving the handoff
-            # flag set through submit would misclassify that legitimate next
-            # successor as an extra duplicate.
-            with self._lock:
-                if self._active.get(entity_id) is placeholder:
-                    placeholder.handoff_in_progress = False
-            future = self._executor.submit(
-                self._execute, job, claimed, placeholder.cancel_event
-            )
-            with self._lock:
-                if self._active.get(entity_id) is placeholder:
-                    placeholder.future = future
+            # generation: a handoff flag still set when the segment parks would
+            # misclassify its legitimate next successor as an extra duplicate.
+            if self._active.get(entity_id) is placeholder:
+                placeholder.handoff_in_progress = False
+            self._start_segment(job, claimed, placeholder)
         except SchemaHeadMismatch as exc:
-            with self._lock:
-                if self._active.get(entity_id) is placeholder:
-                    self._active.pop(entity_id, None)
+            self._drop_placeholder(entity_id, placeholder)
             # The in-transaction fence fired on the successor claim. This
-            # path runs on an executor-finally thread, so raising would be
+            # path runs at the end of a segment's task, so raising would be
             # unobserved -- latching the shared guard is what stops every
             # loop of this process, exactly as the _tick path does.
             self._latch_claim_guard(str(exc))
@@ -716,12 +839,14 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 exc.installed,
                 exc.expected,
             )
-        except BaseException:
-            with self._lock:
-                if self._active.get(entity_id) is placeholder:
-                    self._active.pop(entity_id, None)
+        except (RunBindingNewer, WorkflowUnavailable) as exc:
+            self._drop_placeholder(entity_id, placeholder)
+            # Raising here would go unobserved, as for the schema fence.
+            self._stop_claiming_for_binding(exc, job=job, follow_up=entity_id)
+        except Exception:
+            self._drop_placeholder(entity_id, placeholder)
             # The successor entry remains unacked. Surface the failure, but do
-            # not let an unobserved executor-finally exception disappear.
+            # not let an unobserved task's exception disappear.
             log.exception(
                 "Worker %s: follow-up dispatch for job %s could not be activated; "
                 "redelivery remains responsible.",
@@ -730,25 +855,23 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             )
 
     def _heartbeat_message_ids(self) -> list[str]:
-        """Snapshot active and held-successor stream ids under one lock."""
-        with self._lock:
-            message_ids: list[str] = []
-            for active in self._active.values():
-                message_ids.append(active.job.message_id)
-                if active.successor is not None:
-                    message_ids.append(active.successor.message_id)
-            return message_ids
+        """Active and held-successor stream ids."""
+        message_ids: list[str] = []
+        for active in self._active.values():
+            message_ids.append(active.job.message_id)
+            if active.successor is not None:
+                message_ids.append(active.successor.message_id)
+        return message_ids
 
-    def _heartbeat_loop(self) -> None:
+    async def _heartbeat_loop(self) -> None:
         # Gated on _terminated, NOT _stop: heartbeats must continue
         # through the drain window or every draining job would be
         # reclaimed and double-executed by another worker.
-        while not self._terminated.wait(self._heartbeat_seconds):
-            message_ids = self._heartbeat_message_ids()
-            if not message_ids:
-                continue
+        while not await aio.wait_for_event(self._terminated, self._heartbeat_seconds):
             try:
-                self._queue.heartbeat(message_ids)
+                message_ids = self._heartbeat_message_ids()
+                if message_ids:
+                    await self._queue.heartbeat(message_ids)
             except Exception:  # noqa: BLE001 — heartbeat loss must be visible
                 log.warning(
                     "Worker %s: heartbeat failed; active jobs may be reclaimed by other"
@@ -757,20 +880,19 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                     exc_info=True,
                 )
 
-    def _cancel_loop(self) -> None:
+    async def _cancel_loop(self) -> None:
         # Gated on _terminated like the heartbeat: users must still be
         # able to cancel jobs that are draining.
-        while not self._terminated.wait(_CANCEL_POLL_SECONDS):
-            with self._lock:
+        while not await aio.wait_for_event(self._terminated, _CANCEL_POLL_SECONDS):
+            try:
                 watched = {
                     self._entity_id(active.job): active.job.tenant_id
                     for active in self._active.values()
                     if not active.cancel_event.is_set()
                 }
-            if not watched:
-                continue
-            try:
-                cancelled = self._cancel_requested(watched)
+                if not watched:
+                    continue
+                cancelled = await self._cancel_requested(watched)
             except Exception:  # noqa: BLE001 — poller must not die silently
                 log.warning(
                     "Cancellation poller: database query failed.",
@@ -783,8 +905,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                     self._store.worker_id,
                     entity_id,
                 )
-                with self._lock:
-                    active = self._active.get(entity_id)
+                active = self._active.get(entity_id)
                 if active is not None:
                     active.cancel_event.set()
 
@@ -912,7 +1033,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
         quota_service: "QuotaService | None" = None,
         dependency_authorizer: "ExecutionDependencyAuthorizer | None" = None,
         answer_publisher: "AgentAnswerPublisher | None" = None,
-        claim_guard: Callable[[], None] | None = None,
+        claim_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(
             store=store,
@@ -922,7 +1043,6 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
             heartbeat_seconds=heartbeat_seconds,
             claim_idle_seconds=claim_idle_seconds,
             claim_guard=claim_guard,
-            thread_prefix="inqtrix-job",
         )
         self._resolver = resolver
         self._registry = registry
@@ -937,43 +1057,67 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
     def _entity_id(self, job: "QueuedJob") -> str:
         return job.run_id
 
-    def _stale_dispatch(self) -> list[tuple[str, str]]:
-        return self._store.stale_queued_runs(
-            older_than_seconds=_RECONCILE_MIN_AGE_SECONDS
+    async def _aclaim(
+        self, entity_id: str, tenant_id: str, *, allow_takeover: bool
+    ) -> "ClaimedRun | None":
+        # A run executes only under the contract it is bound to; the store
+        # compares that binding with what this process registered.
+        return await self._store.aclaim_for_execution(
+            entity_id,
+            tenant_id,
+            allow_takeover=allow_takeover,
+            workflow_contracts=self._registry.workflow_contracts(),
         )
 
-    def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
-        return self._store.cancel_requested_runs(watched)
+    async def _periodic_maintenance(self) -> None:
+        # Parked runs this process could no longer resume end at once, the
+        # first time at startup, instead of at their next claim.
+        ended = await self._store.aend_outdated_waits(
+            self._registry.workflow_contracts()
+        )
+        if ended:
+            log.info(
+                "Worker %s ended %d parked runs that their workflow binding no "
+                "longer lets resume.",
+                self._store.worker_id,
+                ended,
+            )
 
-    def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
-        self._queue.enqueue(run_id=entity_id, tenant_id=tenant_id)
+    async def _stale_dispatch(self) -> list[tuple[str, str]]:
+        return await self._store.astale_queued_runs(
+            older_than_seconds=_RECONCILE_MIN_AGE_SECONDS,
+        )
 
-    def _is_successor_dispatch(self, job: "QueuedJob") -> bool:
+    async def _cancel_requested(self, watched: dict[str, str]) -> set[str]:
+        return await self._store.acancel_requested_runs(watched)
+
+    async def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
+        await self._queue.enqueue(run_id=entity_id, tenant_id=tenant_id)
+
+    async def _dispatch_status(self, entity_id: str, tenant_id: str) -> str | None:
+        return await self._store.adispatch_status(entity_id, tenant_id)
+
+    async def _is_successor_dispatch(self, job: "QueuedJob") -> bool:
         """Recognize a queued resume/wake behind an unwinding segment."""
-        return (
-            self._store.dispatch_status(job.run_id, job.tenant_id)
-            == "queued"
-        )
+        return await self._dispatch_status(job.run_id, job.tenant_id) == "queued"
 
     def _execute(
         self,
         job: "QueuedJob",
         claimed: "ClaimedRun",
         cancel_event: threading.Event,
-    ) -> None:
+    ) -> bool:
         handle = FencedRunHandle(
             self._store, job.run_id, cancel_event, claimed.attempt
         )
         # Correlation for the WHOLE segment: every log line in this
         # thread carries run_id/tenant (JSON mode), and the execution
         # span parents itself in the submitter's trace via the
-        # traceparent persisted in request_payload. Worker threads are
-        # reused — both bindings are undone in the outer finally. The
-        # setup lives INSIDE the try so a telemetry failure can never
-        # skip _finish_active (which would leak the worker slot / stream
-        # message and silently wedge the dispatcher).
+        # traceparent persisted in request_payload. The segment runs in a
+        # copy of the context, so neither binding outlives it. The setup lives INSIDE the try so a telemetry failure reaches the
+        # log below instead of the segment's task, like every other
+        # failure of this body.
         telemetry_stack = ExitStack()
-        log_tokens: dict = {}
         old_message_acked = False
         try:
             telemetry_stack.enter_context(
@@ -984,9 +1128,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     payload=claimed.request_payload,
                 )
             )
-            log_tokens = bind_log_context(
-                run_id=job.run_id, tenant=job.tenant_id
-            )
+            bind_log_context(run_id=job.run_id, tenant=job.tenant_id)
             # Before the try: an exception during resolution still
             # reaches the segment observation below, which needs a
             # defined start time and run_request binding (setup time
@@ -1070,11 +1212,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                 if actor_user_id is not None:
                     # Same stable pseudonym as in API logs/audit — the
                     # subject stays greppable across both processes.
-                    log_tokens.update(
-                        bind_log_context(
-                            user=stable_pseudonym("usr", actor_user_id)
-                        )
-                    )
+                    bind_log_context(user=stable_pseudonym("usr", actor_user_id))
                 quota_subject = None
                 if (
                     self._quota_service is not None
@@ -1140,7 +1278,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                         job.run_id,
                     )
                     handle.emit(
-                        "inqtrix.agent.activity",
+                        ACTIVITY_EVENT,
                         {
                             "activity_id": (
                                 f"legacy-child-budget:{job.run_id}"
@@ -1202,7 +1340,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                 # Terminal state is committed (or the run is PARKED in a
                 # waiting status — its resume re-enqueues a fresh
                 # message); only now may the stream forget the job.
-                self._queue.ack(job.message_id)
+                aio.call_from_thread(self._queue.ack(job.message_id))
                 old_message_acked = True
                 _count_worker_job(
                     "runs",
@@ -1221,10 +1359,10 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     job.run_id,
                 )
                 _count_worker_job("runs", "fenced")
-        except Exception:  # noqa: BLE001 — Futures here are unobserved
-            # A failing terminal write or ack must surface in the log,
-            # not vanish inside a never-awaited Future; the message
-            # stays pending and redelivery retries the job.
+        except Exception:  # noqa: BLE001 - the one place that says what failed
+            # A failing terminal write or ack must surface in the log with
+            # this job's name; the message stays pending and redelivery
+            # retries the job.
             log.exception(
                 "Worker %s: terminal phase for run %s failed; redelivery remains "
                 "responsible.",
@@ -1233,23 +1371,8 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
             )
             _count_worker_job("runs", "finalization_failed")
         finally:
-            reset_log_context(log_tokens)
-            _clear_feature_after_segment()
             telemetry_stack.close()
-            self._finish_active(
-                job, allow_successor=old_message_acked
-            )
-
-
-def _clear_feature_after_segment() -> None:
-    """Reused threads must not leak feature label or ledger subject."""
-    from inqtrix.observability.context import (
-        clear_feature,
-        clear_usage_subject,
-    )
-
-    clear_feature()
-    clear_usage_subject()
+        return old_message_acked
 
 
 def _observe_queue_wait(message_id: str) -> None:

@@ -1,9 +1,11 @@
-"""Durable run backends behind the in-memory store's public surface.
+"""The run domain: records, the in-memory stores and the durable backends.
 
-The in-memory :class:`~inqtrix.server.runs.RunStore` remains the
+The in-memory :class:`~inqtrix.runs.memory_store.RunStore` remains the
 zero-infrastructure default. This package adds the opt-in durability
 ladder:
 
+* :mod:`inqtrix.runs.records` — statuses, records and handles every run
+  store and its callers share.
 * :mod:`inqtrix.runs.shared` — pure helpers (summary shape, event
   expansion) used by every backend so the wire format has exactly one
   source.

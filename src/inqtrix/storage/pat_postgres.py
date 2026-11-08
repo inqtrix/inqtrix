@@ -3,8 +3,7 @@
 Same conventions as the other storage backends: every operation runs
 inside :func:`~inqtrix.storage.db.tenant_session` (restricted role +
 tenant GUC, forced RLS as the second defense layer), guarded UPDATEs
-make revocation and the last-used throttle replica-safe, and the
-store shares the identity bundle's HTTP-loop engine. Create, sampled
+make revocation and the last-used throttle replica-safe. Create, sampled
 use, and revoke audit rows commit in the same transaction as their
 token state.
 """
@@ -49,8 +48,7 @@ class PostgresPatStore:
     """Durable token store (tokens survive restarts and replicas).
 
     Args:
-        session_factory: Async session factory on the HTTP loop's
-            engine.
+        session_factory: Async session factory on the engine of the process.
         app_role: Restricted role assumed per transaction.
     """
 

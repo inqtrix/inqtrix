@@ -811,7 +811,7 @@ describe('researchRunToJob live-status events', () => {
       summary: { title: 'Frage' },
     } as unknown as Parameters<typeof researchRunToJob>[0]
 
-    const job = researchRunToJob(run)
+    const job = researchRunToJob(run, 'de')
 
     expect(job.events.map((event) => event.id)).toEqual(['run-1-41', 'run-1-42'])
     // Same minute, so `time` alone could not have told the two rows apart.

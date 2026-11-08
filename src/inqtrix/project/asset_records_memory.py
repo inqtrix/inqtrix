@@ -25,8 +25,8 @@ from inqtrix.project.asset_records_ports import (
     GroupNotFound,
     SectionNotFound,
 )
-from inqtrix.project.scoped_upsert import ResourceScope, require_memory_scope
-from inqtrix.source_authority import (
+from inqtrix.storage.scoped_upsert import ResourceScope, require_memory_scope
+from inqtrix.storage.source_authority import (
     MemorySourceLifecycleAuthority,
     SourceLifecycleConflict,
     SourceScope,
@@ -791,9 +791,6 @@ class MemoryAssetStore:
         if group_id is not None:
             items = [item for item in items if item.group_id == group_id]
         return items
-
-    async def aclose(self) -> None:
-        return None
 
 
 def _scoped(values, created_by_user_id: uuid.UUID | None, workspace_id):

@@ -10,8 +10,11 @@ from inqtrix.services.run_service import RunService
 
 
 class _Registry:
+    def __init__(self, contract_version: int = 1) -> None:
+        self.algorithm = SimpleNamespace(contract_version=contract_version)
+
     def get(self, _mode: str) -> object:
-        return object()
+        return self.algorithm
 
 
 class _Store:
@@ -55,6 +58,26 @@ def test_agent_submission_persists_effective_depth_for_later_plan_edits() -> Non
         store.submission["request_payload"]["body"]["agent_overrides"]
         == {"depth": "deep"}
     )
+
+
+def test_a_run_is_bound_to_the_contract_its_algorithm_carries() -> None:
+    store = _Store()
+    service = RunService(
+        registry=_Registry(contract_version=3),
+        runtime=SimpleNamespace(),
+        run_store=store,
+    )
+
+    service.submit(
+        question="Research",
+        history="",
+        messages=[],
+        resolved=_resolved(depth="deep"),
+        workspace_id=None,
+    )
+
+    assert store.submission["mode"] == "workspace_agent"
+    assert store.submission["workflow_contract"] == 3
 
 
 def test_standard_submission_keeps_explicit_override_summary_shape() -> None:

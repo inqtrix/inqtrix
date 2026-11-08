@@ -4,6 +4,7 @@ import { ExternalLink } from '@/components/icons'
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
 import { StatusBadge, type StatusTone } from '@/features/settings/parts'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { formatCount } from '@/lib/time'
 import type { AgentArtifactReference } from './artifactCitations'
 import {
   safeEvidenceHttpUrl,
@@ -131,7 +132,7 @@ function WebSearchRecord({
   index: number
   search: WebSearchLineage
 }) {
-  const { t } = useLocale()
+  const { locale, t } = useLocale()
   const citation = search.citation
   const safeUrl = safeEvidenceHttpUrl(citation?.url ?? null)
   const mappingCopy = citation
@@ -174,7 +175,7 @@ function WebSearchRecord({
             label={t.agent.canvas.searchDuration}
             value={search.durationMs === null
               ? null
-              : `${search.durationMs.toLocaleString()} ms`}
+              : `${formatCount(search.durationMs, locale)} ms`}
           />
         </EvidenceMetadata>
 

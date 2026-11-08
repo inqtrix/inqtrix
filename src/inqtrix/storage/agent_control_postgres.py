@@ -2,12 +2,11 @@
 
 Lockstep counterpart of
 :class:`~inqtrix.agents.control_memory.MemoryAgentControlStore` — same
-port, same error types, same ordering. HTTP-loop only (NullPool engine via
-:class:`~inqtrix.project.base_session_store.BaseSessionStore`), with ONE
+port, same error types, same ordering. Built on
+:class:`~inqtrix.project.base_session_store.BaseSessionStore`, with ONE
 deliberate exception: the decision/answer writers built by
 :meth:`decide_approval_and_resume` / :meth:`answer_clarification_and_resume`
-run inside the RUN STORE's resume transaction on the run store's private
-loop. Task-cancel and user-artifact writers use the same callback
+run inside the RUN STORE's resume transaction. Task-cancel and user-artifact writers use the same callback
 shape for live run authorization. These writers therefore use only the
 session they are handed, never ``self._session``.
 """

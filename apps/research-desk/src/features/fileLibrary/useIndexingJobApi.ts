@@ -12,6 +12,7 @@ import {
   currentIndexingJobs,
   indexingJobDisposition,
   isTerminalIndexingStatus,
+  splitJobsByKind,
   type ActiveIndexingJobStatus,
   type AutoResumePlan,
   type IndexingJobEvent,
@@ -26,6 +27,8 @@ export type IndexingPauseView = {
   autoResume: AutoResumePlan | null
   completedDocuments: number
   currentBatch: number
+  /** The document of a document job; a run of several continues without it. */
+  documentId: string | null
   /** What the job waits for: the server's error type. */
   errorType: string | null
   generationId: string | null
@@ -77,9 +80,9 @@ type IndexingCallbacks = {
   ) => void
   onQueued: (collectionId: string, queuePosition: number | null) => void
   onPaused?: (collectionId: string, pause: IndexingPauseView) => void
-  /** Every paused document revision of one collection found on load: they
-   * come back as ONE paused run, never one job at a time. */
-  onPausedDocuments: (collectionId: string, jobs: IndexingJobSummary[]) => void
+  /** Every document job of one collection found on load, newest first: they
+   * come back as ONE run, never one job at a time. Returns the jobs to follow. */
+  onDocumentJobs: (collectionId: string, jobs: IndexingJobSummary[]) => IndexingJobSummary[]
   onReadyRaw?: (collectionId: string, jobId: string) => void
   onResumed?: (
     collectionId: string,
@@ -104,6 +107,8 @@ type UseIndexingJobApiOptions = IndexingCallbacks & {
   /** User invalidation generation: re-list jobs started by another authorized
    * editor without adding a second polling or per-resource stream. */
   refreshToken?: number
+  /** The collections the page can match a job to; a new one re-lists the jobs. */
+  knownCollections?: string
   workspaceId: string
 }
 
@@ -121,12 +126,13 @@ export function useIndexingJobApi({
   onProgress,
   onQueued,
   onPaused,
-  onPausedDocuments,
+  onDocumentJobs,
   onReadyRaw,
   onResumed,
   onStart,
   onSuperseded,
   refreshToken = 0,
+  knownCollections,
   sessionAuthed,
   workspaceId,
 }: UseIndexingJobApiOptions) {
@@ -144,7 +150,7 @@ export function useIndexingJobApi({
     onProgress,
     onQueued,
     onPaused,
-    onPausedDocuments,
+    onDocumentJobs,
     onReadyRaw,
     onResumed,
     onStart,
@@ -162,7 +168,7 @@ export function useIndexingJobApi({
       onProgress,
       onQueued,
       onPaused,
-      onPausedDocuments,
+      onDocumentJobs,
       onReadyRaw,
       onResumed,
       onStart,
@@ -176,7 +182,7 @@ export function useIndexingJobApi({
     onDocumentStarted,
     onError,
     onPaused,
-    onPausedDocuments,
+    onDocumentJobs,
     onProgress,
     onQueued,
     onReadyRaw,
@@ -190,13 +196,29 @@ export function useIndexingJobApi({
     const summary = jobSummaryRef.current.get(event.job_id)
     if (!collectionId || !summary) return
     const snapshot = (event.data?.snapshot ?? {}) as IndexingJobSnapshot
-    const emitProgress = () =>
+    const documentId = summary.operation_kind === 'document_revision'
+      ? summary.document_id
+      : null
+    const emitProgress = () => {
+      // A document job speaks for its row: its counters are 0 of 1, not the run's.
+      if (documentId) {
+        if (snapshot.phase) {
+          callbacksRef.current.onDocumentProgress(collectionId, documentId, {
+            currentBatch: snapshot.current_batch ?? 0,
+            phase: snapshot.phase,
+            status: 'running',
+            totalBatches: snapshot.total_batches ?? 0,
+          })
+        }
+        return
+      }
       callbacksRef.current.onProgress(
         collectionId,
         snapshot.completed_documents ?? 0,
         snapshot.total_documents ?? 0,
         snapshot.current_document_title,
       )
+    }
     if (
       event.type === 'inqtrix.index.progress'
       || event.type === 'inqtrix.index.started'
@@ -214,8 +236,13 @@ export function useIndexingJobApi({
       callbacksRef.current.onComplete(collectionId, summary)
     } else if (event.type === 'inqtrix.index.failed') {
       emitProgress()
-      const error = (event.data?.error ?? {}) as { message?: string }
-      callbacksRef.current.onError(collectionId, error.message ?? 'Indizierung fehlgeschlagen.')
+      callbacksRef.current.onError(
+        collectionId,
+        carriedErrorText(
+          event.data?.error as { message?: string | null; type?: string | null } | undefined,
+          readerTexts().fileLibrary.indexingFailed,
+        ) ?? readerTexts().fileLibrary.indexingFailed,
+      )
     } else if (event.type === 'inqtrix.index.cancelled') {
       emitProgress()
       callbacksRef.current.onCancelled(collectionId)
@@ -236,6 +263,7 @@ export function useIndexingJobApi({
         autoResume: (event.data?.auto_resume ?? null) as AutoResumePlan | null,
         completedDocuments: snapshot.completed_documents ?? 0,
         currentBatch: snapshot.current_batch ?? 0,
+        documentId,
         errorType: error.type ?? null,
         generationId: null,
         jobId: event.job_id,
@@ -293,12 +321,14 @@ export function useIndexingJobApi({
     if (streamsRef.current.has(summary.job_id)) return
     // Hydrate the one current projection before attaching after its cursor.
     // Historical SSE frames are audit history, not new UI transitions.
-    callbacksRef.current.onProgress(
-      summary.collection_id,
-      summary.completed_documents,
-      summary.total_documents,
-      summary.snapshot.current_document_title,
-    )
+    if (summary.operation_kind !== 'document_revision') {
+      callbacksRef.current.onProgress(
+        summary.collection_id,
+        summary.completed_documents,
+        summary.total_documents,
+        summary.snapshot.current_document_title,
+      )
+    }
     for (const documentId of summary.checkpoint.completed_document_ids ?? []) {
       callbacksRef.current.onDocumentCompleted(
         summary.collection_id,
@@ -325,6 +355,7 @@ export function useIndexingJobApi({
         autoResume: summary.checkpoint.auto_resume ?? null,
         completedDocuments: summary.completed_documents,
         currentBatch: summary.current_batch,
+        documentId: summary.operation_kind === 'document_revision' ? summary.document_id : null,
         errorType: summary.error?.type ?? null,
         generationId: summary.generation_id,
         jobId: summary.job_id,
@@ -455,27 +486,15 @@ export function useIndexingJobApi({
       try {
         const jobs = await listIndexingJobs({ apiKey, workspaceId })
         if (ignore) return
-        // Several documents of one collection can wait at once (a provider
-        // outage pauses every document in flight). Everything else keeps the
-        // one current job per collection.
-        const pausedDocuments = new Map<string, IndexingJobSummary[]>()
-        for (const summary of jobs) {
-          if (
-            summary.operation_kind !== 'document_revision'
-            || indexingJobDisposition(summary.status).kind !== 'paused'
-          ) continue
-          pausedDocuments.set(summary.collection_id, [
-            ...(pausedDocuments.get(summary.collection_id) ?? []),
-            summary,
-          ])
+        // Several documents of one collection run or wait at once. Everything
+        // else keeps the one current job per collection.
+        const { documentJobs, generations } = splitJobsByKind(jobs)
+        for (const [collectionId, summaries] of documentJobs) {
+          for (const followed of callbacksRef.current.onDocumentJobs(collectionId, summaries)) {
+            startStream(followed)
+          }
         }
-        for (const [collectionId, paused] of pausedDocuments) {
-          callbacksRef.current.onPausedDocuments(collectionId, paused)
-        }
-        const others = jobs.filter((summary) => (
-          !pausedDocuments.get(summary.collection_id)?.includes(summary)
-        ))
-        for (const summary of currentIndexingJobs(others)) {
+        for (const summary of currentIndexingJobs(generations)) {
           const disposition = indexingJobDisposition(summary.status)
           if (disposition.kind === 'active' || disposition.kind === 'paused') {
             callbacksRef.current.onStart(
@@ -506,7 +525,7 @@ export function useIndexingJobApi({
     return () => {
       ignore = true
     }
-  }, [apiKey, enabled, refreshToken, sessionAuthed, startStream, workspaceId])
+  }, [apiKey, enabled, knownCollections, refreshToken, sessionAuthed, startStream, workspaceId])
 
   useEffect(() => {
     return () => {

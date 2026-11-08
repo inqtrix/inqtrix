@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from inqtrix.source_authority import SourceDeletionPermit, SourceScope
+from inqtrix.storage.source_authority import SourceDeletionPermit, SourceScope
 
 
 @dataclass(frozen=True)

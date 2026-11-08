@@ -5,7 +5,7 @@ document-revision deltas to the same job store. Their worker callables share
 the canonical knowledge preparation pipeline, check cancellation between
 provider batches, emit durable progress, and book embedding-token usage only
 for completed work. Read-side operations stay on the
-:class:`~inqtrix.server.indexing.IndexingJobStore` and are called by the
+:class:`~inqtrix.runs.indexing_memory.IndexingJobStore` and are called by the
 router directly.
 
 A reindex builds a complete shadow generation.  The active generation stays
@@ -16,7 +16,6 @@ the result.  Cancel or dependency pause never exposes a partial generation.
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import functools
 import hashlib
@@ -27,6 +26,7 @@ import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import TYPE_CHECKING, Any, Callable
 
+from inqtrix import aio
 from inqtrix.indexing_failures import (
     IndexingDependencyError,
     dependency_error_from_exception,
@@ -45,14 +45,14 @@ from inqtrix.knowledge.stores.ports import (
     KnowledgeCollection,
 )
 from inqtrix.quota.models import QuotaAdjustmentConflict, QuotaDimension
-from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:
     from inqtrix.auth.principal import Principal
-    from inqtrix.indexing_auto_resume import SweepReport
-    from inqtrix.source_authority import SourceScope
+    from inqtrix.runs.indexing_auto_resume import SweepReport
+    from inqtrix.storage.source_authority import SourceScope
     from inqtrix.quota.models import QuotaSubject
-    from inqtrix.server.indexing import IndexingJobHandle, IndexingJobStore
+    from inqtrix.runs.indexing_memory import IndexingJobStore
+    from inqtrix.runs.indexing_records import IndexingCleanup, IndexingJobHandle
     from inqtrix.services.execution_dependency_authority import CollectionEditAuthorizer
     from inqtrix.services.knowledge_service import KnowledgeService
     from inqtrix.services.quota_service import QuotaService
@@ -84,7 +84,7 @@ def _run_dependency_boundary(awaitable, *, vector_surface: bool = False):
     """Run one provider/store awaitable and preserve only proven outages."""
 
     try:
-        return run_coro_sync(awaitable)
+        return aio.call_from_thread(awaitable)
     except Exception as exc:
         dependency = dependency_error_from_exception(
             exc,
@@ -449,11 +449,11 @@ def execute_reindex_job(
     if authority_check is not None:
         authority_check()
     # The worker execution body is synchronous; the knowledge store/service
-    # are async. Bridge each call to completion on this worker thread.
-    documents = run_coro_sync(store.list_documents(collection_id))
+    # are async. Each call reaches the process loop and waits for it.
+    documents = aio.call_from_thread(store.list_documents(collection_id))
     if generation_id is None:
         generation_id = f"gen_{uuid.uuid4().hex[:20]}"
-    collection = run_coro_sync(store.get_collection(collection_id))
+    collection = aio.call_from_thread(store.get_collection(collection_id))
     raw_by_user_choice = bool(getattr(handle, "raw_by_user_choice", False))
     build_contract_hash = knowledge_service.build_contract_hash(
         collection,
@@ -462,7 +462,7 @@ def execute_reindex_job(
     requested_manifest = {
         document.id: document.active_revision_id or "" for document in documents
     }
-    generation = run_coro_sync(
+    generation = aio.call_from_thread(
         knowledge_service.begin_generation(
             collection_id=collection_id,
             generation_id=generation_id,
@@ -624,7 +624,7 @@ def execute_reindex_job(
             # reloaded immediately before embedding so a preceding mutation
             # that committed before the maintenance boundary cannot feed stale
             # title/text/metadata into this pass.
-            document = run_coro_sync(store.get_document(listed_document.id))
+            document = aio.call_from_thread(store.get_document(listed_document.id))
             if authority_check is not None:
                 authority_check()
             document_started = getattr(handle, "document_started", None)
@@ -838,7 +838,7 @@ def execute_reindex_job(
     for listed_document in documents:
         if listed_document.id in completed_ids:
             try:
-                current_document = run_coro_sync(store.get_document(listed_document.id))
+                current_document = aio.call_from_thread(store.get_document(listed_document.id))
             except DocumentNotFound:
                 continue
             current_revision = current_document.active_revision_id or ""
@@ -881,7 +881,7 @@ def execute_reindex_job(
         if handle.cancelled:
             handle.cancel("client_requested_cancel")
             return
-        current_documents = run_coro_sync(store.list_documents(collection_id))
+        current_documents = aio.call_from_thread(store.list_documents(collection_id))
         current_manifest = {
             document.id: document.active_revision_id or ""
             for document in current_documents
@@ -1064,7 +1064,7 @@ def _dispatch_indexing_operation(
     authority_check: Callable[[], None] | None = None,
     actor_user_id: uuid.UUID | None = None,
 ) -> None:
-    from inqtrix.server.indexing import IndexingOperationKind
+    from inqtrix.runs.indexing_records import IndexingOperationKind
 
     kind = IndexingOperationKind(operation_kind)
     if kind == IndexingOperationKind.DOCUMENT_REVISION:
@@ -1123,7 +1123,7 @@ class IndexingService:
         self._quota_service = quota_service
         self._authority = authority
         knowledge_service.bind_collection_maintenance(
-            active_check=job_store.has_active_job,
+            active_check=job_store.ahas_active_job,
         )
 
     @property
@@ -1159,7 +1159,7 @@ class IndexingService:
 
         from inqtrix.auth.principal import Principal
         from inqtrix.quota.models import QuotaSubject
-        from inqtrix.server.indexing import (
+        from inqtrix.runs.indexing_records import (
             IndexingOperationKind,
             IndexingResumeUnavailable,
         )
@@ -1220,7 +1220,7 @@ class IndexingService:
             )
 
         if raw_by_user_choice and kind == IndexingOperationKind.COLLECTION_GENERATION:
-            run_coro_sync(
+            aio.call_from_thread(
                 self._knowledge_service.reset_generation_for_raw_choice(
                     collection_id=spec.collection_id,
                     generation_id=str(spec.generation_id),
@@ -1262,16 +1262,14 @@ class IndexingService:
             except ContextualizationValidationError as exc:
                 handle.pause_validation(str(exc))
 
-        cleanup: Callable[[], None] | None = None
+        cleanup: "IndexingCleanup | None" = None
         if kind == IndexingOperationKind.COLLECTION_GENERATION:
 
-            def _cleanup() -> None:
-                run_coro_sync(
-                    self._knowledge_service.discard_generation(
-                        collection_id=spec.collection_id,
-                        generation_id=str(spec.generation_id),
-                        actor_user_id=actor_user_id,
-                    )
+            async def _cleanup() -> None:
+                await self._knowledge_service.discard_generation(
+                    collection_id=spec.collection_id,
+                    generation_id=str(spec.generation_id),
+                    actor_user_id=actor_user_id,
                 )
 
             cleanup = _cleanup
@@ -1299,7 +1297,7 @@ class IndexingService:
         person's click takes: rebound locally where this process executes the
         work, queued for a worker where one does.
         """
-        from inqtrix.indexing_auto_resume import sweep_due_resumes
+        from inqtrix.runs.indexing_auto_resume import sweep_due_resumes
 
         moment = time.time() if now is None else now
         return sweep_due_resumes(
@@ -1330,10 +1328,10 @@ class IndexingService:
         Raises:
             ReindexUnsupported: The active vector store cannot re-embed
                 in place.
-            inqtrix.server.indexing.IndexingJobConflict: The collection
+            inqtrix.runs.indexing_records.IndexingJobConflict: The collection
                 already has an active collection-generation job (mapped to
                 HTTP 409). Document-revision deltas do not occupy that slot.
-            inqtrix.server.indexing.IndexingQueueFull: The waiting queue
+            inqtrix.runs.indexing_records.IndexingQueueFull: The waiting queue
                 is full (mapped to HTTP 429).
         """
         if not store_supports_reembed(self._knowledge_service):
@@ -1382,15 +1380,13 @@ class IndexingService:
             except ContextualizationValidationError as exc:
                 handle.pause_validation(str(exc))
 
-        def _cleanup() -> None:
-            run_coro_sync(
-                self._knowledge_service.discard_generation(
-                    collection_id=collection_id,
-                    generation_id=generation_id,
-                    actor_user_id=(
-                        principal.user_id if principal is not None else None
-                    ),
-                )
+        async def _cleanup() -> None:
+            await self._knowledge_service.discard_generation(
+                collection_id=collection_id,
+                generation_id=generation_id,
+                actor_user_id=(
+                    principal.user_id if principal is not None else None
+                ),
             )
 
         return self._job_store.submit(
@@ -1470,15 +1466,12 @@ class IndexingService:
             except ContextualizationValidationError as exc:
                 handle.pause_validation(str(exc))
 
-        from inqtrix.server.indexing import IndexingOperationKind
+        from inqtrix.runs.indexing_records import IndexingOperationKind
 
-        # Durable stores expose a deliberately synchronous bridge to their
-        # private database loop. Running that bridge on the request loop can
-        # deadlock concurrent reservations: one request waits synchronously
-        # for the job-store collection lock while another request still needs
-        # the request loop to finish and release that same lock.
-        return await asyncio.to_thread(
-            self._job_store.submit,
+        # Awaited, because blocking the loop here can deadlock concurrent
+        # reservations: one request waits for the job-store collection lock
+        # while another still needs the loop to finish and release that lock.
+        return await self._job_store.asubmit(
             collection_id=collection.id,
             collection_name=collection.name,
             embedding_model=collection.embedding_model,

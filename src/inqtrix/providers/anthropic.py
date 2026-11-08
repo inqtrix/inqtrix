@@ -1,10 +1,12 @@
 """Direct Anthropic adapter for the LLMProvider interface.
 
-This module calls the Anthropic Messages API via ``urllib`` — no SDK, no
-LiteLLM proxy.  The direct approach gives full control over headers,
-retry behaviour, and extended-thinking configuration, but it also means
-we must handle transient failures, error parsing, and token-budget
-adjustments ourselves.
+This module calls the Anthropic Messages API with ``httpx`` on the process
+loop, one async client per adapter and loop — no SDK, no LiteLLM proxy.
+Each request is one attempt of the shared retry loop
+(:func:`~inqtrix.providers.attempts.call_with_retries`), and the sync methods
+are faces of the async ones.  The direct approach gives full control over
+headers and extended-thinking configuration, but it also means we must
+handle error parsing and token-budget adjustments ourselves.
 
 Key design decisions:
 
@@ -12,8 +14,8 @@ Key design decisions:
   when capacity is tight.  The research agent fires parallel
   claim-extraction requests for search results, which can trigger
   529 bursts.  A simple fixed-interval retry makes
-  things worse (thundering herd), so we use exponential backoff with
-  random jitter so parallel threads spread their retries over time.
+  things worse (thundering herd), so the shared loop uses exponential
+  backoff with random jitter so parallel calls spread their retries.
 
 * **Per-call reasoning control** — Extended thinking (``thinking={"type":
   "adaptive"}``) is valuable for complex reasoning calls (classify,
@@ -32,12 +34,15 @@ Key design decisions:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import time
-from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+import threading
+import weakref
+from collections import Counter
+from typing import Any, Mapping
+
+import httpx
 
 from inqtrix.constants import (
     DEFAULT_LLM_MAX_OUTPUT_TOKENS,
@@ -46,28 +51,38 @@ from inqtrix.constants import (
 from inqtrix.exceptions import (
     AgentModelCapacityError,
     AgentRateLimited,
-    AgentTimeout,
+    AgentRequiredToolCallMissing,
     AnthropicAPIError,
 )
+from inqtrix.providers._anthropic_messages import (
+    anthropic_tool_choice,
+    chat_turn,
+    to_anthropic,
+    to_anthropic_tool,
+    with_instruction,
+)
+from inqtrix.providers._claude import (
+    THINKING_BINDING_BETA,
+    model_supports_effort,
+    models_rejecting_sampling,
+    output_budget,
+    thinking_and_effort,
+    tool_forcing_allowed,
+    with_block_binding,
+)
+from inqtrix.providers.attempts import (
+    AsyncNativeLLMProvider,
+    call_with_retries,
+    estimate_request_tokens,
+)
 from inqtrix.providers.base import (
-    LLMProvider,
+    ChatTurn,
     LLMResponse,
-    MAX_PROVIDER_ATTEMPTS,
     StructuredLLMResponse,
-    _NonFatalNoticeMixin,
-    _RetryNoticeMixin,
-    _THINKING_MIN_MAX_TOKENS,
-    normalize_reasoning_effort,
-    validate_reasoning_effort,
-    _SDK_RATE_LIMIT_MAX_RETRIES,
     _bounded_timeout,
     _check_deadline,
-    _check_provider_cancel,
-    _check_provider_operation_deadline,
     _operation_deadline,
     model_capacity_reason,
-    _retry_delay_seconds,
-    _sleep_before_retry,
     extract_usage_tokens,
     cache_usage_details,
     parse_structured_response_content,
@@ -77,52 +92,56 @@ from inqtrix.state import track_tokens
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Retry & backoff constants
-#
-# Anthropic returns 529 ("Overloaded") under sustained load — especially
-# when many parallel claim-extraction threads hit the API at once. The
-# following constants control the retry loop in _request_json.
-#
-# Shared backoff constants (_BACKOFF_BASE_SECONDS, _BACKOFF_MAX_SECONDS,
-# _JITTER_RANGE, _THINKING_MIN_MAX_TOKENS) are imported from base.py.
-#
-# _RETRYABLE_HTTP_STATUS: status codes that trigger a retry instead of
-#     an immediate hard failure.  529 is Anthropic-specific; 500/502/503/
-#     504 cover standard transient infrastructure errors.
-#
-# _MAX_ANTHROPIC_ATTEMPTS: total tries (initial + retries). All failure
-#     classes share this counter and the logical-operation deadline.
-# ---------------------------------------------------------------------------
-_RETRYABLE_HTTP_STATUS = frozenset({500, 502, 503, 504, 529})
-_MAX_ANTHROPIC_ATTEMPTS = MAX_PROVIDER_ATTEMPTS
 _ANTHROPIC_MAX_TOKENS = 64_000
 
-# ---------------------------------------------------------------------------
-# Effort capability blacklist
-#
-# Per Anthropic docs (https://docs.anthropic.com/en/docs/build-with-claude/effort)
-# the effort parameter is supported only on Claude Mythos Preview, Opus 4.7,
-# Opus 4.6, Sonnet 4.6, and Opus 4.5. Other models (notably Haiku 4.5) reject
-# ``output_config.effort`` with HTTP 400 ("Extra inputs are not permitted").
-#
-# Substring match keeps the list tiny. If Anthropic releases a Haiku that
-# DOES support effort, change "haiku" to a more specific fragment here.
-# ---------------------------------------------------------------------------
-_EFFORT_UNSUPPORTED_FRAGMENTS: tuple[str, ...] = ("haiku",)
-# Effort levels the Anthropic Messages API accepts in ``output_config.effort``
-# (per https://docs.anthropic.com/en/docs/build-with-claude/effort). Note this
-# differs from the neutral vocabulary: Anthropic has no ``minimal`` but does
-# have ``max``. ``none`` (off) and ``""`` (inherit) are handled separately.
-_ANTHROPIC_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+_BETA_UNSEEN_MODELS: set[str] = set()
+_BETA_UNSEEN_LOCK = threading.Lock()
+
+
+def _check_beta_arrival(response: Mapping[str, Any], *, model: str) -> None:
+    """Say once per model when the thinking-binding beta did not reach the API; count dropped blocks.
+
+    With the beta header every answer carries ``input_transformations``, empty
+    when nothing was dropped. Without the field a proxy probably stripped the
+    header, and the thinking blocks the API dropped stay invisible.
+    """
+    transformations = response.get("input_transformations")
+    if transformations is None:
+        with _BETA_UNSEEN_LOCK:
+            first = model not in _BETA_UNSEEN_MODELS
+            _BETA_UNSEEN_MODELS.add(model)
+        if first:
+            log.warning(
+                "Claude answered model %s without input_transformations although the "
+                "thinking-binding beta was sent; a proxy may strip the beta header, so "
+                "dropped thinking blocks stay invisible.",
+                model,
+            )
+        return
+    dropped: Counter[str] = Counter()
+    for entry in transformations if isinstance(transformations, list) else ():
+        if isinstance(entry, Mapping) and entry.get("type") == "thinking_dropped":
+            dropped[str(entry.get("reason") or "unspecified")] += 1
+    if dropped:
+        log.info(
+            "Claude dropped thinking blocks for model %s: %s",
+            model,
+            ", ".join(f"{reason}={count}" for reason, count in sorted(dropped.items())),
+        )
+
 _STRUCTURED_OUTPUT_MODEL_FRAGMENTS: tuple[str, ...] = (
+    "claude-fable-5",
     "claude-haiku-4-5",
+    "claude-haiku-5",
     "claude-mythos",
     "claude-opus-4-5",
     "claude-opus-4-6",
     "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
     "claude-sonnet-4-5",
     "claude-sonnet-4-6",
+    "claude-sonnet-5",
 )
 
 
@@ -141,12 +160,6 @@ def _clamp_max_tokens(max_tokens: int, *, model: str, operation: str) -> int:
     return _ANTHROPIC_MAX_TOKENS
 
 
-def _model_supports_effort(model: str) -> bool:
-    """Return True when the given Anthropic model name accepts output_config.effort."""
-    if not model:
-        return True  # No model name → assume the caller's default does support it.
-    lowered = model.lower()
-    return not any(fragment in lowered for fragment in _EFFORT_UNSUPPORTED_FRAGMENTS)
 
 
 def _model_supports_structured_output(model: str) -> bool:
@@ -159,10 +172,71 @@ def _model_supports_structured_output(model: str) -> bool:
     )
 
 
+def _error_details(response: httpx.Response) -> dict[str, str | int | None]:
+    """Parse structured error information from an Anthropic HTTP error.
+
+    Anthropic returns errors as JSON with request-id in headers and an
+    ``{"error": {"type": ..., "message": ...}}`` body. This extracts all
+    available details so that ``AnthropicAPIError`` can surface them for
+    debugging, including the request-id which is essential for support
+    tickets.
+    """
+    headers = response.headers
+    request_id = headers.get("request-id") or headers.get("anthropic-request-id")
+    retry_after = headers.get("retry-after")
+    raw_body = response.text
+
+    error_type = ""
+    message = ""
+    if raw_body:
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            message = raw_body.strip()
+        else:
+            if isinstance(payload, dict):
+                body_request_id = payload.get("request_id")
+                if isinstance(body_request_id, str) and body_request_id.strip():
+                    request_id = request_id or body_request_id.strip()
+                error = payload.get("error")
+                if isinstance(error, dict):
+                    raw_type = error.get("type")
+                    raw_message = error.get("message")
+                    if isinstance(raw_type, str):
+                        error_type = raw_type.strip()
+                    if isinstance(raw_message, str):
+                        message = raw_message.strip()
+                if not message:
+                    top_level_message = payload.get("message")
+                    if isinstance(top_level_message, str):
+                        message = top_level_message.strip()
+
+    return {
+        "status_code": response.status_code,
+        "request_id": request_id,
+        "retry_after": retry_after,
+        "error_type": error_type,
+        "message": message,
+    }
+
+
+def _retry_error_code(exc: BaseException) -> str:
+    """Anthropic's error type for a retry notice, else the status or the exception name."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        details = _error_details(exc.response)
+        return str(details["error_type"] or f"HTTP {details['status_code']}")
+    return type(exc).__name__
+
+
+def _retry_request_id(exc: BaseException) -> str:
+    """The request-id of a failed attempt, for its retry notice."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return str(_error_details(exc.response)["request_id"] or "")
+    return ""
+
+
 class AnthropicLLM(
-    _RetryNoticeMixin,
-    _NonFatalNoticeMixin,
-    LLMProvider,
+    AsyncNativeLLMProvider,
 ):
     """Call the Anthropic Messages API directly without a proxy.
 
@@ -220,6 +294,7 @@ class AnthropicLLM(
         thinking: dict[str, Any] | None = None,
         effort: str | None = None,
         selectable_models: list[str] | None = None,
+        default_headers: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize the direct Anthropic provider.
 
@@ -282,6 +357,10 @@ class AnthropicLLM(
                 or without ``thinking`` enabled. ``"xhigh"`` is only
                 supported on Claude Opus 4.7+. The API default is
                 ``"high"`` (= same as omitting the parameter).
+            default_headers: Optional headers sent with every request,
+                for example the subscription header of an API gateway.
+                They win over the provider's own headers of the same name,
+                except ``x-api-key`` and ``Content-Type``.
 
         Raises:
             ValueError: If both ``temperature`` and ``thinking`` are set,
@@ -302,12 +381,30 @@ class AnthropicLLM(
                 "temperature and thinking are mutually exclusive — "
                 "the Anthropic API rejects requests that set both."
             )
+        if temperature is not None:
+            rejecting = models_rejecting_sampling([
+                default_model, classify_model, claim_extract_model, evaluate_model,
+                plan_model, answer_model, direct_chat_model, tier_high_model,
+                tier_mid_model, tier_fast_model, *(selectable_models or []),
+            ])
+            if rejecting:
+                raise ValueError(
+                    "temperature is not accepted by "
+                    + ", ".join(rejecting)
+                    + "; leave INQTRIX_TEMPERATURE unset for these models."
+                )
         if effort is not None and effort not in {"low", "medium", "high", "xhigh", "max"}:
             raise ValueError(
                 "effort must be one of 'low', 'medium', 'high', 'xhigh', or 'max'."
             )
         self._api_key = api_key
         self._base_url = base_url
+        self._default_headers = dict(default_headers or {})
+        # Tests put a transport here; the client is built per loop on first use.
+        self._client_kwargs: dict[str, Any] = {}
+        self._clients: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, httpx.AsyncClient
+        ] = weakref.WeakKeyDictionary()
         self._anthropic_version = anthropic_version
         self._default_model = default_model
         self._claim_extract_model = claim_extract_model
@@ -370,7 +467,7 @@ class AnthropicLLM(
         for role, model in roles:
             if not model:
                 continue
-            if _model_supports_effort(model):
+            if model_supports_effort(model):
                 continue
             warnings.append(
                 f"AnthropicLLM: effort='{self._effort}' is not sent for {role}='{model}' "
@@ -415,68 +512,6 @@ class AnthropicLLM(
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _is_retryable_http_status(status_code: int) -> bool:
-        return status_code in _RETRYABLE_HTTP_STATUS
-
-    @staticmethod
-    def _extract_http_error_details(exc: HTTPError) -> dict[str, str | int | None]:
-        """Parse structured error information from an Anthropic HTTP error.
-
-        Anthropic returns errors as JSON with request-id in headers and
-        an ``{"error": {"type": ..., "message": ...}}`` body.  This
-        method extracts all available details so that ``AnthropicAPIError``
-        can surface them for debugging — including the request-id which
-        is essential for support tickets.
-        """
-        headers = getattr(exc, "headers", None) or getattr(exc, "hdrs", None)
-        request_id = None
-        retry_after = None
-        if headers is not None:
-            request_id = headers.get("request-id") or headers.get("anthropic-request-id")
-            retry_after = headers.get("retry-after")
-
-        raw_body = ""
-        try:
-            raw_bytes = exc.read()
-        except Exception:
-            raw_bytes = b""
-        if raw_bytes:
-            raw_body = raw_bytes.decode("utf-8", errors="replace")
-
-        error_type = ""
-        message = ""
-        if raw_body:
-            try:
-                payload = json.loads(raw_body)
-            except json.JSONDecodeError:
-                message = raw_body.strip()
-            else:
-                if isinstance(payload, dict):
-                    body_request_id = payload.get("request_id")
-                    if isinstance(body_request_id, str) and body_request_id.strip():
-                        request_id = request_id or body_request_id.strip()
-                    error = payload.get("error")
-                    if isinstance(error, dict):
-                        raw_type = error.get("type")
-                        raw_message = error.get("message")
-                        if isinstance(raw_type, str):
-                            error_type = raw_type.strip()
-                        if isinstance(raw_message, str):
-                            message = raw_message.strip()
-                    if not message:
-                        top_level_message = payload.get("message")
-                        if isinstance(top_level_message, str):
-                            message = top_level_message.strip()
-
-        return {
-            "status_code": exc.code,
-            "request_id": request_id,
-            "retry_after": retry_after,
-            "error_type": error_type,
-            "message": message,
-        }
-
-    @staticmethod
     def _build_api_error(
         *,
         model: str,
@@ -496,195 +531,103 @@ class AnthropicLLM(
             original=original,
         )
 
-    def _request_json(
+    def _async_client(self) -> httpx.AsyncClient:
+        """The HTTP client of the running loop: one per adapter and loop, built on first use."""
+        loop = asyncio.get_running_loop()
+        client = self._clients.get(loop)
+        if client is None:
+            client = httpx.AsyncClient(**self._client_kwargs)
+            self._clients[loop] = client
+        return client
+
+    async def _arequest_json(
         self,
         *,
         payload: dict[str, Any],
         timeout: float,
         deadline: float | None = None,
+        beta: str | None = None,
     ) -> dict[str, Any]:
-        """Send a POST to the Anthropic Messages API with retry.
+        """Send a POST to the Anthropic Messages API.
 
-        This is the central HTTP method shared by completion and
-        structured-output calls. It implements:
-
-        1. Deadline enforcement — abort early if the agent time budget
-           has been exceeded.
-        2. Retry with jittered backoff for transient server errors and 429.
-           Every failure type shares one total attempt counter and one
-           operation deadline, so mixed failures cannot stack budgets.
-        3. Structured error extraction for non-retryable failures,
-           surfacing request-id and error details in the exception.
+        The central HTTP method shared by every call. Each request is one
+        attempt of the shared retry loop, which retries HTTP 408, 409, 429,
+        500, 502, 503, 504, the 529 overload and transport errors within one
+        operation deadline, waiting as long as a ``retry-after`` asks while
+        that wait ends before the deadline. A failure that is not retried becomes
+        ``AgentRateLimited`` (429), ``AgentModelCapacityError`` or an
+        ``AnthropicAPIError`` with the request-id and error details, which are
+        essential for support tickets.
         """
         use_model = str(payload.get("model") or self._default_model)
-        self._clear_retry_notices()
-
         operation_deadline = _operation_deadline(timeout, deadline)
-        effective_timeout_seconds = max(
-            0.0, operation_deadline - time.monotonic()
-        )
+        # Header names ignore case: an extra header replaces the adapter's own
+        # of the same name, and the key and content type replace any extra.
+        headers = httpx.Headers({
+            "User-Agent": self._user_agent,
+            "anthropic-version": self._anthropic_version,
+            **({"anthropic-beta": beta} if beta else {}),
+        })
+        headers.update(self._default_headers)
+        if beta:
+            # An operator's beta joins this request's beta instead of
+            # replacing it: the binding of thinking blocks needs its value.
+            betas = [b.strip() for b in headers.get("anthropic-beta", "").split(",") if b.strip()]
+            headers["anthropic-beta"] = ",".join([*betas, *([] if beta in betas else [beta])])
+        headers["Content-Type"] = "application/json"
+        headers["x-api-key"] = self._api_key
+        body = json.dumps(payload).encode("utf-8")
+        client = self._async_client()
 
-        def _sleep(delay: float) -> None:
-            try:
-                _sleep_before_retry(delay, operation_deadline)
-            except AgentTimeout:
-                _check_provider_operation_deadline(
-                    operation_deadline,
-                    deadline,
-                    label="Anthropic call",
-                )
-                raise
-
-        attempt = 1
-        while True:
-            _check_provider_cancel(label="Anthropic call")
-            _check_provider_operation_deadline(
-                operation_deadline,
-                deadline,
-                label="Anthropic call",
-            )
-
-            request = Request(
+        async def send() -> dict[str, Any]:
+            response = await client.post(
                 self._base_url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": self._user_agent,
-                    "x-api-key": self._api_key,
-                    "anthropic-version": self._anthropic_version,
-                },
-                method="POST",
+                content=body,
+                headers=headers,
+                timeout=_bounded_timeout(timeout, operation_deadline),
             )
+            response.raise_for_status()
+            data = json.loads(response.text)
+            return data if isinstance(data, dict) else {}
 
-            try:
-                with urlopen(
-                    request,
-                    timeout=_bounded_timeout(timeout, operation_deadline),
-                ) as response:
-                    raw = response.read().decode("utf-8")
-                data = json.loads(raw)
-                return data if isinstance(data, dict) else {}
-            except HTTPError as exc:
-                details = self._extract_http_error_details(exc)
-                if exc.code == 429:
-                    max_attempts = _SDK_RATE_LIMIT_MAX_RETRIES + 1
-                    if attempt >= max_attempts:
-                        raise AgentRateLimited(use_model, exc)
-                    delay = _retry_delay_seconds(
-                        attempt - 1, details.get("retry_after")
-                    )
-                    self._append_retry_notice({
-                        "provider": "Anthropic",
-                        "model": use_model,
-                        "operation": "messages",
-                        "error_code": str(details.get("error_type") or "HTTP 429"),
-                        "status_code": 429,
-                        "request_id": str(details.get("request_id") or ""),
-                        "attempt": attempt,
-                        "max_attempts": max_attempts,
-                        "delay_seconds": round(delay, 3),
-                        "configured_timeout_seconds": round(timeout, 3),
-                        "effective_timeout_seconds": round(
-                            effective_timeout_seconds, 3
-                        ),
-                    })
-                    log.warning(
-                        "Anthropic rate limit (%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
-                        use_model,
-                        details.get("request_id") or "-",
-                        attempt,
-                        max_attempts,
-                        delay,
-                    )
-                    _sleep(delay)
-                    attempt += 1
-                    continue
-
-                api_error = self._build_api_error(
-                    model=use_model, details=details, original=exc)
-                if (capacity_reason := model_capacity_reason(api_error)) is not None:
-                    log.warning(
-                        "ALGO-FAIL model_capacity "
-                        "(model=%s, error_type=%s)",
-                        use_model,
-                        type(api_error).__name__,
-                    )
-                    raise AgentModelCapacityError(
-                        use_model,
-                        "llm_complete",
-                        str(api_error),
-                        reason=capacity_reason,
-                        original=api_error,
-                    ) from exc
-                if (
-                    self._is_retryable_http_status(exc.code)
-                    and attempt < _MAX_ANTHROPIC_ATTEMPTS
-                ):
-                    delay = _retry_delay_seconds(
-                        attempt - 1, details.get("retry_after")
-                    )
-                    self._append_retry_notice({
-                        "provider": "Anthropic",
-                        "model": use_model,
-                        "operation": "messages",
-                        "error_code": str(details.get("error_type") or f"HTTP {exc.code}"),
-                        "status_code": exc.code,
-                        "request_id": str(details.get("request_id") or ""),
-                        "attempt": attempt,
-                        "max_attempts": _MAX_ANTHROPIC_ATTEMPTS,
-                        "delay_seconds": round(delay, 3),
-                        "configured_timeout_seconds": round(timeout, 3),
-                        "effective_timeout_seconds": round(
-                            effective_timeout_seconds, 3
-                        ),
-                    })
-                    log.warning(
-                        "Anthropic transient HTTP error (%s, status=%s, type=%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
-                        use_model,
-                        exc.code,
-                        details.get("error_type") or "unknown",
-                        details.get("request_id") or "-",
-                        attempt,
-                        _MAX_ANTHROPIC_ATTEMPTS,
-                        delay,
-                    )
-                    _sleep(delay)
-                    attempt += 1
-                    continue
-                raise api_error from exc
-            except (URLError, OSError) as exc:
-                api_error = self._build_api_error(model=use_model, original=exc)
-                if attempt < _MAX_ANTHROPIC_ATTEMPTS:
-                    delay = _retry_delay_seconds(attempt - 1)
-                    self._append_retry_notice({
-                        "provider": "Anthropic",
-                        "model": use_model,
-                        "operation": "messages",
-                        "error_code": type(exc).__name__,
-                        "attempt": attempt,
-                        "max_attempts": _MAX_ANTHROPIC_ATTEMPTS,
-                        "delay_seconds": round(delay, 3),
-                        "configured_timeout_seconds": round(timeout, 3),
-                        "effective_timeout_seconds": round(
-                            effective_timeout_seconds, 3
-                        ),
-                    })
-                    log.warning(
-                        "Anthropic transport error "
-                        "(model=%s, error_type=%s, attempt=%d/%d). "
-                        "Retrying in %.2fs.",
-                        use_model,
-                        type(exc).__name__,
-                        attempt,
-                        _MAX_ANTHROPIC_ATTEMPTS,
-                        delay,
-                    )
-                    _sleep(delay)
-                    attempt += 1
-                    continue
-                raise api_error from exc
-            except ValueError as exc:
-                raise self._build_api_error(model=use_model, original=exc) from exc
+        try:
+            return await call_with_retries(
+                send,
+                provider_label="Anthropic",
+                model=use_model,
+                operation="messages",
+                deadline=operation_deadline,
+                outer_deadline=deadline,
+                timeout_label="Anthropic call",
+                configured_timeout_seconds=timeout,
+                error_code_for=_retry_error_code,
+                request_id_for=_retry_request_id,
+                estimated_input_tokens=estimate_request_tokens(payload),
+                max_output_tokens=int(payload.get("max_tokens") or 0) or None,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                raise AgentRateLimited(use_model, exc) from exc
+            api_error = self._build_api_error(
+                model=use_model, details=_error_details(exc.response), original=exc
+            )
+            if (capacity_reason := model_capacity_reason(api_error)) is not None:
+                log.warning(
+                    "ALGO-FAIL model_capacity "
+                    "(model=%s, error_type=%s)",
+                    use_model,
+                    type(api_error).__name__,
+                )
+                raise AgentModelCapacityError(
+                    use_model,
+                    "llm_complete",
+                    str(api_error),
+                    reason=capacity_reason,
+                    original=api_error,
+                ) from exc
+            raise api_error from exc
+        except (httpx.TransportError, ValueError) as exc:
+            raise self._build_api_error(model=use_model, original=exc) from exc
 
     @staticmethod
     def _extract_text(payload: dict[str, Any]) -> str:
@@ -749,38 +692,34 @@ class AnthropicLLM(
             thinking config dict or ``None``; ``effort`` is the
             ``output_config.effort`` value or ``None``.
         """
-        token = normalize_reasoning_effort(reasoning_effort)
-        if token == "":
-            thinking = self._thinking if self._thinking is not None else None
-            effort = (
-                self._effort
-                if (self._effort is not None and _model_supports_effort(use_model))
-                else None
-            )
-            return thinking, effort
-        if token == "none":
-            return None, None
-        effort, warnings = validate_reasoning_effort(
-            token,
-            supported_levels=_ANTHROPIC_EFFORT_LEVELS,
-            label=f"AnthropicLLM({use_model})",
+        return thinking_and_effort(
+            reasoning_effort,
+            model=use_model,
+            inherit_thinking=self._thinking,
+            inherit_effort=self._effort,
+            label="AnthropicLLM",
         )
-        for warning in warnings:
-            log.warning("CONFIG: %s", warning)
-        if effort in ("", "none"):
-            return None, None
-        if _model_supports_effort(use_model):
-            return {"type": "adaptive"}, effort
-        log.warning(
-            "CONFIG: AnthropicLLM: reasoning_effort=%r requested on model=%s, "
-            "which does not accept output_config.effort (Haiku class); using "
-            "adaptive thinking without an effort cap.",
-            token,
-            use_model,
-        )
-        return {"type": "adaptive"}, None
 
-    def complete(
+    def _output_budget(
+        self,
+        max_output_tokens: int | None,
+        thinking_cfg: dict[str, Any] | None,
+        *,
+        model: str,
+        operation: str,
+    ) -> int:
+        """The ``max_tokens`` to send for one call.
+
+        The thinking rule of :func:`~inqtrix.providers._claude.output_budget`,
+        clamped to the Messages API's hard limit.
+        """
+        return _clamp_max_tokens(
+            output_budget(max_output_tokens or self._default_max_tokens, thinking_cfg),
+            model=model,
+            operation=operation,
+        )
+
+    async def acomplete(
         self,
         prompt: str,
         *,
@@ -814,7 +753,7 @@ class AnthropicLLM(
             AnthropicAPIError: If a non-retryable direct API failure
                 occurs.
         """
-        return self.complete_with_metadata(
+        response = await self.acomplete_with_metadata(
             prompt,
             system=system,
             model=model,
@@ -823,9 +762,10 @@ class AnthropicLLM(
             state=state,
             deadline=deadline,
             reasoning_effort=reasoning_effort,
-        ).content
+        )
+        return response.content
 
-    def complete_with_metadata(
+    async def acomplete_with_metadata(
         self,
         prompt: str,
         *,
@@ -844,8 +784,8 @@ class AnthropicLLM(
         thinking behavior: when thinking is enabled, the method raises
         ``max_tokens`` to accommodate both hidden reasoning and the final
         visible answer. Request execution itself is delegated to
-        ``_request_json()``, which owns deadline-aware retries for 5xx and
-        HTTP 529 overload responses.
+        ``_arequest_json()``, whose requests are attempts of the shared
+        retry loop (5xx, the HTTP 529 overload, 429 and transport errors).
 
         Args:
             prompt: User-facing input text.
@@ -874,30 +814,12 @@ class AnthropicLLM(
             _check_deadline(deadline)
 
         use_model = model or self._default_model
-        max_tokens = max_output_tokens or self._default_max_tokens
         thinking_cfg, effort_value = self._call_thinking_and_effort(
             reasoning_effort, use_model=use_model
         )
         use_thinking = thinking_cfg is not None
-        if use_thinking:
-            # Anthropic counts thinking tokens *inside* max_tokens, so raise
-            # the budget: honour an explicit budget_tokens, and always enforce
-            # the _THINKING_MIN_MAX_TOKENS floor so neither hidden reasoning
-            # nor the visible answer gets truncated.
-            budget = thinking_cfg.get("budget_tokens")
-            if isinstance(budget, int) and budget >= max_tokens:
-                max_tokens = budget + 1024
-            if max_tokens < _THINKING_MIN_MAX_TOKENS:
-                log.debug(
-                    "max_tokens auto-raised from %d to %d (thinking enabled)",
-                    max_tokens,
-                    _THINKING_MIN_MAX_TOKENS,
-                )
-                max_tokens = _THINKING_MIN_MAX_TOKENS
-        max_tokens = _clamp_max_tokens(
-            max_tokens,
-            model=use_model,
-            operation="complete",
+        max_tokens = self._output_budget(
+            max_output_tokens, thinking_cfg, model=use_model, operation="complete"
         )
         payload: dict[str, Any] = {
             "model": use_model,
@@ -917,7 +839,7 @@ class AnthropicLLM(
         if effort_value is not None:
             payload["output_config"] = {"effort": effort_value}
 
-        raw = self._request_json(
+        raw = await self._arequest_json(
             payload=payload,
             timeout=timeout,
             deadline=deadline,
@@ -938,6 +860,105 @@ class AnthropicLLM(
             track_tokens(state, response)
         return response
 
+    def supports_tool_calls(self, *, model: str | None = None) -> bool:
+        """Claude takes tools natively on every model this adapter serves."""
+        return True
+
+    async def achat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+        tool_choice: str | None = None,
+    ) -> ChatTurn:
+        """Run one tool-calling turn through the Messages API.
+
+        The OpenAI-shaped conversation becomes the Messages API shape (top-level
+        ``system``, ``tool_use`` in the assistant turn, every tool result of a turn
+        as a ``tool_result`` block in one user message); Claude's thinking blocks
+        go back unchanged with the turn that produced them. ``tool_choice``
+        ``required`` forces a tool where the model and the request's thinking allow
+        it; elsewhere the turn gets ``auto`` and an instruction in the system
+        prompt, and a text answer raises
+        :class:`~inqtrix.exceptions.AgentRequiredToolCallMissing` for the kernel's
+        bounded correction. On a model whose thinking blocks are bound to an
+        unchanged prefix, a request that returns blocks asks the API to drop a
+        block whose prefix changed (the kernel's own compaction changes it).
+
+        Raises:
+            AgentTimeout: The run deadline has passed.
+            AgentRateLimited: Anthropic kept answering HTTP 429.
+            AnthropicAPIError: The call failed after retrying.
+            AgentStructuredOutputError: The model declined the request.
+            AgentToolArgumentsError: The output limit stopped the turn while it
+                wrote tool calls, or a tool call's input is no JSON object.
+            AgentRequiredToolCallMissing: A turn that had to call a tool answered in text.
+            ValueError: The conversation has no Messages API form.
+        """
+        if deadline is not None:
+            _check_deadline(deadline)
+        use_model = model or self._default_model
+        thinking_cfg, effort_value = self._call_thinking_and_effort(
+            reasoning_effort, use_model=use_model
+        )
+        max_tokens = self._output_budget(
+            max_output_tokens, thinking_cfg, model=use_model, operation="chat"
+        )
+        system, wire_messages, returns_thinking = to_anthropic(messages)
+        tool_names = [str((tool.get("function") or tool).get("name") or "") for tool in tools or []]
+        choice, instruction = anthropic_tool_choice(
+            tool_choice,
+            tool_names=tool_names,
+            forced_allowed=tool_forcing_allowed(use_model, thinking_cfg),
+        )
+        if instruction:
+            system = with_instruction(system, instruction)
+        thinking_cfg, bound = with_block_binding(
+            thinking_cfg, model=use_model, returns_thinking=returns_thinking
+        )
+        beta = THINKING_BINDING_BETA if bound else None
+        payload: dict[str, Any] = {
+            "model": use_model,
+            "max_tokens": max_tokens,
+            "messages": wire_messages,
+        }
+        if system:
+            payload["system"] = system
+        if tools:
+            payload["tools"] = [to_anthropic_tool(tool) for tool in tools]
+        if choice is not None:
+            payload["tool_choice"] = choice
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
+        if thinking_cfg is not None:
+            payload["thinking"] = thinking_cfg
+        if effort_value is not None:
+            payload["output_config"] = {"effort": effort_value}
+
+        raw = await self._arequest_json(
+            payload=payload, timeout=timeout, deadline=deadline, beta=beta
+        )
+        if bound:
+            _check_beta_arrival(raw, model=use_model)
+        prompt_tokens, completion_tokens = self._extract_usage(raw)
+        turn = chat_turn(
+            raw,
+            model=use_model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cache=self._cache_usage(raw),
+        )
+        if instruction and not turn.tool_calls:
+            raise AgentRequiredToolCallMissing(
+                use_model, turn=turn, tool_names=tuple(tool_names)
+            )
+        return turn
+
     def supports_structured_output(self, *, model: str | None = None) -> bool:
         """Return whether the selected Anthropic model supports JSON schemas.
 
@@ -951,7 +972,7 @@ class AnthropicLLM(
         """
         return _model_supports_structured_output(model or self._default_model)
 
-    def complete_structured(
+    async def acomplete_structured(
         self,
         prompt: str,
         *,
@@ -999,26 +1020,12 @@ class AnthropicLLM(
             _check_deadline(deadline)
 
         use_model = model or self._default_model
-        max_tokens = max_output_tokens or self._default_max_tokens
         thinking_cfg, effort_value = self._call_thinking_and_effort(
             reasoning_effort, use_model=use_model
         )
         use_thinking = thinking_cfg is not None
-        if use_thinking:
-            budget = thinking_cfg.get("budget_tokens")
-            if isinstance(budget, int) and budget >= max_tokens:
-                max_tokens = budget + 1024
-            if max_tokens < _THINKING_MIN_MAX_TOKENS:
-                log.debug(
-                    "max_tokens auto-raised from %d to %d (thinking enabled)",
-                    max_tokens,
-                    _THINKING_MIN_MAX_TOKENS,
-                )
-                max_tokens = _THINKING_MIN_MAX_TOKENS
-        max_tokens = _clamp_max_tokens(
-            max_tokens,
-            model=use_model,
-            operation="complete_structured",
+        max_tokens = self._output_budget(
+            max_output_tokens, thinking_cfg, model=use_model, operation="complete_structured"
         )
 
         output_config: dict[str, Any] = {
@@ -1043,7 +1050,7 @@ class AnthropicLLM(
         if use_thinking:
             payload["thinking"] = thinking_cfg
 
-        raw = self._request_json(
+        raw = await self._arequest_json(
             payload=payload,
             timeout=timeout,
             deadline=deadline,

@@ -61,6 +61,12 @@ from inqtrix.citation_labels import (
     segment_within,
     segment_words,
 )
+from inqtrix.model_cards import (
+    estimate_required_context_tokens,
+    llm_context_window_tokens,
+    llm_default_output_tokens,
+    resolve_model_card,
+)
 from inqtrix.strategies._claim_values import claim_values
 
 log = logging.getLogger(__name__)
@@ -277,26 +283,26 @@ def _result(item: Mapping[str, Any], state: str, reason: str) -> FindingResult:
 def review_context_fits(
     llm: Any, *, model: str | None, prompt: str, schema: str, fallback_window: int,
 ) -> bool:
-    """Reuse the existing rough context estimate; never tokenize or trim evidence."""
-    from inqtrix.model_cards import resolve_model_card
-    from inqtrix.nodes import (
-        _estimate_required_context_tokens,
-        _llm_context_window_tokens,
-        _llm_default_output_tokens,
-    )
+    """Reuse the existing rough context estimate; never tokenize or trim evidence.
 
+    Input plus the requested output must fit the window; where the card names an
+    input limit of the provider (:attr:`~inqtrix.model_cards.ModelCard.max_input_tokens`),
+    the input must stay within it too.
+    """
     card = resolve_model_card(model) if model else None
-    window = card.context_window_tokens if card else _llm_context_window_tokens(llm)
+    window = card.context_window_tokens if card else llm_context_window_tokens(llm)
     if window is None:
         log.warning("Deep model context window unknown; using the existing conservative"
                     " context limit.")
         window = fallback_window
-    output = _llm_default_output_tokens(llm)
+    output = llm_default_output_tokens(llm)
     if card:
         output = min(output, card.max_output_tokens)
-    _, required = _estimate_required_context_tokens(
+    estimated_input, required = estimate_required_context_tokens(
         system=schema, prompt=prompt, requested_output_tokens=output,
     )
+    if card is not None and card.max_input_tokens and estimated_input > card.max_input_tokens:
+        return False
     return required <= window
 
 

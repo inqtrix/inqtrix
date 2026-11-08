@@ -74,8 +74,6 @@ from inqtrix.agents.kernel.review_edits import (
     split_findings_by_basis,
 )
 from inqtrix.agents.kernel.tools import (
-    TOOL_FINISHED_EVENT,
-    TOOL_STARTED_EVENT,
     ChildScope,
     inherited_stufe,
     submit_or_find_child,
@@ -111,6 +109,8 @@ from inqtrix.core.results import (
 from inqtrix.exceptions import AgentCancelled
 from inqtrix.i18n import MESSAGES, t, t_count
 from inqtrix.knowledge.grounding import quote_is_verbatim
+from inqtrix.model_cards import estimate_required_context_tokens
+from inqtrix.harness.contracts.events import TOOL_FINISHED_EVENT, TOOL_STARTED_EVENT
 
 log = logging.getLogger(__name__)
 
@@ -448,12 +448,10 @@ def choose_transport(host: ReviewHost, subject: ReviewSubject) -> str:
     the role that reads in windows. A server without the kernel engine has
     no role and falls back to the one call as long as the model can hold it.
     """
-    from inqtrix.nodes import _estimate_required_context_tokens
-
     if host.review_call is None:
         return TRANSPORT_ROLE if host.role_available else ""
     system, prompt, _ = review_call_input(subject)
-    estimated, _ = _estimate_required_context_tokens(
+    estimated, _ = estimate_required_context_tokens(
         system=system, prompt=prompt, requested_output_tokens=0,
     )
     if estimated <= REVIEW_IN_PROMPT_BUDGET_TOKENS:

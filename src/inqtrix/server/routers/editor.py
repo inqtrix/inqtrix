@@ -130,10 +130,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         wait_timeout = editor_wait_seconds(resolved.agent_settings)
         async with sem:
             loop = asyncio.get_running_loop()
-            # A client abort releases the shared semaphore once the
-            # in-flight provider attempt returns (the probe fires at
-            # attempt boundaries and backoff sleeps) instead of burning
-            # the remaining retry ladder on a ghost request.
+            # A client abort ends the waiting provider call at once and
+            # releases the shared semaphore instead of burning the retry
+            # ladder on a ghost request; a Bedrock request thread runs on to
+            # its read timeout.
             try:
                 async with disconnect_watch(req) as cancel_event:
                     result, consumed = await asyncio.wait_for(
@@ -178,9 +178,9 @@ def build_router(container: "AppContainer") -> APIRouter:
                         "server_error",
                     )
                 log.warning(
-                    "Editor suggestion cancelled after client disconnect. Tokens "
-                    "already consumed by this request are not charged to the quota; the"
-                    " usage ledger records them."
+                    "Editor suggestion cancelled after client disconnect. Tokens of "
+                    "calls this request finished are not charged to the quota; the usage"
+                    " ledger records them. A call cut off by the disconnect reports none."
                 )
                 return error_response(
                     499,
@@ -309,9 +309,9 @@ def build_router(container: "AppContainer") -> APIRouter:
                         "server_error",
                     )
                 log.warning(
-                    "Editor instruction cancelled after client disconnect. Tokens "
-                    "already consumed by this request are not charged to the quota; the"
-                    " usage ledger records them."
+                    "Editor instruction cancelled after client disconnect. Tokens of "
+                    "calls this request finished are not charged to the quota; the usage"
+                    " ledger records them. A call cut off by the disconnect reports none."
                 )
                 return error_response(
                     499,

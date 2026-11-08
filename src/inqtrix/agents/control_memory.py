@@ -887,6 +887,3 @@ class MemoryAgentControlStore:
             created_at_of=lambda a: a.created_at,
             id_of=lambda a: a.artifact_id,
         )
-
-    async def aclose(self) -> None:
-        """No-op; symmetric with the Postgres store."""

@@ -27,7 +27,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.storage.scoped_upsert import ResourceScope
 
 from inqtrix.auth.permissions import SharePermission
 
@@ -579,8 +579,4 @@ class EditorStore(Protocol):
         actor_user_id: uuid.UUID | None,
     ) -> None:
         """CAS-delete one creator-private suggestion draft."""
-        ...
-
-    async def aclose(self) -> None:
-        """Release backing resources at application shutdown."""
         ...

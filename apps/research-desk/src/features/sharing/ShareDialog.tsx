@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { useModalFocusTrap } from '@/components/ui/use-modal-focus-trap'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
+import { formatCount } from '@/lib/time'
 import { searchDemoUsers } from './demoShares'
 import {
   personLabel,
@@ -434,15 +435,15 @@ export function ShareDialog({
                 />
                 <DetailsFact
                   label={locale === 'de' ? 'Offene Kommentare' : 'Open comments'}
-                  value={formatOptionalCount(documentDetails.openCommentCount)}
+                  value={formatOptionalCount(documentDetails.openCommentCount, locale)}
                 />
                 <DetailsFact
                   label={locale === 'de' ? 'Offene Vorschläge' : 'Open suggestions'}
-                  value={formatOptionalCount(documentDetails.openSuggestionCount)}
+                  value={formatOptionalCount(documentDetails.openSuggestionCount, locale)}
                 />
                 <DetailsFact
                   label={locale === 'de' ? 'Aktive Teilnehmende' : 'Active participants'}
-                  value={formatOptionalCount(documentDetails.participantCount)}
+                  value={formatOptionalCount(documentDetails.participantCount, locale)}
                 />
               </>
             ) : null}
@@ -921,18 +922,19 @@ function DetailsFact({ label, value }: { label: string; value: string }) {
 }
 
 function MetricFact({ label, value }: { label: string; value: number }) {
+  const { locale } = useLocale()
   return (
     <div className="bg-background px-3 py-2.5">
       <p className="t-title tabular-nums text-foreground">
-        {new Intl.NumberFormat().format(value)}
+        {formatCount(value, locale)}
       </p>
       <p className="t-meta-sm text-muted-foreground">{label}</p>
     </div>
   )
 }
 
-function formatOptionalCount(value: number | null): string {
-  return value === null ? '—' : new Intl.NumberFormat().format(value)
+function formatOptionalCount(value: number | null, locale: string): string {
+  return value === null ? '—' : formatCount(value, locale)
 }
 
 function formatDetailsDate(value: string, locale: 'de' | 'en'): string {

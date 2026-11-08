@@ -7,6 +7,7 @@ import logging
 import time
 import uuid
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -63,7 +64,7 @@ class _ChangeWaiter:
 
 class _TenantChangePoll:
     """The one poll of ``user_events`` that serves every waiting stream of
-    a tenant in one event loop.
+    a tenant.
 
     Each interval it reads the newest event of every waiting user once and
     wakes the streams whose user has an event past their cursor. Event ids
@@ -145,6 +146,72 @@ def _event_from_row(row: Any) -> UserInvalidation:
             row.created_at.timestamp() if row.created_at is not None else 0.0
         ),
     )
+
+
+@dataclass(frozen=True)
+class EventRows:
+    """One read of a tenant's events: the newest event ID, the rows a reader
+    wants after its cursor, and whether it must start over instead."""
+
+    current: int
+    rows: tuple[Any, ...]
+    reset_required: bool
+
+
+async def read_events_after(
+    session: "AsyncSession",
+    *,
+    tenant_id: str,
+    cursor: int,
+    limit: int,
+    wanted: Any,
+) -> EventRows:
+    """Read the tenant's event bounds and the *wanted* events after *cursor*.
+
+    Bounds and page rows travel in ONE statement, i.e. one READ COMMITTED
+    snapshot. As two statements, an event committed in between lands above the
+    newest ID the page reports, and a retention DELETE committed in between
+    hides a gap from the reset check: a partial replay delivered as complete.
+    The reader starts over when its cursor lies past the newest event or before
+    the oldest one kept, or when more than *limit* events wait.
+    """
+    bounds = (
+        select(
+            func.min(user_events.c.id).label("oldest"),
+            func.max(user_events.c.id).label("current"),
+        )
+        .where(user_events.c.tenant_id == tenant_id)
+        .cte("bounds")
+    )
+    page = (
+        select(user_events)
+        .where(
+            user_events.c.tenant_id == tenant_id,
+            user_events.c.id > cursor,
+            wanted,
+        )
+        .order_by(user_events.c.id)
+        .limit(limit + 1)
+        .subquery("page")
+    )
+    rows = (
+        await session.execute(
+            select(bounds.c.oldest, bounds.c.current, page)
+            .select_from(bounds.outerjoin(page, true()))
+            .order_by(page.c.id)
+        )
+    ).all()
+    head = rows[0]
+    oldest = int(head.oldest) if head.oldest is not None else 0
+    current = int(head.current) if head.current is not None else 0
+    events = tuple(row for row in rows if row.id is not None)
+    if (
+        (cursor > current and cursor != 0)
+        or (cursor and oldest and cursor < oldest - 1)
+        or len(events) > limit
+    ):
+        return EventRows(current, (), reset_required=True)
+    return EventRows(current, events, reset_required=False)
 
 
 async def append_user_invalidation(
@@ -246,9 +313,8 @@ class PostgresUserEventStore:
     Retention is enforced lazily by the traffic that reads and writes the
     stream, exactly as before -- but coalesced: at most one retention
     DELETE per tenant per STORE INSTANCE per ``cleanup_interval_seconds``
-    (one instance per api process in practice; the NullPool twin built
-    for run threads never runs cleanup on Postgres, where repositories
-    write invalidations atomically inside their own transactions).
+    (one instance per process in practice; repositories on Postgres write
+    invalidations atomically inside their own transactions and clean nothing).
     Uncoalesced, every ``page_after`` poll of every open browser tab paid
     a tenant-wide DELETE (a sequential scan -- the table has no
     ``created_at`` index) that, at a 24h retention, almost always deleted
@@ -281,11 +347,8 @@ class PostgresUserEventStore:
         # Monotonic deadline per tenant. Per tenant, not per process: one
         # busy tenant must not starve another tenant's retention.
         self._cleanup_due: dict[str, float] = {}
-        # One change poll per event loop and tenant; asyncio primitives
-        # belong to the loop that created them.
-        self._change_polls: dict[
-            tuple[asyncio.AbstractEventLoop, str], _TenantChangePoll
-        ] = {}
+        # One change poll per tenant.
+        self._change_polls: dict[str, _TenantChangePoll] = {}
 
     def _session(
         self, tenant_id: str
@@ -329,51 +392,17 @@ class PostgresUserEventStore:
         bounded_limit = max(1, min(int(limit), USER_EVENT_REPLAY_LIMIT))
         async with self._session(tenant_id) as session:
             await self._maybe_cleanup(session, tenant_id)
-            # Bounds and page rows travel in ONE statement, i.e. one READ
-            # COMMITTED snapshot. As two statements, a CONCURRENT process's
-            # retention DELETE could commit in between: bounds computed
-            # before the sweep, rows after it -- a partial replay delivered
-            # as complete, with the reset check blind to the gap. (Before
-            # the coalesced retention this could not happen, because the
-            # local DELETE always ran first in the same transaction.)
-            bounds = (
-                select(
-                    func.min(user_events.c.id).label("oldest"),
-                    func.max(user_events.c.id).label("current"),
-                )
-                .where(user_events.c.tenant_id == tenant_id)
-                .cte("bounds")
+            read = await read_events_after(
+                session,
+                tenant_id=tenant_id,
+                cursor=cursor,
+                limit=bounded_limit,
+                wanted=user_events.c.target_user_id == target_user_id,
             )
-            page = (
-                select(user_events)
-                .where(
-                    user_events.c.tenant_id == tenant_id,
-                    user_events.c.target_user_id == target_user_id,
-                    user_events.c.id > cursor,
-                )
-                .order_by(user_events.c.id)
-                .limit(bounded_limit + 1)
-                .subquery("page")
-            )
-            rows = (
-                await session.execute(
-                    select(bounds.c.oldest, bounds.c.current, page)
-                    .select_from(bounds.outerjoin(page, true()))
-                    .order_by(page.c.id)
-                )
-            ).all()
-            head = rows[0]
-            oldest = int(head.oldest) if head.oldest is not None else 0
-            current = int(head.current) if head.current is not None else 0
-            events = [row for row in rows if row.id is not None]
-            if cursor > current and cursor != 0:
-                return UserEventPage((), current, reset_required=True)
-            if cursor and oldest and cursor < oldest - 1:
-                return UserEventPage((), current, reset_required=True)
-            if len(events) > bounded_limit:
-                return UserEventPage((), current, reset_required=True)
+            if read.reset_required:
+                return UserEventPage((), read.current, reset_required=True)
             return UserEventPage(
-                tuple(_event_from_row(row) for row in events), current
+                tuple(_event_from_row(row) for row in read.rows), read.current
             )
 
     async def current_cursor(self, *, tenant_id: str) -> int:
@@ -393,25 +422,25 @@ class PostgresUserEventStore:
         target_user_id: uuid.UUID,
         cursor: int,
         timeout: float,
-    ) -> None:
-        """Return once the user has an event past *cursor*, or after
-        *timeout*. All waiting streams of the tenant in this event loop share
-        one poll per ``poll_seconds``."""
+    ) -> bool:
+        """Return ``True`` once the user has an event past *cursor*, ``False``
+        after *timeout*. All waiting streams of the tenant share one poll per
+        ``poll_seconds``."""
         if timeout <= 0:
-            return
-        key = (asyncio.get_running_loop(), tenant_id)
-        poll = self._change_polls.get(key)
+            return False
+        poll = self._change_polls.get(tenant_id)
         if poll is None:
-            poll = self._change_polls[key] = _TenantChangePoll(self, tenant_id)
+            poll = self._change_polls[tenant_id] = _TenantChangePoll(self, tenant_id)
         waiter = _ChangeWaiter(target_user_id, cursor)
         poll.add(waiter)
         try:
             await asyncio.wait_for(waiter.woken.wait(), timeout)
         except TimeoutError:
-            return
+            return False
         finally:
-            if poll.discard(waiter) and self._change_polls.get(key) is poll:
-                del self._change_polls[key]
+            if poll.discard(waiter) and self._change_polls.get(tenant_id) is poll:
+                del self._change_polls[tenant_id]
+        return True
 
     async def _newest_event_ids(
         self, tenant_id: str, user_ids: Sequence[uuid.UUID]

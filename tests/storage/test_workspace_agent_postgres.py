@@ -9,6 +9,7 @@ through the REAL control service, and the loud checkpoint-wipe failure
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import os
 import time
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 import inqtrix.research.web_research as web_research_module
+from inqtrix import aio
 from inqtrix.server.routes import create_router, register_routes
 from inqtrix.settings import (
     AgentSettings,
@@ -78,7 +80,25 @@ def pg_agent_client(monkeypatch):
     monkeypatch.setattr(
         web_research_module, "run_web_graph", fake_child_graph
     )
-    app = FastAPI()
+
+    @asynccontextmanager
+    async def on_a_process_loop(_app: FastAPI):
+        loop = asyncio.get_running_loop()
+        aio.configure_loop(
+            loop,
+            blocking_workers=8,
+            provider_workers=8,
+            legacy_segment_workers=16,
+            watch=False,
+        )
+        try:
+            yield
+        finally:
+            await container.run_store.aclose()
+            await container.database_engine.dispose()
+            aio.close_loop(loop)
+
+    app = FastAPI(lifespan=on_a_process_loop)
     router = create_router()
     settings = Settings(
         models=ModelSettings(),
@@ -101,7 +121,6 @@ def pg_agent_client(monkeypatch):
     client.llm = scripted  # type: ignore[attr-defined]
     client.container = container  # type: ignore[attr-defined]
     yield client
-    container.run_store.close()
 
 
 def _wait(client: TestClient, run_id: str, statuses: set[str], timeout: float = 20.0) -> dict[str, Any]:

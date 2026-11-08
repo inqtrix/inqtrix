@@ -10,8 +10,12 @@ import pytest
 qdrant_client = pytest.importorskip("qdrant_client")
 
 from inqtrix.knowledge.stores.qdrant_store import (
+    _UPSERT_BATCH_POINTS,
+    QdrantKnowledgeStore,
     QdrantVectorIndex,
     _Bm25,
+    _ensure_chunks_collection,
+    _require_qdrant,
     _require_server_side_bm25,
 )
 from inqtrix.knowledge.stores.vector_index import ChunkVector, VectorSearchScope
@@ -37,6 +41,28 @@ class _SparseStub:
     @staticmethod
     def query(_text: str):
         return qdrant_client.models.SparseVector(indices=[0], values=[1.0])
+
+
+def test_the_points_of_one_document_go_out_in_requests_the_server_accepts() -> None:
+    written: list[int] = []
+    index = object.__new__(QdrantKnowledgeStore)
+    index._client = SimpleNamespace(
+        upsert=lambda *, points, **_write: written.append(len(points))
+    )
+    index._sparse_enabled = False
+    chunks = ["Ein Satz."] * 200
+
+    index._upsert_chunk_points(
+        SimpleNamespace(id="kc", embedding_model="m", embedding_dim=2),
+        "kd",
+        "Titel",
+        chunks,
+        [[1.0, 0.0]] * 200,
+        chunks,
+    )
+
+    assert sum(written) == 200
+    assert max(written) <= _UPSERT_BATCH_POINTS
 
 
 def _index(*, sparse: bool = False) -> QdrantVectorIndex:
@@ -520,3 +546,43 @@ def test_constructor_gates_only_when_sparse_enabled(monkeypatch) -> None:
 
     QdrantVectorIndex(url="http://unused.invalid", api_key="k")
     assert gated == ["QdrantVectorIndex"]
+
+
+class _CreateLoses:
+    """A client whose create fails after its first look found nothing."""
+
+    def __init__(self, *, visible_afterwards: bool) -> None:
+        self._looks = [False, visible_afterwards]
+        self.indexed: list[str] = []
+
+    def collection_exists(self, name: str) -> bool:
+        return self._looks.pop(0)
+
+    def create_collection(self, **kwargs: object) -> None:
+        raise RuntimeError("the create failed")
+
+    def create_payload_index(self, **kwargs: object) -> None:
+        self.indexed.append(str(kwargs["field_name"]))
+
+
+def test_a_create_lost_to_another_caller_counts_as_created() -> None:
+    _client, models = _require_qdrant()
+    client = _CreateLoses(visible_afterwards=True)
+
+    _ensure_chunks_collection(
+        client, models, name="race", embedding_dim=2, sparse_enabled=False
+    )
+
+    assert "collection_id" in client.indexed
+
+
+def test_a_create_that_failed_for_itself_stays_loud() -> None:
+    _client, models = _require_qdrant()
+    client = _CreateLoses(visible_afterwards=False)
+
+    with pytest.raises(RuntimeError, match="the create failed"):
+        _ensure_chunks_collection(
+            client, models, name="race", embedding_dim=2, sparse_enabled=False
+        )
+
+    assert client.indexed == []

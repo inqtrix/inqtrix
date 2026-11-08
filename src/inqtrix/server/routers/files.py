@@ -366,7 +366,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             assert asset_id is not None and section_id is not None
             now = time.time()
             try:
-                deletion_service.assert_upload_allowed(
+                await deletion_service.assert_upload_allowed(
                     asset_id,
                     principal=principal,
                     workspace_id=workspace_id,
@@ -534,7 +534,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         bounded = min(200, max(1, limit))
         return {
             "object": "list",
-            "data": upload_service.operations.list_operations(
+            "data": await upload_service.operations.alist_operations(
                 tenant_id=principal.tenant_id,
                 created_by_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id,
@@ -550,7 +550,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     ):
         try:
             workspace_id = workspace_id_from_request(req)
-            return upload_service.operations.get(
+            return await upload_service.operations.aget(
                 operation_id,
                 tenant_id=principal.tenant_id,
                 created_by_user_id=_caller_user_id(principal),
@@ -569,7 +569,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     ):
         try:
             workspace_id = await workspace_id_for_write(req, principal, users)
-            return upload_service.operations.retry(
+            return await upload_service.operations.aretry(
                 operation_id,
                 tenant_id=principal.tenant_id,
                 created_by_user_id=_caller_user_id(principal),

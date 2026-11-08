@@ -52,10 +52,8 @@ services:
       - ../../tests/load/mock-providers:/opt/loadtest:ro
     healthcheck:
       test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:9300/healthz', timeout=3)
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9300/healthz', timeout=3)"
       interval: 5s
       timeout: 5s
       retries: 12
@@ -72,11 +70,6 @@ services:
       AZURE_OPENAI_ENDPOINT: http://mock-providers:9300/azure
       AZURE_OPENAI_API_KEY: loadtest-placeholder
       INQTRIX_LLM_PROVIDER: azure
-      # Entra is only chosen when the key is empty; clearing the service
-      # principal keeps the key path selected regardless of the env files.
-      AZURE_TENANT_ID: ""
-      AZURE_CLIENT_ID: ""
-      AZURE_CLIENT_SECRET: ""
       # Web search. No /v1 here: the client appends /v1/responses to the base.
       INQTRIX_SEARCH_PROVIDER: perplexity
       PERPLEXITY_BASE_URL: http://mock-providers:9300/perplexity
@@ -85,6 +78,10 @@ services:
       INQTRIX_EMBEDDING_PROVIDER: azure
       INQTRIX_EMBEDDING_AZURE_ENDPOINT: http://mock-providers:9300/azure-embeddings
       INQTRIX_EMBEDDING_AZURE_API_KEY: loadtest-placeholder
+      # The other outward calls an operator's env file can switch on. The stand-in
+      # has no route for them, so they stay off whatever that file says.
+      INQTRIX_RERANKER_PROVIDER: "none"
+      INQTRIX_AGENT_MEMORY_PROVIDER: "none"
 
   worker:
     depends_on:

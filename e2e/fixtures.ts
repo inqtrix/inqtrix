@@ -10,6 +10,7 @@ import {
   type CollaborationE2EStack,
   type CollaborationTransport,
 } from './config'
+import { httpsErrorsIgnored } from '../tests/verification/fixtures/https-errors.mjs'
 
 export type CollaborationHarness = {
   collaboratorContext: BrowserContext
@@ -67,15 +68,13 @@ export const test = base.extend<Fixtures>({
     const ownerContext = await browser.newContext({
       ...deviceOptions,
       baseURL: endpoint.baseURL!,
-      ignoreHTTPSErrors:
-        process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1',
+      ignoreHTTPSErrors: httpsErrorsIgnored(),
       storageState: endpoint.ownerStorageState,
     })
     const collaboratorContext = await browser.newContext({
       ...deviceOptions,
       baseURL: endpoint.baseURL!,
-      ignoreHTTPSErrors:
-        process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1',
+      ignoreHTTPSErrors: httpsErrorsIgnored(),
       storageState: endpoint.collaboratorStorageState,
     })
 

@@ -48,9 +48,9 @@ from inqtrix.quota.models import (
     QuotaExceeded,
     QuotaSubject,
     current_period_start,
-    estimate_tokens,
     period_end,
 )
+from inqtrix.text import estimate_tokens
 from inqtrix.services.quota_service import QuotaService
 from inqtrix.server.container import build_container
 from inqtrix.server.routers import (
@@ -989,11 +989,10 @@ def test_month_rollover_readmits_blocked_subject():
     asyncio.run(scenario())
 
 
-class _NamedLane:
-    """Serve every store call from one shared memory store, naming the lane."""
+class _CountingStore:
+    """Serve every store call from a memory store and note its name."""
 
-    def __init__(self, name: str, backing: MemoryQuotaStore, calls: list) -> None:
-        self._name = name
+    def __init__(self, backing: MemoryQuotaStore, calls: list) -> None:
         self._backing = backing
         self._calls = calls
 
@@ -1001,25 +1000,18 @@ class _NamedLane:
         target = getattr(self._backing, attribute)
 
         async def call(*args, **kwargs):
-            self._calls.append((self._name, attribute))
+            self._calls.append(attribute)
             return await target(*args, **kwargs)
 
         return call
 
 
-def test_http_reads_use_the_request_lane_and_run_threads_keep_their_own():
-    """Admission and the meter read once, on the request-path store.
-
-    The meter asks every 30 seconds per visible tab and every admission
-    asks before a run, so these reads belong on the pooled engine of the
-    request loop, as one read each. Recording from a run thread happens on
-    a throwaway event loop and must stay on the loop-agnostic store.
-    """
-    backing = MemoryQuotaStore()
-    calls: list[tuple[str, str]] = []
+def test_admission_and_the_meter_read_usage_and_limits_once():
+    """The meter asks every 30 seconds per visible tab and every admission asks
+    before a run, so each is one read, usage and limits together."""
+    calls: list[str] = []
     service = QuotaService(
-        store=_NamedLane("run", backing, calls),
-        request_store=_NamedLane("request", backing, calls),
+        store=_CountingStore(MemoryQuotaStore(), calls),
         settings=QuotaSettings(enabled=True, runs_default=5),
         clock=lambda: 1_749_816_000.0,
     )
@@ -1032,7 +1024,7 @@ def test_http_reads_use_the_request_lane_and_run_threads_keep_their_own():
     subject = service.subject_for(principal)
 
     service.record_blocking(subject, QuotaDimension.RUNS, 1)
-    assert calls == [("run", "add_usage")]
+    assert calls == ["add_usage"]
 
     calls.clear()
 
@@ -1041,10 +1033,7 @@ def test_http_reads_use_the_request_lane_and_run_threads_keep_their_own():
         return await service.usage_for(subject)
 
     rows = asyncio.run(http_reads())
-    assert calls == [
-        ("request", "read_usage_with_limits"),
-        ("request", "read_usage_with_limits"),
-    ]
+    assert calls == ["read_usage_with_limits", "read_usage_with_limits"]
     runs = next(row for row in rows if row.dimension is QuotaDimension.RUNS)
     assert (runs.used, runs.limit) == (1, 5)
 

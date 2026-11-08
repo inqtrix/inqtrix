@@ -235,6 +235,7 @@ def test_the_documented_library_app_starts_its_server_with_the_resolver_passed_i
     monkeypatch.setattr(server_main, "configure_logging", lambda **_: None)
     monkeypatch.setattr(server_main, "log_status_line", lambda *_, **__: None)
     monkeypatch.setattr(server_main, "create_app", lambda **_: "server")
+    monkeypatch.setattr(server_main, "freeze_startup_heap", lambda: None)
     monkeypatch.setattr(server_main.uvicorn, "run", lambda app, **options: started.update(options))
     server_main.main()
     expected = {key: value for key, value in started.items() if key not in {"host", "port", "workers"}}

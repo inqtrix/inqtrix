@@ -81,7 +81,10 @@ from inqtrix.storage.resource_access import (
     revoke_resource_shares,
     visible_resource_select,
 )
-from inqtrix.storage.user_events_postgres import append_user_invalidation
+from inqtrix.storage.user_events_postgres import (
+    append_user_invalidation,
+    read_events_after,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -625,6 +628,32 @@ async def _lock_command_scope(
 # caller's tenant scope, under the (tenant, user) advisory lock both paths
 # already hold, and over the caller's own rows via ix_collaboration_leases_user.
 _LEASE_SWEEP_GRACE_SECONDS = 24 * 3600.0
+
+
+async def _lock_live_lease_session(
+    session: "AsyncSession",
+    lease: CollaborationLease,
+    *,
+    now: float,
+) -> str | None:
+    """Read the lease's account session and hold it until the transaction ends.
+
+    Signing out deletes the session row, and the foreign key cascade then
+    writes every lease bound to it. The foreign key of a new lease needs the
+    same row. A transaction that reached it only after a lease row would wait
+    for the sign-out while the sign-out waits for that lease, so the session
+    row comes before any lease row, in the mode the foreign key takes.
+    """
+    return await session.scalar(
+        select(auth_sessions.c.id)
+        .where(
+            auth_sessions.c.tenant_id == lease.tenant_id,
+            auth_sessions.c.id == lease.session_id,
+            auth_sessions.c.user_id == lease.user_id,
+            auth_sessions.c.expires_at > now,
+        )
+        .with_for_update(read=True, key_share=True)
+    )
 
 
 async def _sweep_expired_actor_leases(
@@ -1314,11 +1343,10 @@ class PostgresEditorCollaborationStore:
         self,
         lease: CollaborationLease,
         *,
-        max_active: int,
         max_issued_per_window: int,
         issued_since: float,
     ) -> CollaborationLease:
-        if max_active < 1 or max_issued_per_window < 1:
+        if max_issued_per_window < 1:
             raise ValueError("lease limits must be positive")
         minimum = SharePermission(lease.permission)
         rate_actor_id = lease.user_id or lease.guest_identity_id
@@ -1382,13 +1410,8 @@ class PostgresEditorCollaborationStore:
                     ),
                     sharing_enabled=self._sharing_enabled,
                 )
-                session_exists = await session.scalar(
-                    select(auth_sessions.c.id).where(
-                        auth_sessions.c.tenant_id == lease.tenant_id,
-                        auth_sessions.c.id == lease.session_id,
-                        auth_sessions.c.user_id == lease.user_id,
-                        auth_sessions.c.expires_at > lease.issued_at,
-                    )
+                session_exists = await _lock_live_lease_session(
+                    session, lease, now=lease.issued_at
                 )
             if access is None:
                 raise CollaborationDocumentNotFound(lease.document_id)
@@ -1408,33 +1431,6 @@ class PostgresEditorCollaborationStore:
                 or int(document_row.collaboration_generation) != lease.generation
             ):
                 raise CollaborationConflict("generation_conflict")
-            active_count = int(
-                await session.scalar(
-                    select(func.count())
-                    .select_from(editor_collaboration_leases)
-                    .where(
-                        editor_collaboration_leases.c.tenant_id
-                        == lease.tenant_id,
-                        editor_collaboration_leases.c.document_id
-                        == lease.document_id,
-                        editor_collaboration_leases.c.generation
-                        == lease.generation,
-                        (
-                            editor_collaboration_leases.c.user_id
-                            == lease.user_id
-                            if lease.actor_kind == "user"
-                            else editor_collaboration_leases.c.guest_identity_id
-                            == lease.guest_identity_id
-                        ),
-                        editor_collaboration_leases.c.revoked_at.is_(None),
-                        editor_collaboration_leases.c.expires_at
-                        > lease.issued_at,
-                    )
-                )
-                or 0
-            )
-            if active_count >= max_active:
-                raise CollaborationRateLimited("session_limit")
             issued_count = int(
                 await session.scalar(
                     select(func.count())
@@ -1524,6 +1520,13 @@ class PostgresEditorCollaborationStore:
                     editor_documents.c.id == replacement.document_id,
                 )
                 .with_for_update(read=True, key_share=True)
+            )
+            active_session = (
+                await _lock_live_lease_session(
+                    session, replacement, now=replacement.issued_at
+                )
+                if replacement.actor_kind != "guest"
+                else None
             )
             # The previous lease row is locked before the replacement a
             # replayed command already inserted, the order in which an update
@@ -1617,14 +1620,6 @@ class PostgresEditorCollaborationStore:
                 if replacement.user_id is None:
                     raise CollaborationLeaseInvalid("lease_invalid")
                 access = locked_access
-                active_session = await session.scalar(
-                    select(auth_sessions.c.id).where(
-                        auth_sessions.c.tenant_id == replacement.tenant_id,
-                        auth_sessions.c.id == replacement.session_id,
-                        auth_sessions.c.user_id == replacement.user_id,
-                        auth_sessions.c.expires_at > replacement.issued_at,
-                    )
-                )
             if access is None or active_session is None:
                 raise CollaborationLeaseInvalid("access_revoked")
             issued_count = int(
@@ -4312,40 +4307,15 @@ class PostgresEditorCollaborationStore:
             raise ValueError("cursor must be non-negative")
         bounded_limit = max(1, min(limit, 500))
         async with self._session(tenant_id) as session:
-            bounds = (
-                await session.execute(
-                    select(
-                        func.min(user_events.c.id),
-                        func.max(user_events.c.id),
-                    ).where(user_events.c.tenant_id == tenant_id)
-                )
-            ).one()
-            oldest = int(bounds[0]) if bounds[0] is not None else 0
-            current = int(bounds[1]) if bounds[1] is not None else 0
-            if cursor > current and cursor != 0:
-                return CollaborationPolicyPage(
-                    (), current, reset_required=True
-                )
-            if cursor and oldest and cursor < oldest - 1:
-                return CollaborationPolicyPage(
-                    (), current, reset_required=True
-                )
-            rows = (
-                await session.execute(
-                    select(user_events)
-                    .where(
-                        user_events.c.tenant_id == tenant_id,
-                        user_events.c.id > cursor,
-                        user_events.c.resource_type.in_(
-                            ("editor_document", "user")
-                        ),
-                    )
-                    .order_by(user_events.c.id)
-                    .limit(bounded_limit + 1)
-                )
-            ).all()
-        if len(rows) > bounded_limit:
-            return CollaborationPolicyPage((), current, reset_required=True)
+            read = await read_events_after(
+                session,
+                tenant_id=tenant_id,
+                cursor=cursor,
+                limit=bounded_limit,
+                wanted=user_events.c.resource_type.in_(("editor_document", "user")),
+            )
+        if read.reset_required:
+            return CollaborationPolicyPage((), read.current, reset_required=True)
         return CollaborationPolicyPage(
             events=tuple(
                 CollaborationPolicyEvent(
@@ -4359,9 +4329,9 @@ class PostgresEditorCollaborationStore:
                         else None
                     ),
                 )
-                for row in rows
+                for row in read.rows
             ),
-            current_cursor=current,
+            current_cursor=read.current,
         )
 
     async def compact(

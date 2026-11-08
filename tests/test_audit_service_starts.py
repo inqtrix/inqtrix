@@ -8,8 +8,10 @@ import time
 import uuid
 from contextlib import contextmanager
 
-from inqtrix.server.runs import RunStatus, RunStore
-from inqtrix.services.audit_service import AuditService, build_audit_entry
+from inqtrix.runs.memory_store import RunStore
+from inqtrix.runs.records import RunStatus
+from inqtrix.auth.audit_entries import build_audit_entry
+from inqtrix.services.audit_service import AuditService
 
 
 class _RecordingAuthority:
@@ -63,6 +65,8 @@ def test_completed_run_writes_index_row_with_metadata():
         handle.emit_answer("done")
 
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="index", stack_name="default", work=work
     )
     _wait_terminal(store, summary["run_id"])
@@ -85,7 +89,7 @@ def test_failed_run_writes_failure_index_row():
     def work(handle):
         raise RuntimeError("boom")
 
-    summary = store.submit(question="x", stack_name="default", work=work)
+    summary = store.submit(mode="research", workflow_contract=1, question="x", stack_name="default", work=work)
     _wait_terminal(store, summary["run_id"])
     rows = [r for r in authority.rows if r["action"] == "run.failed"]
     assert len(rows) == 1
@@ -96,6 +100,8 @@ def test_failed_run_writes_failure_index_row():
 def test_toggle_disables_index_rows():
     store, authority = _store(audit_service_starts=False)
     summary = store.submit(
+        mode="research",
+        workflow_contract=1,
         question="quiet",
         stack_name="default",
         work=lambda handle: handle.emit_answer("ok"),

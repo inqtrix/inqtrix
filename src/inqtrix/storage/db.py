@@ -6,9 +6,10 @@ application role, and sets the transaction-local ``inqtrix.tenant_id``
 GUC the row-level-security policies read. Both steps are
 deliberately transaction-scoped:
 
-* ``SET LOCAL ROLE`` reverts at COMMIT/ROLLBACK, so pooled
-  connections never leak the restricted role into unrelated work
-  (e.g. migrations sharing a pool in tests).
+* ``set_config('role', ..., true)``, the function form of ``SET LOCAL
+  ROLE``, reverts at COMMIT/ROLLBACK, so pooled connections never leak
+  the restricted role into unrelated work (e.g. migrations sharing a
+  pool in tests).
 * ``set_config(..., is_local => true)`` reverts the tenant id the
   same way — the only safe form under connection pooling, where a
   session-scoped value would leak the previous tenant to the next
@@ -41,16 +42,20 @@ pooler — DDL and long transactions do not multiplex.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import re
 import threading
-import weakref
+import time
 from contextlib import asynccontextmanager
 from types import TracebackType
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 
 from anyio import CancelScope
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import InvalidatePoolError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -59,7 +64,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
-from sqlalchemy.util.concurrency import await_only
 
 log = logging.getLogger(__name__)
 
@@ -67,73 +71,16 @@ TENANT_GUC = "inqtrix.tenant_id"
 """Name of the per-transaction GUC carrying the tenant id for RLS."""
 
 _SAFE_ROLE_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
-"""Allowed shape for the application role identifier. ``SET ROLE`` is a
-utility statement and cannot take bind parameters, so the identifier is
-validated against this conservative pattern before interpolation."""
+"""Allowed shape for the application role identifier. A misconfigured role
+fails here, in the application's words, not in the first statement of a
+request."""
 
-_ENGINE_LOOPS: "weakref.WeakKeyDictionary[Any, Any]" = weakref.WeakKeyDictionary()
-"""First event loop seen per POOLED engine, for :func:`_warn_on_loop_change`.
-Weak keys so a disposed engine does not pin its loop."""
+_PING_AFTER_IDLE_SECONDS = 1.0
+"""How long a pooled connection may sit unused before its next checkout checks
+it. The check is three round trips and a transaction otherwise needs about
+five; a connection in steady use comes around again within milliseconds."""
 
-_LOOP_MISMATCH_REPORTED: "weakref.WeakSet[Any]" = weakref.WeakSet()
-"""Engines already reported. The failure repeats every call; one warning
-names the cause without drowning the log that carries the crash."""
-
-
-def _warn_on_loop_change(session_factory: "async_sessionmaker[AsyncSession]") -> None:
-    """Name the cause when a POOLED engine is touched from a second loop.
-
-    asyncpg connections are event-loop-affine. A pooled engine therefore
-    belongs to exactly ONE loop: either a persistent one (the HTTP loop, a
-    job store's dedicated loop) or none at all. Reached from a second loop
-    — the classic case being a sync run thread driving it through
-    ``run_coro_sync``/``asyncio.run``, one fresh loop per call — the pool
-    hands back a connection bound to a foreign or already-dead loop and
-    ``pool_pre_ping`` fails with "Future attached to a different loop". The
-    same reuse also corrupts asyncpg's protocol state and poisons the pool
-    for every later borrower, including the request path.
-
-    :mod:`inqtrix.sync_bridge`, :func:`build_engine` and
-    ``build_run_thread_persistence`` all state the resulting invariant —
-    anything reachable from a per-call loop MUST sit on a NullPool engine —
-    and none of them could enforce it: not every caller goes through
-    ``sync_bridge`` (the agents use bare ``asyncio.run``), so no wrapper
-    sees them all. :func:`tenant_session` does; it is the one chokepoint
-    every tenant-scoped read and write passes through.
-
-    Warns rather than raises: the asyncpg failure follows within the same
-    call anyway, so raising would only replace one error with another. The
-    value is naming the cause — and catching the latent case that has not
-    crashed yet because the pool happened to be empty.
-
-    NullPool engines are skipped: holding no connection, they are
-    loop-agnostic by construction and are exactly what the invariant asks
-    for.
-    """
-    engine = session_factory.kw.get("bind")
-    if engine is None or isinstance(engine.pool, NullPool):
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    first = _ENGINE_LOOPS.get(engine)
-    if first is None:
-        _ENGINE_LOOPS[engine] = loop
-        return
-    if first is loop or engine in _LOOP_MISMATCH_REPORTED:
-        return
-    _LOOP_MISMATCH_REPORTED.add(engine)
-    log.warning(
-        "Pooled database engine %s reached from a second event loop. "
-        "asyncpg connections are loop-affine: this pool is bound to the "
-        "loop that first touched it, and the next checkout can fail with "
-        "'Future attached to a different loop' or corrupt the connection "
-        "for other callers. A store driven from a sync thread via "
-        "asyncio.run must be built with null_pool=True.",
-        id(engine),
-    )
-
+_RETURNED_AT = "inqtrix_returned_at"
 
 _pooled_engine_capacities: list[int] = []
 _pooled_engine_lock = threading.Lock()
@@ -154,61 +101,91 @@ def _record_pooled_engine(max_connections: int) -> None:
 def pooled_connection_budget() -> tuple[int, int]:
     """Return how many pooled engines exist and what they may hold together.
 
-    Counts every pooled engine built in this process. NullPool stores are
-    excluded: they hold nothing between operations and instead add one
-    short-lived connection per operation in flight.
+    A running process has one. One-off probes on a NullPool engine hold
+    nothing between operations and are not counted.
     """
     with _pooled_engine_lock:
         return len(_pooled_engine_capacities), sum(_pooled_engine_capacities)
+
+
+def _dumps_json_column(value: Any) -> str:
+    """Serialize a JSON column value; Postgres refuses NaN and Infinity.
+
+    One such number would fail the whole write, so it is stored as ``null`` and
+    said out loud. The log names how many and never a key, because keys in
+    metadata are user data. Everything else stays byte-identical to the default
+    serializer: event payloads are replayed verbatim.
+    """
+    try:
+        return json.dumps(value, allow_nan=False)
+    except ValueError:
+        pass
+    replaced = 0
+
+    def finite(item: Any) -> Any:
+        nonlocal replaced
+        if isinstance(item, float) and not math.isfinite(item):
+            replaced += 1
+            return None
+        if isinstance(item, dict):
+            return {key: finite(element) for key, element in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [finite(element) for element in item]
+        return item
+
+    text_form = json.dumps(finite(value))
+    if replaced:
+        log.warning(
+            "A JSON column value held %d numbers that are not finite; stored as null.",
+            replaced,
+        )
+    return text_form
 
 
 def build_engine(
     database_url: str,
     *,
     null_pool: bool = False,
-    pool_size: int = 5,
-    max_overflow: int = 10,
+    pool_size: int = 15,
+    max_overflow: int = 0,
     pool_timeout: float = 30.0,
     command_timeout: float | None = None,
 ) -> AsyncEngine:
-    """Create the async engine for the platform persistence layer.
+    """Create an async engine for the platform persistence layer.
+
+    A serving process builds exactly one, in its composition root, and hands it
+    to every store. asyncpg connections belong to the loop that opened them, so
+    the engine belongs to the process loop.
 
     Args:
         database_url: SQLAlchemy async URL
             (``postgresql+asyncpg://...``). Constructor argument by
             design — only the settings bridge reads the environment.
         null_pool: When ``True``, use a :class:`NullPool` (a fresh
-            connection per operation, none cached). asyncpg connections
-            are event-loop-affine; a pooled connection reused across
-            loops fails. NullPool makes the engine loop-AGNOSTIC, which
-            a store that is called both from the async request loop AND
-            from a sync worker thread via ``asyncio.run`` requires (the
-            quota store; the durable run store solves the same problem
-            with its own dedicated loop instead). The pool sizing
-            arguments are ignored on this branch — NullPool holds no
-            connections.
-        pool_size: Persistent connections this engine keeps open.
-            Default 5 (the SQLAlchemy default) keeps existing
-            deployments byte-identical. Operators size it through
+            connection per operation, none cached). Only for one-off probes
+            and command line tools, which are not worth a pool. The pool
+            sizing arguments are ignored on this branch.
+        pool_size: Connections this engine keeps once opened. They open on
+            demand and stay until recycled. Operators size it through
             ``StorageSettings.pool_kwargs()`` so the per-process budget
-            — ``pooled_engines x (pool_size + max_overflow)`` — stays
-            reviewable against Postgres ``max_connections``.
-        max_overflow: Burst connections beyond ``pool_size``, closed
-            again when idle (default 10, the SQLAlchemy default).
+            stays reviewable against Postgres ``max_connections``.
+        max_overflow: Burst connections beyond ``pool_size``. The pool closes
+            them on return, so a process that stays above ``pool_size`` keeps
+            reconnecting; the default is none.
         pool_timeout: Seconds a caller waits for a free pooled
             connection before failing loudly (default 30, the
             SQLAlchemy default). Bounds the queueing latency a
             too-small pool would otherwise convert errors into.
         command_timeout: Per-statement wall-clock ceiling in seconds,
-            enforced client-side by asyncpg (``None`` disables). Pre-ping
-            only validates connections at checkout; this bounds the one
+            enforced client-side by asyncpg (``None`` disables). The
+            connection check runs at checkout only; this bounds the one
             remaining hang class — an in-flight statement on a silently
             dead connection — by turning it into an ordinary error.
 
     Returns:
-        An :class:`AsyncEngine` with pre-ping (survives idle-timeout
-        connection kills) and a 30-minute recycle below common
-        infrastructure idle limits.
+        An :class:`AsyncEngine` that checks a connection left idle (survives
+        idle-timeout connection kills) and recycles after 30 minutes, below
+        common infrastructure idle limits.
     """
     connect_args = (
         {"command_timeout": command_timeout} if command_timeout else {}
@@ -218,21 +195,121 @@ def build_engine(
             database_url,
             poolclass=NullPool,
             connect_args=connect_args,
+            json_serializer=_dumps_json_column,
         )
     else:
         engine = create_async_engine(
             database_url,
-            pool_pre_ping=True,
             pool_recycle=1800,
             pool_size=pool_size,
             max_overflow=max_overflow,
             pool_timeout=pool_timeout,
             connect_args=connect_args,
+            json_serializer=_dumps_json_column,
         )
         _record_pooled_engine(pool_size + max_overflow)
+        _check_connections_left_idle(engine)
     _make_asyncpg_pool_invalidation_atomic(engine)
-    _make_first_connect_mutex_loop_agnostic(engine)
     return engine
+
+
+class DatabasePoolCollector:
+    """Prometheus collector: how full the pool of this process is at scrape time."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._pool = engine.pool
+
+    def collect(self) -> Iterator[Any]:
+        from prometheus_client.core import GaugeMetricFamily
+
+        yield GaugeMetricFamily(
+            "inqtrix_database_pool_size",
+            "Connections the pool of this process may keep.",
+            value=self._pool.size(),
+        )
+        yield GaugeMetricFamily(
+            "inqtrix_database_pool_in_use",
+            "Connections of this process's pool in use right now.",
+            value=self._pool.checkedout(),
+        )
+
+
+def build_process_engine(storage: Any) -> AsyncEngine | None:
+    """The one database engine of a process, or ``None`` without Postgres.
+
+    Every store of the process shares it, so its connections have one limit.
+    Whoever composes the process disposes it, after everything that uses it has
+    stopped.
+
+    Args:
+        storage: The resolved ``StorageSettings``.
+
+    Raises:
+        RuntimeError: Postgres is configured without a database URL.
+    """
+    if storage.backend != "postgres":
+        return None
+    if not storage.database_url.strip():
+        raise RuntimeError(
+            "INQTRIX_STORAGE_BACKEND=postgres requires INQTRIX_DATABASE_URL to be set."
+        )
+    return build_engine(storage.database_url, **storage.pool_kwargs())
+
+
+def resolve_process_engine(auth_provider: Any, storage: Any) -> AsyncEngine | None:
+    """The engine an auth provider built beforehand brought, else a new one.
+
+    The documented library path builds the provider first. Its stores already sit
+    on the engine of the process, so a second one would double the limit. A
+    provider built from other settings would put every store on one database and
+    the checkpointer, the budget and the worker on another, so that refuses to
+    start.
+
+    Raises:
+        RuntimeError: The provider's database is not the one the settings name.
+    """
+    engine = getattr(auth_provider, "database_engine", None)
+    if engine is None:
+        return build_process_engine(storage)
+    if engine.url != make_url(storage.database_url):
+        raise RuntimeError(
+            "The auth provider sits on another database than INQTRIX_DATABASE_URL "
+            "names. Build it from the same settings as the app."
+        )
+    return engine
+
+
+def _check_connections_left_idle(engine: AsyncEngine) -> None:
+    """Check a pooled connection at checkout only when it sat unused.
+
+    SQLAlchemy's ``pool_pre_ping`` checks every checkout, and on asyncpg that is
+    BEGIN, an empty statement and ROLLBACK. A transaction holds its connection
+    through each round trip, so with a database a few milliseconds away the check
+    alone takes more than a third of what the pool can serve.
+
+    A connection returned a moment ago was alive a moment ago. One that died in
+    that moment fails its caller like a statement in flight would, and that failure
+    replaces the pool. What the check is for stays covered: a connection an idle
+    timeout or a restart killed while it sat in the pool. As with ``pool_pre_ping``,
+    a failed check replaces every older connection.
+    """
+    dialect = engine.sync_engine.dialect
+
+    @event.listens_for(engine.sync_engine, "checkin")
+    def note_return(dbapi_connection: Any, record: Any) -> None:
+        record.info[_RETURNED_AT] = time.monotonic()
+
+    @event.listens_for(engine.sync_engine, "checkout")
+    def check_if_left_idle(dbapi_connection: Any, record: Any, proxy: Any) -> None:
+        returned_at = record.info.get(_RETURNED_AT)
+        if returned_at is None or time.monotonic() - returned_at < _PING_AFTER_IDLE_SECONDS:
+            return
+        try:
+            dialect.do_ping(dbapi_connection)
+        except dialect.loaded_dbapi.Error as error:
+            if dialect.is_disconnect(error, dbapi_connection, None):
+                raise InvalidatePoolError() from error
+            raise
 
 
 def _make_asyncpg_pool_invalidation_atomic(engine: AsyncEngine) -> None:
@@ -261,77 +338,21 @@ def _make_asyncpg_pool_invalidation_atomic(engine: AsyncEngine) -> None:
     dialect.do_terminate = terminate_without_interrupting_pool_state
 
 
-class _LoopAgnosticOnceMutex:
-    """Serialize an engine's first-connect dialect initialization across event loops.
-
-    SQLAlchemy runs ``dialect.initialize`` exactly once per engine, on the
-    first connection, and guards that run with a mutex that EVERY connection
-    of the engine takes until the first run has completed
-    (``event/attr.py: _exec_w_sync_on_first_run``). For async engines that
-    mutex is an ``asyncio.Lock`` (``AsyncAdaptedLock``). An ``asyncio.Lock``
-    binds itself to the loop of its first contended waiter and wakes that
-    waiter through the *foreign* loop's ``call_soon`` from whichever loop
-    releases it: with the per-call loops the workspace agent drives from
-    executor threads (``asyncio.run`` per tool call), a second contender
-    raises "bound to a different event loop" and the first one never wakes
-    up -- its loop sleeps in ``epoll_wait`` without a timer, holding an
-    authenticated connection that never sends a statement (for example
-    three parallel ``search_context`` calls that make the first connections
-    of the agent-sessions engine in a worker process).
-
-    This mutex satisfies the same ``_MutexProtocol`` with a thread lock, so it
-    is correct across threads and loops, and it never blocks the calling
-    loop: a contender that misses the lock yields to its own loop with a
-    short sleep instead of parking the thread, which keeps a holder that
-    awaits the database on the SAME loop (the API process) runnable. The
-    lock is only ever contended during a process's first connections of one
-    engine; afterwards SQLAlchemy skips the guard entirely.
-    """
-
-    _POLL_SECONDS = 0.005
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-
-    def __enter__(self) -> bool:
-        while not self._lock.acquire(blocking=False):
-            await_only(asyncio.sleep(self._POLL_SECONDS))
-        return True
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        self._lock.release()
-
-
-def _make_first_connect_mutex_loop_agnostic(engine: AsyncEngine) -> None:
-    """Install :class:`_LoopAgnosticOnceMutex` on the pool's connect events.
-
-    Set before the first connection so SQLAlchemy's lazily created
-    ``AsyncAdaptedLock`` never comes into existence for this engine
-    (``_get_exec_once_mutex`` returns a preset mutex unchanged). Done here,
-    at the one place every engine is built, because the hazard is a property
-    of how the engine is DRIVEN (per-call loops) and no store can see that.
-    The private attribute is pinned by a test so a library upgrade fails
-    loudly instead of hanging silently.
-    """
-
-    dispatch = engine.sync_engine.pool.dispatch
-    for name in ("connect", "first_connect"):
-        collection = getattr(dispatch, name).for_modify(dispatch)
-        collection._exec_once_mutex = _LoopAgnosticOnceMutex()
-
-
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     """Create the session factory bound to *engine*.
 
     ``expire_on_commit=False`` is mandatory for async SQLAlchemy:
     attribute access after commit must not trigger implicit IO
     (``MissingGreenlet``).
+
+    Raises:
+        RuntimeError: There is no engine. Without this a store would only fail at
+            its first statement, long after the composition went wrong.
     """
+    if engine is None:
+        raise RuntimeError(
+            "A store on Postgres needs the engine of its process; see build_process_engine."
+        )
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -437,7 +458,6 @@ async def tenant_session(
         raise ValueError("tenant_id must be non-empty for a tenant session")
     if app_role and not _SAFE_ROLE_PATTERN.fullmatch(app_role):
         raise ValueError(f"app_role has an unsafe identifier shape: {app_role!r}")
-    _warn_on_loop_change(session_factory)
     session = session_factory()
     transaction = session.begin()
     session_entered = False
@@ -447,14 +467,18 @@ async def tenant_session(
         session_entered = True
         await transaction.__aenter__()
         transaction_entered = True
+        # One statement: this runs in every transaction, and the transaction holds
+        # its connection through every round trip.
         if app_role:
-            # Identifier validated above; SET ROLE cannot be
-            # parameterized (Postgres utility statement).
-            await session.execute(text(f'SET LOCAL ROLE "{app_role}"'))
-        await session.execute(
-            text("SELECT set_config(:guc, :tenant, true)"),
-            {"guc": TENANT_GUC, "tenant": tenant_id},
-        )
+            await session.execute(
+                text("SELECT set_config('role', :role, true), set_config(:guc, :tenant, true)"),
+                {"role": app_role, "guc": TENANT_GUC, "tenant": tenant_id},
+            )
+        else:
+            await session.execute(
+                text("SELECT set_config(:guc, :tenant, true)"),
+                {"guc": TENANT_GUC, "tenant": tenant_id},
+            )
         yield session
     except BaseException as error:
         suppressed = await _finalize_tenant_session(

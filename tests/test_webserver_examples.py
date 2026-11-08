@@ -26,6 +26,8 @@ from fastapi import FastAPI
 
 import inqtrix.research.web_research as web_research_module
 from tests._webserver_helpers import (
+    _StubLLM,
+    _StubSearch,
     import_stack_module,
     make_test_client,
     patch_provider_constructors,
@@ -77,13 +79,26 @@ def fake_agent_run(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize("stack", _STACKS)
 def test_stack_imports(stack: str):
     """Module import must succeed before any env-var is set."""
-    # Force a fresh import every time to keep test order independent.
-    module_name = f"examples.webserver_stacks.{stack}"
-    if module_name in importlib.sys.modules:
-        del importlib.sys.modules[module_name]
-    module = importlib.import_module(module_name)
+    module = import_stack_module(stack)
     assert hasattr(module, "build_app")
     assert hasattr(module, "main")
+
+
+def test_a_stack_imported_before_the_patch_still_builds_with_the_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The examples bind the provider classes when they are imported.
+
+    An earlier import without the patch (the import test runs first) left the
+    real classes bound, and every later test built real providers.
+    """
+    importlib.import_module("examples.webserver_stacks.azure_foundry_web_search")
+    patch_provider_constructors(monkeypatch)
+
+    module = import_stack_module("azure_foundry_web_search")
+
+    assert module.AzureFoundryWebSearch is _StubSearch
+    assert module.AzureOpenAILLM is _StubLLM
 
 
 @pytest.mark.parametrize("stack", _STACKS)
@@ -149,10 +164,7 @@ def test_stack_chat_completions_blocking(
 
 
 def test_multi_stack_imports():
-    module_name = "examples.webserver_stacks.multi_stack"
-    if module_name in importlib.sys.modules:
-        del importlib.sys.modules[module_name]
-    module = importlib.import_module(module_name)
+    module = import_stack_module("multi_stack")
     assert hasattr(module, "build_app")
     assert hasattr(module, "main")
 

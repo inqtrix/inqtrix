@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from email.utils import formatdate
 
 import pytest
@@ -12,6 +15,7 @@ from inqtrix.execution_failures import classify_execution_failure
 from inqtrix.exceptions import ModelCapacityReason
 from inqtrix.exceptions import AzureOpenAIAPIError
 from inqtrix.providers import base
+from inqtrix.providers.attempts import call_with_retries, observe_retries
 
 
 class StatusError(RuntimeError):
@@ -58,21 +62,27 @@ def test_retry_after_accepts_http_date_and_rejects_infinite_delays(monkeypatch):
 
 
 def test_retry_log_and_activity_share_the_operation_attempt_count(monkeypatch, caplog):
-    monkeypatch.setattr(base, "_sleep_before_retry", lambda *_: None)
+    monkeypatch.setattr(base, "_retry_delay_seconds", lambda *_args: 0.0)
     responses = iter([StatusError(503), "completed"])
-    notices = []
 
-    def create():
+    async def send():
         value = next(responses)
         if isinstance(value, Exception):
             raise value
         return value
 
-    with base.provider_attempt_scope(base.ProviderAttemptBudget(used=1)):
-        assert base._call_openai_chat_completion_with_retries(
-            provider_label="Fixture", model="fixture-model", operation="chat",
-            deadline=None, create=create, append_retry_notice=notices.append,
+    with (
+        base.provider_attempt_scope(base.ProviderAttemptBudget(used=1)),
+        observe_retries("model") as retries,
+    ):
+        assert asyncio.run(
+            call_with_retries(
+                send, provider_label="Fixture", model="fixture-model",
+                operation="chat", deadline=time.monotonic() + 30,
+                outer_deadline=None, timeout_label="Fixture call",
+            )
         ) == "completed"
+    notices = retries.notices()
     assert notices[0]["attempt"] == 2
     assert notices[0]["max_attempts"] == 3
     retry_logs = [record.getMessage() for record in caplog.records

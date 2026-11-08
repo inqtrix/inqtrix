@@ -33,7 +33,9 @@ import pytest_asyncio
 
 from inqtrix.knowledge.stores.qdrant_store import (
     QdrantVectorIndex,
+    _ensure_chunks_collection,
     _model_slug,
+    _require_qdrant,
 )
 from inqtrix.knowledge.stores.vector_index import ChunkVector, VectorSearchScope
 
@@ -80,6 +82,32 @@ def _drop(instance: QdrantVectorIndex, model_name: str) -> None:
             instance._client.delete_collection(name)
     except Exception:  # noqa: BLE001 — teardown must not mask a test failure
         pass
+
+
+@pytest.mark.asyncio
+async def test_a_document_above_the_request_limit_of_the_server_is_written(
+    index: QdrantVectorIndex, model_name: str
+) -> None:
+    """The server refuses a request above 32 MB; a large document has to fit anyway."""
+    dimension = 3072
+    chunks = 700
+    await index.ensure_model(embedding_model=model_name, embedding_dim=dimension)
+
+    await index.upsert(
+        embedding_model=model_name,
+        collection_id="kc_large",
+        document_id="kd_large",
+        vectors=[
+            ChunkVector(
+                f"kch_{number}",
+                tuple((number * position + 1) / 99_991.0 for position in range(dimension)),
+            )
+            for number in range(chunks)
+        ],
+    )
+
+    counted = await index.count_document(embedding_model=model_name, document_id="kd_large")
+    assert counted == chunks
 
 
 @pytest.mark.asyncio
@@ -184,6 +212,54 @@ async def test_server_filters_inactive_generation_and_revision(
     # The two staged points rank HIGHER by cosine; the filter, not the score,
     # is what must exclude them.
     assert [hit.chunk_id for hit in hits] == ["kch_active"]
+
+
+class _SawNothingAtFirst:
+    """A client whose first look misses what another caller has just created."""
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+        self._looked = False
+
+    def collection_exists(self, name: str) -> bool:
+        if not self._looked:
+            self._looked = True
+            return False
+        return self._client.collection_exists(name)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._client, name)
+
+
+@pytest.mark.asyncio
+async def test_the_loser_of_a_first_creation_gets_the_winners_collection(
+    index: QdrantVectorIndex, model_name: str
+) -> None:
+    """The server answers the second create with 409, which must not reach a user."""
+    await index.ensure_model(embedding_model=model_name, embedding_dim=2)
+    _client, models = _require_qdrant()
+
+    _ensure_chunks_collection(
+        _SawNothingAtFirst(index._client),
+        models,
+        name=_model_slug(model_name),
+        embedding_dim=2,
+        sparse_enabled=False,
+    )
+
+    await index.upsert(
+        embedding_model=model_name,
+        collection_id="kc_race",
+        document_id="kd_race",
+        vectors=[
+            ChunkVector(
+                "kch_race",
+                (1.0, 0.0),
+                generation_id="gen_race",
+                revision_id="rev_race",
+            )
+        ],
+    )
 
 
 @pytest.mark.asyncio

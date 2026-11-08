@@ -13,7 +13,8 @@ def _run_main(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     import inqtrix.__main__ as server_main
 
     app = object()
-    captured: dict[str, object] = {"stub_app": app}
+    order: list[str] = []
+    captured: dict[str, object] = {"stub_app": app, "order": order}
     monkeypatch.setattr(
         server_main,
         "configure_logging",
@@ -33,9 +34,16 @@ def _run_main(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
             )
         ),
     )
-    monkeypatch.setattr(server_main, "create_app", lambda settings: app)
+
+    def create_app(settings: object) -> object:
+        order.append("create_app")
+        return app
+
+    monkeypatch.setattr(server_main, "create_app", create_app)
+    monkeypatch.setattr(server_main, "freeze_startup_heap", lambda: order.append("freeze"))
 
     def run(received_app: object, **kwargs: object) -> None:
+        order.append("run")
         captured["app"] = received_app
         captured["options"] = kwargs
 
@@ -43,6 +51,15 @@ def _run_main(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
 
     server_main.main()
     return captured
+
+
+def test_main_keeps_what_it_built_out_of_later_collections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spared from every full collection: the composition, not what comes after it."""
+    captured = _run_main(monkeypatch)
+
+    assert captured["order"] == ["create_app", "freeze", "run"]
 
 
 def test_main_propagates_collaboration_limits_to_uvicorn(

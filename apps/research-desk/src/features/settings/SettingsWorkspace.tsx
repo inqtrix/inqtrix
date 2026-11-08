@@ -63,6 +63,7 @@ import {
 import { isPasswordAcceptable } from '@/features/auth/passwordPolicy'
 import { AccessTokensPanel } from '@/features/admin/AccessTokensPanel'
 import { AdminAuditSection } from '@/features/admin/AdminAuditSection'
+import { RunBindingsPanel } from '@/features/admin/RunBindingsPanel'
 import { SystemStatusPanel } from '@/features/admin/SystemStatusPanel'
 import { AdminWorkspacesPanel } from '@/features/admin/AdminWorkspacesPanel'
 import { UsersPanel } from '@/features/admin/UsersPanel'
@@ -92,6 +93,7 @@ import type {
   StackDiscoveryStatus,
 } from '@/features/researchRuns/types'
 import { cn } from '@/lib/utils'
+import { formatMessageTimestamp } from '@/lib/time'
 import {
   useTheme,
   type ThemeMode,
@@ -956,13 +958,16 @@ function SettingsPanel({
         ) : activeItem.id === 'access-tokens' ? (
           <AccessTokensPanel tokens={patTokens} />
         ) : activeItem.id === 'admin-system' ? (
-          <SystemStatusPanel
-            capabilities={isDemoMode ? seedSystemCapabilities() : apiCapabilities}
-            health={isDemoMode ? seedSystemHealth() : apiHealth}
-            runtime={adminSystemRuntime.state.runtime}
-            runtimeError={adminSystemRuntime.state.error}
-            runtimeStatus={adminSystemRuntime.state.status}
-          />
+          <div className="flex min-w-0 flex-col gap-4">
+            <SystemStatusPanel
+              capabilities={isDemoMode ? seedSystemCapabilities() : apiCapabilities}
+              health={isDemoMode ? seedSystemHealth() : apiHealth}
+              runtime={adminSystemRuntime.state.runtime}
+              runtimeError={adminSystemRuntime.state.error}
+              runtimeStatus={adminSystemRuntime.state.status}
+            />
+            <RunBindingsPanel demo={isDemoMode} />
+          </div>
         ) : activeItem.id === 'admin-audit' ? (
           <AdminAuditSection
             demo={isDemoMode}
@@ -1108,7 +1113,7 @@ function AgentMemoryPanel({
   apiKey: string
   apiRequestBaseUrl?: string
 }) {
-  const { t } = useLocale()
+  const { locale, t } = useLocale()
   const { agentMemoryEnabled, setAgentMemoryEnabled } = useTheme()
   const memory = useAgentMemory({ apiKey, baseUrl: apiRequestBaseUrl })
   const [drafts, setDrafts] = useState<Record<string, AgentMemoryWire>>({})
@@ -1429,7 +1434,7 @@ function AgentMemoryPanel({
                   </p>
                 </div>
                 <p className="shrink-0 t-meta text-muted-foreground">
-                  {new Date(row.created_at * 1000).toLocaleString()}
+                  {formatMessageTimestamp(new Date(row.created_at * 1000).toISOString(), locale)}
                 </p>
               </div>
               {row.reason ? (

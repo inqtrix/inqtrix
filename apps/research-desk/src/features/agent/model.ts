@@ -857,6 +857,8 @@ export type AgentRunRecord = {
   timing?: ResearchRunSummary['timing']
   error?: string
   errorCode?: string
+  /** Why a cancelled run ended, as its cancel event names it. */
+  cancelReason?: string
   snapshot?: ResearchRunSnapshot
   /** Highest event sequence applied (drives `?after=` replay filtering). */
   lastSequence: number

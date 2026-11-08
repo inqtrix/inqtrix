@@ -9,7 +9,7 @@ Type decisions:
 * ``run_id`` is text (``run_...``) — the existing public run
   identifier, unchanged from the in-memory store.
 * All timestamps are unix-seconds doubles, mirroring the in-memory
-  :class:`~inqtrix.server.runs.RunRecord` and the pinned wire format
+  :class:`~inqtrix.runs.records.RunRecord` and the pinned wire format
   (``created_at``/``started_at``/``finished_at`` are float epochs in
   run summaries and event envelopes).
 * JSON columns use the text-preserving ``JSON`` type, NOT ``JSONB``:
@@ -17,7 +17,7 @@ Type decisions:
   replay parity with the in-memory store (``json.dumps`` of the
   loaded dict must reproduce the original frame).
 * ``status`` is text + CHECK; the lifecycle ordering lives only in
-  :class:`~inqtrix.server.runs.RunStatus` (single ordering authority,
+  :class:`~inqtrix.runs.records.RunStatus` (single ordering authority,
   no native PG enums).
 * ``event_seq`` on the run row is the per-run sequence allocator:
   ``UPDATE ... SET event_seq = event_seq + 1 RETURNING event_seq``
@@ -59,7 +59,10 @@ runs = Table(
         nullable=False,
         server_default=text("'queued'"),
     ),
-    Column("mode", Text, nullable=False, server_default=text("'research'")),
+    # The run's binding (0100): its mode and the workflow contract it was
+    # accepted under. Neither has a default; every write names both.
+    Column("mode", Text, nullable=False),
+    Column("workflow_contract", Integer, nullable=False),
     # Agent-tree columns (migration 0029): role of the run in an agent
     # tree plus its parent/root links. ``session_id`` is the shared durable
     # relation to a saved Agent or Knowledge session. All remain additive
@@ -172,7 +175,7 @@ runs = Table(
 """Durable run records — the source of truth once
 ``INQTRIX_STORAGE_BACKEND=postgres`` is active; the Valkey stream only
 carries dispatch messages. The status CHECK constraint is added in
-migration 0003 (values from :class:`~inqtrix.server.runs.RunStatus`)."""
+migration 0003 (values from :class:`~inqtrix.runs.records.RunStatus`)."""
 
 run_events = Table(
     "run_events",

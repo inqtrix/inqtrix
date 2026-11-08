@@ -1123,7 +1123,7 @@ def test_chart_version_tracks_chart_contract_changes() -> None:
     below is for.
     """
     chart = yaml.safe_load((_CHART / "Chart.yaml").read_text(encoding="utf-8"))
-    assert chart["version"] == "0.5.5"
+    assert chart["version"] == "0.5.7"
 
 
 def test_observability_tracing_env_renders_for_api_and_worker() -> None:
@@ -1950,7 +1950,7 @@ def test_invalid_connection_ceiling_fails_the_render(value):
 #h.update(p.read_bytes()),h.update(b'\0')) for p in sorted(x for x in c.rglob('*') \
 #if x.is_file())];print(h.hexdigest())"
 _CHART_CONTRACT_DIGEST = (
-    "dd9c8bb50051c8c5905b75f618e33642c64595ecb1c6b978c1b08b0e84da8d7e"
+    "71d54d36dd47d484e9a658dc878fd244d80009a4ac9a5aa387138c5d910ec44a"
 )
 
 

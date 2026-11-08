@@ -45,7 +45,7 @@ from inqtrix.agents.kernel.review_edits import RECHECK_REASONS, is_counted
 from inqtrix.agents.research_prospect import extraction_limited, readings_of
 from inqtrix.exceptions import AgentCancelled, AgentTokenBudgetExceeded
 from inqtrix.i18n import t, t_count
-from inqtrix.runs.shared import OUTCOME_EVENT
+from inqtrix.harness.contracts.events import OUTCOME_EVENT
 
 log = logging.getLogger(__name__)
 

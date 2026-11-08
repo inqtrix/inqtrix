@@ -86,7 +86,7 @@ describe('markdownToDocxBlocks', () => {
 describe('docxDocumentOptions', () => {
   it('writes the report look: numbered headings, its own styles, direct table borders', async () => {
     const markdown = '# H\n\n```\ncode\n```\n\n> Zitat\n\n| A |\n| - |\n| 1 |\n\n[L](https://example.com) `c`'
-    const zip = await JSZip.loadAsync(await Packer.toBuffer(new Document(docxDocumentOptions(markdown, 'T'))))
+    const zip = await JSZip.loadAsync(await Packer.toBuffer(new Document(docxDocumentOptions(markdown, 'T', 'de'))))
     const document = await zip.file('word/document.xml')!.async('string')
 
     expect(document).toContain('<w:pStyle w:val="Heading1"/><w:numPr>')
@@ -98,7 +98,7 @@ describe('docxDocumentOptions', () => {
   })
 
   it('marks a generated report in the core properties a reader can see', () => {
-    const options = docxDocumentOptions('# Report\n\nBody.', 'Quarterly review', {
+    const options = docxDocumentOptions('# Report\n\nBody.', 'Quarterly review', 'de', {
       notice: AI_NOTICE,
     })
 
@@ -110,7 +110,7 @@ describe('docxDocumentOptions', () => {
   })
 
   it('writes the machine-readable custom properties', () => {
-    const options = docxDocumentOptions('Body.', 'T', { notice: AI_NOTICE })
+    const options = docxDocumentOptions('Body.', 'T', 'de', { notice: AI_NOTICE })
 
     expect(options.customProperties).toEqual([
       { name: 'AIGenerated', value: 'true' },
@@ -121,7 +121,7 @@ describe('docxDocumentOptions', () => {
   })
 
   it('leaves a document the user wrote unmarked when no disclosure is given', () => {
-    const options = docxDocumentOptions('Body.', 'My notes')
+    const options = docxDocumentOptions('Body.', 'My notes', 'de')
 
     expect(options.creator).toBeUndefined()
     expect(options.description).toBeUndefined()
@@ -132,7 +132,7 @@ describe('docxDocumentOptions', () => {
 
   it('builds a usable section either way', () => {
     for (const disclosure of [undefined, { notice: AI_NOTICE }]) {
-      const options = docxDocumentOptions('# H\n\nBody.', 'T', disclosure)
+      const options = docxDocumentOptions('# H\n\nBody.', 'T', 'de', disclosure)
 
       expect(options.sections).toHaveLength(1)
       expect(options.sections[0].children.length).toBeGreaterThan(0)

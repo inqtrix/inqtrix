@@ -17,7 +17,7 @@ import pytest
 import sqlalchemy as sa
 
 import inqtrix.storage as storage_package
-from inqtrix.services.user_erasure import (
+from inqtrix.storage.user_erasure import (
     ERASURE_PLAN,
     Disposition,
     PLANNED_COLUMNS,
@@ -146,7 +146,7 @@ def test_only_the_deletion_machines_own_tombstones_are_left_in_place() -> None:
     That record is the machine's, not the account's data; anything else a
     rule left out would be data an erasure silently keeps.
     """
-    from inqtrix.source_authority import SourceLifecycleState
+    from inqtrix.storage.source_authority import SourceLifecycleState
 
     kept = sorted(
         (rule.table, rule.column, rule.tombstone)

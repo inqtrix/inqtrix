@@ -76,7 +76,7 @@ def build_tracer_provider(
         )
         return None
 
-    from inqtrix import __version__
+    from inqtrix.version import __version__
 
     resource = Resource.create(
         {
@@ -232,7 +232,7 @@ def run_execute_span(
     from inqtrix.observability import semconv
     from inqtrix.observability.content import withheld_content
     from inqtrix.observability.propagation import extract_context
-    from inqtrix.runs.shared import incognito_request
+    from inqtrix.observability.incognito import incognito_request
 
     incognito = incognito_request(payload)
 

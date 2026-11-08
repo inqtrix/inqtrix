@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.principal import AuthProvider
     from inqtrix.providers.base import ProviderContext
     from inqtrix.server.container import AppContainer
-    from inqtrix.server.runs import RunStore
+    from inqtrix.runs.memory_store import RunStore
     from inqtrix.storage.object_store import ObjectStore
     from inqtrix.strategies import StrategyContext
 
@@ -66,6 +66,7 @@ def register_routes(
     default_stack: str = "",
     run_store: "RunStore | None" = None,
     object_store_impl: "ObjectStore | None" = None,
+    database_engine: Any = None,
 ) -> "AppContainer":
     """Bind all routes to *_router* with dependency injection.
 
@@ -110,6 +111,7 @@ def register_routes(
         default_stack=default_stack,
         run_store=run_store,
         object_store_impl=object_store_impl,
+        database_engine=database_engine,
     )
 
     _router.include_router(health.build_router(container))

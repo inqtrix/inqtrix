@@ -25,7 +25,7 @@ RUN npm ci \
 COPY apps/research-desk ./apps/research-desk
 COPY packages/editor-schema ./packages/editor-schema
 # Version source for the SPA's __APP_VERSION__ Vite define (vite.config.ts).
-COPY src/inqtrix/__init__.py src/inqtrix/__init__.py
+COPY src/inqtrix/version.py src/inqtrix/version.py
 RUN npm run ui:build
 
 # --- Python gateway dependencies, resolved from the repository uv.lock ---

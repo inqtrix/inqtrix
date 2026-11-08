@@ -120,9 +120,9 @@ export const DEMO_AGENT_OVERVIEW_SOURCE: AgentOverviewSource = {
       reason: 'operator_ceiling_exactly_once_required',
     },
     kernel: {
-      schnell: { tool_calls: 30, tool_calls_ceiling: 30, steps: 57, steps_ceiling: 57 },
-      normal: { tool_calls: 30, tool_calls_ceiling: 60, steps: 73, steps_ceiling: 145 },
-      deep: { tool_calls: 60, tool_calls_ceiling: 120, steps: 121, steps_ceiling: 241 },
+      schnell: { tool_calls: 30, tool_calls_ceiling: 30, steps: 96, steps_ceiling: 96 },
+      normal: { tool_calls: 30, tool_calls_ceiling: 60, steps: 120, steps_ceiling: 240 },
+      deep: { tool_calls: 60, tool_calls_ceiling: 120, steps: 120, steps_ceiling: 240 },
     },
     mission: {
       discovery_tool_calls: 15,

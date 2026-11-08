@@ -12,7 +12,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build && node scripts/verify-precompressed-assets.mjs dist",
     "lint": "eslint .",
-    "typecheck": "tsc -b --pretty false",
+    "typecheck": "tsc -b --pretty false && tsc -p tsconfig.browser-tests.json --noEmit --pretty false",
     "test": "vitest run",
     "test:watch": "vitest",
     "preview": "vite preview --host 127.0.0.1",
@@ -101,7 +101,7 @@
     "globals": "17.6.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.59.3",
-    "vite": "8.0.16",
-    "vitest": "4.1.7"
+    "vite": "8.3.5",
+    "vitest": "4.1.12"
   }
 }

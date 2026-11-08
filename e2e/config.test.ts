@@ -2,12 +2,18 @@ import assert from 'node:assert/strict'
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, test } from 'node:test'
+
+import ts from 'typescript'
 
 import {
   assertStrictE2EConfiguration,
@@ -524,3 +530,71 @@ function validFixture() {
     version: 2,
   }
 }
+
+describe('every browser context of the gate follows the HTTPS switch', () => {
+  // Over HTTPS with a throwaway certificate, a context without the switch
+  // fails on the certificate alone while the others pass. The switch has one
+  // derivation; every call that opens a browser context or an API session
+  // must carry it, and a page must come from such a context.
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const derivation = join(root, 'tests', 'verification', 'fixtures', 'https-errors.mjs')
+
+  function gateSources(): string[] {
+    const files: string[] = []
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        if (name.startsWith('.') || name === 'node_modules' || name === '__pycache__') continue
+        const path = join(dir, name)
+        if (statSync(path).isDirectory()) {
+          walk(path)
+        } else if (/\.(?:ts|mts|mjs|js)$/.test(name) && !/\.test\.|\.d\.mts$|\.d\.ts$/.test(name)) {
+          files.push(path)
+        }
+      }
+    }
+    for (const tree of ['e2e', join('tests', 'verification'), join('tests', 'load')]) walk(join(root, tree))
+    return files
+  }
+
+  function carriesSwitch(options: ts.Expression | undefined): boolean {
+    if (!options || !ts.isObjectLiteralExpression(options)) return false
+    return options.properties.some((property) => {
+      if (ts.isShorthandPropertyAssignment(property)) return property.name.text === 'ignoreHTTPSErrors'
+      return ts.isPropertyAssignment(property)
+        && property.name.getText() === 'ignoreHTTPSErrors'
+        && property.initializer.kind !== ts.SyntaxKind.FalseKeyword
+    })
+  }
+
+  test('no context, session or page is opened past the switch', () => {
+    const offenders: string[] = []
+    let contexts = 0
+    for (const file of gateSources()) {
+      const text = readFileSync(file, 'utf8')
+      const where = (node: ts.Node) =>
+        `${relative(root, file)}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`
+      if (file !== derivation && text.includes('INQTRIX_E2E_IGNORE_HTTPS_ERRORS ===')) {
+        offenders.push(`${relative(root, file)}: derives the switch itself`)
+      }
+      const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)
+      const visit = (node: ts.Node) => {
+        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+          const method = node.expression.name.text
+          const receiver = node.expression.expression.getText(source)
+          if (method === 'newContext' || method === 'launchPersistentContext') {
+            contexts += 1
+            const options = method === 'newContext' ? node.arguments[0] : node.arguments[1]
+            if (!carriesSwitch(options)) offenders.push(where(node))
+          } else if (method === 'newPage' && !/context$/i.test(receiver)) {
+            // A page outside a context opens a context of its own.
+            offenders.push(where(node))
+          }
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(source)
+    }
+    assert.ok(contexts >= 8, `the scan found only ${contexts} contexts`)
+    assert.deepEqual(offenders, [])
+  })
+})

@@ -8,13 +8,14 @@ import logging
 import time
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import inqtrix.server.app as app_module
 import inqtrix.research.web_research as web_research_module
 import inqtrix.server.routers.chat as chat_router_module
-from inqtrix import __display_version__, __version__
+from inqtrix import __display_version__, __version__, aio
 from inqtrix.legal import ai_disclosure_metadata, legal_metadata
 from inqtrix.providers.base import ProviderContext
 from inqtrix.search_result import GroundedSearchResult
@@ -793,16 +794,16 @@ def test_upload_reconciler_is_owned_by_restartable_app_lifespan():
     assert reconciler is not None
     assert reconciler.running is False
 
-    with TestClient(app):
+    with TestClient(app) as client:
         assert reconciler.running is True
-        reconciler.start()
+        client.portal.call(reconciler.start)
         assert reconciler.running is True
     assert reconciler.running is False
 
     with TestClient(app):
         assert reconciler.running is True
     assert reconciler.running is False
-    reconciler.close()
+    asyncio.run(reconciler.aclose())
     assert reconciler.running is False
 
 
@@ -820,11 +821,11 @@ def test_indexing_auto_resumer_is_owned_by_the_app_lifespan_and_stops_first():
         def start(self) -> None:
             events.append("resumer.start")
 
-        def close(self) -> None:
+        async def aclose(self) -> None:
             events.append("resumer.close")
 
     class JobStore:
-        def close(self) -> None:
+        async def aclose(self) -> None:
             events.append("store.close")
 
     app.state.container = replace(
@@ -836,6 +837,92 @@ def test_indexing_auto_resumer_is_owned_by_the_app_lifespan_and_stops_first():
     with TestClient(app):
         assert events == ["resumer.start"]
     assert events == ["resumer.start", "resumer.close", "store.close"]
+
+
+@pytest.mark.parametrize(
+    ("field", "wrap"),
+    [
+        ("run_store", lambda store: store),
+        ("indexing_service", lambda store: SimpleNamespace(job_store=store)),
+        ("asset_deletion_service", lambda store: SimpleNamespace(operation_store=store)),
+        ("upload_operation_service", lambda store: SimpleNamespace(operations=store)),
+    ],
+)
+def test_the_lifespan_starts_and_closes_every_job_store_on_its_loop(field, wrap):
+    """Closing waits for the store's segments, and those need the loop to finish."""
+    from dataclasses import replace
+
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+    events: list[str] = []
+
+    class Store:
+        async def astart(self) -> None:
+            events.append("started")
+
+        async def aclose(self) -> None:
+            events.append("closed")
+
+    app.state.container = replace(app.state.container, **{field: wrap(Store())})
+
+    with TestClient(app):
+        assert events == ["started"]
+
+    assert events == ["started", "closed"]
+
+
+def test_the_lifespan_makes_its_loop_the_process_loop_and_starts_the_ledger():
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+    before = aio.default_loop()
+
+    with TestClient(app) as client:
+        assert aio.default_loop() is client.portal.call(asyncio.get_running_loop)
+        tasks = client.portal.call(lambda: [task.get_name() for task in asyncio.all_tasks()])
+        assert "inqtrix-usage-ledger" in tasks
+
+    assert aio.default_loop() is before
+
+
+def test_a_failing_startup_leaves_no_process_loop_behind(monkeypatch):
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+    default_before = aio.default_loop()
+
+    class Boom(RuntimeError):
+        pass
+
+    def fail_startup(*_args, **_kwargs):
+        raise Boom
+
+    monkeypatch.setattr(app_module, "provider_label", fail_startup)
+
+    with pytest.raises(Boom):
+        with TestClient(app):
+            pass
+
+    assert aio.default_loop() is default_before
+
+
+def test_the_transition_lane_holds_every_job_slot_and_the_short_hops() -> None:
+    from inqtrix import aio
+    from inqtrix.server.app import process_loop_lifespan
+
+    settings = Settings()
+
+    async def main() -> aio.LaneSnapshot:
+        async with process_loop_lifespan(settings):
+            return aio.lane_snapshot()[aio.LEGACY_LANE]
+
+    lane = asyncio.run(main())
+
+    assert lane.workers == (
+        (settings.server.run_max_concurrent or settings.server.max_concurrent)
+        + settings.knowledge.reindex_max_concurrent
+        + settings.server.deletion_max_concurrent
+        + settings.server.upload_max_concurrent
+        + settings.queue.blocking_pool_size
+    )
 
 
 def test_run_retention_sweep_is_owned_by_the_app_lifespan_and_stops_first():
@@ -851,11 +938,11 @@ def test_run_retention_sweep_is_owned_by_the_app_lifespan_and_stops_first():
         def start(self) -> None:
             events.append("sweep.start")
 
-        def close(self) -> None:
+        async def aclose(self) -> None:
             events.append("sweep.close")
 
     class RunStore:
-        def close(self) -> None:
+        async def aclose(self) -> None:
             events.append("store.close")
 
     app.state.container = replace(
@@ -873,8 +960,6 @@ def test_the_api_process_sweeps_the_run_store_every_minute():
     """Retention windows hold while nobody reads the store: the container
     wires one sweep of the run store, inert until the application lifespan
     starts it."""
-    import threading
-
     from inqtrix.periodic_sweep import PeriodicSweep
     from inqtrix.runs.shared import RETENTION_SWEEP_SECONDS
 
@@ -884,16 +969,20 @@ def test_the_api_process_sweeps_the_run_store_every_minute():
 
     assert isinstance(sweep, PeriodicSweep)
     assert sweep.running is False
-    assert sweep._sweep == container.run_store.sweep
+    assert sweep._sweep == container.run_store.asweep
     assert sweep._label == "Run retention"
     assert sweep._interval == RETENTION_SWEEP_SECONDS == 60.0
-    sweep.start()
-    try:
-        assert "inqtrix-run-retention" in [
-            thread.name for thread in threading.enumerate()
-        ]
-    finally:
-        sweep.close()
+
+    async def scenario() -> None:
+        sweep.start()
+        try:
+            assert "inqtrix-run-retention" in [
+                task.get_name() for task in asyncio.all_tasks()
+            ]
+        finally:
+            await sweep.aclose()
+
+    asyncio.run(scenario())
     assert sweep.running is False
 
 
@@ -1301,7 +1390,7 @@ def test_upload_reconciler_starts_even_when_database_contract_is_not_ready(
     with TestClient(app):
         assert reconciler.running is True
     assert reconciler.running is False
-    reconciler.close()
+    asyncio.run(reconciler.aclose())
 
 
 def test_a_chat_timeout_is_a_warning_line(monkeypatch, caplog):
@@ -1325,3 +1414,37 @@ def test_a_chat_timeout_is_a_warning_line(monkeypatch, caplog):
     lines = [record.getMessage() for record in caplog.records if "504" in record.getMessage()]
     assert len(lines) == 1
     assert "mode=" in lines[0]
+
+
+def test_the_test_route_runs_where_a_provider_may_wait_for_the_loop(monkeypatch):
+    """The parity route runs the graph on a lane whose threads may wait for the loop.
+
+    A provider's sync face waits for the process loop. On the loop's default
+    executor, the short-work lane, that wait is refused, and every parity run
+    answered 502.
+    """
+
+    def graph_test_run(question, **_kwargs):
+        async def answer() -> str:
+            return f"Antwort auf {question}"
+
+        return {
+            "answer": aio.call_from_thread(answer()),
+            "metrics": {},
+            "iteration_logs": [],
+            "top_sources": [],
+            "top_claims": [],
+        }
+
+    monkeypatch.setattr(web_research_module, "run_web_graph_test", graph_test_run)
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(
+        settings=Settings(agent=AgentSettings(testing_mode=True)), providers=providers
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/v1/test/run", json={"question": "Was gilt?"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["answer"] == "Antwort auf Was gilt?"
+

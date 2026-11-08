@@ -19,15 +19,14 @@ otherwise startup raises ``RuntimeError``:
 
 * ``litellm_perplexity``        → ``LITELLM_API_KEY``
 * ``anthropic_perplexity``      → ``ANTHROPIC_API_KEY`` + ``PERPLEXITY_API_KEY``
-* ``bedrock_perplexity``        → ``PERPLEXITY_API_KEY`` (AWS via profile)
+* ``bedrock_perplexity``        → ``PERPLEXITY_API_KEY`` (AWS via profile or ``AWS_BEARER_TOKEN_BEDROCK``)
 * ``azure_openai_perplexity``   → ``AZURE_OPENAI_API_KEY`` +
                                    ``AZURE_OPENAI_ENDPOINT`` +
-                                   ``AZURE_OPENAI_DEPLOYMENT_NAME`` +
                                    ``PERPLEXITY_API_KEY``
 * ``azure_foundry_web_search``  → ``AZURE_OPENAI_API_KEY`` +
                                    ``AZURE_OPENAI_ENDPOINT`` +
-                                   ``AZURE_OPENAI_DEPLOYMENT_NAME`` +
                                    ``AZURE_AI_PROJECT_ENDPOINT`` +
+                                   ``AZURE_AI_PROJECT_API_KEY`` +
                                    ``WEB_SEARCH_AGENT_NAME``
 
 Optional logging / server / security: same as the single-stack examples
@@ -116,9 +115,9 @@ def _build_litellm_perplexity() -> tuple[str, StackBundle] | None:
                 # classify/claim_extract -> fast. A per-node <node>_model arg
                 # overrides the tier.
                 #
-                # NOTE: LiteLLM currently IGNORES per-tier effort (tier_*_effort
-                # is accepted but not mapped yet); tier MODEL routing still
-                # applies.  Use Anthropic/Bedrock/Azure for reasoning control.
+                # tier_*_effort goes out as the OpenAI-compatible
+                # reasoning_effort field; whether it takes effect depends on
+                # the model behind the gateway.
                 # See docs/architecture/websearch/nodes.md
                 # Fallback + reasoning_model identity on /health & /v1/stacks
                 # (= high tier); the tiers below are the active routing.
@@ -205,7 +204,6 @@ def _build_azure_openai_perplexity() -> tuple[str, StackBundle] | None:
     required = (
         "AZURE_OPENAI_API_KEY",
         "AZURE_OPENAI_ENDPOINT",
-        "AZURE_OPENAI_DEPLOYMENT_NAME",
         "PERPLEXITY_API_KEY",
     )
     if not _has(*required):
@@ -242,26 +240,24 @@ def _build_azure_foundry_web_search() -> tuple[str, StackBundle] | None:
     required = (
         "AZURE_OPENAI_API_KEY",
         "AZURE_OPENAI_ENDPOINT",
-        "AZURE_OPENAI_DEPLOYMENT_NAME",
         "AZURE_AI_PROJECT_ENDPOINT",
+        "AZURE_AI_PROJECT_API_KEY",
         "WEB_SEARCH_AGENT_NAME",
     )
     if not _has(*required):
         return None
     project_endpoint = os.environ["AZURE_AI_PROJECT_ENDPOINT"].strip()
-    project_api_key = os.environ.get("AZURE_AI_PROJECT_API_KEY", "").strip()
+    project_api_key = os.environ["AZURE_AI_PROJECT_API_KEY"].strip()
     web_agent_version = os.environ.get("WEB_SEARCH_AGENT_VERSION", "").strip()
 
-    # Azure Foundry web search auth: project API key (api-key header) when set,
-    # otherwise Entra ID (DefaultAzureCredential).
+    # Azure Foundry web search auth: the project API key (api-key header).
     search_kwargs: dict[str, Any] = {
         "project_endpoint": project_endpoint,
         "agent_name": os.environ["WEB_SEARCH_AGENT_NAME"].strip(),
+        "api_key": project_api_key,
     }
     if web_agent_version:
         search_kwargs["agent_version"] = web_agent_version
-    if project_api_key:
-        search_kwargs["api_key"] = project_api_key
 
     return "azure_foundry_web_search", StackBundle(
         providers=ProviderContext(

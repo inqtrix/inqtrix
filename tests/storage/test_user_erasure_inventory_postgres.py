@@ -18,8 +18,8 @@ import uuid
 import pytest
 import sqlalchemy as sa
 
-from inqtrix.services.user_erasure import Disposition
-from inqtrix.services.user_erasure_inventory import (
+from inqtrix.storage.user_erasure import Disposition
+from inqtrix.storage.user_erasure_inventory import (
     ErasureInventory,
     _tables,
     collect_inventory,

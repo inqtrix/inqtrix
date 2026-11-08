@@ -54,12 +54,12 @@ from inqtrix.project.asset_records_ports import (
     AssetNotFound,
     AssetUploadConflict,
 )
-from inqtrix.quota.models import QuotaDimension, estimate_tokens
+from inqtrix.quota.models import QuotaDimension
 from inqtrix.server.routers import (
     quota_admission,
     quota_record,
 )
-from inqtrix.server.indexing import IndexingJobConflict, IndexingQueueFull
+from inqtrix.runs.indexing_records import IndexingJobConflict, IndexingQueueFull
 from inqtrix.runs.deletion_operations import DeletionOperationConflict
 from inqtrix.services.knowledge_service import (
     ChunkNotFound,
@@ -72,7 +72,8 @@ from inqtrix.services.request_parsing import (
     workspace_id_for_write,
     workspace_id_from_request,
 )
-from inqtrix.source_authority import SourceScope
+from inqtrix.storage.source_authority import SourceScope
+from inqtrix.text import estimate_tokens
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -218,9 +219,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 delay_seconds = 0.05
                 last_progress = progress
             await asyncio.sleep(delay_seconds)
-            current = await asyncio.to_thread(
-                job_store.get, str(summary["job_id"])
-            )
+            current = await job_store.aget(str(summary["job_id"]))
             delay_seconds = min(delay_seconds * 1.7, 1.0)
         status = current.get("status")
         if status in {"completed", "ready_raw_by_user_choice"}:

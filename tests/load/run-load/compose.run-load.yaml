@@ -1,0 +1,30 @@
+# Measurement override for the run-load profile. Apply last, on top of
+# compose.loadtest.yaml and compose.loadtest-providers.yaml.
+#
+# The API and the worker start through tests/load/run-load/probes/with_probes.py,
+# which adds what the application has no instrument for: event-loop lag, pool
+# wait and occupancy, and the wait at the checkpoint saver's lock. Nothing else
+# about them changes. The worker publishes no host port here, so it can scale.
+# Tracing is off: the stack has no trace sink, and a load number should not
+# carry a retrying exporter. The cost of the export is measured separately.
+#
+# Usage: see tests/load/README.md, "Run load".
+
+services:
+  api:
+    command: ["python", "/opt/run-load/probes/with_probes.py", "api"]
+    environment:
+      INQTRIX_TRACING: "off"
+      INQTRIX_RUN_LOAD_STALL_MS: ${INQTRIX_RUN_LOAD_STALL_MS:-}
+    volumes:
+      - ../../tests/load/run-load:/opt/run-load:ro
+    ports: !reset []
+
+  worker:
+    command: ["python", "/opt/run-load/probes/with_probes.py", "worker"]
+    environment:
+      INQTRIX_TRACING: "off"
+      INQTRIX_RUN_LOAD_STALL_MS: ${INQTRIX_RUN_LOAD_STALL_MS:-}
+    volumes:
+      - ../../tests/load/run-load:/opt/run-load:ro
+    ports: !reset []

@@ -56,8 +56,9 @@ def build_capability_registry(
     Each catalog is registered only when its service/provider is
     present (mirrors conditional router mounting), so a deployment
     without knowledge/editor/web contributes no capabilities of
-    that kind — the manifest degrades visibly rather than lying. The
-    patch write pair additionally requires *editor_patch_service*.
+    that kind. The manifest then lists fewer entries and nothing logs
+    which catalog was left out. The patch write pair additionally
+    requires *editor_patch_service*.
     """
     registry = CapabilityRegistry()
     if context_source_service is not None:

@@ -12,10 +12,6 @@ Autosave is an idempotent ``INSERT ... ON CONFLICT (id) DO UPDATE``:
 re-saving a thread or message overwrites only its mutable fields and
 never reassigns ``created_at`` or the ownership columns, so a later
 write cannot silently re-home or re-order existing data.
-
-The engine is its own NullPool engine (loop-agnostic): the store is
-awaited from the HTTP loop, the same constraint the knowledge store
-documents.
 """
 
 from __future__ import annotations
@@ -34,7 +30,7 @@ from inqtrix.project.chat_ports import (
     ThreadNotFound,
 )
 from inqtrix.project.session_titles import TitleSource, check_legacy_title_conflict, generated_title_update, legacy_title_condition, title_update_columns
-from inqtrix.project.scoped_upsert import (
+from inqtrix.storage.scoped_upsert import (
     ResourceScope,
     delete_scoped_postgres,
     require_scoped_parent,
@@ -54,7 +50,7 @@ from inqtrix.project.base_session_store import (
 class PostgresChatStore(BaseSessionStore):
     """Durable :class:`~inqtrix.project.chat_ports.ChatStore` over Postgres.
 
-    Inherits the dedicated engine + tenant-scoped session lifecycle from
+    Inherits the tenant-scoped session lifecycle from
     :class:`~inqtrix.project.base_session_store.BaseSessionStore`.
     """
 
