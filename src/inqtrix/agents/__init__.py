@@ -1,1 +1,1 @@
-"""Workspace-agent and kernel implementations."""
+"""The agent kernel and the modules its runs share."""

@@ -10,7 +10,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import AgentState, ExtendedModelResponse, PrivateStateAttr
 from langchain_core.messages import AIMessage, HumanMessage
 
-from inqtrix.agents.prompts import HARNESS_NOTE_PREFIX, POST_MISSION_EVIDENCE_GUIDANCE
+from inqtrix.agents.prompts import HARNESS_NOTE_PREFIX
 from inqtrix.agents.kernel.chat_bridge import (
     KERNEL_USAGE_STATE,
     collect_model_usage,
@@ -235,7 +235,11 @@ class KernelSkillInputMiddleware(AgentMiddleware):
                 clarification_scope=f"attached:{skill.id}",
             )
         deps.skill_answers.update(resolved)
-        block = build_skills_block(deps.skills, resolved)
+        block = build_skills_block(
+            deps.skills,
+            resolved,
+            viewer_user_id=getattr(deps.principal, "user_id", None),
+        )
         return {
             "messages": [
                 HumanMessage(
@@ -252,16 +256,6 @@ class KernelSkillInputMiddleware(AgentMiddleware):
 
 
 SUFFICIENCY_NUDGE_FLAG = "inqtrix_sufficiency_nudge"
-POST_MISSION_NUDGE_FLAG = "inqtrix_post_mission_nudge"
-POST_MISSION_NUDGE_TEXT = (
-    HARNESS_NOTE_PREFIX
-    + "The mission is complete and its memo is available as a document in "
-    "this session. "
-    + POST_MISSION_EVIDENCE_GUIDANCE
-    + " Then answer with a short conclusion that cites the memo's "
-    "evidence labels, plus the reference to the document; evidence notes "
-    "of the children you name as open points in reader language."
-)
 """``additional_kwargs`` key of one advisory sufficiency nudge message.
 
 Carries the evidence state (successful source-tool count) the verdict
@@ -297,18 +291,6 @@ class KernelSufficiencyMiddleware(AgentMiddleware):
             # Low-level harness contract tests intentionally assemble a
             # throwaway graph without per-run deps.
             return None
-        if deps.post_mission_nudge_pending:
-            # One advisory after the mission: reuse its memo and evidence;
-            # further research must address a concrete remaining gap.
-            deps.post_mission_nudge_pending = False
-            return {
-                "messages": [
-                    HumanMessage(
-                        content=POST_MISSION_NUDGE_TEXT,
-                        additional_kwargs={POST_MISSION_NUDGE_FLAG: True},
-                    )
-                ]
-            }
         platform = deps.platform
         if not platform.kernel_sufficiency_gate or deps.tier == "schnell":
             return None
@@ -387,8 +369,13 @@ class KernelSufficiencyMiddleware(AgentMiddleware):
         # derived from the checkpointed coverage ledger, never from the
         # judge's prose. Advice never overrides the assignment, so a
         # "covered" verdict must not order the model to abandon them.
-        open_sources = deps.source_coverage.open_entries()
-        remainders = deps.source_coverage.remainder_summary()
+        # A document the server read for an analysis is read: its ranges
+        # close the remainder the model's own windows left.
+        from inqtrix.agents.document_table import also_read
+
+        analysed = also_read(deps.document_analyses)
+        open_sources = deps.source_coverage.open_entries(also_read=analysed)
+        remainders = deps.source_coverage.remainder_summary(also_read=analysed)
         deps.emit(
             SUFFICIENCY_JUDGED_EVENT,
             {
@@ -942,9 +929,7 @@ def message_text(message: Any) -> str:
     return str(content or "")
 
 
-CHILD_TOOL_NAMES = frozenset(
-    {"run_web_research", "run_deep_mission", "delegate_batch"}
-)
+CHILD_TOOL_NAMES = frozenset({"run_web_research", "delegate_batch"})
 """Kernel tools that submit child runs and interrupt inside their body."""
 
 

@@ -1,9 +1,9 @@
-"""One review pass for both agent engines.
+"""The review pass of the agent kernel.
 
-The engine that owns the outputs describes them as a :class:`ReviewSubject`,
-asks for a review, has the verdict assessed and lets the pass propose
-anchored edits. Saving those edits and telling the user stay with that
-engine, in its own vocabulary and through its own write path.
+The kernel segment that owns the outputs describes them as a
+:class:`ReviewSubject`, asks for a review, has the verdict assessed and lets
+the pass propose anchored edits. Saving those edits and telling the user stay
+with the kernel, in its own vocabulary and through its own write path.
 
 The contract in one place:
 
@@ -97,7 +97,6 @@ from inqtrix.agents.phase_models import (
 from inqtrix.agents.report_quality import (
     REFERENCE_ID_FIELDS,
     REFERENCE_RECORD_ID_FIELDS,
-    quoted_passages,
     writer_identifiers,
 )
 from inqtrix.core.results import (
@@ -106,6 +105,7 @@ from inqtrix.core.results import (
     ReleasedSource,
     WorkHandover,
 )
+from inqtrix.evidence import cited_material_basis
 from inqtrix.exceptions import AgentCancelled
 from inqtrix.i18n import MESSAGES, t, t_count
 from inqtrix.knowledge.grounding import quote_is_verbatim
@@ -117,11 +117,8 @@ log = logging.getLogger(__name__)
 REVIEW_ROLE_ORIGIN = "role-review"
 """Idempotency key of a run's review role child. It doubles as the invocation
 id of the parent's delegation row, which is how the desk joins the child's
-progress to that row. An engine that reviews more than once per run appends
-its round (``role-review:2``)."""
-
-TRANSPORT_BY_NEED = "by_need"
-"""Let :func:`choose_transport` decide from the size of the material."""
+progress to that row. A kernel run reviews once, so it orders one role child
+under this key."""
 
 REVIEW_IN_PROMPT_BUDGET_TOKENS = 32_000
 """Estimated input up to which a review runs as one structured call.
@@ -130,8 +127,7 @@ One call costs its input once; a role run pays a fixed price for its turns
 (several model calls, each with the grown transcript) before its reading
 starts to pay off. At the measured price structure the two meet near 56k
 input tokens. The bound sits well below that and inside the range where one
-call judges reliably; typical mission reviews measure 1k–7k tokens and stay
-far below it, while a review of many full-text sources crosses it and gets
+call judges reliably; a review of many full-text sources crosses it and gets
 the reader it needs."""
 
 REVIEW_GOAL = (
@@ -165,7 +161,7 @@ class ModelCall:
 
 @dataclass(frozen=True)
 class ReviewHost:
-    """What the pass needs from the engine segment that runs it."""
+    """What the pass needs from the kernel segment that runs it."""
 
     scope: ChildScope
     emit: Callable[[str, dict[str, Any]], None]
@@ -175,10 +171,11 @@ class ReviewHost:
     platform: Any
     """The agent platform settings (context limits of an unknown model)."""
     revision_call: ModelCall
-    review_call: ModelCall | None = None
-    """The single-call review; ``None`` for an engine that reviews by role only."""
+    review_call: ModelCall
+    """The single-call review: its node, model and effort."""
     role_available: bool = True
-    """Whether this server executes kernel runs, the role's engine."""
+    """Whether the host can submit the role child (the kernel sets it when a
+    child-run seam is wired)."""
 
 
 @dataclass(frozen=True)
@@ -227,11 +224,11 @@ class ReviewSubject:
     user_text: str = ""
     """Every text of the run under work that a PERSON typed.
 
-    NOT the assignment: that is a composed message, and the kernel's
-    version renders the released collections as ``name -> id``. Handing it
+    NOT the assignment: that is a composed message, and the kernel renders
+    the released collections in it as ``name -> id``. Handing it
     to the revision guard would exempt every collection id of the run from
-    the very check the revision has to pass. Each engine fills this with
-    its own user-authored projection."""
+    the very check the revision has to pass. The kernel fills this with its
+    user-authored projection (``KernelDeps.user_text``)."""
     released_sources: tuple[ReleasedSource, ...] = ()
     evidence_run_id: str = ""
     language: str = ""
@@ -263,7 +260,7 @@ class Assessment:
     verdict that names nothing), ``inapplicable`` (confirmed findings exist
     and none could be located) or ``revise`` (at least one located)."""
     findings: list[DeepReviewFinding] = field(default_factory=list)
-    """The confirmed findings: the model's, then the server's."""
+    """The confirmed findings, in verdict order."""
     unconfirmed: list[DeepReviewFinding] = field(default_factory=list)
     not_checked: list[str] = field(default_factory=list)
     criteria_met: list[str] = field(default_factory=list)
@@ -296,6 +293,15 @@ class Assessment:
     """Whether the run under work holds no stored evidence
     (:func:`has_stored_evidence`): its outputs were reviewed from general
     knowledge, a fix rewords without a label and nothing re-checks it."""
+    basis: str = "evidence"
+    """What the review could check against, decided by the server, never by
+    the verdict: ``knowledge`` (no stored evidence), ``provider_context`` (at
+    least one cited reference, and every cited one carries the search
+    provider's context alone, so nothing in them confirms a fact) or
+    ``evidence``."""
+    unexplained: list[str] = field(default_factory=list)
+    """The negative flags of an ``inconsistent`` verdict that nothing
+    explains: ``complete``, ``grounded`` or ``contradictions_named``."""
     label_basis: dict[str, dict[str, str]] = field(default_factory=dict)
     """Per output, every label of its label space with the source basis it
     stands for (:func:`~inqtrix.agents.kernel.review_edits.label_bases`)."""
@@ -445,11 +451,10 @@ def choose_transport(host: ReviewHost, subject: ReviewSubject) -> str:
     """Pick the transport from the size of the material; ``""`` when none fits.
 
     Small material is cheaper and faster in one call; large material needs
-    the role that reads in windows. A server without the kernel engine has
-    no role and falls back to the one call as long as the model can hold it.
+    the role that reads in windows. A host without a role
+    (``role_available`` false: no child-run seam) falls back to the one call
+    as long as the model can hold it.
     """
-    if host.review_call is None:
-        return TRANSPORT_ROLE if host.role_available else ""
     system, prompt, _ = review_call_input(subject)
     estimated, _ = estimate_required_context_tokens(
         system=system, prompt=prompt, requested_output_tokens=0,
@@ -467,12 +472,12 @@ def choose_transport(host: ReviewHost, subject: ReviewSubject) -> str:
     ):
         log.warning(
             "Review material exceeds the single-call budget (estimated_tokens=%d) "
-            "and this server runs no kernel role; reviewing in one call.",
+            "and this run cannot start the review role; reviewing in one call.",
             estimated,
         )
         return TRANSPORT_PROMPT
     log.warning(
-        "Review material fits no transport (estimated_tokens=%d, no kernel role); "
+        "Review material fits no transport (estimated_tokens=%d, no review role); "
         "the outputs remain unreviewed.",
         estimated,
     )
@@ -483,45 +488,36 @@ def request_review(
     host: ReviewHost,
     subject: ReviewSubject,
     *,
-    transport: str = TRANSPORT_BY_NEED,
-    origin_key: str = REVIEW_ROLE_ORIGIN,
     on_start: Callable[[], None] = lambda: None,
 ) -> Review:
     """Have the outputs reviewed and return the typed verdict with its proof.
 
     Re-entrant by construction: a role child is found again through its
-    origin key, so the caller may run any number of times around its park.
-    An existing child therefore settles the transport, whatever the estimate
-    says on re-entry.
+    origin key (:data:`REVIEW_ROLE_ORIGIN`), so the caller may run any
+    number of times around its park. An existing child therefore settles
+    the transport, whatever the estimate says on re-entry.
 
     Raises:
         AwaitingReview: The review role child exists and is not terminal yet.
     """
-    known = role_child_known(host.scope.run_service, host.scope.run_id, origin_key)
-    if known:
-        transport = TRANSPORT_ROLE
-    elif transport == TRANSPORT_BY_NEED:
-        transport = choose_transport(host, subject)
+    known = role_child_known(host.scope.run_service, host.scope.run_id)
+    transport = TRANSPORT_ROLE if known else choose_transport(host, subject)
     if transport == TRANSPORT_PROMPT:
         return _review_in_one_call(host, subject, on_start=on_start)
     if transport == TRANSPORT_ROLE:
-        return _review_by_role(
-            host, subject, origin_key=origin_key, known=known, on_start=on_start
-        )
+        return _review_by_role(host, subject, known=known, on_start=on_start)
     return Review(reason="context")
 
 
-def role_child_known(
-    run_service: Any, run_id: str, origin_key: str = REVIEW_ROLE_ORIGIN
-) -> bool:
-    """Whether *run_id* already ordered the role child of *origin_key*.
+def role_child_known(run_service: Any, run_id: str) -> bool:
+    """Whether *run_id* already ordered its review role child.
 
     A segment that re-enters its post-loop after the role parked it finds the
     child here; everything it did before ordering the role is done.
     """
     store = getattr(run_service, "run_store", None)
     return store is not None and any(
-        row.get("origin_key") == origin_key for row in store.children(run_id)
+        row.get("origin_key") == REVIEW_ROLE_ORIGIN for row in store.children(run_id)
     )
 
 
@@ -532,8 +528,6 @@ def _review_in_one_call(
     from inqtrix.agents.patterns._structured import structured_call
 
     call = host.review_call
-    if call is None:
-        raise ValueError("This host reviews by role only.")
     on_start()
     system, prompt, pushed = review_call_input(subject)
     try:
@@ -573,7 +567,6 @@ def _review_by_role(
     host: ReviewHost,
     subject: ReviewSubject,
     *,
-    origin_key: str,
     known: bool,
     on_start: Callable[[], None],
 ) -> Review:
@@ -587,8 +580,8 @@ def _review_by_role(
     store = getattr(host.scope.run_service, "run_store", None)
     row = {
         "tool": profile.operation,
-        "tool_call_id": origin_key,
-        "invocation_id": origin_key,
+        "tool_call_id": REVIEW_ROLE_ORIGIN,
+        "invocation_id": REVIEW_ROLE_ORIGIN,
     }
 
     def ended(reason: str, detail: str = "") -> Review:
@@ -605,11 +598,11 @@ def _review_by_role(
     try:
         child = submit_or_find_child(
             host.scope,
-            origin_key=origin_key,
+            origin_key=REVIEW_ROLE_ORIGIN,
             mode="agent_kernel",
             question=REVIEW_GOAL,
             # The role is priced like the run that ordered it: a review
-            # commissioned by a "tief" mission must not fall back to the
+            # commissioned by a "tief" run must not fall back to the
             # server's default depth, or the user's thoroughness statement
             # is lost between parent and child.
             agent_overrides=inherited_stufe(host.scope.tier, host.scope.depth),
@@ -662,44 +655,22 @@ def _review_by_role(
     )
 
 
-def assess_review(
-    review: Review,
-    subject: ReviewSubject,
-    *,
-    measured: Sequence[DeepReviewFinding] = (),
-) -> Assessment:
+def assess_review(review: Review, subject: ReviewSubject) -> Assessment:
     """Decide what a verdict means for the outputs, before any edit.
 
     Settles the success criteria, confirms every basis, names what stays
     open, widens the evidence to the confirmed bases the outputs do not cite
     and locates the findings, naming each one that cannot be located.
-
-    *measured* are the server's findings (the mission's unverified web
-    quotes). They stand behind the model's, in text order, and lose every
-    overlap; their origin is carried by the pass, never by the verdict.
     """
     verdict = review.verdict
     if verdict is None:
         raise ValueError("assess_review needs a verdict")
-
-    def split(
-        items: Sequence[DeepReviewFinding],
-    ) -> tuple[list[DeepReviewFinding], list[DeepReviewFinding]]:
-        return split_findings_by_basis(
-            list(items),
-            read_sources=review.read_sources,
-            ledger_ids=frozenset(subject.ledger),
-            diagnostic_ids=subject.diagnostic_ids,
-        )
-
-    # Text order, then wording: which of two overlapping server findings
-    # wins, and the ids they get, must not depend on the order in which
-    # they were measured.
-    measured = sorted(measured, key=lambda item: (_anchor_start(subject, item), item.quote))
-    model_confirmed, model_unconfirmed = split(verdict.findings)
-    server_confirmed, server_unconfirmed = split(measured)
-    findings = [*model_confirmed, *server_confirmed]
-    unconfirmed = [*model_unconfirmed, *server_unconfirmed]
+    findings, unconfirmed = split_findings_by_basis(
+        list(verdict.findings),
+        read_sources=review.read_sources,
+        ledger_ids=frozenset(subject.ledger),
+        diagnostic_ids=subject.diagnostic_ids,
+    )
     met, unmet, unsettled, unsettled_indices = _settle_criteria(verdict, subject.criteria)
     cited_ids = list(dict.fromkeys(
         KernelDeps.ledger_id(ref) for ref in subject.cited
@@ -724,6 +695,16 @@ def assess_review(
         for source in evidence.get("sources") or []
     }
     knowledge = not has_stored_evidence(subject)
+    provider_only_ids = [
+        item for item in cited_ids
+        if material_kinds.get(f"{SOURCE_BASIS_PREFIX}{item}") == "provider_context"
+    ]
+    # The one rule a research result reports its own basis with; stored
+    # evidence nothing cites is still evidence the review ran against.
+    basis = "knowledge" if knowledge else cited_material_basis(
+        material_kinds.get(f"{SOURCE_BASIS_PREFIX}{item}", "") for item in cited_ids
+    ) or "evidence"
+    not_checked = [str(item).strip() for item in verdict.not_checked if str(item).strip()]
     shared = {
         # Computed once: every reading boundary of this review projects
         # through the same map, so two of them cannot drift apart.
@@ -732,9 +713,7 @@ def assess_review(
         ),
         "findings": findings,
         "unconfirmed": unconfirmed,
-        "not_checked": [
-            str(item).strip() for item in verdict.not_checked if str(item).strip()
-        ],
+        "not_checked": not_checked,
         "criteria_met": met,
         "criteria_unmet": unmet,
         "criteria_unsettled": unsettled,
@@ -746,35 +725,46 @@ def assess_review(
         },
         "cited_ids": cited_ids,
         "reread_ids": reread_ids,
-        "provider_only_ids": [
-            item for item in cited_ids
-            if material_kinds.get(f"{SOURCE_BASIS_PREFIX}{item}") == "provider_context"
-        ],
+        "provider_only_ids": provider_only_ids,
         "evidence": evidence,
         "knowledge": knowledge,
+        "basis": basis,
         "label_basis": {
             output_id: label_bases(references)
             for output_id, references in subject.allowed_references.items()
         },
         "reviewed": dict(subject.outputs),
     }
-    # The verdict's own flags never decide a pass: what it NAMES does. They
-    # only expose the one contradiction nothing else explains. Without stored
-    # evidence "grounded" has nothing to rest on and exposes nothing.
-    unsettled_matter = bool(unconfirmed or unmet or unsettled)
-    if not findings and not unsettled_matter and not all(
-        (verdict.complete, verdict.grounded or knowledge, verdict.contradictions_named)
-    ):
-        log.warning("Review returned a negative verdict without repairable findings.")
-        return Assessment(status="inconsistent", **shared)
+    # The verdict's own flags never decide a pass: what it NAMES does. A
+    # negative flag needs a reason: a named matter (an unconfirmed finding,
+    # an open or unsettled criterion, a point it could not check) explains
+    # any flag, and a server fact explains "grounded" (no stored evidence,
+    # or the search provider's context alone). A flag with neither is the
+    # one contradiction left, and the assessment names it.
+    unsettled_matter = bool(unconfirmed or unmet or unsettled or not_checked)
+    if not findings and not unsettled_matter:
+        unexplained = [
+            flag
+            for flag, holds in (
+                ("complete", verdict.complete),
+                ("grounded", verdict.grounded or basis != "evidence"),
+                ("contradictions_named", verdict.contradictions_named),
+            )
+            if not holds
+        ]
+        if unexplained:
+            log.warning(
+                "Review returned a negative verdict without a reason for %s.",
+                ", ".join(unexplained),
+            )
+            return Assessment(status="inconsistent", unexplained=unexplained, **shared)
     if not findings:
         return Assessment(status="open" if unsettled_matter else "passed", **shared)
     # Any confirmed ledger source may ground a finding on any output; which
     # labels an edit may CITE stays bound to its target output.
     available = {item["basis_id"] for item in evidence["sources"]}
-    ordered = [*(("model", item) for item in model_confirmed), *(("server", item) for item in server_confirmed)]
     located, named = locate_findings(
-        ordered,
+        findings,
         subject.outputs,
         source_basis_ids={output_id: available for output_id in subject.outputs},
         diagnostic_basis_ids=subject.diagnostic_ids,
@@ -795,12 +785,6 @@ def assess_review(
         results=named,
         **shared,
     )
-
-
-def _anchor_start(subject: ReviewSubject, finding: DeepReviewFinding) -> int:
-    """Where *finding*'s passage starts in its target output (``-1`` when nowhere)."""
-    target = finding.artifact_id if finding.target == "artifact" else "chat"
-    return subject.outputs.get(target, "").find(finding.quote)
 
 
 _NAME_BOUNDARY = r"(?![\w:/?=#-])"
@@ -1081,8 +1065,8 @@ _CARRIED_ID_FIELDS = frozenset({
 references: a diagnostic's basis and run ids, the documents a reading
 record names, a search's ids, the sources a reading verified. A reference's
 own id is read by :func:`~inqtrix.agents.report_quality.writer_identifiers`,
-which tells a label-shaped one from an id. A plan's task id is no such id:
-the planner writes it, and it may be a plain word a sentence uses."""
+which tells a label-shaped one from an id. A stored plan's task id is no
+such id: a model wrote it, and it may be a plain word a sentence uses."""
 
 
 def _carried_identifiers(value: Any) -> set[str]:
@@ -1193,7 +1177,8 @@ class OpenLine:
     text: str
     reason: str
     """The code of why it stayed open (``basis_unconfirmed``, a naming reason
-    of :data:`~inqtrix.agents.kernel.review_edits.FINDING_REASONS`), the state
+    of :data:`~inqtrix.agents.kernel.review_edits.FINDING_REASONS`),
+    ``not_checked`` for a point the review could not check, the state
     ``criterion_revised`` of an unmet criterion its findings worked on,
     ``criterion_verified`` when the re-check held every one of those edits,
     or ``""``."""
@@ -1203,7 +1188,7 @@ def criterion_states(
     assessment: Assessment, results: Sequence[FindingResult]
 ) -> dict[int, tuple[str, int]]:
     """Per unmet criterion (by its ``index``): its state and how many counted
-    model results concern it.
+    results concern it.
 
     An ``output_requirement`` criterion is ``revised`` when at least one such
     result concerns it and every one of them was applied: its gap in the
@@ -1216,9 +1201,7 @@ def criterion_states(
     ``information`` criterion always, since an applied edit reaches no
     material the review had not read.
     """
-    counted = [
-        result for result in counted_results(results) if result.origin == "model"
-    ]
+    counted = counted_results(results)
     states: dict[int, tuple[str, int]] = {}
     for item in assessment.criteria_unmet:
         linked = [result for result in counted if result.criterion == item["index"]]
@@ -1251,11 +1234,14 @@ def open_point_lines(
     check, or a criterion it did not settle), ``finding`` (a finding without
     a confirmed basis, reason ``basis_unconfirmed``) or the unmet criterion's
     own kind (``information``, ``output_requirement``). An unmet output
-    requirement that at least one counted model finding in *results*
+    requirement that at least one counted finding in *results*
     concerns, every such finding applied (:func:`criterion_states`), says
     so, and whether the re-check held those edits, and does not quote the
-    gap of the reviewed draft, which the delivered text may not hold. The
-    findings the outputs did not take over are :func:`finding_lines`.
+    gap of the reviewed draft, which the delivered text may not hold. A
+    point the review could not check likewise describes the reviewed draft:
+    once any edit in *results* is applied, its line says it was noted before
+    the revision. The findings the outputs did not take over are
+    :func:`finding_lines`.
     """
     words = {"language": language}
     states = criterion_states(assessment, results)
@@ -1285,10 +1271,21 @@ def open_point_lines(
         numbers = assessment.unsettled_indices
         return readers.get(numbers[position], text) if position < len(numbers) else text
 
+    # The verdict's points describe the draft it read. Once one of its edits
+    # is applied, the delivered text may no longer hold what a point names,
+    # and nothing compares the two: the line says when the point was noted.
+    revised = any(result.state == "applied" for result in results)
+
+    def point_line(point: str) -> str:
+        return t(words, "review_point_before_revision", point=point) if revised else point
+
     return [
         OpenLine(kind, readable(point, assessment.names, language), reason)
         for kind, point, reason in (
-            *(("not_checked", item, "") for item in assessment.not_checked),
+            *(
+                ("not_checked", point_line(item), "not_checked")
+                for item in assessment.not_checked
+            ),
             *(
                 (
                     "finding",
@@ -1319,44 +1316,26 @@ def finding_lines(
     results: Sequence[FindingResult],
     names: Mapping[str, str],
     language: str,
-    *,
-    draft_round: int | None = None,
-    unverified: Collection[str] | None = None,
 ) -> list[OpenLine]:
     """One line per named finding, with its reason in reader words.
 
-    A model finding reads as its own prose (``finding``); a server finding
-    names its unverified quote (``not_checked``). A finding that marked its
-    passage asked for no revision, so its line (``marked``) says what the
-    mark says instead of a reason it was not applied. A server finding
-    anchored by its paragraph holds every quote of that paragraph, so
-    *unverified* (the quotes the server measured) keeps the line to the ones
-    that failed. On the research route (*draft_round*) the draft is
-    rewritten next, so a server line names the round instead of quoting a
-    passage the next text may no longer hold.
+    A finding reads as its own prose (``finding``). A finding that marked
+    its passage asked for no revision, so its line (``marked``) says what
+    the mark says instead of a reason it was not applied.
     """
     words = {"language": language}
     lines: list[OpenLine] = []
     for result in results:
         if result.state != "named":
             continue
-        if result.origin != "server":
-            finding = readable(result.finding.strip(), names, language)
-        elif draft_round is not None:
-            finding = t(words, "review_quote_unverified_draft", round=draft_round)
-        else:
-            inner = [
-                text for text, _passage in quoted_passages(result.quote)
-                if unverified is None or text in unverified
-            ]
-            finding = t(words, "review_quote_unverified", quote=" … ".join(inner) or result.quote)
+        finding = readable(result.finding.strip(), names, language)
         if result.reason == PROVIDER_CONTEXT_ONLY:
             lines.append(OpenLine(
                 "marked", t(words, "review_finding_marked", finding=finding), result.reason,
             ))
             continue
         lines.append(OpenLine(
-            "not_checked" if result.origin == "server" else "finding",
+            "finding",
             t(
                 words,
                 "review_finding_named",
@@ -1370,16 +1349,15 @@ def finding_lines(
 
 def counted_results(results: Sequence[FindingResult]) -> list[FindingResult]:
     """The results a revision decided (:func:`~inqtrix.agents.kernel.review_edits.is_counted`)."""
-    return [result for result in results if is_counted(result.origin, result.reason)]
+    return [result for result in results if is_counted(result.reason)]
 
 
 def revision_state(results: Sequence[FindingResult]) -> str:
     """What the revision decided (:func:`counted_results`): ``none``,
     ``verified`` (all applied, and the re-check held every one),
     ``unverified`` (all applied, at least one not held: rejected, unchecked
-    or not confirmed, a failed re-check or a server finding, which the
-    model re-check never judges), ``discarded`` (none applied) or
-    ``partially_discarded``."""
+    or not confirmed, or a failed re-check), ``discarded`` (none applied)
+    or ``partially_discarded``."""
     counted = counted_results(results)
     applied = sum(1 for result in counted if result.state == "applied")
     if not counted:
@@ -1396,10 +1374,8 @@ def unapplied_activity(
     results: Sequence[FindingResult],
     names: Mapping[str, str],
     language: str,
-    *,
-    unverified: Collection[str] | None = None,
 ) -> dict[str, Any] | None:
-    """The findings a revision left standing, as one activity for both engines.
+    """The findings a revision left standing, as one activity.
 
     ``None`` unless :func:`revision_state` reads ``discarded`` or
     ``partially_discarded``; the label says which, the detail lists every
@@ -1422,7 +1398,7 @@ def unapplied_activity(
         ),
         "detail": "; ".join(
             line.text
-            for line in finding_lines(named, names, language, unverified=unverified)
+            for line in finding_lines(named, names, language)
         ),
     }
 
@@ -1444,22 +1420,20 @@ def report_facts(
     *,
     revision: str,
     language: str,
-    draft_round: int | None = None,
-    unverified: Collection[str] | None = None,
     outputs: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """The review's facts in the one shape both engines report.
+    """The review's facts in the one shape the outcome record reads.
 
     ``revision`` (:func:`revision_state`), ``accounting``,
     ``criteria_uncovered`` (each with its ``state`` from
     :func:`criterion_states`: ``open``, ``revised`` or ``verified``), ``open_lines``
     (``kind``, ``text``, ``reason``), ``findings`` (one record per result,
     in verdict order), ``reach`` (how many cited references the review
-    re-read, of how many cited) and ``basis`` (``knowledge`` for a review in
-    knowledge mode, ``evidence`` otherwise); with *outputs*, the texts the
-    run delivers, also ``claims`` and ``marks`` (:func:`claim_facts`);
+    re-read, of how many cited) and ``basis`` (:attr:`Assessment.basis`:
+    ``evidence``, ``knowledge`` or ``provider_context``); with *outputs*,
+    the texts the run delivers, also ``claims`` and ``marks``
+    (:func:`claim_facts`);
     :func:`inqtrix.agents.run_outcome.build_outcome` reads them.
-    *draft_round* and *unverified* are :func:`finding_lines`'.
     """
     ordered = verdict_order(results)
     states = criterion_states(assessment, ordered)
@@ -1478,10 +1452,7 @@ def report_facts(
             asdict(line)
             for line in (
                 *open_point_lines(assessment, language, ordered),
-                *finding_lines(
-                    ordered, assessment.names, language,
-                    draft_round=draft_round, unverified=unverified,
-                ),
+                *finding_lines(ordered, assessment.names, language),
             )
         ],
         "findings": [result.record() for result in ordered],
@@ -1490,7 +1461,7 @@ def report_facts(
             "cited": len(assessment.cited_ids),
             "provider_only": len(assessment.provider_only_ids),
         },
-        "basis": "knowledge" if assessment.knowledge else "evidence",
+        "basis": assessment.basis,
     }
 
 
@@ -1629,8 +1600,8 @@ def reader_detail(review: Review, language: str) -> str:
     model debris, half a schema, an exception class, the limit a budget
     hit. Each reason therefore has ONE sentence. The log gets the reason,
     the transport and the length of that text, never the text: it can be
-    model output. Both engines read this, so neither can show the debris
-    the other hides.
+    model output. The unavailable activity takes its reader detail from
+    here alone (:func:`unavailable_activity`).
 
     A reason without a sentence is a defect, not a case to fall through:
     the fall-through was how the runtime's English reached a German reader
@@ -1874,7 +1845,7 @@ def revise_outputs(
     if assessment.knowledge:
         results = [
             replace(result, recheck_reason="knowledge_only")
-            if result.state == "applied" and result.origin == "model" else result
+            if result.state == "applied" else result
             for result in results
         ]
         check_usage: dict[str, int] = {}
@@ -1955,9 +1926,8 @@ def _recheck(
     replacement and the basis give the content, and what became of the
     replaced text. The server decides each edit from its rows
     (:func:`settle_check`): it holds, it is rejected with its code, or it
-    stays unchecked. A server finding never reaches the call; only the
-    server measures it. The check judges the replacement, never the
-    finding it answers.
+    stays unchecked. The check judges the replacement, never the finding it
+    answers.
 
     The check can only confirm. One answer of a model can flip on the same
     request, so when the first call holds an edit, a second call sends the
@@ -2005,17 +1975,9 @@ def _recheck(
     located = assessment.located
     by_id = {result.finding_id: result for result in results}
     applied = [item for item in located if by_id[str(item["finding_id"])].state == "applied"]
-    checked = [item for item in applied if by_id[str(item["finding_id"])].origin == "model"]
-    if not checked:
+    if not applied:
         return results, {}
     call = host.review_call
-    if call is None:
-        log.warning(
-            "Revision re-check has no review call; the applied edits stand unverified."
-        )
-        return _settled(results, dict.fromkeys(
-            (str(item["finding_id"]) for item in checked), "check_unavailable",
-        )), {}
     replacements = {
         edit.finding_id: spliced_replacement(edit.replacement)
         for edit in bundle.edits
@@ -2026,7 +1988,7 @@ def _recheck(
     segments: dict[str, list[ChangedSegment]] = {}
     oversized: list[str] = []
     textless: list[str] = []
-    for item in checked:
+    for item in applied:
         finding_id = str(item["finding_id"])
         found = changed_segments(
             str(item["quote"]),
@@ -2059,7 +2021,7 @@ def _recheck(
         )
     sent: list[Mapping[str, Any]] = []
     carried = 0
-    for item in checked:
+    for item in applied:
         finding_id = str(item["finding_id"])
         if finding_id not in segments:
             continue
@@ -2077,7 +2039,7 @@ def _recheck(
             ", ".join(f"{finding_id} ({len(segments[finding_id])} segments)" for finding_id in left),
         )
     if not sent:
-        _warn_unchecked(unchecked, len(checked))
+        _warn_unchecked(unchecked, len(applied))
         return _settled(results, unchecked), {}
     placements = _placements(applied, sent, revised, replacements, originals=subject.outputs)
     basis_ids: list[str] = []
@@ -2190,7 +2152,7 @@ def _recheck(
             if state != "holds":
                 held.discard(finding_id)
                 unchecked[finding_id] = f"unconfirmed:{code}" if code else "unconfirmed"
-    _warn_unchecked(unchecked, len(checked))
+    _warn_unchecked(unchecked, len(applied))
     return _settled(results, unchecked, held), usage
 
 
@@ -2275,8 +2237,8 @@ def _placements(
 ) -> dict[str, Placement]:
     """Where each replacement of *sent* stands in its delivered output.
 
-    Every applied edit of an output, a server finding's included, moved the
-    text after it, by the span the revision spliced
+    Every applied edit of an output moved the text after it, by the span the
+    revision spliced
     (:func:`~inqtrix.agents.kernel.review_edits.edit_span` on *originals*, in
     order of position);
     :func:`~inqtrix.agents.kernel.review_edits.spliced_positions` places each

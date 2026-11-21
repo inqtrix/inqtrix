@@ -193,6 +193,16 @@ export function printSummary(
   for (const scenario of skipped) {
     out.write(`    ${scenario.id}: ${scenario.reason ?? ''}\n`)
   }
+  // A pass inside a warning band carries a note with the band's ceiling and
+  // what was measured. The summary shows it, so a tolerated deviation is read
+  // with the result and not only stored in the report.
+  const noted = report.scenarios.filter(
+    (scenario) => scenario.status === 'passed' && scenario.reason,
+  )
+  out.write(`  scenarios passed with a note: ${noted.length}\n`)
+  for (const scenario of noted) {
+    out.write(`    ${scenario.id}: ${scenario.reason}\n`)
+  }
   out.write(`  adapters: ${report.adapters.length}\n`)
   for (const adapter of report.adapters) {
     if (adapter.scenarioResultsProblem) {

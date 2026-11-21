@@ -1,1 +1,1 @@
-"""Shared structured-output helper for workspace-agent phases."""
+"""Shared structured-output helper for the agent's model steps."""

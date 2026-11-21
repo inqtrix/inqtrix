@@ -1342,31 +1342,31 @@ def _startup_warnings(settings) -> list[str]:
     return [record.getMessage() for record in records]
 
 
-def test_startup_warns_when_per_user_cap_below_one_agent_wave():
-    """1.3 review fix: a per-user cap below the agent wave width is loud.
+@pytest.mark.parametrize("cap", [1, 2])
+def test_startup_warns_when_per_user_cap_cannot_fit_one_kernel_batch(cap):
+    """A per-user cap below the children of one kernel batch is loud.
 
-    A cap that cannot fit one agent wave silently truncates agent trees;
-    the composition root must warn at startup (No Silent Fallbacks).
+    The children of a ``delegate_batch`` count against their user's cap and
+    the parent does not, so a cap below the batch width (three children)
+    limits such a batch; the composition root says so at startup instead of
+    leaving it to be found as an incomplete agent run.
     """
     settings = Settings()
-    settings.server.run_max_concurrent_per_user = 2
-    settings.agent_platform.max_parallel_children = 3
+    settings.server.run_max_concurrent_per_user = cap
     messages = _startup_warnings(settings)
     assert any(
-        "RUN_MAX_CONCURRENT_PER_USER=2" in message
-        and "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN=3" in message
+        f"RUN_MAX_CONCURRENT_PER_USER={cap} is smaller than the 3 child runs" in message
         for message in messages
-    )
+    ), messages
 
 
-def test_startup_silent_when_per_user_cap_fits_a_wave():
+def test_startup_silent_when_per_user_cap_fits_a_kernel_batch():
     settings = Settings()
-    settings.server.run_max_concurrent_per_user = 4
-    settings.agent_platform.max_parallel_children = 3
+    settings.server.run_max_concurrent_per_user = 3
     messages = _startup_warnings(settings)
     assert not any(
         "RUN_MAX_CONCURRENT_PER_USER" in message for message in messages
-    )
+    ), messages
 
 
 def test_upload_reconciler_starts_even_when_database_contract_is_not_ready(

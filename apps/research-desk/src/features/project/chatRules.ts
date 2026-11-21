@@ -27,7 +27,7 @@ export const defaultChatRuleCategory: ChatRuleCategory = 'instruction'
 export const defaultChatRuleVisibility: ChatRuleVisibility = {
   // Opt-IN for the agent surface: an existing rule was written for chat
   // or the editor, and turning it into a report requirement without its
-  // owner saying so would change what missions produce.
+  // owner saying so would change what agent runs produce.
   agent: false,
   chat: true,
   editor: true,

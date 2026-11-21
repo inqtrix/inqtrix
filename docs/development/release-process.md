@@ -6,7 +6,7 @@ The release process is maintainer-owned. This page exists so contributors know w
 
 ## Today's state
 
-The repository is marked experimental and is on release line `0.2.0` (dev designation `0.2.0.12`), a placeholder. The version is defined once as `__version__` in `src/inqtrix/version.py`; `pyproject.toml` derives the package version from it (Hatchling dynamic version). No version has been tagged or published yet. A formal release process — signing, PyPI publication, GitHub Releases, change categorisation — is a dedicated follow-up task.
+The repository is marked experimental and is on release line `0.2.0` (dev designation `0.2.0.13`), a placeholder. The version is defined once as `__version__` in `src/inqtrix/version.py`; `pyproject.toml` derives the package version from it (Hatchling dynamic version). No version has been tagged or published yet. A formal release process — signing, PyPI publication, GitHub Releases, change categorisation — is a dedicated follow-up task.
 
 ## Automation status
 
@@ -86,6 +86,14 @@ version is bumped manually at milestones.
    remains authoritative for refreshing `uv.lock`; the plain Python
    commands document that the project scripts do not require uv as their
    runtime.
+
+   Code copied into the repository from another project (a component
+   registry, an icon set) has no lockfile entry. `copied-code.json` at the
+   repository root declares it with its source, license, origin and paths,
+   and its license text stands in the folder of the copied code. The
+   generator lists it under "Copied Code" and fails when a declared path or
+   license file is missing or when the license file stands in another
+   folder.
 
 Automated release publication remains disabled and is explicitly out of scope
 until the reactivation review described above has been completed.

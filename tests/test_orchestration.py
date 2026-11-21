@@ -474,7 +474,7 @@ def test_evaluate_min_rounds_suppresses_early_stop():
     messages = []
     while not progress_queue.empty():
         messages.append(progress_queue.get()[1])
-    assert any("min_rounds=2" in m for m in messages), (
+    assert any("Mindestzahl der Runden (2) noch nicht erreicht" in m for m in messages), (
         f"Expected a min_rounds progress hint, got: {messages}"
     )
 
@@ -607,6 +607,73 @@ def test_stop_is_suppressed_when_report_evidence_is_too_thin():
     assert stop_cascade["report_eligible_evidence_count"] == 1
 
 
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (
+            "Was ist passiert?",
+            "Beleglage noch zu dünn (berichtsfähige Belege: 1, nötig sind mindestens 3); "
+            "weitere Recherche.",
+        ),
+        (
+            "What happened?",
+            "Evidence still too thin (report-ready evidence records: 1, at least 3 needed); "
+            "continuing research.",
+        ),
+    ],
+)
+def test_the_thin_evidence_step_reads_in_the_language_of_the_run(question, expected):
+    """The step that keeps a run going for want of report-ready evidence is
+    reader text: German with real umlauts in a German run, English without
+    a German word in an English one. Spelled out here, so a reword or a
+    fixed literal is caught at the step itself."""
+    settings = AgentSettings(confidence_stop=8, max_rounds=4, min_rounds=1, testing_mode=True)
+    defaults = create_default_strategies(settings)
+    strategies = StrategyContext(
+        source_tiering=defaults.source_tiering,
+        claim_extraction=defaults.claim_extraction,
+        claim_consolidation=defaults.claim_consolidation,
+        risk_scoring=defaults.risk_scoring,
+        stop_criteria=_DoneStopCriteria(),
+    )
+    progress_queue = Queue()
+    state = initial_state(question, progress_queue=progress_queue, max_total_seconds=30)
+    state["round"] = 2
+    state["all_citations"] = ["https://example.com/report"]
+    state["evidence_ledger"] = [
+        {
+            "evidence_id": "ev_1",
+            "report_eligible": True,
+            "claims": [],
+            "tier": "mainstream",
+            "source_snippet": "One useful source is available.",
+            "source_passages": [{"passage_id": "passage_1", "text": "One useful source is available."}],
+            "citation_set": [{"url": "https://example.com/report"}],
+        }
+    ]
+    provider_context = ProviderContext(
+        llm=_EvalLLMStub(
+            "STATUS: SUFFICIENT\n"
+            "CONFIDENCE: 9\n"
+            "GAPS: Keine\n"
+            "CONTRADICTIONS: Nein\n"
+            "IRRELEVANT: Keine\n"
+            "COMPETING_EVENTS: Keine\n"
+            "EVIDENCE_CONSISTENCY: 8\n"
+            "EVIDENCE_SUFFICIENCY: 8"
+        ),
+        search=_SearchStub(),
+    )
+
+    evaluate(state, providers=provider_context, strategies=strategies, settings=settings)
+
+    messages = []
+    while not progress_queue.empty():
+        messages.append(progress_queue.get()[1])
+    assert settings.report_tuning.min_report_eligible_evidence == 3
+    assert expected in messages, messages
+
+
 def test_evaluate_emits_completion_when_stop_criteria_already_finished():
     settings = AgentSettings(confidence_stop=8, max_rounds=4)
     defaults = create_default_strategies(settings)
@@ -715,7 +782,7 @@ def test_search_emits_fallback_progress_messages():
         messages.append(progress_queue.get()[1])
 
     assert any("Suchanfragen fehlgeschlagen" in msg for msg in messages)
-    assert any("Claim-Extraktionen fehlgeschlagen" in msg for msg in messages)
+    assert any("Aussagenerfassungen fehlgeschlagen" in msg for msg in messages)
     assert not any("Zusammenfassungen" in msg for msg in messages)
 
 
@@ -784,9 +851,10 @@ def test_a_claim_extraction_retry_is_reported_under_its_own_operation():
     messages = []
     while not progress_queue.empty():
         messages.append(progress_queue.get()[1])
-    retries = [msg for msg in messages if "FakeLLM-Retry 1/3" in msg]
+    retries = [msg for msg in messages if "FakeLLM: Wiederholung 1/3" in msg]
     assert len(retries) == 1
-    assert "Claim" in retries[0]
+    assert "bei Aussagenerfassung (" in retries[0]
+    assert "Retry" not in retries[0]
 
 
 def test_search_emits_claim_binding_issues_only_when_claims_are_unbound():
@@ -1076,14 +1144,16 @@ def test_run_emits_progress_before_rate_limit_abort(monkeypatch):
 
 
 def test_answer_catches_anthropic_api_error_and_falls_back():
-    """AnthropicAPIError in answer node must trigger context fallback, not crash.
+    """AnthropicAPIError in answer node must show the gathered material, not crash.
 
     Also asserts that the fallback is **never silent**:
-    - The visible warning header is present at the top of the answer.
+    - The visible warning header is present at the top of the answer, and
+      the material the research gathered stands beneath it.
     - The iteration log carries ``_answer_fallback=True`` plus a
       structured ``_answer_fallback_kind`` and ``_answer_fallback_reason``.
-    - A progress message was emitted on the queue so terminal/UI consumers
-      see the degradation in real time.
+    - A warning step was emitted on the queue and the run events so
+      terminal/UI consumers see the degradation in real time, in the run's
+      language and without internal words.
     """
 
     class _FailingLLM:
@@ -1114,8 +1184,12 @@ def test_answer_catches_anthropic_api_error_and_falls_back():
     progress_queue = Queue()
     state = initial_state("Was ist passiert?",
                           progress_queue=progress_queue, max_total_seconds=30)
-    state["context"] = ["Recherche-Kontext: Wichtige Informationen"]
+    events: list[tuple[str, dict]] = []
+    state["_run_event_sink"] = lambda event_type, payload: events.append((event_type, payload))
     state["all_citations"] = ["https://example.com/report"]
+    state["evidence_ledger"] = [
+        _ledger_record("ev_1", state["all_citations"][0], title="Wichtige Informationen")
+    ]
     state["consolidated_claims"] = []
 
     answer(
@@ -1130,9 +1204,12 @@ def test_answer_catches_anthropic_api_error_and_falls_back():
         settings=settings,
     )
 
-    assert "Recherche-Kontext" in state["answer"]
-    assert "[!WARNING] Antwort-Synthese-Fallback aktiv" in state["answer"]
+    assert "das bisher gesammelte Material der Recherche in Rohform" in state["answer"]
+    assert "[!WARNING] Kein geschriebener Bericht" in state["answer"]
     assert "_answer_fallback=true" in state["answer"]
+    # The material the research gathered stands beneath the header.
+    header_end = state["answer"].index("_answer_fallback=true")
+    assert state["answer"].index("Wichtige Informationen passage with concrete detail.") > header_end
 
     answer_log = next(
         entry for entry in reversed(state["iteration_logs"])
@@ -1140,7 +1217,13 @@ def test_answer_catches_anthropic_api_error_and_falls_back():
     )
     assert answer_log["_answer_fallback"] is True
     assert answer_log["_answer_fallback_kind"] == "no_fallback_model"
-    assert "AnthropicAPIError" in answer_log["_answer_fallback_reason"]
+    reason = answer_log["_answer_fallback_reason"]
+    error = reason.removeprefix("Der Bericht ließ sich nicht schreiben (").split("); ")[0]
+    assert error.startswith("AnthropicAPIError: ")
+    assert reason == (
+        f"Der Bericht ließ sich nicht schreiben ({error}); ein Ersatzmodell ist nicht eingerichtet."
+    )
+    assert reason in state["answer"]
 
     progress_messages: list[str] = []
     while not progress_queue.empty():
@@ -1151,15 +1234,25 @@ def test_answer_catches_anthropic_api_error_and_falls_back():
             progress_messages.append(item)
         elif isinstance(item, dict):
             progress_messages.append(str(item.get("text", "") or item))
-    assert any(
-        "kein Fallback-Modell konfiguriert" in m
-        or "no fallback model configured" in m
-        for m in progress_messages
-    ), f"Progress queue must surface the answer fallback: {progress_messages}"
+    fallback_steps = [m for m in progress_messages if "es ist kein Ersatzmodell eingerichtet" in m]
+    assert fallback_steps == [
+        f"Der Bericht ließ sich nicht schreiben ({error}); es ist kein Ersatzmodell "
+        "eingerichtet; die Antwort zeigt das bisher gesammelte Material mit einem Warnhinweis"
+    ], f"Progress queue must surface the answer fallback: {progress_messages}"
+    for text in (fallback_steps[0].replace(error, ""), reason.replace(error, "")):
+        assert not [word for word in ("Fallback", "Synthese", "LLM", "konfiguriert") if word in text], text
+    severities = [
+        payload["severity"] for event_type, payload in events
+        if event_type == "inqtrix.progress.message" and payload["message"] == fallback_steps[0]
+    ]
+    assert severities == ["warning"]
 
 
-def test_both_answer_models_failing_is_reported_in_the_run_language():
-    """The warning header names both failures in the run's language, never in fixed German."""
+@pytest.mark.parametrize("gathered", [True, False], ids=["material", "no_material"])
+def test_both_answer_models_failing_is_reported_in_the_run_language(gathered):
+    """The warning header names both failures in the run's language, never in
+    fixed German, and says that gathered material follows only when the
+    research gathered some; the step says the same."""
 
     class _FailingLLM:
         def __init__(self):
@@ -1185,10 +1278,14 @@ def test_both_answer_models_failing_is_reported_in_the_run_language():
         testing_mode=True,
     )
     defaults = create_default_strategies(settings)
-    state = initial_state("What happened?", progress_queue=Queue(), max_total_seconds=30)
+    progress_queue = Queue()
+    state = initial_state("What happened?", progress_queue=progress_queue, max_total_seconds=30)
     state["language"] = "en"
-    state["context"] = ["Research context: key facts"]
     state["all_citations"] = ["https://example.com/report"]
+    if gathered:
+        state["evidence_ledger"] = [
+            _ledger_record("ev_1", state["all_citations"][0], title="Key facts")
+        ]
     state["consolidated_claims"] = []
 
     answer(
@@ -1208,8 +1305,27 @@ def test_both_answer_models_failing_is_reported_in_the_run_language():
         entry for entry in reversed(state["iteration_logs"]) if entry.get("node") == "answer"
     )
     assert answer_log["_answer_fallback_kind"] == "fallback_model_failed"
-    assert "the fallback model `fallback-model` failed as well" in state["answer"]
-    assert "fehlgeschlagen" not in state["answer"]
+    assert "the backup model `fallback-model` failed as well" in state["answer"]
+    assert "Ersatzmodell" not in state["answer"] and "ließ sich nicht schreiben" not in state["answer"]
+    below = "> Below is the material the research has gathered so far, in raw form"
+    none_yet = "> No material has been gathered yet. For operators:"
+    assert (below in state["answer"], none_yet in state["answer"]) == (gathered, not gathered)
+    if gathered:
+        assert state["answer"].index("Key facts passage with concrete detail.") > state["answer"].index(below)
+    else:
+        assert "Please try again and check the connection to the model provider." in state["answer"]
+    steps: list[str] = []
+    while not progress_queue.empty():
+        steps.append(str(progress_queue.get_nowait()[1]))
+    fallback_error = answer_log["_answer_fallback_reason"].split("failed as well (")[1].removesuffix(").")
+    outcome = (
+        "the answer shows the material gathered so far with a warning"
+        if gathered
+        else "no material has been gathered yet, so the answer shows only a warning"
+    )
+    assert [step for step in steps if step.startswith("The backup model could not write the report either")] == [
+        f"The backup model could not write the report either ({fallback_error}); {outcome}"
+    ]
 
 
 def test_answer_node_escapes_currency_dollars_like_the_agent_answers():
@@ -1237,7 +1353,6 @@ def test_answer_node_escapes_currency_dollars_like_the_agent_answers():
     )
     defaults = create_default_strategies(settings)
     state = initial_state("Was kostet das?", max_total_seconds=30)
-    state["context"] = ["Recherche-Kontext: Preise"]
     state["all_citations"] = ["https://example.com/report"]
     state["consolidated_claims"] = []
 
@@ -1264,7 +1379,8 @@ def test_answer_timeout_emits_visible_warning_and_marker():
     A timeout path that wrote a short German fallback string into
     ``state["answer"]`` without setting ``_answer_fallback``, without
     ``emit_progress``, and without a structured iteration-log reason
-    would be silent. This regression guards against that path.
+    would be silent. This regression guards against that path, for a run
+    that has gathered no material yet: the answer says so.
     """
 
     class _TimingOutLLM:
@@ -1293,7 +1409,6 @@ def test_answer_timeout_emits_visible_warning_and_marker():
         progress_queue=progress_queue,
         max_total_seconds=30,
     )
-    state["context"] = ["Recherche-Kontext: Findings 1, 2, 3"]
     state["all_citations"] = ["https://example.com/report"]
     state["consolidated_claims"] = []
 
@@ -1309,9 +1424,17 @@ def test_answer_timeout_emits_visible_warning_and_marker():
         settings=settings,
     )
 
-    assert "[!WARNING] Antwort-Synthese-Fallback aktiv" in state["answer"]
-    assert "Recherche-Kontext" in state["answer"]
+    assert "[!WARNING] Kein geschriebener Bericht" in state["answer"]
     assert "_answer_fallback=true" in state["answer"]
+    # Without gathered material the header says so and claims no material
+    # beneath it; what follows tells the reader what to do.
+    assert "das bisher gesammelte Material der Recherche in Rohform" not in state["answer"]
+    assert (
+        "> Es liegt noch kein gesammeltes Material vor. Für den Betrieb: Das "
+        "Iterationsprotokoll führt diese Antwort mit `_answer_fallback=true`.\n\n"
+        "Bitte erneut versuchen; für den Betrieb: gegebenenfalls `REASONING_TIMEOUT` "
+        "erhöhen oder `MAX_TOTAL_SECONDS` anpassen.\n"
+    ) in state["answer"]
 
     answer_log = next(
         entry for entry in reversed(state["iteration_logs"])
@@ -1319,17 +1442,20 @@ def test_answer_timeout_emits_visible_warning_and_marker():
     )
     assert answer_log["_answer_fallback"] is True
     assert answer_log["_answer_fallback_kind"] == "timeout"
-    assert "Timeout" in answer_log["_answer_fallback_reason"]
+    assert answer_log["_answer_fallback_reason"] == (
+        "Das Schreiben des Berichts hat die Zeitgrenze des Modells überschritten."
+    )
 
     progress_messages: list[str] = []
     while not progress_queue.empty():
         item = progress_queue.get_nowait()
         if isinstance(item, tuple) and len(item) == 2:
             progress_messages.append(str(item[1]))
-    assert any(
-        "Antwort-Synthese-Timeout" in m or "Answer synthesis timeout" in m
-        for m in progress_messages
-    ), f"Timeout fallback must surface on progress queue: {progress_messages}"
+    timeout_steps = [m for m in progress_messages if "Zeitgrenze" in m]
+    assert timeout_steps == [
+        "Das Schreiben des Berichts hat die Zeitgrenze überschritten; es liegt noch "
+        "kein gesammeltes Material vor, die Antwort zeigt nur einen Warnhinweis"
+    ], f"Timeout fallback must surface on progress queue: {progress_messages}"
 
 
 def _ledger_record(
@@ -1744,7 +1870,7 @@ def test_section_progress_counts_in_write_order_and_types_the_position():
         payload
         for kind, payload in events
         if kind == "inqtrix.progress.message"
-        and str(payload.get("message") or "").startswith("Schreibe Report-Abschnitt")
+        and str(payload.get("message") or "").startswith("Schreibe Berichtsabschnitt")
     ]
     total = len(settings.report_tuning.answer_sections)
     assert [event["snapshot"]["writing_section"] for event in section_events] == list(
@@ -1864,8 +1990,11 @@ def test_answer_preserves_source_context_and_references_without_bundles():
     assert "EVIDENCE OVERVIEW" in llm.calls[0]["system"]
     assert "[1](https://source.example/report)" in state["answer"]
     assert "## Referenzen" in state["answer"]
-    assert "Evidence-Contract: source_context_only" in state["answer"]
-    # source_context_only (no verified/contested claim backs the answer) is the
+    # The reader learns it from the notice; the footer names no status.
+    assert "## Evidenzhinweis" in state["answer"]
+    assert "Kein Satz der Antwort, der eine Quelle zitiert," in state["answer"]
+    assert "Evidence-Contract" not in state["answer"]
+    # source_context_only (no cited sentence restates a recorded statement) is the
     # weakest non-failure evidence state and is capped at 4 via
     # _CONTRACT_CONFIDENCE_CAP -- below needs_review (6), above algorithm_failed (3).
     assert state["final_confidence"] == 4
@@ -2172,11 +2301,9 @@ def test_answer_omits_truncated_section_and_marks_incomplete_without_recovery():
     assert "## Fazit / Ausblick" in state["answer"]
     # Every rendered online evidence source stays on record (cited first,
     # then the examined-but-uncited ones), but only the cited sources are
-    # listed as references; the rest is named as examined. No separate
-    # additional-links section is needed for already-listed sources.
+    # listed as references; the rest is named as examined.
     assert "## Referenzen" in state["answer"]
     assert "## Weitere geprüfte Quellen" in state["answer"]
-    assert "## Weiterfuehrende Links" not in state["answer"]
     assert state["iteration_logs"][-1]["allowed_citation_count"] == 25
     assert len(state["report_references"]) == 25
     assert [reference["url"] for reference in state["report_references"]] == urls
@@ -2190,7 +2317,6 @@ def test_answer_omits_truncated_section_and_marks_incomplete_without_recovery():
     assert section_log_2["finish_reason"] == "length"
     # Log WARNING was emitted for the truncated section (visible in caplog)
     assert state["iteration_logs"][-1]["reference_link_count"] == 25
-    assert state["iteration_logs"][-1]["additional_link_count"] == 0
 
 
 def test_reference_extraction_runs_when_answer_complete():
@@ -2237,7 +2363,6 @@ def test_reference_extraction_runs_when_answer_complete():
     assert "https://example.com/report/a" in joined
     assert "https://example.com/report/b" in joined
     assert "https://example.com/extra/c" in joined
-    assert "## Weiterfuehrende Links" not in joined
     assert [reference["url"] for reference in appendix.references] == allowed_citations
     # The reference list names only what the body cites; the source the
     # writer saw but did not cite is listed as examined, never as a
@@ -2971,6 +3096,40 @@ def test_build_query_slots_returns_one_slot_per_later_round_query():
     assert any(slot["slot_type"] == "primary_source" for slot in slots)
 
 
+@pytest.mark.parametrize(("response", "error", "message"), [
+    (
+        "", AgentTimeout("plan call timed out"),
+        "Search planning failed (AgentTimeout); the search falls back to the original question",
+    ),
+    (
+        "keine Liste", None,
+        "Search planning returned no readable list of search queries; the search "
+        "falls back to the original question",
+    ),
+])
+def test_a_failed_search_plan_is_recorded_in_english_in_a_german_run(response, error, message):
+    """The reader's step follows the run's language; the protocol entry of
+    the same failure is English, whatever language the run has."""
+    from inqtrix.nodes import plan
+
+    class _PlanLLM(_RecordingLLMStub):
+        def complete(self, prompt, *a, **kw):
+            if error is not None:
+                raise error
+            return super().complete(prompt, *a, **kw)
+
+    settings = AgentSettings(testing_mode=True)
+    state = initial_state("Was ist passiert?", max_total_seconds=30)
+    plan(
+        state,
+        providers=ProviderContext(llm=_PlanLLM(response), search=_SearchStub()),
+        strategies=create_default_strategies(settings),
+        settings=settings,
+    )
+
+    assert [failure["message"] for failure in state["algorithm_failures"]] == [message]
+
+
 def test_plan_logs_query_slots_for_later_round():
     from inqtrix.nodes import plan
 
@@ -3127,7 +3286,7 @@ def test_plan_prompt_includes_crosscheck_targets_after_search_round():
     assert "Model X reached 87 percent on Benchmark Y" in prompt
     assert "analysis-alpha.example" in prompt
     plan_log = state["iteration_logs"][-1]
-    assert "Cross-Check" in plan_log["planning_basis"]["active_strategies"]
+    assert "Gegenprüfung" in plan_log["planning_basis"]["active_strategies"]
     assert plan_log["planning_basis"]["crosscheck_target_count"] == 1
 
 
@@ -3479,7 +3638,9 @@ def test_answer_records_the_budget_cut_in_state_and_names_it_in_the_report():
     assert "„Suchanfrage 0“" in state["answer"]
 
 
-def _capture_evaluated_answer_prompts(profile, *, translated_headings=False, obey_disclosure_heading=False):
+def _capture_evaluated_answer_prompts(
+    profile, *, translated_headings=False, obey_disclosure_heading=False, state_extra=None,
+):
     tuning = AgentSettings(report_profile=profile).report_tuning
     if translated_headings:
         tuning = dataclasses.replace(
@@ -3524,6 +3685,7 @@ def _capture_evaluated_answer_prompts(profile, *, translated_headings=False, obe
     state["claim_status_counts"] = {"verified": 0, "unverified": 1}
     state["all_citations"] = ["https://source.example/report"]
     state["evidence_ledger"] = [_ledger_record("ev_1", state["all_citations"][0])]
+    state.update(state_extra or {})
     llm = _CapturingLLM()
     answer(
         state,
@@ -3543,6 +3705,74 @@ def test_every_section_plan_has_one_reachable_uncertainty_owner(profile, transla
     # These are call positions: summaries are written after the body.
     expected_call = {ReportProfile.SCHNELL: 0, ReportProfile.COMPACT: 2, ReportProfile.DEEP: 3}[profile]
     assert [index for index, system in enumerate(systems) if directive in system] == [expected_call]
+
+
+@pytest.mark.parametrize(("profile", "owner_heading"), [
+    (ReportProfile.SCHNELL, "Kernaussagen"),
+    (ReportProfile.COMPACT, "Einordnung / Ausblick"),
+    (ReportProfile.DEEP, "Risiken / Unsicherheiten"),
+])
+def test_the_section_that_owns_the_evidence_limits_names_the_thin_cross_check(profile, owner_heading):
+    """A thin cross-check is an evidence limit of the report: the section the
+    profile's plan gives the limits to names it, under its own heading, and
+    no other section is told to; only the deep profile has a risks section."""
+    systems, _ = _capture_evaluated_answer_prompts(profile, state_extra={
+        "evidence_depth_gap": {
+            "active": True,
+            "supported_count": 4,
+            "cross_checked_count": 0,
+            "single_source_count": 4,
+            "single_source_ratio": 1.0,
+        },
+    })
+    directive = (
+        f"- This section ('{owner_heading}') MUST name this thin cross-check "
+        "situation explicitly as an evidence limit of the report."
+    )
+    # These are call positions: summaries are written after the body.
+    expected_call = {ReportProfile.SCHNELL: 0, ReportProfile.COMPACT: 2, ReportProfile.DEEP: 3}[profile]
+    assert all("EVIDENCE DEPTH -- IMPORTANT FOR THE TONE OF THE REPORT:" in system for system in systems)
+    assert [
+        index for index, system in enumerate(systems) if "MUST name this thin cross-check" in system
+    ] == [expected_call]
+    assert directive in systems[expected_call]
+    assert [
+        index for index, system in enumerate(systems)
+        if "- Add NO own block on this thin cross-check situation in THIS section" in system
+    ] == [index for index in range(len(systems)) if index != expected_call]
+
+
+@pytest.mark.parametrize(("profile", "owner_heading"), [
+    (ReportProfile.SCHNELL, "Kernaussagen"),
+    (ReportProfile.COMPACT, "Einordnung / Ausblick"),
+    (ReportProfile.DEEP, "Risiken / Unsicherheiten"),
+])
+def test_open_sub_questions_are_named_by_the_section_that_owns_the_evidence_limits(profile, owner_heading):
+    """Open sub-questions are an evidence limit: the section the plan gives
+    the limits to names them under its own heading, every other section marks
+    them inline, and no section prompt names another section of any plan."""
+    from inqtrix.prompt_language import HEADINGS
+
+    systems, _ = _capture_evaluated_answer_prompts(profile)
+    # These are call positions: summaries are written after the body.
+    expected_call = {ReportProfile.SCHNELL: 0, ReportProfile.COMPACT: 2, ReportProfile.DEEP: 3}[profile]
+    assert [
+        index for index, system in enumerate(systems) if "name them transparently" in system
+    ] == [expected_call]
+    assert (
+        "- When sub-questions remain open, name them transparently in this "
+        f"section ('{owner_heading}').\n"
+    ) in systems[expected_call]
+    assert all(
+        "- When sub-questions are relevant to THIS section but unsupported, mark them "
+        "briefly inline with '(unbestätigt)'.\n" in system
+        for index, system in enumerate(systems)
+        if index != expected_call
+    )
+    section_names = set(HEADINGS["de"].values()) - {HEADINGS["de"]["uncertainties"]}
+    for system in systems:
+        own = re.search(r"- Current section: \d+/\d+ - \*\*(.+?)\*\*\.", system)[1]
+        assert {name for name in section_names if f"'{name}'" in system} <= {own}, own
 
 
 def test_answer_passes_the_evaluators_explanation_to_every_writer_call():

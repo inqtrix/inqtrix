@@ -28,9 +28,11 @@ from inqtrix.server.routers import (
 from inqtrix.server.streaming import disconnect_watch, guarded_stream
 from inqtrix.services.agent_context import StackResolutionError
 from inqtrix.services.request_parsing import (
+    boolean_field,
     format_history,
     incognito_from_request,
     question_and_messages,
+    read_json_object,
     ui_language_from_request,
     workspace_id_from_request,
 )
@@ -63,11 +65,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         a trace. An omitted/empty/null filter is PINNED to the
         caller-visible collections, but ONLY for ``mode=knowledge``: that
         algorithm consumes the filter without scoping of its own, while
-        every other mode either ignores the filter or (workspace agent)
-        resolves its scope itself at execution time. The pinned ids are
-        written back into ``resolved_filters`` in place and ride into
-        execution. ``visible_to=None`` (auth off) keeps the historical
-        see-everything view untouched.
+        every other mode either ignores the filter or cannot run on this
+        surface at all (``agent_kernel`` runs only through ``/v1/runs``).
+        The pinned ids are written back into ``resolved_filters`` in place
+        and ride into execution. ``visible_to=None`` (auth off) keeps the
+        historical see-everything view untouched.
         """
         if knowledge_service is None or visible_to is None:
             return None
@@ -98,16 +100,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(container.principal_dependency),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        try:
-            body = await req.json()
-        except Exception:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {
-                    "message": "Invalid JSON body",
-                    "type": "invalid_request_error",
-                }},
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
 
         try:
             # Called for the 400 it raises on a malformed namespace. Chat has
@@ -162,13 +157,17 @@ def build_router(container: "AppContainer") -> APIRouter:
             messages, max_messages=settings.server.max_messages_history
         )
 
-        stream = body.get("stream", False)
-        include_progress_raw = body.get("include_progress", True)
-        include_progress = (
-            include_progress_raw
-            if isinstance(include_progress_raw, bool)
-            else True
-        )
+        try:
+            # OpenAI's chat-completions contract lets ``stream`` be null,
+            # which means its default.
+            stream = (
+                False
+                if body.get("stream") is None
+                else boolean_field(body, "stream", False)
+            )
+            include_progress = boolean_field(body, "include_progress", True)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
 
         sem = container.semaphore_factory()
         if sem.locked():
@@ -184,7 +183,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             algorithm = container.registry.get(resolved.mode)
             if not algorithm.capabilities().get("supports_chat_completions"):
                 # An algorithm that is not a chat-completions peer (e.g.
-                # workspace_agent, which needs run_id + park) cannot serve this
+                # agent_kernel, which needs run_id + park) cannot serve this
                 # surface. Reject loudly rather than dispatch it into a context
                 # it will fail in.
                 return JSONResponse(

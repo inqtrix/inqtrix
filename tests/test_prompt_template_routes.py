@@ -315,6 +315,28 @@ def test_view_grant_admits_reads_not_writes(world):
     )
 
 
+def test_a_shared_template_publishes_the_size_of_its_shared_block(world):
+    """The recipient attaches it under the opener that names its source,
+    so the size a client pre-checks the ceiling with counts that opener."""
+    from inqtrix.agents.report_requirement import rule_requirement_block
+
+    client, _container = world
+    created = create_template(client)
+    assert grant(client, created["id"]).status_code == 201
+
+    mine = client.get("/v1/prompt-templates", headers=as_user(OWNER)).json()["data"]
+    theirs = client.get("/v1/prompt-templates", headers=as_user(RECIPIENT)).json()["data"]
+    [own_row] = [item for item in mine if item["id"] == created["id"]]
+    [shared_row] = [item for item in theirs if item["id"] == created["id"]]
+    assert own_row["composed_chars"] == len(
+        rule_requirement_block(created["label"], created["content_markdown"])
+    )
+    assert shared_row["composed_chars"] == len(
+        rule_requirement_block(created["label"], created["content_markdown"], shared=True)
+    )
+    assert shared_row["composed_chars"] > own_row["composed_chars"]
+
+
 def test_edit_grant_admits_updates_not_deletion(world):
     client, _container = world
     created = create_template(client)

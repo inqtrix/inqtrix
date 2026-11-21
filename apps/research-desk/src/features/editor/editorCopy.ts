@@ -5,6 +5,8 @@
  * editor strings stay in one place.
  */
 
+import { intlLocale } from '@/lib/time'
+
 export type EditorCopy = { [Key in keyof typeof editorCopy.de]: string }
 
 export const editorCopy = {
@@ -74,6 +76,15 @@ export const editorCopy = {
     recoveryGenerationReplaced: 'Der Dienst konnte Änderungen aus diesem Editor nicht bestätigen, und das ursprüngliche Dokument wurde inzwischen neu aufgebaut. Hier ist ausschließlich eine lokale Kopie dieses Stands; sie wird nicht automatisch synchronisiert.',
     recoveryRemoteDeleted: 'Das ursprüngliche Dokument wurde remote gelöscht. Hier ist ausschließlich eine lokale Kopie nicht bestätigter Arbeit; sie wird nicht automatisch synchronisiert.',
     recoverySaveAsNew: 'Als neues Dokument speichern',
+    conflictCopyTitle: '{title} (Konfliktkopie {moment})',
+    conflictCopyAtOriginal: 'Ihre Fassung ließ sich nicht mit einer inzwischen gespeicherten Änderung zusammenführen. Das Dokument hat die gespeicherte Fassung übernommen, Ihre liegt in der Kopie „{title}“.',
+    conflictCopyAtOriginalConverted: 'Das Dokument wurde inzwischen in den Modus Zusammenarbeit umgestellt. Ihre Fassung von vor der Umstellung liegt in der Kopie „{title}“.',
+    conflictCopyAtCopy: 'Diese Kopie enthält Ihre Fassung von „{title}“, die sich nicht mit einer dort inzwischen gespeicherten Änderung zusammenführen ließ.',
+    conflictCopyAtCopyConverted: 'Diese Kopie enthält Ihre Fassung von „{title}“ von vor der Umstellung in den Modus Zusammenarbeit.',
+    conflictCopyOpen: 'Kopie öffnen',
+    conflictCopyCompare: 'Mit Original vergleichen',
+    conflictCopyCompareClose: 'Vergleich schließen',
+    conflictCopyDelete: 'Kopie löschen',
     revision: 'Revision',
     removeFromQueue: 'Aus Warteschlange entfernen',
     removeFormatting: 'Formatierung entfernen',
@@ -150,6 +161,9 @@ export const editorCopy = {
     reviewInPanel: 'In der Karte übernehmen oder verwerfen',
     sources: 'Quellen',
     suggestionStale: 'Textstelle hat sich geändert. Bitte Vorschlag neu erzeugen.',
+    suggestionSaveBeforeAccept: 'Speichern Sie das Dokument, bevor Sie den Vorschlag übernehmen.',
+    suggestionDocumentNotSaved: 'Das Dokument konnte nicht gespeichert werden. Bitte erneut versuchen.',
+    suggestionDocumentConverted: 'Das Dokument ist inzwischen im Modus Zusammenarbeit. Der Vorschlag wurde nicht übernommen.',
     regenerate: 'Neu erzeugen',
     collect: 'Sammeln',
     collected: 'Gesammelt',
@@ -301,6 +315,15 @@ export const editorCopy = {
     recoveryGenerationReplaced: 'The service could not confirm changes from this editor, and the original document has been rebuilt since. This is only a local copy of that state and is not synchronized automatically.',
     recoveryRemoteDeleted: 'The original document was deleted remotely. This is only a local copy of unconfirmed work and is not synchronized automatically.',
     recoverySaveAsNew: 'Save as new document',
+    conflictCopyTitle: '{title} (conflicted copy {moment})',
+    conflictCopyAtOriginal: 'Your version could not be merged with a change saved in the meantime. The document took the saved version; yours is in the copy “{title}”.',
+    conflictCopyAtOriginalConverted: 'The document was switched to collaboration mode in the meantime. Your version from before the switch is in the copy “{title}”.',
+    conflictCopyAtCopy: 'This copy holds your version of “{title}”, which could not be merged with a change saved there in the meantime.',
+    conflictCopyAtCopyConverted: 'This copy holds your version of “{title}” from before it was switched to collaboration mode.',
+    conflictCopyOpen: 'Open copy',
+    conflictCopyCompare: 'Compare with original',
+    conflictCopyCompareClose: 'Close comparison',
+    conflictCopyDelete: 'Delete copy',
     revision: 'Revision',
     removeFromQueue: 'Remove from queue',
     removeFormatting: 'Remove formatting',
@@ -377,6 +400,9 @@ export const editorCopy = {
     reviewInPanel: 'Accept or reject it in this card',
     sources: 'Sources',
     suggestionStale: 'The passage changed. Please regenerate the suggestion.',
+    suggestionSaveBeforeAccept: 'Save the document before accepting the suggestion.',
+    suggestionDocumentNotSaved: 'The document could not be saved. Please try again.',
+    suggestionDocumentConverted: 'The document is in collaboration mode now. The suggestion was not accepted.',
     regenerate: 'Regenerate',
     collect: 'Collect',
     collected: 'Collected',
@@ -463,6 +489,55 @@ export const editorCopy = {
     updated: 'last edited',
   },
 } as const
+
+/** The title of a conflict copy: the document's title without `.md`, the
+ * date and time the copy was made in the desk language, and `.md` again —
+ * `Plan (Konfliktkopie 04.03.2026 05:06:07).md`. The title alone says what
+ * the copy is once the session that made it is gone. */
+export function editorConflictCopyTitle(
+  title: string,
+  at: Date,
+  locale: 'de' | 'en',
+): string {
+  const formatter = intlLocale(locale)
+  const date = new Intl.DateTimeFormat(formatter, locale === 'de'
+    ? { day: '2-digit', month: '2-digit', year: 'numeric' }
+    : { day: 'numeric', month: 'short', year: 'numeric' }).format(at)
+  const time = new Intl.DateTimeFormat(formatter, {
+    hour: locale === 'de' ? '2-digit' : 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(at)
+  // Plain spaces only: some engines put a narrow no-break space before AM/PM.
+  const moment = `${date} ${time}`.replace(/\s/gu, ' ')
+  const bare = title.replace(/\.md$/i, '')
+  // Replacer functions: a string replacement would expand `$&` and similar
+  // patterns typed into the title.
+  const copyTitle = editorCopy[locale].conflictCopyTitle
+    .replace('{title}', () => bare)
+    .replace('{moment}', () => moment)
+  return `${copyTitle}.md`
+}
+
+/** What a conflict copy's notice says: at the original, where the own
+ * version went; at the copy, whose version it holds. `title` is the title
+ * of the other document. `concurrent_change`: a version saved elsewhere
+ * could not be merged with the own one; `content_mode_changed`: the
+ * document was switched to collaboration mode elsewhere. */
+export function editorConflictCopyNotice(
+  locale: 'de' | 'en',
+  reason: 'concurrent_change' | 'content_mode_changed',
+  place: 'copy' | 'original',
+  title: string,
+): string {
+  const copy = editorCopy[locale]
+  const text = place === 'original'
+    ? reason === 'concurrent_change' ? copy.conflictCopyAtOriginal : copy.conflictCopyAtOriginalConverted
+    : reason === 'concurrent_change' ? copy.conflictCopyAtCopy : copy.conflictCopyAtCopyConverted
+  // A replacer function: a string replacement would expand `$&` and
+  // similar patterns typed into the title.
+  return text.replace('{title}', () => title)
+}
 
 /** The accessible name of a task item's checkbox, from the item's text. */
 export function taskCheckboxLabelFor(copy: EditorCopy): (taskText: string) => string {

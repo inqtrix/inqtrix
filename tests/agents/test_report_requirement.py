@@ -207,7 +207,7 @@ def test_a_composed_requirement_splits_back_into_its_parts():
     rules = [("briefing", _FORGED_BODY), ("ton]\n  sachlich", "Sachlich.")]
     for free_text in ("Fuer den Vorstand.", ""):
         composed = compose_report_requirement(free_text=free_text, rules=rules)
-        split = split_composed_requirement(composed, [label for label, _ in rules])
+        split = split_composed_requirement(composed, [{"label": label} for label, _ in rules])
         assert split is not None, composed
         blocks, typed = split
         assert blocks == [rule_requirement_block(label, body) for label, body in rules]
@@ -242,7 +242,20 @@ def test_a_composed_requirement_splits_back_into_its_parts():
 def test_a_text_that_is_not_this_composition_does_not_split(composed, labels):
     from inqtrix.agents.report_requirement import split_composed_requirement
 
-    assert split_composed_requirement(composed, labels) is None
+    assert split_composed_requirement(composed, [{"label": label} for label in labels]) is None
+
+
+def test_the_split_reads_each_rule_under_the_marker_its_part_names():
+    """A shared rule opens with the marker that names its source; the
+    stored part says which marker to expect, so neither reads as the other."""
+    from inqtrix.agents.report_requirement import split_composed_requirement
+
+    own = "[Rule: a]\nA.\n[End rule: a]"
+    shared = "[Rule: a (shared by another user)]\nA.\n[End rule: a]"
+    assert split_composed_requirement(own, [{"label": "a"}]) == ([own], "")
+    assert split_composed_requirement(shared, [{"label": "a", "shared": True}]) == ([shared], "")
+    assert split_composed_requirement(own, [{"label": "a", "shared": True}]) is None
+    assert split_composed_requirement(shared, [{"label": "a"}]) is None
 
 
 def test_the_attached_event_names_rules_and_counts_the_typed_text(caplog):

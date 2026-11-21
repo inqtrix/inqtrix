@@ -34,6 +34,7 @@ import {
   MAX_SKILL_POINTS,
   SKILL_ALLOWED_TOOL_OPTIONS,
   canDeleteSkill,
+  canChangeSkillInvocation,
   canEditSkill,
   emptySkillPayload,
   emptySkillPoint,
@@ -55,6 +56,19 @@ import type { SkillsApiHandle } from './useSkillsApi'
  * `{{name}}` placeholders in the instructions (scaffolded rows), and
  * uncovered placeholders warn before the server would 400.
  */
+
+/**
+ * Class line of every native select of the editor. A locked select must
+ * look locked: without the disabled part it renders exactly like one the
+ * reader can change, and a click on it does nothing without a visible
+ * reason. The shared form controls dim the same way.
+ */
+const NATIVE_SELECT_CLASS
+  = 'w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground disabled:cursor-not-allowed disabled:opacity-50'
+
+/** Base class of a tool chip; dims like the shared buttons when locked. */
+const TOOL_CHIP_CLASS
+  = 'rounded-md border px-2 py-1 t-meta transition-colors disabled:pointer-events-none disabled:opacity-50'
 
 type Draft = {
   baseRevision: number
@@ -657,7 +671,7 @@ export function SkillLibraryPanel({
               <Field htmlFor={`${fieldIds}-deliverable`} label={s.fieldDeliverable}>
                 <select
                   id={`${fieldIds}-deliverable`}
-                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+                  className={NATIVE_SELECT_CLASS}
                   disabled={!editable}
                   onChange={(event) =>
                     patch({
@@ -676,7 +690,7 @@ export function SkillLibraryPanel({
               <Field hint={s.fieldRequiresPlanHint} htmlFor={`${fieldIds}-requires-plan`} label={s.fieldRequiresPlan}>
                 <select
                   id={`${fieldIds}-requires-plan`}
-                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+                  className={NATIVE_SELECT_CLASS}
                   disabled={!editable}
                   onChange={(event) =>
                     patch({
@@ -690,22 +704,13 @@ export function SkillLibraryPanel({
                   <option value="never">{s.requiresPlanNever}</option>
                 </select>
               </Field>
-              <Field hint={s.fieldInvocationHint} htmlFor={`${fieldIds}-invocation`} label={s.fieldInvocation}>
-                <select
-                  id={`${fieldIds}-invocation`}
-                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
-                  disabled={!editable}
-                  onChange={(event) =>
-                    patch({
-                      invocation: event.target
-                        .value as SkillPayload['invocation'],
-                    })}
-                  value={draft.payload.invocation}
-                >
-                  <option value="user_only">{s.invocationUserOnly}</option>
-                  <option value="model_allowed">{s.invocationModelAllowed}</option>
-                </select>
-              </Field>
+              <SkillInvocationField
+                editable={editable}
+                id={`${fieldIds}-invocation`}
+                onChange={(invocation) => patch({ invocation })}
+                skill={selected}
+                value={draft.payload.invocation}
+              />
             </div>
 
             <Field hint={s.fieldAllowedToolsHint} label={s.fieldAllowedTools}>
@@ -715,7 +720,7 @@ export function SkillLibraryPanel({
                   return (
                     <button
                       className={cn(
-                        'rounded-md border px-2 py-1 t-meta transition-colors',
+                        TOOL_CHIP_CLASS,
                         active
                           ? 'border-success/40 bg-success-subtle text-success'
                           : 'border-border text-muted-foreground hover:text-foreground',
@@ -743,7 +748,7 @@ export function SkillLibraryPanel({
               <Field hint={s.fieldPinsHint} htmlFor={`${fieldIds}-model-tier`} label={s.fieldModelTier}>
                 <select
                   id={`${fieldIds}-model-tier`}
-                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+                  className={NATIVE_SELECT_CLASS}
                   disabled={!editable}
                   onChange={(event) =>
                     patch({
@@ -761,7 +766,7 @@ export function SkillLibraryPanel({
               <Field htmlFor={`${fieldIds}-effort`} label={s.fieldEffort}>
                 <select
                   id={`${fieldIds}-effort`}
-                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+                  className={NATIVE_SELECT_CLASS}
                   disabled={!editable}
                   onChange={(event) => patch({ effort: event.target.value })}
                   value={draft.payload.effort}
@@ -851,5 +856,49 @@ function Field({
       {children}
       {hint && <p className="t-meta text-muted-foreground">{hint}</p>}
     </div>
+  )
+}
+
+/**
+ * The field that says who may activate the skill. Only the owner decides
+ * that: for a skill shared with the reader the select is locked whatever
+ * the edit permission says, and the hint names the reason. The server
+ * refuses the change as well; this keeps the form from offering it.
+ */
+export function SkillInvocationField({
+  editable,
+  id,
+  onChange,
+  skill,
+  value,
+}: {
+  editable: boolean
+  id: string
+  onChange: (invocation: SkillPayload['invocation']) => void
+  /** The stored skill behind the draft; null while a new one is drafted. */
+  skill: SkillInfo | null
+  value: SkillPayload['invocation']
+}) {
+  const { t } = useLocale()
+  const s = t.skills
+  const ownerOnly = !canChangeSkillInvocation(skill)
+  return (
+    <Field
+      hint={ownerOnly ? s.fieldInvocationOwnerOnlyHint : s.fieldInvocationHint}
+      htmlFor={id}
+      label={s.fieldInvocation}
+    >
+      <select
+        id={id}
+        className={NATIVE_SELECT_CLASS}
+        disabled={!editable || ownerOnly}
+        onChange={(event) =>
+          onChange(event.target.value as SkillPayload['invocation'])}
+        value={value}
+      >
+        <option value="user_only">{s.invocationUserOnly}</option>
+        <option value="model_allowed">{s.invocationModelAllowed}</option>
+      </select>
+    </Field>
   )
 }

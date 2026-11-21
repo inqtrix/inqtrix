@@ -1,6 +1,6 @@
-"""Gate and URL-translation behaviour of the workspace-agent checkpointer.
+"""Gate and URL-translation behaviour of the agent checkpointer.
 
-The gate decides Agent-Desk visibility (features.workspace_agent) from
+The gate decides Agent-Desk visibility (features.agent_desk) from
 settings and imports alone; the URL translation feeds the psycopg pool
 that opens lazily on the first agent run. Both had zero test coverage
 while being the two ways a deployment silently loses the Agent Desk or
@@ -73,7 +73,7 @@ def test_gate_names_the_missing_durable_backend(caplog) -> None:
         )
     assert handle is None
     assert any(
-        "features.workspace_agent remains false" in record.message
+        "features.agent_desk remains false" in record.message
         and "durable checkpointer" in record.message
         for record in caplog.records
     )

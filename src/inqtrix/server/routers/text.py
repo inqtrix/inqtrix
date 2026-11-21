@@ -31,6 +31,7 @@ from inqtrix.server.text_improvements import (
 from inqtrix.services.agent_context import StackResolutionError
 from inqtrix.services.request_parsing import (
     error_response,
+    read_json_object,
     text_wait_seconds,
     workspace_id_from_request,
 )
@@ -55,10 +56,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(container.principal_dependency),
     ):
         """Improve one browser text field without creating an agent run."""
-        try:
-            body = await req.json()
-        except Exception:
-            return error_response(400, "Invalid JSON body", "invalid_request_error")
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
 
         try:
             workspace_id_from_request(req, body)

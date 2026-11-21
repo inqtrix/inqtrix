@@ -1,10 +1,9 @@
-"""Shared source policy for both agent brains.
+"""The source policy of agent runs.
 
 The Agent Desk exposes source availability independently from the model's
-choice to use a tool.  Enforcement therefore belongs at the tool/task
-dispatch choke points, not only in prompts.  This module is the single policy
-definition consumed by the cognitive kernel, the workspace phase machine,
-and child-run submission.
+choice to use a tool.  Enforcement therefore belongs at the tool dispatch
+choke points, not only in prompts.  This module is the single policy
+definition consumed by the cognitive kernel and child-run submission.
 """
 
 from __future__ import annotations
@@ -22,49 +21,53 @@ WEB_TOOL_NAMES = frozenset(
     {
         "web_instant",
         "run_web_research",
-        "delegate_batch",
     }
 )
-"""Kernel tool names that contact the public web.
+"""Kernel tool names that contact the public web."""
 
-``delegate_batch`` sits here for tool-use-counter parity: rehydration
-counts one web use per ToolMessage NAME, so the live batch records
-exactly ONE web use per batch (never per child). Side effect, accepted
-and deliberate: ``source_policy.web=disabled`` removes the whole batch
-tool — research assignments would be denied per-assignment anyway, and
-a deep_mission-only batch degrades to the still-available single
-``run_deep_mission`` tool."""
+BATCH_TOOL_NAME = "delegate_batch"
+"""The batch of subtasks. It reaches the web through its research
+assignments and project knowledge through its knowledge assignments, so it
+belongs to neither list: the tool is offered while either source is
+available, and what one assignment may reach its own admission decides.
+Which sources a batch counts as used it says in the artifact of its tool
+message (``SOURCE_USES`` in ``agents.kernel.tools``); the counters read
+them from there."""
 
 KNOWLEDGE_TOOL_NAMES = frozenset(
-    {"search_project_knowledge", "read_project_document", "cite_document_passages"}
+    {
+        "search_project_knowledge",
+        "read_project_document",
+        "cite_document_passages",
+        "analyze_document",
+    }
 )
 """Kernel tool names that access project knowledge."""
+
+
+def batch_assignment_mode(assignment: object) -> str:
+    """The mode one assignment of a batch names, as the batch tool reads it.
+
+    One reading for the tool, for the gate that decides whether to ask
+    first and for the approval card: a gate that read the mode differently
+    from the tool would let an assignment past the question it owes.
+    """
+    if not isinstance(assignment, Mapping):
+        return ""
+    return str(assignment.get("mode") or "").strip()
+
+
+def batch_reaches_knowledge(args: object) -> bool:
+    """Whether the arguments of a batch call carry a knowledge assignment."""
+    assignments = args.get("assignments") if isinstance(args, Mapping) else None
+    return isinstance(assignments, list) and any(
+        batch_assignment_mode(assignment) == "knowledge" for assignment in assignments
+    )
 
 UNCOUNTED_SOURCE_TOOLS = frozenset({"cite_document_passages"})
 """Source tools that reach no new source: a citation labels text the run
 already read, so it spends no source budget (the live counter skips its
 capability the same way)."""
-
-WEB_TASK_KINDS = frozenset({"web_instant", "web_research"})
-"""Workspace-agent task kinds that contact the public web."""
-
-KNOWLEDGE_TASK_KINDS = frozenset({"rag_query", "file_analysis"})
-"""Workspace-agent task kinds that access project knowledge."""
-
-_ALL_TASK_KINDS = WEB_TASK_KINDS | KNOWLEDGE_TASK_KINDS | {"synthesis"}
-def coerce_source_policy(value: object = None) -> SourcePolicy:
-    """Normalize a policy or a deps-like owner, defaulting legacy omission.
-
-    The both-available default is the documented backward-compatible wire
-    behavior.  This helper also keeps focused task-executor test seams that
-    predate the new deps attribute representative of an omitted policy.
-    """
-    candidate = getattr(value, "source_policy", value)
-    if isinstance(candidate, SourcePolicy):
-        return candidate
-    if isinstance(candidate, dict):
-        return SourcePolicy.model_validate(candidate)
-    return SourcePolicy()
 
 
 def effective_source_policy(policy: SourcePolicy) -> SourcePolicy:
@@ -84,6 +87,8 @@ def require_kernel_tool_allowed(
     """Fail loudly when a kernel tool violates the enforced run policy."""
     if kernel_tool_allowed(tool_name, policy=policy):
         return
+    if tool_name == BATCH_TOOL_NAME:
+        _deny("source_policy.web=disabled and source_policy.knowledge=disabled", tool_name)
     if tool_name in WEB_TOOL_NAMES:
         _deny("source_policy.web=disabled", tool_name)
     if tool_name in KNOWLEDGE_TOOL_NAMES:
@@ -97,6 +102,8 @@ def kernel_tool_allowed(
     policy: SourcePolicy,
 ) -> bool:
     """Whether a kernel tool belongs to the effective run tool surface."""
+    if tool_name == BATCH_TOOL_NAME:
+        return "available" in (policy.web, policy.knowledge)
     if tool_name in WEB_TOOL_NAMES and policy.web != "available":
         return False
     if tool_name in KNOWLEDGE_TOOL_NAMES and policy.knowledge != "available":
@@ -104,37 +111,14 @@ def kernel_tool_allowed(
     return True
 
 
-def require_task_allowed(task_kind: str, *, policy: SourcePolicy) -> None:
-    """Fail loudly when a workspace-agent task violates source policy."""
-    if task_kind in WEB_TASK_KINDS and policy.web != "available":
-        _deny("source_policy.web=disabled", task_kind)
-    if task_kind in KNOWLEDGE_TASK_KINDS and policy.knowledge != "available":
-        _deny("source_policy.knowledge=disabled", task_kind)
+def require_web_research_allowed(*, policy: SourcePolicy) -> None:
+    """Fail loudly when the source policy disables the web for a research run.
 
-
-def allowed_task_kinds_for_policy(
-    skill_kinds: set[str] | None,
-    *,
-    policy: SourcePolicy,
-) -> set[str] | None:
-    """Intersect the skill task allowlist with the effective source policy.
-
-    ``None`` is retained only when neither source nor skills restrict the
-    historical surface.  This keeps existing prompts byte-identical for old
-    clients while ensuring a disabled source becomes a planner repair error,
-    before any task is persisted.
+    The research algorithm checks here before its graph runs, so a research
+    run whose source policy disables the web fails before any search.
     """
-    if skill_kinds is None and (
-        policy.web == "available" and policy.knowledge == "available"
-    ):
-        return None
-    allowed = set(skill_kinds) if skill_kinds is not None else set(_ALL_TASK_KINDS)
     if policy.web != "available":
-        allowed -= WEB_TASK_KINDS
-    if policy.knowledge != "available":
-        allowed -= KNOWLEDGE_TASK_KINDS
-    allowed.add("synthesis")
-    return allowed
+        _deny("source_policy.web=disabled", "web_research")
 
 
 def execution_payload(
@@ -148,12 +132,14 @@ def execution_payload(
     consent_reason: str,
     tool_use_counts: dict[str, int] | None = None,
     web_searches: int = 0,
+    knowledge_searches: int | None = None,
     limits: dict[str, object] | None = None,
     tool_grants: "Iterable[str] | None" = None,
     knowledge_scope: str = "inherited",
     knowledge_collection_count: int = 0,
     source_coverage: "Iterable[Mapping[str, Any]] | None" = None,
     work_profile: str = "",
+    document_analyses: "Iterable[Mapping[str, Any]] | None" = None,
 ) -> dict[str, object]:
     """Canonical run/snapshot execution projection for Agent Desk.
 
@@ -183,9 +169,18 @@ def execution_payload(
             "knowledge": max(0, int(counts.get("knowledge", 0) or 0)),
         },
         # The web searches the run's own provider calls executed. The
-        # budget counter above takes a delegated research as one web use;
-        # a research child reports its own searches (`executed_queries`).
+        # counter above counts uses of a source and takes a delegated
+        # research as one web use; a research child reports its own
+        # searches (`executed_queries`).
         "web_searches": max(0, int(web_searches or 0)),
+        # The searches of the knowledge base the run executed itself. The
+        # counter above takes a read window as a use of the source like a
+        # search, so it is no count of them. ``None`` when the caller passes
+        # none (the stored payload of an older mission run reads so): not
+        # recorded is never a zero.
+        "knowledge_searches": (
+            None if knowledge_searches is None else max(0, int(knowledge_searches))
+        ),
         # Server-authored limit facts only. The model never writes this
         # block; absent limits remain an explicit empty object for older or
         # non-agent callers instead of being guessed by the UI.
@@ -196,6 +191,10 @@ def execution_payload(
         # What the run actually read of each source version:
         # an explicit empty list for algorithms without windowed readers.
         "source_coverage": [dict(entry) for entry in (source_coverage or [])],
+        # What the run's document analyses read of each document, read on
+        # the server and not handed to the model (reading facts only): an
+        # explicit empty list for engines without the analysis tool.
+        "document_analyses": [dict(entry) for entry in (document_analyses or [])],
         # Internal role of the run; empty for every ordinary run.
         "work_profile": work_profile,
     }
@@ -233,8 +232,8 @@ def knowledge_boundary_payload(
     knowledge_filters: Mapping[str, Any],
 ) -> dict[str, object]:
     """The two boundary fields of :func:`execution_payload`, read from the
-    persisted request — ONE projection for the kernel and the mission
-    machine (``**knowledge_boundary_payload(request.knowledge_filters)``)."""
+    persisted request — ONE projection
+    (``**knowledge_boundary_payload(request.knowledge_filters)``)."""
     return {
         "knowledge_scope": knowledge_scope_of(knowledge_filters),
         "knowledge_collection_count": len(

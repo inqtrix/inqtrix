@@ -160,12 +160,9 @@ describe('what the "+" menu offers', () => {
     expect(isDisabled(addButton(composer({ collections: [] })))).toBe(true)
   })
 
-  it('offers reports to the kernel engine only', () => {
-    // The server refuses report_ids on a mission run, so the mission
-    // engine must not offer them in the first place.
+  it('opens for a report alone', () => {
     const props = { collections: [], onReportIdsChange: noop, reportOptions: [report] }
-    expect(isDisabled(addButton(composer({ ...props, engineMode: 'workspace_agent' })))).toBe(true)
-    expect(isDisabled(addButton(composer({ ...props, engineMode: 'agent_kernel' })))).toBe(false)
+    expect(isDisabled(addButton(composer(props)))).toBe(false)
   })
 })
 
@@ -204,63 +201,6 @@ describe('the caps the composer pre-checks', () => {
   it('takes the report and the rule cap from its caller, with no default', () => {
     expect(propBinding('reportIdsMax')).toBe('reportIdsMax: reportLimit')
     expect(propBinding('ruleIdsMax')).toBe('ruleIdsMax: ruleLimit')
-  })
-})
-
-describe('attachments the selected engine refuses', () => {
-  // Reports and canvas context feed the kernel only; the server refuses
-  // them on a mission run with 400. Attached under the kernel and then
-  // switched, the attachments stayed and the send failed — flagged before
-  // it now, and held: the notice here, the warning on the capsule itself
-  // (pinned in CommandPillView.test, where the capsule renders).
-  const report = { label: 'co2', markdown: '# Bericht', runId: 'run_r1', title: 'CO2-Flottengrenzwerte' }
-  const notice = translations.de.agent.composer.kernelOnlyAttached
-    .replace('{engine}', translations.de.agent.composer.engineAuto)
-  const noticeElement = (html: string) =>
-    html.match(/<div[^>]*data-testid="agent-engine-refusal"[^>]*>/)?.[0] ?? ''
-
-  it('flags an attached report before a mission send', () => {
-    const html = composer({
-      engineMode: 'workspace_agent', onReportIdsChange: noop, reportIds: ['run_r1'], reportOptions: [report],
-    })
-    expect(html).toContain(notice)
-    // The capsules are described by this notice: it carries the id they name.
-    expect(noticeElement(html)).toMatch(/ id="[^"]+"/)
-  })
-
-  it('flags a pinned canvas document the same way', () => {
-    const html = composer({
-      canvasDocuments: [{ artifactId: 'a1', name: 'memo.md', revision: 1, title: 'Memo' }],
-      engineMode: 'workspace_agent',
-      pinnedCanvasDocumentId: 'a1',
-    })
-    expect(html).toContain(notice)
-  })
-
-  it('says nothing under the kernel engine', () => {
-    const html = composer({
-      engineMode: 'agent_kernel', onReportIdsChange: noop, reportIds: ['run_r1'], reportOptions: [report],
-    })
-    expect(html).not.toContain(notice)
-  })
-
-  it('holds the send until the engine is switched or the attachment detached', () => {
-    // The send went out anyway and came back as the server's 400.
-    const send = (html: string) => html.match(/<button[^>]*data-testid="agent-submit"[^>]*>/)?.[0] ?? ''
-    // A report the desk knows: only the engine can hold this send.
-    const draft = {
-      draftQuestion: 'Vergleiche bitte',
-      onReportIdsChange: noop,
-      reportCatalog: [report],
-      reportIds: ['run_r1'],
-      reportOptions: [report],
-    }
-    const mission = composer({ ...draft, engineMode: 'workspace_agent' })
-    expect(mission).toContain(notice)
-    expect(mission).not.toContain(translations.de.agent.composer.unavailableAttached)
-    expect(send(mission)).toContain('disabled=""')
-    // The same draft sends under the kernel engine.
-    expect(send(composer({ ...draft, engineMode: 'agent_kernel' }))).not.toContain('disabled=""')
   })
 })
 
@@ -368,7 +308,6 @@ describe('a document that is gone', () => {
   it('holds the send and says why while an attached report is gone', () => {
     const html = composer({
       draftQuestion: 'Vergleiche bitte',
-      engineMode: 'agent_kernel',
       onReportIdsChange: noop,
       reportCatalog: [known],
       reportIds: ['run_gone'],
@@ -381,7 +320,6 @@ describe('a document that is gone', () => {
   it('finds a report kept out of the menus, so it is not gone', () => {
     const html = composer({
       draftQuestion: 'Vergleiche bitte',
-      engineMode: 'agent_kernel',
       onReportIdsChange: noop,
       reportCatalog: [known],
       reportIds: ['run_r1'],
@@ -400,7 +338,6 @@ describe('a document that is gone', () => {
     expect(composer({
       canvasDocuments: [],
       draftQuestion: 'Kürze bitte',
-      engineMode: 'agent_kernel',
       pinnedCanvasDocumentId: 'a_gone',
     })).toContain(translations.de.agent.composer.unavailableAttached)
   })

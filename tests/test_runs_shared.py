@@ -241,6 +241,19 @@ def test_a_clipped_question_is_marked() -> None:
     assert question_was_clipped(row) is True
 
 
+def test_the_clip_flag_turns_at_the_column_limit() -> None:
+    """One character over the limit is already clipped: the column then holds
+    the limit plus the mark, exactly as long as the question that was asked,
+    so comparing the two lengths would miss it."""
+    from inqtrix.runs.shared import QUESTION_COLUMN_LIMIT
+
+    for extra, clipped in ((0, False), (1, True), (2, True)):
+        asked = "A" * (QUESTION_COLUMN_LIMIT + extra)
+        row = _AskedRow(clipped_question(asked), asked)
+        assert (row.question != asked) is clipped, extra
+        assert question_was_clipped(row) is clipped, extra
+
+
 def test_a_question_the_user_ended_with_an_ellipsis_is_not_marked() -> None:
     """The flag compares lengths; it never sniffs a trailing ellipsis.
 

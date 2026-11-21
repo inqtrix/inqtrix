@@ -1,41 +1,29 @@
 """Clarification records.
 
-Small by design: which questions get asked is decided by intake routing
-(``ask_user_first``) or the discovery analyst's ``questions_for_user``;
-this module only shapes the control-store records and the deterministic
-filters in front of them. A question the run does not ask is never a
-silent drop: one its settings already answer is quoted with that
-setting, one that repeats an earlier round or an assumption is counted
-as skipped, and one a cap keeps out becomes a named assumption the
-first plan carries.
+Small by design: which questions get asked is decided by the kernel's
+``ask_user`` call and by the skill-point check; this module only shapes the
+control-store records in front of them.
 
-Structured option questions: the LLM proposes questions with LIKELY
+Structured option questions: the model proposes questions with LIKELY
 answer options; :func:`sanitize_questions` turns them into the
-deterministic shape the node filters and the record stores. Ids are
-assigned positionally here — never trusted from the model — so a
-re-executed clarify node (interrupt semantics) regenerates the exact
-same payload from the checkpointed phase state.
+deterministic shape the record stores. Ids are assigned positionally here —
+never trusted from the model — so a re-executed node (interrupt semantics)
+regenerates the exact same payload from the checkpointed state.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 import uuid
-from dataclasses import dataclass
-from typing import Any, Callable, Literal, NamedTuple, Sequence
+from typing import Any, Callable, Sequence
 
 from inqtrix.agents.control_ports import ClarificationRecord
 from inqtrix.agents.limit_contract import parse_limit_gate
 from inqtrix.agents.phase_models import (
-    AssignmentProfile,
     ClarificationQuestionModel,
-    DiscoveryResult,
-    ProposedClarificationQuestion,
 )
 from inqtrix.constants import CLARIFICATION_OPTION_LABEL_CHARS
 from inqtrix.core.results import HandoverClarification
-from inqtrix.i18n import t, t_count
 
 log = logging.getLogger(__name__)
 
@@ -45,128 +33,20 @@ MAX_QUESTIONS_PER_ROUND = 3
 MAX_OPTIONS_PER_QUESTION = 4
 """Hard cap of options per question (AskUserQuestion-informed)."""
 
-ASSUMPTION_GUIDANCE_CHARS = 300
-"""Display guidance for a proposed default assumption. The assumption is
-what a run works with when its question is not asked, so a longer one is
-kept whole and named in a WARNING — never shortened."""
-
 _STORED_QUESTION_KEYS = ("id", "prompt", "options", "multi_select", "skill_key")
 """What one question of a stored round carries. ``skill_key`` binds a
 kernel skill-point round back to its point when the row is read after a
-resume; the proposal's ``subject`` and ``default_assumption`` are
-internal to the clarify node and never reach the store or the wire."""
-
-
-@dataclass(frozen=True)
-class RunSettingsFacts:
-    """What the run's immutable settings fix before any question is asked.
-
-    Recomputed from the request and the segment's deps whenever needed
-    and never checkpointed, so a resumed segment reads the same facts.
-
-    Attributes:
-        knowledge: ``off`` (the source policy removes project knowledge),
-            ``pinned`` (collection chips), ``all`` (the session switch) or
-            ``inherited`` (no explicit choice).
-        collection_count: Collections inside the admitted boundary;
-            ``None`` for a deliberately unscoped run.
-        collections: ``(name, document_count)`` per admitted collection,
-            for display only; ``None`` when the names were not read or
-            could not be read — never "no collections".
-        web: Whether the source policy allows the public web.
-        pinned_form: ``chat``/``canvas`` when the request, a skill, a
-            patch target or the tier fixes the output form, else ``""``.
-        tier: The run's Stufe (``""`` for a run without one).
-        cap: The effective clarification-round cap.
-        rounds_used: Clarification rounds this run already held
-            (checkpointed, so a resumed segment reads the same number).
-        autonomy: The run's permission mode.
-    """
-
-    knowledge: Literal["off", "pinned", "all", "inherited"]
-    collection_count: int | None
-    collections: tuple[tuple[str, int], ...] | None
-    web: bool
-    pinned_form: Literal["", "chat", "canvas"]
-    tier: str
-    cap: int
-    rounds_used: int
-    autonomy: str
-
-    @property
-    def knowledge_available(self) -> bool:
-        """Whether project knowledge is a source this run can search.
-
-        Off by policy, or a boundary that admits no collection, leaves
-        nothing to search; an unscoped run (``collection_count`` None)
-        searches what the user can see.
-        """
-        return self.knowledge != "off" and self.collection_count != 0
-
-    def settles(self, subject: str) -> bool:
-        """Whether these settings already answer a question on *subject*.
-
-        THE rule — the clarify node filters with it and the prompts mark
-        the same settings as fixed. It reads the typed subject and the
-        immutable facts only, never a collection name:
-
-        - ``knowledge_scope`` is settled when project knowledge is off,
-          the user pinned collections or switched on all of them, or the
-          run's boundary holds at most one collection; an inherited
-          boundary of two or more and an unscoped run leave it open;
-        - ``sources`` is settled when at most one source is available
-          (:attr:`knowledge_available` decides for project knowledge);
-        - ``output_form`` is settled only by a pinned form — a form the
-          intake merely inferred is the assignment's content;
-        - ``assignment`` is never settled.
-        """
-        if subject == "knowledge_scope":
-            return self.knowledge in ("off", "pinned", "all") or (
-                self.collection_count is not None
-                and self.collection_count <= 1
-            )
-        if subject == "sources":
-            return int(self.web) + int(self.knowledge_available) <= 1
-        if subject == "output_form":
-            return bool(self.pinned_form)
-        return False
-
-
-class SettledQuestion(NamedTuple):
-    """A proposed question the run's settings already answer."""
-
-    question: dict[str, Any]
-    subject: str
-    """The subject whose setting answers it (renders the setting text)."""
-
-
-def _whole_assumption(text: str, number: int) -> str:
-    """*text* on one line and whole; a length over
-    :data:`ASSUMPTION_GUIDANCE_CHARS` is named, never cut."""
-    text = " ".join(text.split())
-    if len(text) > ASSUMPTION_GUIDANCE_CHARS:
-        log.warning(
-            "Clarification %d default assumption has %d characters "
-            "(display guidance %d); kept in full.",
-            number,
-            len(text),
-            ASSUMPTION_GUIDANCE_CHARS,
-        )
-    return text
+resume."""
 
 
 def sanitize_questions(
     models: Sequence[ClarificationQuestionModel],
-    *,
-    limit: int | None = MAX_QUESTIONS_PER_ROUND,
 ) -> list[dict[str, Any]]:
     """The deterministic shape of LLM-proposed questions.
 
     Guards (all LOUD, nothing silently dropped without a log line):
 
-    - at most *limit* questions survive (``None`` keeps them all: the
-      mission's clarify node applies the round cap itself, AFTER its
-      filters, and names every question the cap leaves out);
+    - at most :data:`MAX_QUESTIONS_PER_ROUND` questions survive;
     - a question without a usable prompt is dropped with a warning (an
       empty question cannot be asked);
     - a question with fewer than 2 usable options keeps the question but
@@ -179,21 +59,16 @@ def sanitize_questions(
       :data:`~inqtrix.constants.CLARIFICATION_OPTION_LABEL_CHARS` (what
       the option schema asks for) is logged and kept.
 
-    A :class:`ProposedClarificationQuestion` keeps its ``subject`` and
-    ``default_assumption`` as internal keys (the assumption whole, one
-    line; :data:`ASSUMPTION_GUIDANCE_CHARS` is display guidance);
-    :func:`build_clarification` projects them away.
-
     Ids are positional (``q1``, ``q1_o2`` ...) so the SAME input always
     yields the SAME payload — required by the interrupt re-execution
     contract (pre-interrupt writes must be idempotent).
     """
     sanitized: list[dict[str, Any]] = []
     for model in models:
-        if limit is not None and len(sanitized) >= limit:
+        if len(sanitized) >= MAX_QUESTIONS_PER_ROUND:
             log.warning(
                 "Clarification round capped at %d questions (%d proposed).",
-                limit,
+                MAX_QUESTIONS_PER_ROUND,
                 len(models),
             )
             break
@@ -250,168 +125,8 @@ def sanitize_questions(
             "options": options,
             "multi_select": bool(model.multi_select) and bool(options),
         }
-        if isinstance(model, ProposedClarificationQuestion):
-            question["subject"] = model.subject
-            question["default_assumption"] = _whole_assumption(
-                model.default_assumption, number
-            )
         sanitized.append(question)
     return sanitized
-
-
-def number_round(questions: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """*questions* with positional ids reassigned for the round they form.
-
-    The filters in front of a round drop questions, so the survivors'
-    sanitizer ids can have gaps; a round is numbered ``q1..qn`` in its
-    own order, options ``q{n}_o{m}``, deterministically.
-    """
-    numbered: list[dict[str, Any]] = []
-    for number, question in enumerate(questions, start=1):
-        numbered.append(
-            {
-                **question,
-                "id": f"q{number}",
-                "options": [
-                    {**option, "id": f"q{number}_o{index}"}
-                    for index, option in enumerate(
-                        question.get("options", []), start=1
-                    )
-                ],
-            }
-        )
-    return numbered
-
-
-def filter_settled_questions(
-    questions: Sequence[dict[str, Any]],
-    facts: RunSettingsFacts,
-) -> tuple[list[dict[str, Any]], list[SettledQuestion]]:
-    """Split proposed questions into kept ones and ones the settings answer.
-
-    The decision is :meth:`RunSettingsFacts.settles` over the typed
-    subject — never the question text — so an interrupt re-execution
-    decides exactly as the first pass did.
-    """
-    kept: list[dict[str, Any]] = []
-    settled: list[SettledQuestion] = []
-    for question in questions:
-        subject = str(question.get("subject", ""))
-        if facts.settles(subject):
-            settled.append(SettledQuestion(question, subject))
-        else:
-            kept.append(question)
-    return kept, settled
-
-
-def settled_setting_text(
-    subject: str, facts: RunSettingsFacts, words: dict[str, Any]
-) -> str:
-    """The reader's wording of the setting that answers *subject*.
-
-    Only a pinned boundary is called "selected"; a boundary the run
-    inherited is named as what the run was released, so the transcript
-    never claims a choice the user did not make.
-    """
-    if subject == "output_form":
-        return t(words, f"agent_setting_form_{facts.pinned_form}")
-    if subject == "sources":
-        parts = [] if facts.web else [t(words, "agent_setting_web_off")]
-        if facts.knowledge == "off":
-            parts.append(t(words, "agent_setting_knowledge_off"))
-        elif not facts.knowledge_available:
-            parts.append(t(words, "agent_setting_scope_none"))
-        return ", ".join(parts)
-    if facts.knowledge == "off":
-        return t(words, "agent_setting_knowledge_off")
-    if facts.knowledge == "all":
-        return t(words, "agent_setting_scope_all")
-    if facts.collection_count == 0:
-        return t(words, "agent_setting_scope_none")
-    names = (
-        ", ".join(
-            t(words, "agent_setting_collection_name", name=name)
-            for name, _count in facts.collections
-        )
-        if facts.collections
-        else ""
-    )
-    if facts.knowledge == "pinned":
-        if names:
-            return t_count(
-                words,
-                "agent_setting_scope_pinned",
-                len(facts.collections or ()),
-                names=names,
-            )
-        return t_count(
-            words, "agent_setting_scope_count", int(facts.collection_count or 0)
-        )
-    # Inherited and settled: the boundary holds exactly one collection.
-    if names:
-        return t(words, "agent_setting_scope_only", names=names)
-    return t(words, "agent_setting_scope_only_unnamed")
-
-
-def settled_narration(
-    settled: Sequence[SettledQuestion],
-    facts: RunSettingsFacts,
-    words: dict[str, Any],
-) -> str:
-    """One transcript line quoting every settled question and its setting."""
-    items = "; ".join(
-        t(
-            words,
-            "agent_clarify_settled_item",
-            prompt=entry.question.get("prompt", ""),
-            setting=settled_setting_text(entry.subject, facts, words),
-        )
-        for entry in settled
-    )
-    return t_count(words, "agent_clarify_settled", len(settled), items=items)
-
-
-NotAskedReason = Literal["limit", "tier", "overflow"]
-
-
-def not_asked_assumptions(
-    questions: Sequence[dict[str, Any]], reason: NotAskedReason
-) -> list[dict[str, str]]:
-    """The assumption entries for questions a cap keeps the run from asking."""
-    return [
-        {
-            "prompt": str(question.get("prompt", "")),
-            "assumption": str(question.get("default_assumption", "")),
-            "reason": reason,
-        }
-        for question in questions
-    ]
-
-
-def not_asked_narration(
-    entries: Sequence[dict[str, str]],
-    reason: NotAskedReason,
-    words: dict[str, Any],
-) -> str:
-    """One transcript line naming every question not asked and its assumption."""
-    items = "; ".join(
-        t(
-            words,
-            "agent_clarify_assumed_item",
-            prompt=entry["prompt"],
-            assumption=entry["assumption"].rstrip().removesuffix("."),
-        )
-        if entry["assumption"].strip()
-        else t(words, "agent_clarify_no_assumption", prompt=entry["prompt"])
-        for entry in entries
-    )
-    return t_count(
-        words,
-        f"agent_clarify_not_asked_{reason}",
-        len(entries),
-        items=items,
-        limit=MAX_QUESTIONS_PER_ROUND,
-    )
 
 
 def guarded_questions(
@@ -481,13 +196,13 @@ def build_clarification(
     one question its options mirror into the legacy ``options`` column.
 
     ``clarification_id`` overrides the random id with a DETERMINISTIC
-    one — required by every interrupt caller (phase-machine clarify
-    node, kernel ``ask_user``): the node re-executes on resume, so the
+    one — required by every interrupt caller (the kernel's ``ask_user``
+    and its skill-point round): the node re-executes on resume, so the
     get-or-create must land on the same row.
 
-    Every question is projected onto :data:`_STORED_QUESTION_KEYS`, so a
-    proposal's internal ``subject`` and ``default_assumption`` reach
-    neither the store nor ``/clarifications``.
+    Every question is projected onto :data:`_STORED_QUESTION_KEYS`, so no
+    other key a caller put on a question reaches the store or
+    ``/clarifications``.
     """
     stored = tuple(
         {key: question[key] for key in _STORED_QUESTION_KEYS if key in question}
@@ -668,138 +383,3 @@ def run_clarifications(
     return tuple(entries)
 
 
-def answered_subjects(
-    *,
-    questions: Sequence[dict[str, Any]],
-    answers: dict[str, Any],
-    answer: str,
-    option_id: str,
-) -> set[str]:
-    """The subjects of one round the user actually answered.
-
-    A structured answer counts per question (a picked option or free
-    text); a whole-round free-text or legacy option answer answers every
-    question of the round. Same reading of ``answers`` as
-    :func:`round_qa_lines`, so the transcript and the subjects never
-    disagree about what was answered.
-    """
-    if answers and questions:
-        subjects: set[str] = set()
-        for item in questions:
-            entry = answers.get(item.get("id", "")) or {}
-            known = {option["id"] for option in item.get("options", [])}
-            picked = [oid for oid in entry.get("option_ids", []) if oid in known]
-            if picked or str(entry.get("text", "")).strip():
-                subjects.add(str(item.get("subject", "")))
-        return subjects - {""}
-    if answer or option_id:
-        return {str(item.get("subject", "")) for item in questions} - {""}
-    return set()
-
-
-_QUESTION_STOPWORDS = frozenset(
-    {
-        "an", "am", "auch", "auf", "aus", "bei", "beziehen", "bitte",
-        "das", "dem", "den", "der", "des", "die", "du", "ein", "eine",
-        "einem", "einen", "einer", "es", "fuer", "für", "im", "in",
-        "ist", "mit", "nach", "primaer", "primär", "sich", "sie",
-        "soll", "sollen", "sollte", "um", "und", "uns", "unsere",
-        "von", "was", "welche", "welchem", "welchen", "welcher",
-        "welches", "wie", "wir", "zu", "zum", "zur",
-    }
-)
-"""German question scaffolding that carries no topical signal."""
-
-_TOKEN_PREFIX_CHARS = 6
-"""Poor-man's stemming: 'Analyse' and 'analysieren' meet at 'analys'.
-A full German stemmer would be a new dependency for one comparison."""
-
-_DUPLICATE_JACCARD = 0.6
-_DUPLICATE_CONTAINMENT = 0.8
-
-
-def _question_tokens(prompt: str) -> frozenset[str]:
-    """Topical token set of a question prompt (normalized, prefix-cut)."""
-    words = re.findall(r"[0-9a-zA-ZÀ-ſ]+", prompt.casefold())
-    return frozenset(
-        word[:_TOKEN_PREFIX_CHARS]
-        for word in words
-        if len(word) >= 2 and word not in _QUESTION_STOPWORDS
-    )
-
-
-def filter_repeated_questions(
-    questions: Sequence[dict[str, Any]],
-    asked_prompts: Sequence[str],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Drop questions that near-duplicate one this run already handled.
-
-    *asked_prompts* are the questions of earlier rounds AND the ones the
-    run answered with an assumption instead of asking. Deterministic
-    backstop behind the prompt-side never-re-ask rule: the discovery
-    analyst is an independent LLM call and can rephrase an intake
-    question ("Auf welchen KI-Markt ...?" -> "Welchen KI-Markt sollen
-    wir ...?"). Token-set overlap (Jaccard >= :data:`_DUPLICATE_JACCARD`
-    or containment >= :data:`_DUPLICATE_CONTAINMENT` of the smaller set)
-    marks the rephrase as the same question.
-
-    Returns:
-        ``(kept, dropped_prompts)`` — the caller narrates every dropped
-        prompt (No Silent Fallbacks) and proceeds without an interrupt
-        when nothing is left to ask.
-    """
-    asked = [
-        tokens
-        for prompt in asked_prompts
-        if (tokens := _question_tokens(prompt))
-    ]
-    kept: list[dict[str, Any]] = []
-    dropped: list[str] = []
-    for question in questions:
-        prompt = str(question.get("prompt", ""))
-        tokens = _question_tokens(prompt)
-        duplicate = False
-        for prior in asked:
-            if not tokens or not prior:
-                continue
-            overlap = len(tokens & prior)
-            jaccard = overlap / len(tokens | prior)
-            containment = overlap / min(len(tokens), len(prior))
-            if (
-                jaccard >= _DUPLICATE_JACCARD
-                or containment >= _DUPLICATE_CONTAINMENT
-            ):
-                duplicate = True
-                break
-        if duplicate:
-            dropped.append(prompt)
-        else:
-            kept.append(question)
-    return kept, dropped
-
-
-def intake_questions(
-    profile: AssignmentProfile | None,
-) -> list[dict[str, Any]]:
-    """The ask-user-first questions from the intake profile (sanitized).
-
-    Uncapped: the clarify node applies the round cap after its filters.
-    """
-    if profile is None:
-        return []
-    return sanitize_questions(profile.clarification_questions, limit=None)
-
-
-def discovery_questions(
-    discovery: DiscoveryResult | None,
-) -> list[dict[str, Any]]:
-    """Post-discovery questions: the analyst's ``questions_for_user``.
-
-    A blocking GAP is research the plan must close, not a question — the
-    router sends a run to the second clarify round only when this list
-    (or a pending skill point) is non-empty. Uncapped like
-    :func:`intake_questions`.
-    """
-    if discovery is None:
-        return []
-    return sanitize_questions(discovery.questions_for_user, limit=None)

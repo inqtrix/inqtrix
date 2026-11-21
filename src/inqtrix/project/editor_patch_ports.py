@@ -1,8 +1,8 @@
 """Contracts of the editor-patch store.
 
 One persisted proposal of anchored document edits (from the editor
-assistant's suggest/instruct calls or the workspace agent) with its
-apply/reject lifecycle. Mirrors :mod:`inqtrix.project.editor_ports`:
+assistant's suggest/instruct calls or an agent run's
+``propose_editor_patch``) with its apply/reject lifecycle. Mirrors :mod:`inqtrix.project.editor_ports`:
 the store owns persistence only; the parent-document visibility rule and
 the CAS apply live in
 :class:`~inqtrix.services.editor_patch_service.EditorPatchService`, the
@@ -108,7 +108,7 @@ class EditorPatchRecord:
         patch_id: Row id (``pch_...``).
         document_id: The editor document the edits target (cascade
             parent).
-        run_id: The proposing workspace-agent run, or ``None`` for
+        run_id: The proposing agent run, or ``None`` for
             suggest/instruct proposals (and after run retention expired
             the run — ``SET NULL``).
         source: One of :data:`PATCH_SOURCES`.

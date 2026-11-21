@@ -31,6 +31,8 @@ from inqtrix.project.vector_index_ports import (
 )
 from inqtrix.services.request_parsing import (
     error_response,
+    read_json_object,
+    read_optional_json_object,
     workspace_id_for_write,
     workspace_id_from_request,
 )
@@ -168,8 +170,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if not isinstance(body, dict) or not _require_numbers(body):
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
+        if not _require_numbers(body):
             return error_response(400, "Invalid body", "invalid_request_error")
         model = body.get("model")
         if not isinstance(model, str) or not model:
@@ -235,12 +239,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is not None and not isinstance(body, dict):
-            return error_response(400, "Invalid body", "invalid_request_error")
-        server_collection_id_hint = (
-            body.get("server_collection_id") if isinstance(body, dict) else None
-        )
+        body, error = await read_optional_json_object(req)
+        if error is not None:
+            return error
+        server_collection_id_hint = body.get("server_collection_id")
         if server_collection_id_hint is not None and (
             not isinstance(server_collection_id_hint, str)
             or not server_collection_id_hint.strip()
@@ -265,10 +267,3 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(409, "Index is already being deleted", "deletion_in_progress")
 
     return router
-
-
-async def _json_object(req: Request) -> Any:
-    try:
-        return await req.json()
-    except Exception:
-        return None

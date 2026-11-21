@@ -11,7 +11,7 @@ from copy import deepcopy
 import hashlib
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from inqtrix.agents.critic_phase import (
     DIAGNOSTIC_BASIS_PREFIX,
@@ -227,6 +227,125 @@ def load_retained_sources(
 
 
 
+_RESEARCH_EVIDENCE_KEYS = (
+    "evidence_contract_status", "confidence", "single_source_ratio",
+    "omitted_evidence_record_count", "omitted_evidence_query_count",
+)
+"""Metrics of a research run every reader gets whenever the run recorded them."""
+
+_RESEARCH_EVIDENCE_REASON_KEYS = (
+    "evidence_contract_causes", "evidence_depth_gap_reasons",
+    "confidence_cap", "confidence_cap_reasons",
+    "cited_reference_count", "provider_only_reference_count",
+)
+"""Metrics that explain the contract; passed on only where they say something."""
+
+# The research engine records the first three causes. ``evidence_depth_gap``
+# is no cause it records: an active depth gap caps the confidence and names
+# its own reasons there. A stored result can still carry the word as a
+# cause, and it keeps reading in words.
+_CONTRACT_CAUSE_WORDS = {
+    "unknown_citation": "a cited link has no evidence record",
+    "citation_without_claim": "a cited source carries no recorded statement",
+    "algorithm_failure": "a processing step failed",
+    "evidence_depth_gap": (
+        "the evidence-depth check of the supported statements is not met"
+    ),
+}
+
+# The words say what the engine counted, never more: a statement with a
+# primary source counts as primary-sourced however many sources confirm it,
+# so "not cross-checked" is not "confirmed by one source only".
+_CAP_REASON_WORDS = {
+    **_CONTRACT_CAUSE_WORDS,
+    "source_context_only": "no cited sentence carries a recorded statement",
+    "no_cross_checked_claims": (
+        "none of the supported statements counts as cross-checked"
+    ),
+    "majority_single_source_claims": (
+        "most supported statements cite a single source"
+    ),
+    "central_claim_single_quality_source": (
+        "a statement with a figure rests on a single source"
+    ),
+}
+
+
+def research_evidence_values(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """The evidence state of a finished research run as a reader gets it.
+
+    The status alone says too little: ``needs_review`` has three causes,
+    ``clean`` can still carry a ceiling of the evidence-depth gap, and
+    neither says anything about the material behind the cited sources. The
+    values therefore carry cause, ceiling and basis wherever the
+    run recorded them. A result stored before it recorded a basis says
+    ``unknown`` instead of leaving the reader to assume one.
+    """
+    values = {key: metrics[key] for key in _RESEARCH_EVIDENCE_KEYS if key in metrics}
+    values.update({
+        key: metrics[key] for key in _RESEARCH_EVIDENCE_REASON_KEYS if metrics.get(key)
+    })
+    values["evidence_basis"] = str(metrics.get("evidence_basis") or "unknown")
+    return values
+
+
+def research_evidence_note(metrics: Mapping[str, Any]) -> str:
+    """What a parent model reads about a research child's evidence state.
+
+    Empty where no contract was audited. Otherwise one paragraph naming the
+    status with its cause, the confidence with its ceiling and the ceiling's
+    reason, and the material behind the child's cited sources. A clean child
+    is not silent: ``clean`` says that the cited sources carry recorded
+    statements and a cited sentence restates one, never that a statement
+    was checked.
+    """
+    status = str(metrics.get("evidence_contract_status") or "")
+    if status not in {"needs_review", "source_context_only", "clean"}:
+        return ""
+    values = research_evidence_values(metrics)
+    if status == "needs_review":
+        causes = [str(cause) for cause in values.get("evidence_contract_causes") or []]
+        status += " (" + (
+            "; ".join(_CONTRACT_CAUSE_WORDS.get(cause, cause) for cause in causes)
+            or "cause not recorded"
+        ) + ")"
+    confidence = f"confidence {int(metrics.get('confidence', 0) or 0)}/10"
+    cap = values.get("confidence_cap")
+    if cap:
+        reasons = "; ".join(
+            _CAP_REASON_WORDS.get(str(reason), str(reason))
+            for reason in values.get("confidence_cap_reasons") or []
+        )
+        confidence += f" (ceiling {cap}{': ' + reasons if reasons else ''})"
+    cited = int(values.get("cited_reference_count", 0) or 0)
+    provider_only = int(values.get("provider_only_reference_count", 0) or 0)
+    basis = {
+        "provider_context": (
+            "what the search provider returned for the cited sources; the "
+            "pages themselves were not read"
+        ),
+        "evidence": (
+            "the stored material of the cited sources, not the search "
+            "provider's context alone" + (
+                f"; {provider_only} of {cited} carry what the search "
+                "provider returned only"
+                if provider_only else ""
+            )
+        ),
+        "none": "none, the report cites no source",
+    }.get(values["evidence_basis"], "not recorded")
+    closing = (
+        "'clean' says that the cited sources carry recorded statements and "
+        "a cited sentence restates one, not that a statement was checked."
+        if status == "clean"
+        else "Name it as an open point, do not cite it as evidence."
+    )
+    return (
+        f"Evidence state of the subtask: {status}, {confidence}. "
+        f"Basis: {basis}. {closing}"
+    )
+
+
 def project_review_sources(
     references: list[dict[str, Any]],
     web_search_ledger: dict[str, Any],
@@ -235,9 +354,9 @@ def project_review_sources(
 ) -> dict[str, Any]:
     """The review's view of references: every projected source names its basis id.
 
-    Engine-neutral: a finding names its ground as ``source:<reference_id>``
+    Origin-neutral: a finding names its ground as ``source:<reference_id>``
     (:data:`~inqtrix.agents.critic_phase.SOURCE_BASIS_PREFIX`), whichever
-    engine's ledger the reference comes from.
+    run's ledger the reference comes from.
     """
     from inqtrix.agents.kernel.deps import KernelDeps
 
@@ -288,6 +407,29 @@ READING_RECORD_METHOD = (
 """Describes the reading record; the rule how a review may use it is part
 of the trusted review rubric, never of the fenced diagnostic."""
 
+ANALYSIS_RECORD_METHOD = (
+    "What the server read in one document analysis this run ran itself (the tool "
+    "analyze_document); server facts only. task.objective and task.criteria are "
+    "the objective and the fields the run named; every section of each document "
+    "was asked for them. documents lists the documents the call named; "
+    "documents_found counts them, documents_not_selected and already_read stay "
+    "empty, and collection_documents counts the documents in the run's "
+    "collections when that count is known. text_read_to_end: every character of "
+    "the stored text of that version was analysed. document_complete: in "
+    "addition, nothing is known to be missing from that stored text (no page "
+    "without a text layer, extraction recorded). passages_verified: passages "
+    "checked verbatim against the document and tied to a stored text section with "
+    "a verified position; verified_sources names those sections. "
+    "passages_not_taken_over: named passages that did not become evidence, by "
+    "status - not_in_window, too_long, too_short, spans_chunks, chunk_unverified, "
+    "chunk_stale. windows_possibly_more: sections of the reading that named the "
+    "most passages one section may contribute, or reported more. "
+    "absence_blocked_by: everything that prevents the statement that these "
+    "documents hold nothing further on the fields. source_bound marks a limit of "
+    "the stored document version that every re-reading returns again."
+)
+"""Describes the reading record of an analysis the run itself ran."""
+
 
 def document_analysis_diagnostic(
     report: dict[str, Any],
@@ -298,13 +440,16 @@ def document_analysis_diagnostic(
     objective: str,
     evidence: list[dict[str, Any]],
     language: str,
+    title_key: str = "review_diagnostic_document_analysis",
+    method: str = READING_RECORD_METHOD,
 ) -> dict[str, Any] | None:
     """The reading record of one document analysis as a review diagnostic.
 
-    The one builder for both engines. Server facts of the stored report
+    The one builder, for a kernel run's own analyses and for the stored
+    analyses of an older mission's plan. Server facts of the stored report
     only: no summary, claim, quote or verdict of the analysis model. The
-    task's title and objective and the report's questions (what every
-    window was asked) are plan text; document titles and plan text have
+    title and objective and the report's questions (what every window was
+    asked) are model or plan text; document titles and that text have
     their fence delimiters defused. ``language`` gives the record its reader
     title and names the document of every blocker, so a review that quotes a
     limit can say WHICH document it belongs to without printing an id.
@@ -327,14 +472,14 @@ def document_analysis_diagnostic(
         "basis_id": f"{DIAGNOSTIC_BASIS_PREFIX}{run_id}:{task_id}:document_analysis",
         "title": t(
             {"language": language},
-            "review_diagnostic_document_analysis",
+            title_key,
             title=neutralize_fence_delimiters(title),
         ),
         "source_run_id": run_id,
         "mission_run_id": run_id,
         "task_id": task_id,
         "scope": "document_analysis",
-        "method": READING_RECORD_METHOD,
+        "method": method,
         "values": {
             "task": {
                 "task_id": task_id,
@@ -408,11 +553,13 @@ def build_review_evidence(
     deps: KernelDeps,
     references: list[dict[str, Any]],
     *,
-    mission_run_ids: list[str],
     language: str,
 ) -> dict[str, Any]:
     """One review snapshot, with existing result/task diagnostics kept scoped.
 
+    The origins read are the runs the *references* come from. A stored
+    mission run among the origins contributes the readings of its latest
+    plan.
     ``language`` is the answer language of the run under review: every
     diagnostic carries the title a reader sees when the verdict names it.
     """
@@ -421,8 +568,7 @@ def build_review_evidence(
     from inqtrix.untrusted_content import neutralize_fence_delimiters
 
     words = {"language": language}
-    origins = list(dict.fromkeys([*reference_origins(references), *mission_run_ids]))
-    loaded, unavailable = load_retained_sources(deps, origins)
+    loaded, unavailable = load_retained_sources(deps, reference_origins(references))
     context = project_review_sources(
         references, deps.web_search_ledger, unavailable=unavailable,
     )
@@ -434,10 +580,7 @@ def build_review_evidence(
                 "basis_id": DIAGNOSTIC_BASIS_PREFIX + run_id,
                 "title": t(words, "review_diagnostic_research_run"),
                 "source_run_id": run_id, "scope": "research_run",
-                "values": {key: metrics[key] for key in (
-                    "evidence_contract_status", "confidence", "single_source_ratio",
-                    "omitted_evidence_record_count", "omitted_evidence_query_count",
-                ) if key in metrics},
+                "values": research_evidence_values(metrics),
             })
         if data["summary"].get("mode") != "workspace_agent":
             continue
@@ -550,12 +693,96 @@ def run_reading_diagnostics(
     return diagnostics
 
 
+def run_analysis_diagnostics(
+    run_id: str,
+    records: Iterable[Mapping[str, Any]],
+    *,
+    references: Iterable[Mapping[str, Any]],
+    language: str,
+) -> list[dict[str, Any]]:
+    """The reading record of each document analysis this run ran, as review diagnostics.
+
+    One per record of ``analyze_document`` (``agents.document_table``),
+    built by the same :func:`document_analysis_diagnostic` as the reading
+    record of a stored mission's analysis, with the method text of an
+    analysis the run ran itself. *references* is the run's
+    evidence ledger: a record's verified sources are the entries its
+    findings name. The title is the run's own objective, shortened.
+    """
+    from inqtrix.text import LOG_CUT_MARKER, shorten_visibly
+
+    ledger = [dict(ref) for ref in references]
+    diagnostics: list[dict[str, Any]] = []
+    for index, record in enumerate(records, start=1):
+        named = {str(finding.get("reference_id") or "") for finding in record.get("findings") or []}
+        objective = " ".join(str(record.get("objective") or "").split())
+        reading = document_analysis_diagnostic(
+            dict(record),
+            run_id=run_id,
+            task_id=str(record.get("call_id") or index),
+            title=shorten_visibly(objective, 80, marker=LOG_CUT_MARKER),
+            objective=objective,
+            evidence=[ref for ref in ledger if str(ref.get("reference_id") or "") in named],
+            language=language,
+            title_key="review_diagnostic_run_analysis",
+            method=ANALYSIS_RECORD_METHOD,
+        )
+        if reading is not None:
+            diagnostics.append(reading)
+    return diagnostics
+
+
+def own_review_diagnostics(
+    deps: KernelDeps, *, titles: dict[str, str], language: str,
+) -> list[dict[str, Any]]:
+    """What this run read itself, for its review: the windows its readers
+    transferred (:func:`run_reading_diagnostics`) and the documents its
+    analyses read (:func:`run_analysis_diagnostics`)."""
+    with deps._evidence_lock:
+        references = list(deps.evidence_refs.values())
+    return [
+        *run_reading_diagnostics(
+            deps.run_id, deps.source_coverage.entries(), titles=titles, language=language,
+        ),
+        *run_analysis_diagnostics(
+            deps.run_id, deps.document_analyses, references=references, language=language,
+        ),
+    ]
+
+
+def review_released_sources(deps: KernelDeps, *, titles: dict[str, str]) -> list[dict[str, str]]:
+    """What the review role may re-read: what this run reached, once per source version.
+
+    The sources its readers transferred text of, and every document one of
+    its analyses opened: the server read that document for the run, so the
+    role may check what the run says about it. Each as ``{kind, source_id,
+    version, title}``; *titles* names a source by its id.
+    """
+    from inqtrix.agents.document_table import analysed_documents
+    from inqtrix.agents.kernel.work_profiles import RELEASED_SOURCE_KINDS
+
+    released: dict[tuple[str, str, str], dict[str, str]] = {}
+
+    def release(kind: str, source_id: str, version: str) -> None:
+        released.setdefault((kind, source_id, version), {
+            "kind": kind, "source_id": source_id, "version": version, "title": titles.get(source_id, ""),
+        })
+
+    for entry in deps.source_coverage.entries():
+        if entry["kind"] in RELEASED_SOURCE_KINDS and entry["read_units"] > 0:
+            release(str(entry["kind"]), str(entry["source_id"]), str(entry["version"] or ""))
+    for entry in analysed_documents(deps.document_analyses):
+        release("knowledge_document", entry["document_id"], entry["version"])
+    return list(released.values())
+
+
 def own_reading_outputs(
     output_ids: Iterable[str], canvases: dict[str, Any], *, run_id: str,
 ) -> set[str]:
     """The outputs a run's own reading record belongs to: its chat answer and
-    the canvases this run wrote. A canvas a delegated run wrote (a mission's
-    memo) carries that run's reading record, never this one's."""
+    the canvases this run wrote. A canvas another run wrote (the memo of a
+    stored mission run) carries that run's reading record, never this
+    one's."""
     return {
         output_id for output_id in output_ids
         if output_id == "chat"
@@ -628,8 +855,10 @@ def read_registered_evidence(
             for item in (selected.get("citations") or [])
             if isinstance(item, dict) and item.get("url")
         ]
+        # Re-reading a stored search hands its references to the run; it
+        # does not search again, so they are not what this run gathered.
         registered = deps.register_web_search_ledger(
-            {"searches": {query_id: selected}}, refs,
+            {"searches": {query_id: selected}}, refs, gathered=False,
         )
         context = project_evidence_context(
             registered, {"searches": {query_id: selected}},

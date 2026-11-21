@@ -572,6 +572,21 @@ def test_grounding_off_restores_plain_prompt_and_passthrough():
     )
 
 
+def test_a_reference_says_that_its_span_is_verified():
+    """A hit of the agent's own knowledge search carries this status. A
+    reference of a knowledge run without it reads as evidence stored before
+    spans existed, with its verified span right beside it."""
+    algorithm, context, runtime, _events = make_algorithm(
+        GroundedLLM("Antwort mit Beleg [K1]."), grounding_enabled=False
+    )
+
+    result = run_question(algorithm, runtime, context)
+
+    (reference,) = result.raw["result_state"]["report_references"]
+    assert reference["source_span"]["end"] > reference["source_span"]["start"]
+    assert reference["provenance_status"] == "verified_span"
+
+
 def test_refusal_path_records_no_grounding_check():
     llm = GroundedLLM("nie aufgerufen")
     algorithm, context, runtime, _events = make_algorithm(

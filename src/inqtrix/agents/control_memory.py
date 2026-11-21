@@ -41,12 +41,10 @@ from inqtrix.agents.control_ports import (
     ClarificationRecord,
     PlanNotFound,
     PlanRecord,
-    PlanTaskNotFound,
     PlanTaskRecord,
     SESSION_SINGLETON_ARTIFACT_KINDS,
     RUN_SINGLETON_ARTIFACT_KINDS,
-    transitioned_plan_task,
-    requested_task_cancellation,
+    check_creatable_approval,
 )
 from inqtrix.pagination import keyset_page
 from inqtrix.agents.context_archive import (
@@ -83,48 +81,7 @@ class MemoryAgentControlStore:
             return nullcontext()
         return self._execution_guard(run_id)
 
-    # -- plans ---------------------------------------------------------- #
-
-    async def save_plan(
-        self,
-        *,
-        run_id: str,
-        plan: PlanRecord,
-        tasks: list[PlanTaskRecord],
-    ) -> PlanRecord:
-        with self._runtime_write_guard(run_id), self._lock:
-            return self._save_plan_locked(run_id=run_id, plan=plan, tasks=tasks)
-
-    def _save_plan_locked(
-        self, *, run_id: str, plan: PlanRecord, tasks: list[PlanTaskRecord]
-    ) -> PlanRecord:
-        latest = max(
-            (p.version for p in self._plans.values() if p.run_id == run_id),
-            default=0,
-        )
-        version = plan.version if plan.version > 0 else latest + 1
-        if version != latest + 1:
-            raise ValueError(
-                f"plan version must be {latest + 1}, got {version}"
-            )
-        for plan_id, existing in list(self._plans.items()):
-            if existing.run_id == run_id and existing.status not in (
-                "rejected",
-                "superseded",
-            ):
-                self._plans[plan_id] = replace(existing, status="superseded")
-        stored = replace(
-            plan,
-            run_id=run_id,
-            version=version,
-            created_at=plan.created_at or time.time(),
-        )
-        self._plans[stored.plan_id] = stored
-        self._plan_tasks[stored.plan_id] = [
-            replace(task, plan_id=stored.plan_id, run_id=run_id)
-            for task in tasks
-        ]
-        return stored
+    # -- plans (stored rows of mission runs, read only) ----------------- #
 
     async def get_plan(
         self, run_id: str, *, version: int | None = None
@@ -148,104 +105,14 @@ class MemoryAgentControlStore:
             )
             return plan, list(tasks)
 
-    async def list_plan_versions(self, run_id: str) -> list[PlanRecord]:
-        with self._lock:
-            return sorted(
-                (p for p in self._plans.values() if p.run_id == run_id),
-                key=lambda p: p.version,
-                reverse=True,
-            )
-
-    async def transition_plan_task(
-        self,
-        *,
-        run_id: str,
-        plan_id: str,
-        task_id: str,
-        status: str,
-        child_run_id: str | None = None,
-        result_summary: str | None = None,
-        result_payload: dict[str, Any] | None = None,
-    ) -> PlanTaskRecord:
-        with self._runtime_write_guard(run_id), self._lock:
-            tasks = self._plan_tasks.get(plan_id)
-            if tasks is None:
-                raise PlanTaskNotFound(task_id)
-            for index, current in enumerate(tasks):
-                if current.task_id == task_id and current.run_id == run_id:
-                    stored = transitioned_plan_task(
-                        current,
-                        status=status,
-                        child_run_id=child_run_id,
-                        result_summary=result_summary,
-                        result_payload=result_payload,
-                    )
-                    tasks[index] = stored
-                    return stored
-            raise PlanTaskNotFound(task_id)
-
-    async def request_plan_task_cancel(
-        self,
-        *,
-        run_id: str,
-        plan_id: str,
-        task_id: str,
-        authorize: Any,
-    ) -> tuple[PlanTaskRecord, str | None]:
-        def _write(
-            _transaction: Any, cancel_child: Any
-        ) -> tuple[PlanTaskRecord, str | None]:
-            with self._lock:
-                tasks = self._plan_tasks.get(plan_id)
-                if tasks is None:
-                    raise PlanTaskNotFound(task_id)
-                for index, current in enumerate(tasks):
-                    if current.task_id != task_id or current.run_id != run_id:
-                        continue
-                    stored = requested_task_cancellation(current)
-                    tasks[index] = stored
-                    try:
-                        child_status = (
-                            cancel_child(stored.child_run_id)
-                            if stored.child_run_id
-                            and stored.status in {"cancel_requested", "cancelled"}
-                            else None
-                        )
-                    except BaseException:
-                        tasks[index] = current
-                        raise
-                    return stored, child_status
-                raise PlanTaskNotFound(task_id)
-
-        return await authorize(_write)
-
     # -- approvals ------------------------------------------------------- #
 
     async def create_approval(self, approval: ApprovalRecord) -> ApprovalRecord:
+        check_creatable_approval(approval)
         with self._runtime_write_guard(approval.run_id), self._lock:
             stored = replace(
                 approval, created_at=approval.created_at or time.time()
             )
-            if stored.subject_type == "plan" and not stored.subject_id:
-                version = int(stored.payload.get("plan_version", 0) or 0)
-                matching = [
-                    plan
-                    for plan in self._plans.values()
-                    if plan.run_id == stored.run_id
-                    and (version <= 0 or plan.version == version)
-                ]
-                if not matching:
-                    raise PlanNotFound(stored.run_id)
-                stored = replace(
-                    stored,
-                    subject_id=max(
-                        matching, key=lambda item: item.version
-                    ).plan_id,
-                )
-            elif stored.subject_type == "plan":
-                plan = self._plans.get(stored.subject_id)
-                if plan is None or plan.run_id != stored.run_id:
-                    raise PlanNotFound(stored.run_id)
             self._approvals[stored.approval_id] = stored
             return stored
 
@@ -274,8 +141,6 @@ class MemoryAgentControlStore:
         note: str,
         decided_by_user_id: uuid.UUID | None,
         resume: Any,
-        edited_plan: PlanRecord | None = None,
-        edited_tasks: list[PlanTaskRecord] | None = None,
     ) -> tuple[ApprovalRecord, dict[str, Any]]:
         def _writer(_transaction: Any) -> None:
             # ``resume`` invokes this callback while the run store holds the
@@ -288,31 +153,6 @@ class MemoryAgentControlStore:
                     raise ApprovalNotFound(approval_id)
                 if approval.status != "pending":
                     raise ApprovalAlreadyDecided(approval)
-                plan_decision = approval.subject_type == "plan"
-                target_plan = (
-                    self._plans.get(approval.subject_id)
-                    if plan_decision and edited_plan is None
-                    else None
-                )
-                if plan_decision and edited_plan is None and (
-                    target_plan is None or target_plan.run_id != run_id
-                ):
-                    raise PlanNotFound(run_id)
-                if edited_plan is not None:
-                    self._save_plan_locked(
-                        run_id=run_id,
-                        plan=edited_plan,
-                        tasks=list(edited_tasks or []),
-                    )
-                elif target_plan is not None:
-                    self._plans[target_plan.plan_id] = replace(
-                        target_plan,
-                        status=(
-                            "approved"
-                            if decision == "approve"
-                            else "rejected"
-                        ),
-                    )
                 self._approvals[approval_id] = replace(
                     approval,
                     status=APPROVAL_STATUS_BY_DECISION[decision],
@@ -637,7 +477,7 @@ class MemoryAgentControlStore:
         expected_revision: int,
         authorize: Any,
     ) -> ArtifactRecord:
-        def _write(_transaction: Any, _cancel_child: Any) -> ArtifactRecord:
+        def _write(_transaction: Any) -> ArtifactRecord:
             with self._lock:
                 artifact = self._artifacts.get(artifact_id)
                 if artifact is None or artifact.run_id != run_id or is_private_archive(artifact.payload):
@@ -679,7 +519,7 @@ class MemoryAgentControlStore:
         title: str,
         authorize: Any,
     ) -> ArtifactRecord:
-        def _write(_transaction: Any, _cancel_child: Any) -> ArtifactRecord:
+        def _write(_transaction: Any) -> ArtifactRecord:
             with self._lock:
                 artifact = self._artifacts.get(artifact_id)
                 if artifact is None or artifact.run_id != run_id or is_private_archive(artifact.payload):
@@ -727,15 +567,6 @@ class MemoryAgentControlStore:
             ]
             metadata.sort(key=lambda row: row.revision, reverse=True)
             return artifact, metadata
-
-    async def get_session_artifact(
-        self, session_id: str, kind: str
-    ) -> ArtifactRecord | None:
-        with self._lock:
-            for artifact in self._artifacts.values():
-                if artifact.session_id == session_id and artifact.kind == kind:
-                    return artifact
-            return None
 
     async def get_session_artifact_by_id(
         self, session_id: str, artifact_id: str

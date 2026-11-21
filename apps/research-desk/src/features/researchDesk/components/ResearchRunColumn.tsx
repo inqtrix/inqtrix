@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { PanelToggle } from '@/components/ui/panel-toggle'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { WelcomeState } from '@/components/ui/welcome-state'
-import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
+import type { CreateResearchRunRequest, LastResearchProfile } from '@/features/researchRuns/types'
 import { partitionJobsByAccess } from '@/features/sharing/shareModel'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { StructuralLoadBoundary } from '@/motion/StructuralLoadBoundary'
@@ -21,7 +21,12 @@ import type { ResearchSubmissionOutcome } from '../researchSubmission'
 import {
   Composer,
   buildComposerRequest,
-  defaultComposerFormState,
+  composerFormForLastProfile,
+  composerSettingsForLastProfile,
+  lastProfileFollowAfterEdit,
+  lastProfileFollowAfterRestore,
+  startLastProfileFollow,
+  type LastProfileFollow,
 } from './Composer'
 import { JobFilterMenu } from './JobFilterMenu'
 import { ResearchJobCard } from './ResearchJobCard'
@@ -43,11 +48,15 @@ type ResearchRunColumnProps = {
    * auth session is still resolving, instead of a silent no-op. */
   isSubmitDisabled: boolean
   jobs: ResearchJob[]
+  /** The report profile the composer starts with: the user's last pick. */
+  lastReportProfile: LastResearchProfile
   onActiveFilterChange: (filter: JobFilter) => void
   onCancelJob: (jobId: string) => void
   onAuthenticationRequired: () => void
   onComposerSubmit: (request: CreateResearchRunRequest) => Promise<ResearchSubmissionOutcome>
   onComposerVisibleChange: (isComposerVisible: boolean) => void
+  /** The user picked a report profile in the composer menu. */
+  onReportProfileChange: (profile: Exclude<LastResearchProfile, ''>) => void
   onReportVisibleChange: (isVisible: boolean) => void
   onResearchQuestionChange: (question: string) => void
   researchQuestion: string
@@ -73,12 +82,14 @@ export function ResearchRunColumn({
   isReportVisible,
   isSubmitDisabled,
   jobs,
+  lastReportProfile,
   runsLoading = false,
   onActiveFilterChange,
   onAuthenticationRequired,
   onCancelJob,
   onComposerSubmit,
   onComposerVisibleChange,
+  onReportProfileChange,
   onReportVisibleChange,
   onResearchQuestionChange,
   researchQuestion,
@@ -96,12 +107,16 @@ export function ResearchRunColumn({
   // The shell keeps ordinary navigation drafts in memory. Auth recovery is the
   // narrower exception: after a rejected write, the complete form is restored
   // once for the same user across the mandatory account-boundary reload.
+  // The form opens on the preset of the user's last report profile and
+  // follows a later pick until it is the user's (`LastProfileFollow`).
   const [composerForm, setComposerForm] = useState(() => ({
-    ...defaultComposerFormState,
+    ...composerSettingsForLastProfile(lastReportProfile),
     question: researchQuestion,
   }))
   const composerFormRef = useRef(composerForm)
   composerFormRef.current = composerForm
+  const [initialFollow] = useState(() => startLastProfileFollow(lastReportProfile))
+  const lastProfileFollowRef = useRef<LastProfileFollow>(initialFollow)
   const submissionPendingRef = useRef(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submissionError, setSubmissionError] = useState<string | null>(null)
@@ -114,8 +129,27 @@ export function ResearchRunColumn({
     const storage = browserResearchDraftStorage()
     if (!storage) return
     const recovered = takeResearchDraftRecovery(storage, authenticatedUserId)
-    if (recovered) setComposerForm(recovered)
+    if (!recovered) return
+    lastProfileFollowRef.current = lastProfileFollowAfterRestore(lastProfileFollowRef.current)
+    setComposerForm(recovered)
   }, [authenticatedUserId])
+  // Every change of the form first: a setting the user changed in the same
+  // update as a new last pick keeps the form the user's.
+  useEffect(() => {
+    lastProfileFollowRef.current = lastProfileFollowAfterEdit(
+      lastProfileFollowRef.current,
+      composerForm,
+    )
+  }, [composerForm])
+  useEffect(() => {
+    const next = composerFormForLastProfile(
+      lastProfileFollowRef.current,
+      composerFormRef.current,
+      lastReportProfile,
+    )
+    lastProfileFollowRef.current = next.follow
+    if (next.form !== composerFormRef.current) setComposerForm(next.form)
+  }, [lastReportProfile])
   const submitComposerRequest = useCallback(async (
     request: CreateResearchRunRequest,
   ): Promise<boolean> => {
@@ -271,6 +305,7 @@ export function ResearchRunColumn({
             isSubmitting={isSubmitting}
             key="composer"
             onHide={() => onComposerVisibleChange(false)}
+            onReportProfileChange={onReportProfileChange}
             onSubmit={submitComposerRequest}
             reduceMotion={reduceMotion}
             selectedStack={selectedStack}

@@ -68,14 +68,14 @@ latency note. This is the reference; the prose above explains the *why*.
 | Chat messages | Postgres, keyset | eager on thread open; a reply into the thread waits for them | client | composite PK `(thread_id, id)` isolates threads |
 | Knowledge session groups | Postgres | eager (metadata) | client | folder records; deleting a group orphans sessions |
 | Knowledge sessions | Postgres | metadata eager, items load-on-open | client | list/get include `group_id`; `items_json` excluded from list |
-| Editor documents (Markdown mode) | **Postgres TEXT** | **load-on-open** | client | revision-CAS debounced autosave; body excluded from the list |
+| Editor documents (Markdown mode) | **Postgres TEXT** | **load-on-open** | client | revision-CAS debounced autosave; body excluded from the list; a version saved elsewhere is merged line by line with the text both build on, and an own version that cannot be merged is saved at once as a conflict copy ([concurrent writers](editor-collaboration.md#markdown-mode-concurrent-writers)) |
 | Editor documents (collaboration mode) | **Postgres Yjs updates + verified snapshots** | WebSocket join; Markdown projection for read-only/fallback consumers | active Y.Doc | binary state is truth; durable ack follows commit; Node has no persistence volume |
 | Private editor AI notes | Postgres (idx `document_id`, creator-scoped API) | lazy (on open) | client | creator-only; never promoted to a team discussion implicitly |
 | Shared editor comments | Postgres threads/messages/read cursors + content-free `user_events` | incremental on document open/reconnect | client + browser draft storage | Yjs-relative anchor with quote fallback; author-only message mutation; tombstones and resolution remain auditable |
 | Editor suggestions | transient for Markdown mode; Postgres patch metadata + Yjs marks for collaboration mode | assistant/changes inspector | active Y.Doc + client | collaboration decisions are idempotent server mutations; AI drafts stay private until publication |
 | File-asset records (+ extracted text) | Postgres (binary in object store) | metadata eager, **body load-on-use** | client | record relational, blob external |
 | Vector-index records (file↔collection) | Postgres (full record) | eager (small) | client | members + capped history travel with the record |
-| Account preferences | Postgres (per user) | eager on login | React state | theme, locale, contrast, and user bubble tone follow the user, not the workspace |
+| Account preferences | Postgres (per user) | eager on login | React state + browser `localStorage` | theme, preset, locale, contrast, user bubble tone, the agent-memory opt-in, the model tier per surface and the last report profile and Stufe follow the user, not the workspace |
 | Device UI state (panels, scroll, drafts) | Browser `localStorage` | eager (mount) | localStorage | no server round-trip |
 | Auth sessions | Postgres | eager (init) | memory | cookie session |
 | Job / progress state | Postgres job rows (durable) / in-memory (fallback) | status poll / SSE | — | claimed by id from the dispatch message; `FOR UPDATE` on that row + status CAS |
@@ -232,8 +232,10 @@ hide:
   and Valkey the job, checkpoints, cancel request, and worker fencing survive
   API/browser restarts. A stalled dependency is a visible paused state, not a
   terminal record repaired locally after reload.
-- **Account preferences follow the user.** Theme / locale / contrast / user
-  bubble tone are an
+- **Account preferences follow the user.** Theme, theme preset, locale,
+  contrast, user bubble tone, the long-term agent-memory opt-in, the preferred
+  model tier for chat and for agent runs, and the report profile and Stufe the
+  user picked last in the two composers that start with one are an
   account tier (one row per `(tenant, user_id)`), not project data, and are
   deliberately excluded from the project import. On a real per-user session the
   saved row is applied over the device's preferences on login ("account wins");
@@ -241,7 +243,12 @@ hide:
   account tier, so loading a file never overwrites the account. Anonymous /
   apikey sessions do not sync preferences (there is no canonical per-user
   identity in those modes, so one caller could otherwise overwrite another
-  visitor's preferences).
+  visitor's preferences). Every save replaces the whole row, so every field
+  rides every save. The last profile and Stufe are habits rather than
+  settings: an empty value from the row or from a project file means "no
+  pick" and keeps the pick the browser holds, and the server derives nothing
+  from either. Tabs of one browser take over each other's saved preferences
+  from the storage event, so no tab sends an older value back with the row.
 
 **Suggestion persistence depends on document mode.** Legacy Markdown AI
 suggestions remain transient and only acceptance/rejection mutates the body.
@@ -428,8 +435,8 @@ resolved by id from elsewhere**:
   autosave sees the whole thread.
 - **Agent runs** list as summaries (status, question, session). Their control
   rows, answer bodies, the session artifact index and the replay of a finished
-  run's event history load only for the open session and for child missions
-  someone inspects; another session loads when the user opens it. The result
+  run's event history load only for the open session; another session loads
+  when the user opens it. The result
   payload of an agent run is not fetched, because its answer is the answer
   artifact. A result request that is still on its way is shared instead of
   asked again, and so is an artifact body; the body of a pinned artifact

@@ -58,6 +58,7 @@ from inqtrix.providers.base import (
     _check_provider_cancel,
     _check_provider_operation_deadline,
     _plan_retry,
+    _set_verbosity,
     current_provider_attempt_budget,
 )
 
@@ -161,6 +162,8 @@ class AttemptInfo:
     reasoning_effort: str | None = None
     """The reasoning effort the request carries, after the adapter's rules; ``None`` when none is sent
     or the adapter does not say."""
+    verbosity: str | None = None
+    """The ``verbosity`` the request carries; ``None`` when none is sent or the adapter does not say."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,22 +210,25 @@ def estimate_request_tokens(*parts: object) -> int:
 class AttemptCount:
     """The physical requests of one logical provider call, counted as an attempt observer.
 
-    It also keeps the output budget (``max_output_tokens``) and the reasoning
-    effort (``reasoning_effort``) the last request sent, which a trace reports
-    next to what the caller asked for.
+    It also keeps the output budget (``max_output_tokens``), the reasoning
+    effort (``reasoning_effort``) and the verbosity (``verbosity``) the last
+    request sent. A trace reports the budget and the effort next to what the
+    caller asked for, and the verbosity on its own.
     """
 
-    __slots__ = ("value", "max_output_tokens", "reasoning_effort")
+    __slots__ = ("value", "max_output_tokens", "reasoning_effort", "verbosity")
 
     def __init__(self) -> None:
         self.value = 0
         self.max_output_tokens: int | None = None
         self.reasoning_effort: str | None = None
+        self.verbosity: str | None = None
 
     def before_attempt(self, info: AttemptInfo) -> object:
         self.value += 1
         self.max_output_tokens = info.max_output_tokens
         self.reasoning_effort = info.reasoning_effort
+        self.verbosity = info.verbosity
         return None
 
     def after_attempt(self, ticket: object, outcome: AttemptOutcome) -> None:
@@ -375,6 +381,7 @@ async def call_with_retries(
     estimated_input_tokens: int = 0,
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = None,
+    verbosity: str | None = None,
 ) -> T:
     """The one async retry loop of a logical provider call.
 
@@ -382,8 +389,8 @@ async def call_with_retries(
     :func:`inqtrix.providers.base._plan_retry`, and every retry reaches the
     caller's retry log of *kind*. An adapter whose client raises its own
     transient errors names them with *transient_for*. *max_output_tokens* is
-    the output budget the request sends, *reasoning_effort* the effort it
-    carries, *estimated_input_tokens* its rough size
+    the output budget the request sends, *reasoning_effort* the effort and
+    *verbosity* the verbosity it carries, *estimated_input_tokens* its rough size
     (:func:`estimate_request_tokens`); all reach the attempt observers.
     """
     effective_timeout_seconds = max(0.0, deadline - time.monotonic())
@@ -398,6 +405,7 @@ async def call_with_retries(
         estimated_input_tokens=estimated_input_tokens,
         max_output_tokens=max_output_tokens,
         reasoning_effort=reasoning_effort,
+        verbosity=verbosity,
     )
     attempt = 1
     while True:
@@ -459,6 +467,7 @@ class AsyncNativeLLMProvider(LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> str:
         """Sync face of :meth:`acomplete`."""
         return call_on_loop(
@@ -466,6 +475,7 @@ class AsyncNativeLLMProvider(LLMProvider):
                 prompt, system=system, model=model,
                 max_output_tokens=max_output_tokens, timeout=timeout, state=state,
                 deadline=deadline, reasoning_effort=reasoning_effort,
+                **_set_verbosity(verbosity),
             )
         )
 
@@ -480,6 +490,7 @@ class AsyncNativeLLMProvider(LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> LLMResponse:
         """Sync face of :meth:`acomplete_with_metadata`."""
         return call_on_loop(
@@ -487,6 +498,7 @@ class AsyncNativeLLMProvider(LLMProvider):
                 prompt, system=system, model=model,
                 max_output_tokens=max_output_tokens, timeout=timeout, state=state,
                 deadline=deadline, reasoning_effort=reasoning_effort,
+                **_set_verbosity(verbosity),
             )
         )
 
@@ -526,6 +538,7 @@ class AsyncNativeLLMProvider(LLMProvider):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | None = None,
+        verbosity: str | None = None,
     ) -> ChatTurn:
         """Sync face of :meth:`achat`."""
         return call_on_loop(
@@ -533,7 +546,7 @@ class AsyncNativeLLMProvider(LLMProvider):
                 messages, tools=tools, model=model,
                 max_output_tokens=max_output_tokens, timeout=timeout,
                 deadline=deadline, reasoning_effort=reasoning_effort,
-                tool_choice=tool_choice,
+                tool_choice=tool_choice, **_set_verbosity(verbosity),
             )
         )
 
@@ -573,14 +586,16 @@ class AsyncNativeSearchProvider(SearchProvider):
         search_mode: str | None = None,
         return_related: bool = False,
         deadline: float | None = None,
+        answer_form: str | None = None,
     ) -> GroundedSearchResult:
-        """Sync face of :meth:`asearch`."""
+        """Sync face of :meth:`asearch`; an answer form goes on only when given."""
         return call_on_loop(
             self.asearch(
                 query, search_context_size=search_context_size,
                 recency_filter=recency_filter, language_filter=language_filter,
                 domain_filter=domain_filter, search_mode=search_mode,
                 return_related=return_related, deadline=deadline,
+                **({"answer_form": answer_form} if answer_form else {}),
             )
         )
 

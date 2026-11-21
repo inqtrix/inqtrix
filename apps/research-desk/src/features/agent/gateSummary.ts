@@ -1,8 +1,6 @@
 import type { TranslationDictionary } from '@/i18n/translations'
 import { countLabel } from '@/i18n/plural'
 import { kernelToolLabel } from './activityPresentation'
-import { agentTaskTypeLabel } from './plan/taskPresentation'
-import type { AgentPlanTaskRecord } from './model'
 
 /**
  * What a tool approval actually asks for, said plainly.
@@ -19,11 +17,20 @@ export type GateActionRow = {
   label: string
   /** The full primary text being approved (query/question/assignment). */
   text: string
+  /** A condition of the request the approver has to see beside its text:
+   * the period a web research prefers for its sources, the form a web
+   * search is asked to answer in, or that what the call names is not
+   * applied. It says what the call asks for; whether the search provider
+   * of the run takes a form, the card does not know. '' = the call names
+   * none. */
+  note: string
   /** Fan-out items (delegate_batch): one full objective per entry. */
   items: string[]
 }
 
-const PRIMARY_ARG_KEYS = ['query', 'question', 'assignment', 'skill_id'] as const
+/** The argument that says what a call is for, in the order the server's
+ * tool rows read them (`objective`: what a document analysis is for). */
+const PRIMARY_ARG_KEYS = ['query', 'question', 'assignment', 'objective', 'skill_id'] as const
 
 function primaryText(args: Record<string, unknown> | undefined): string {
   if (!args) return ''
@@ -32,6 +39,155 @@ function primaryText(args: Record<string, unknown> | undefined): string {
     if (typeof value === 'string' && value.trim()) return value
   }
   return ''
+}
+
+/** The periods a research takes, by the value a call names them with. */
+const RECENCY_WINDOWS = new Map<string, (t: TranslationDictionary) => string>([
+  ['day', (t) => t.agent.timeline.gateRecencyDay],
+  ['week', (t) => t.agent.timeline.gateRecencyWeek],
+  ['month', (t) => t.agent.timeline.gateRecencyMonth],
+  ['year', (t) => t.agent.timeline.gateRecencyYear],
+])
+
+/**
+ * What the card says about the period a call names for its sources.
+ *
+ * The tool reads one of its four periods whatever its case and surrounding
+ * blanks, on a research only, and takes a missing, empty or null value for
+ * none. A call that names anything else, or names a period for a subtask
+ * that is no research, is refused: the card then says that the period is
+ * not applied, with the value as it was sent, instead of announcing one.
+ */
+function recencyNote(
+  value: unknown,
+  research: boolean,
+  t: TranslationDictionary,
+): string {
+  if (value === undefined || value === null) return ''
+  const named = typeof value === 'string' ? value.trim() : JSON.stringify(value)
+  if (!named) return ''
+  const label = research ? RECENCY_WINDOWS.get(named.toLowerCase()) : undefined
+  return label
+    ? t.agent.timeline.gateRecencyNote.replace('{window}', () => label(t))
+    : t.agent.timeline.gateRecencyRefused.replace('{window}', () => named)
+}
+
+/**
+ * The forms a web search can be asked to answer in, by the names the
+ * search tool takes (a test of the server holds both lists together).
+ */
+export const SEARCH_ANSWER_FORMS = ['overview', 'table', 'timeline'] as const
+export type SearchAnswerForm = (typeof SEARCH_ANSWER_FORMS)[number]
+
+/** The form of a search nobody asked a form of: choosing it asks for nothing. */
+export const DEFAULT_SEARCH_ANSWER_FORM: SearchAnswerForm = SEARCH_ANSWER_FORMS[0]
+
+/** The argument of the search tool that carries the form. */
+export const ANSWER_FORM_ARG = 'answer_form'
+
+/** The label of a form of the search answer, in the approver's words. */
+export function searchAnswerFormLabel(
+  form: SearchAnswerForm,
+  t: TranslationDictionary,
+): string {
+  if (form === 'table') return t.agent.timeline.gateSearchFormTable
+  if (form === 'timeline') return t.agent.timeline.gateSearchFormTimeline
+  return t.agent.timeline.gateSearchFormOverview
+}
+
+/**
+ * The form a web search names, as the tool reads it: exactly one of the
+ * three names, and the default where the call names none (a missing or
+ * null value). Any other value is no form (the tool refuses such a call).
+ */
+function namedSearchAnswerForm(value: unknown): SearchAnswerForm | null {
+  if (value === undefined || value === null) return DEFAULT_SEARCH_ANSWER_FORM
+  return SEARCH_ANSWER_FORMS.find((form) => form === value) ?? null
+}
+
+/**
+ * What the card says about the form a web search is asked to answer in:
+ * nothing for the default form, the requested form for a table or a
+ * timeline, and for any other value that the tool refuses the call, with
+ * the value as it was sent.
+ */
+function searchFormNote(value: unknown, t: TranslationDictionary): string {
+  const form = namedSearchAnswerForm(value)
+  if (form === DEFAULT_SEARCH_ANSWER_FORM) return ''
+  if (form) {
+    return t.agent.timeline.gateSearchFormNote.replace('{form}', () =>
+      searchAnswerFormLabel(form, t),
+    )
+  }
+  const named = typeof value === 'string' ? value : JSON.stringify(value)
+  return t.agent.timeline.gateSearchFormRefused.replace('{form}', () => named)
+}
+
+/** Whether editing this action offers the form of the search answer as a choice. */
+export function choosesSearchAnswerForm(
+  action: Record<string, unknown> | null,
+): boolean {
+  return String(action?.tool ?? '') === 'web_instant'
+}
+
+function actionArgs(
+  action: Record<string, unknown> | null,
+): Record<string, unknown> {
+  return (action?.args as Record<string, unknown> | undefined) ?? {}
+}
+
+/**
+ * The arguments an edit offers as text fields: the ones that are text,
+ * without the form of a web search, which is a choice.
+ */
+export function editableTextArgs(
+  action: Record<string, unknown> | null,
+): string[] {
+  const args = actionArgs(action)
+  return Object.keys(args).filter(
+    (key) =>
+      typeof args[key] === 'string'
+      && !(choosesSearchAnswerForm(action) && key === ANSWER_FORM_ARG),
+  )
+}
+
+/**
+ * What the edit form starts from: every text argument as it was sent, and
+ * for a web search the form it names (the default where it names none or
+ * names no form).
+ */
+export function initialEditDraft(
+  action: Record<string, unknown> | null,
+): Record<string, string> {
+  const args = actionArgs(action)
+  const draft = Object.fromEntries(
+    editableTextArgs(action).map((key) => [key, String(args[key] ?? '')]),
+  )
+  if (choosesSearchAnswerForm(action)) {
+    draft[ANSWER_FORM_ARG] =
+      namedSearchAnswerForm(args[ANSWER_FORM_ARG]) ?? DEFAULT_SEARCH_ANSWER_FORM
+  }
+  return draft
+}
+
+/**
+ * The arguments an edit sends: the text fields as typed, everything else
+ * as it was. The form of a web search goes as chosen; the default form is
+ * left out, so the edited call is the one a search without a form makes.
+ */
+export function editedToolArgs(
+  action: Record<string, unknown> | null,
+  draft: Record<string, string>,
+): Record<string, unknown> {
+  const args: Record<string, unknown> = { ...actionArgs(action) }
+  for (const key of editableTextArgs(action)) {
+    if (key in draft) args[key] = draft[key]
+  }
+  if (choosesSearchAnswerForm(action) && ANSWER_FORM_ARG in draft) {
+    if (draft[ANSWER_FORM_ARG] === DEFAULT_SEARCH_ANSWER_FORM) delete args[ANSWER_FORM_ARG]
+    else args[ANSWER_FORM_ARG] = draft[ANSWER_FORM_ARG]
+  }
+  return args
 }
 
 export function gateActionRow(
@@ -46,10 +202,23 @@ export function gateActionRow(
   return {
     label: kernelToolLabel(tool, t),
     text: primaryText(args),
+    // Each key is an argument of its one tool; on another tool it is
+    // none, and the card says nothing about it.
+    note:
+      tool === 'run_web_research'
+        ? recencyNote(args?.recency, true, t)
+        : tool === 'web_instant'
+          ? searchFormNote(args?.[ANSWER_FORM_ARG], t)
+          : '',
     items: assignments.map((assignment) => {
       const objective = String(assignment.objective ?? '')
       const mode = assignment.mode ? ` (${String(assignment.mode)})` : ''
-      return `${objective}${mode}`
+      const window = recencyNote(
+        assignment.recency,
+        String(assignment.mode ?? '').trim() === 'research',
+        t,
+      )
+      return `${objective}${mode}${window ? ` \u00b7 ${window}` : ''}`
     }),
   }
 }
@@ -77,8 +246,6 @@ export function toolGateHeadline(
       return t.agent.timeline.gateKnowledgeTitle
     case 'run_web_research':
       return t.agent.timeline.gateWebResearchTitle
-    case 'run_deep_mission':
-      return t.agent.timeline.gateDeepMissionTitle
     case 'delegate_batch': {
       const args = (action.args ?? {}) as Record<string, unknown>
       const count = Array.isArray(args.assignments)
@@ -94,15 +261,13 @@ export function toolGateHeadline(
       return t.agent.timeline.gateSkillTitle
     case 'propose_editor_patch':
       return t.agent.timeline.gatePatchTitle
-    case 'read_project_document':
-    case 'read_canvas':
-    case 'write_canvas':
+    default:
+      // A tool with a name of its own is named by it (a stored run's
+      // retired delegation tool, too); an unknown one by its raw id.
       return t.agent.timeline.gateGenericTitle.replace(
         '{tool}',
         () => kernelToolLabel(tool, t),
       )
-    default:
-      return t.agent.timeline.gateGenericTitle.replace('{tool}', () => tool)
   }
 }
 
@@ -119,8 +284,6 @@ export function toolGateExplanation(
       return t.agent.timeline.gateKnowledgeHint
     case 'run_web_research':
       return t.agent.timeline.gateWebResearchHint
-    case 'run_deep_mission':
-      return t.agent.timeline.gateDeepMissionHint
     case 'delegate_batch':
       return t.agent.timeline.gateFanoutHint
     case 'load_skill':
@@ -206,49 +369,3 @@ export function gateKnowledgeScope(
   )
 }
 
-
-/**
- * What a delegated mission's REPLAN gate asks for: the reason
- * the plan grew and the tasks the new version adds — said from the
- * approval payload alone, without fetching the child's plan. An unknown
- * reason code stays visible verbatim; a task kind the labels do not know
- * is shown by its raw id.
- */
-export type ReplanGateSummary = {
-  /** "The delegated run wants to extend the plan (v2): <reason>" */
-  hint: string
-  /** "Open tasks in plan v2:" — only when there are rows. */
-  heading: string
-  /** One row per not yet executed task: "<type> · <title>". */
-  rows: string[]
-}
-
-const REPLAN_REASON: Record<string, (t: TranslationDictionary) => string> = {
-  critic_research: (t) => t.agent.tray.replanReasonCritic,
-  replan: (t) => t.agent.tray.replanReasonGap,
-}
-
-export function replanGateSummary(
-  payload: Record<string, unknown>,
-  t: TranslationDictionary,
-): ReplanGateSummary {
-  const version = String(payload.plan_version ?? '')
-  const reasonCode = String(payload.reason ?? '')
-  const reason = REPLAN_REASON[reasonCode]?.(t) ?? reasonCode
-  const tasks = Array.isArray(payload.new_tasks)
-    ? (payload.new_tasks as Record<string, unknown>[])
-    : []
-  const rows = tasks.map((task) => {
-    const toolKind = String(task.tool_kind ?? '')
-    const typeLabel = agentTaskTypeLabel(toolKind as AgentPlanTaskRecord['toolKind'], t) || toolKind
-    const title = String(task.title ?? '').trim()
-    return title ? `${typeLabel} · ${title}` : typeLabel
-  })
-  return {
-    hint: t.agent.tray.childReplanHint
-      .replace('{version}', () => version)
-      .replace('{reason}', () => reason),
-    heading: t.agent.tray.childReplanTasks.replace('{version}', () => version),
-    rows,
-  }
-}

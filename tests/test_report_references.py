@@ -214,6 +214,7 @@ def test_reference_records_carry_the_ledger_title_when_known() -> None:
     records = _format_report_reference_records(
         [("E1", _KFW), ("E2", _BMLUK)],
         _strategies(),
+        language="de",
         tier_by_url={_KFW: "primary"},
         title_by_url={_KFW: "Heizungsförderung | KfW"},
     )

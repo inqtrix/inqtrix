@@ -13,7 +13,6 @@ function run(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     station: 'intake',
     createdAt: '2026-08-30T10:00:00.000Z',
     lastSequence: 1,
-    planStale: false,
     approvals: [],
     ...overrides,
   } as AgentRunRecord

@@ -83,15 +83,18 @@ async def resolve_attached_reports(
         if str(summary.get("status") or "") != "completed":
             unfinished.append(report_id)
             continue
-        resolved.append(
-            {
-                "report_id": report_id,
-                "title": str(summary.get("question") or report_id).strip(),
-                "reference_count": await _reference_count(
-                    run_store, report_id, visible_to
-                ),
-            }
-        )
+        entry: dict[str, Any] = {
+            "report_id": report_id,
+            "title": str(summary.get("question") or report_id).strip(),
+            "reference_count": await _reference_count(
+                run_store, report_id, visible_to
+            ),
+        }
+        if summary.get("question_clipped"):
+            # The summary's own verdict, never a guess from a trailing
+            # mark: the prompt says the cut is one.
+            entry["title_clipped"] = True
+        resolved.append(entry)
     if unknown:
         raise AttachedReportError(
             ["Unknown or non-visible report: " + ", ".join(unknown)]

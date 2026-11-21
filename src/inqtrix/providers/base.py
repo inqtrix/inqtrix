@@ -40,6 +40,7 @@ from inqtrix.exceptions import (
     AgentTimeout,
     ModelCapacityReason,
 )
+from inqtrix.search_form import ANSWER_FORM_PARAMETER
 from inqtrix.search_result import GroundedSearchResult
 
 if TYPE_CHECKING:
@@ -410,14 +411,18 @@ class SearchProviderCapabilities:
     This is an additive helper for the Baukastensystem: providers may
     expose a capability object without changing the stable
     :class:`SearchProvider` contract. Callers should treat omitted
-    capability metadata as "supports everything" to preserve backward
-    compatibility with existing providers and custom user adapters.
+    capability metadata as "accepts every generic hint" to preserve
+    backward compatibility with existing providers and custom user
+    adapters. The answer form is the one exception: it counts as accepted
+    only where a provider names it.
 
     Attributes:
         supported_parameters: Search-hint names accepted by the backend.
             Valid values correspond to the optional keyword parameters of
             :meth:`SearchProvider.search` except ``deadline``, which is
-            always handled separately.
+            always handled separately. The default names every generic
+            hint and no answer form. An object a provider builds itself is
+            read as written: it accepts exactly the names in it.
         max_concurrency: Optional provider-level cap for simultaneous search
             calls. ``0`` means no cap beyond the agent's own query limit.
     """
@@ -438,6 +443,15 @@ def get_search_provider_capabilities(provider: object) -> SearchProviderCapabili
     ``supported_search_parameters`` attribute returning an iterable of
     accepted parameter names. When neither is present, the default is to
     preserve today's behavior and assume all generic hints are allowed.
+
+    The name list says two things apart. Every name other than the answer
+    form, known or not, makes the list the hints the provider accepts; a
+    list that names nothing besides the answer form accepts every generic
+    hint. A misspelt name matches no hint, so a list whose other names are
+    all misspelt leaves the provider without any. The answer form is
+    accepted only when the list names it, and naming it says nothing about
+    the hints: a provider that lists the answer form alone keeps every
+    generic hint.
     """
 
     def _max_concurrency() -> int:
@@ -468,8 +482,10 @@ def get_search_provider_capabilities(provider: object) -> SearchProviderCapabili
     except TypeError:
         return SearchProviderCapabilities(max_concurrency=_max_concurrency())
 
+    answer_form = supported & {ANSWER_FORM_PARAMETER}
+    hints = supported - answer_form
     return SearchProviderCapabilities(
-        supported_parameters=supported or _SEARCH_PARAMETER_NAMES,
+        supported_parameters=(hints or _SEARCH_PARAMETER_NAMES) | answer_form,
         max_concurrency=_max_concurrency(),
     )
 
@@ -559,6 +575,43 @@ def reported_capability(
         return bool(checker(model=model))
     except TypeError:
         return bool(checker())
+
+
+def verbosity_kwargs(
+    provider: object, verbosity: str | None, *, model: str | None
+) -> dict[str, str]:
+    """The keyword a text call takes for *verbosity*; empty unless the provider says it sends one.
+
+    A call site asks its routing for the prose verbosity of its model
+    (:func:`inqtrix.model_routing.prose_verbosity`) and spreads the result of
+    this function into :meth:`LLMProvider.complete`,
+    :meth:`LLMProvider.complete_with_metadata` or :meth:`LLMProvider.chat`. A
+    provider that does not declare :meth:`LLMProvider.supports_verbosity` was
+    written without the parameter and is not handed it.
+
+    Args:
+        provider: Provider or decorator the call goes to.
+        verbosity: The level the call site asks for; empty or ``None`` for none.
+        model: Model the call runs on.
+
+    Returns:
+        ``{"verbosity": verbosity}``, or ``{}`` when no level is asked for or
+        the provider does not send one.
+    """
+    if reported_capability(provider, "supports_verbosity", model=model):
+        return _set_verbosity(verbosity)
+    return {}
+
+
+def _set_verbosity(verbosity: str | None) -> dict[str, str]:
+    """*verbosity* as a keyword of a call, only when a level is set.
+
+    A wrapper forwards the keyword this way, so a call without a level reaches a
+    provider written without the parameter unchanged. A call site asks
+    :func:`verbosity_kwargs` first; a level handed straight to a wrapper around
+    such a provider ends in that provider's ``TypeError``.
+    """
+    return {"verbosity": verbosity} if verbosity else {}
 
 
 def reported_reasoning_levels(provider: object, *, model: str) -> list[str] | None:
@@ -1865,6 +1918,7 @@ class LLMProvider(ABC):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> str:
         """Generate a completion and return only the visible text.
 
@@ -1899,6 +1953,12 @@ class LLMProvider(ABC):
                 default; ``"none"`` forces reasoning off for this call; a
                 graded level (``"minimal"`` .. ``"xhigh"``) requests reasoning
                 where the model supports it.
+            verbosity: Optional level for how much the model writes in its
+                visible answer (``"low"``, ``"medium"``, ``"high"``). ``None``
+                sends nothing and leaves the backend's default. A call site
+                passes it only to a provider that says it sends it
+                (:meth:`supports_verbosity`, :func:`verbosity_kwargs`); a
+                structured call has no such parameter.
 
         Returns:
             str: The visible assistant text. Providers should return an
@@ -1926,6 +1986,7 @@ class LLMProvider(ABC):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> LLMResponse:
         """Generate a completion together with token metadata.
 
@@ -1978,6 +2039,7 @@ class LLMProvider(ABC):
                 state=state,
                 deadline=deadline,
                 reasoning_effort=reasoning_effort,
+                **_set_verbosity(verbosity),
             ),
             model=model or "",
         )
@@ -2068,6 +2130,23 @@ class LLMProvider(ABC):
         """
         return False
 
+    def supports_verbosity(self, *, model: str | None = None) -> bool:
+        """Return whether the text calls send a ``verbosity`` for *model*.
+
+        The default is ``False``: a provider written without the parameter
+        is never handed it. An adapter whose backend takes it overrides this
+        and accepts ``verbosity`` in :meth:`complete`,
+        :meth:`complete_with_metadata` and :meth:`chat`.
+
+        Args:
+            model: Optional per-call model or deployment identifier.
+
+        Returns:
+            ``True`` only when the provider puts a given ``verbosity`` into
+            the request of the requested model.
+        """
+        return False
+
     def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
         """Return the reasoning efforts this provider can send for *model*.
 
@@ -2095,6 +2174,7 @@ class LLMProvider(ABC):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | None = None,
+        verbosity: str | None = None,
     ) -> "ChatTurn":
         """Run ONE native tool-calling chat turn.
 
@@ -2133,6 +2213,8 @@ class LLMProvider(ABC):
                 nothing and leaves the choice to the model. An adapter maps
                 each value to its backend or rejects it visibly, never
                 silently.
+            verbosity: Optional level for the visible answer of the turn,
+                as in :meth:`complete`.
 
         Returns:
             ChatTurn: The next assistant turn with tool-call requests,
@@ -2160,6 +2242,7 @@ class LLMProvider(ABC):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> str:
         """Async twin of :meth:`complete`: same arguments, result and errors.
 
@@ -2170,6 +2253,7 @@ class LLMProvider(ABC):
             self, "complete", prompt, system=system, model=model,
             max_output_tokens=max_output_tokens, timeout=timeout, state=state,
             deadline=deadline, reasoning_effort=reasoning_effort,
+            **_set_verbosity(verbosity),
         )
 
     async def acomplete_with_metadata(
@@ -2183,6 +2267,7 @@ class LLMProvider(ABC):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> LLMResponse:
         """Async twin of :meth:`complete_with_metadata`: same arguments, result and errors.
 
@@ -2193,6 +2278,7 @@ class LLMProvider(ABC):
             self, "complete_with_metadata", prompt, system=system, model=model,
             max_output_tokens=max_output_tokens, timeout=timeout, state=state,
             deadline=deadline, reasoning_effort=reasoning_effort,
+            **_set_verbosity(verbosity),
         )
 
     async def acomplete_structured(
@@ -2234,6 +2320,7 @@ class LLMProvider(ABC):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | None = None,
+        verbosity: str | None = None,
     ) -> "ChatTurn":
         """Async twin of :meth:`chat`: same arguments, result and errors.
 
@@ -2244,7 +2331,7 @@ class LLMProvider(ABC):
             self, "chat", messages, tools=tools, model=model,
             max_output_tokens=max_output_tokens, timeout=timeout,
             deadline=deadline, reasoning_effort=reasoning_effort,
-            tool_choice=tool_choice,
+            tool_choice=tool_choice, **_set_verbosity(verbosity),
         )
 
     @abstractmethod
@@ -2284,6 +2371,7 @@ class SearchProvider(ABC):
         search_mode: str | None = None,
         return_related: bool = False,
         deadline: float | None = None,
+        answer_form: str | None = None,
     ) -> GroundedSearchResult:
         """Execute a search request and normalize the backend response.
 
@@ -2317,6 +2405,15 @@ class SearchProvider(ABC):
             deadline: Optional absolute monotonic deadline for the whole
                 run. Providers should clamp their timeout budget and stop
                 retrying once it is exceeded.
+            answer_form: Optional form of the answer, one of
+                :data:`~inqtrix.search_form.ANSWER_FORMS`. Unlike the hints
+                above it is handed only to a provider that names
+                ``answer_form`` among its ``supported_search_parameters``
+                (or in its ``search_capabilities``), and only when a caller
+                chose a form other than the default one. A provider that
+                does not name it never receives the keyword, so a
+                ``search`` without it keeps running; a type checker still
+                compares an override with this signature.
 
         Returns:
             GroundedSearchResult: Normalized result carrying ``answer``,
@@ -2345,17 +2442,21 @@ class SearchProvider(ABC):
         search_mode: str | None = None,
         return_related: bool = False,
         deadline: float | None = None,
+        answer_form: str | None = None,
     ) -> GroundedSearchResult:
         """Async twin of :meth:`search`: same arguments, result and errors.
 
         A provider without its own async implementation serves it through
-        :meth:`search` on the provider lane (:func:`sync_twin`).
+        :meth:`search` on the provider lane (:func:`sync_twin`), which
+        drops every argument left at ``None``: a provider written against
+        the signature without the answer form is called as before.
         """
         return await sync_twin(
             self, "search", query, search_context_size=search_context_size,
             recency_filter=recency_filter, language_filter=language_filter,
             domain_filter=domain_filter, search_mode=search_mode,
             return_related=return_related, deadline=deadline,
+            answer_form=answer_form,
         )
 
     @abstractmethod
@@ -2488,6 +2589,7 @@ class ConfiguredLLMProvider(LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> str:
         """Forward to the wrapped provider, defaulting ``model`` from settings.
 
@@ -2510,6 +2612,8 @@ class ConfiguredLLMProvider(LLMProvider):
                 Forwarded to the wrapped provider only when it is a non-empty
                 string, so the common ``""``/``None`` case never reaches a
                 custom provider whose ``complete`` predates this parameter.
+            verbosity: Optional level for the visible answer; forwarded
+                only when set, for the same reason.
 
         Returns:
             The visible assistant text from the wrapped provider.
@@ -2521,7 +2625,7 @@ class ConfiguredLLMProvider(LLMProvider):
         return self._provider.complete(
             prompt,
             **self._forwarded(
-                model, reasoning_effort, system=system,
+                model, reasoning_effort, verbosity=verbosity, system=system,
                 max_output_tokens=max_output_tokens, timeout=timeout,
                 state=state, deadline=deadline,
             ),
@@ -2538,6 +2642,7 @@ class ConfiguredLLMProvider(LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> LLMResponse:
         """Forward to the wrapped provider, defaulting ``model`` from settings.
 
@@ -2554,6 +2659,7 @@ class ConfiguredLLMProvider(LLMProvider):
             state: See :meth:`complete`.
             deadline: See :meth:`complete`.
             reasoning_effort: See :meth:`complete`.
+            verbosity: See :meth:`complete`.
 
         Returns:
             :class:`LLMResponse` from the wrapped provider.
@@ -2565,7 +2671,7 @@ class ConfiguredLLMProvider(LLMProvider):
         return self._provider.complete_with_metadata(
             prompt,
             **self._forwarded(
-                model, reasoning_effort, system=system,
+                model, reasoning_effort, verbosity=verbosity, system=system,
                 max_output_tokens=max_output_tokens, timeout=timeout,
                 state=state, deadline=deadline,
             ),
@@ -2604,6 +2710,14 @@ class ConfiguredLLMProvider(LLMProvider):
             model=model or self._models.reasoning_model,
         )
 
+    def supports_verbosity(self, *, model: str | None = None) -> bool:
+        """Forward whether the wrapped provider sends a ``verbosity`` for *model*."""
+        return reported_capability(
+            self._provider,
+            "supports_verbosity",
+            model=model or self._models.reasoning_model,
+        )
+
     def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
         """Forward the reasoning levels of *model* to the wrapped provider."""
         return reported_reasoning_levels(
@@ -2621,6 +2735,7 @@ class ConfiguredLLMProvider(LLMProvider):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | None = None,
+        verbosity: str | None = None,
     ) -> "ChatTurn":
         """Forward a native tool-calling chat turn to the wrapped provider.
 
@@ -2638,6 +2753,8 @@ class ConfiguredLLMProvider(LLMProvider):
             tool_choice: Optional obligation for the turn's tool use;
                 forwarded only when set, so a wrapped provider that never
                 learned the parameter still serves plain turns.
+            verbosity: Optional level for the visible answer of the turn;
+                forwarded only when set.
 
         Returns:
             The wrapped provider's :class:`ChatTurn`.
@@ -2657,6 +2774,7 @@ class ConfiguredLLMProvider(LLMProvider):
                 tools=tools, model=model, max_output_tokens=max_output_tokens,
                 timeout=timeout, deadline=deadline,
                 reasoning_effort=reasoning_effort, tool_choice=tool_choice,
+                verbosity=verbosity,
             ),
         )
 
@@ -2714,13 +2832,15 @@ class ConfiguredLLMProvider(LLMProvider):
         )
 
     def _forwarded(
-        self, model: str | None, reasoning_effort: str | None, **always: Any
+        self, model: str | None, reasoning_effort: str | None, *,
+        verbosity: str | None = None, **always: Any
     ) -> dict[str, object]:
         """Keyword arguments of a forwarded call, sync or async.
 
         *always* goes along as given; the model only when one is in effect,
-        defaulting to ``self.models.reasoning_model``; the effort only when
-        set, so a wrapped provider that predates the parameter keeps working.
+        defaulting to ``self.models.reasoning_model``; the effort and the
+        verbosity only when set, so a wrapped provider that predates either
+        parameter keeps working.
         """
         call_kwargs: dict[str, object] = dict(always)
         effective_model = model or self._models.reasoning_model
@@ -2728,14 +2848,15 @@ class ConfiguredLLMProvider(LLMProvider):
             call_kwargs["model"] = effective_model
         if reasoning_effort:
             call_kwargs["reasoning_effort"] = reasoning_effort
+        call_kwargs.update(_set_verbosity(verbosity))
         return call_kwargs
 
     def _forwarded_chat(
         self, *, model: str | None, reasoning_effort: str | None,
-        tool_choice: str | None, **always: Any,
+        tool_choice: str | None, verbosity: str | None = None, **always: Any,
     ) -> dict[str, object]:
         """:meth:`_forwarded` for a chat turn: the tool choice only when set."""
-        call_kwargs = self._forwarded(model, reasoning_effort, **always)
+        call_kwargs = self._forwarded(model, reasoning_effort, verbosity=verbosity, **always)
         if tool_choice is not None:
             call_kwargs["tool_choice"] = tool_choice
         return call_kwargs
@@ -2751,12 +2872,13 @@ class ConfiguredLLMProvider(LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> str:
         """Async twin of :meth:`complete`, with the same defaulting."""
         return await async_call(self._provider, "complete")(
             prompt,
             **self._forwarded(
-                model, reasoning_effort, system=system,
+                model, reasoning_effort, verbosity=verbosity, system=system,
                 max_output_tokens=max_output_tokens, timeout=timeout,
                 state=state, deadline=deadline,
             ),
@@ -2773,12 +2895,13 @@ class ConfiguredLLMProvider(LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> LLMResponse:
         """Async twin of :meth:`complete_with_metadata`, with the same defaulting."""
         return await async_call(self._provider, "complete_with_metadata")(
             prompt,
             **self._forwarded(
-                model, reasoning_effort, system=system,
+                model, reasoning_effort, verbosity=verbosity, system=system,
                 max_output_tokens=max_output_tokens, timeout=timeout,
                 state=state, deadline=deadline,
             ),
@@ -2825,6 +2948,7 @@ class ConfiguredLLMProvider(LLMProvider):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | None = None,
+        verbosity: str | None = None,
     ) -> "ChatTurn":
         """Async twin of :meth:`chat`, with the same defaulting."""
         if not callable(getattr(self._provider, "chat", None)):
@@ -2837,6 +2961,7 @@ class ConfiguredLLMProvider(LLMProvider):
                 tools=tools, model=model, max_output_tokens=max_output_tokens,
                 timeout=timeout, deadline=deadline,
                 reasoning_effort=reasoning_effort, tool_choice=tool_choice,
+                verbosity=verbosity,
             ),
         )
 
@@ -2908,6 +3033,11 @@ class UntrustedContentRuleProvider(LLMProvider):
     def supports_tool_calls(self, *, model: str | None = None) -> bool:
         return reported_capability(
             self._provider, "supports_tool_calls", model=model
+        )
+
+    def supports_verbosity(self, *, model: str | None = None) -> bool:
+        return reported_capability(
+            self._provider, "supports_verbosity", model=model
         )
 
     def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:

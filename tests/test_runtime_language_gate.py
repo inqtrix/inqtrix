@@ -84,10 +84,7 @@ EXEMPT = {
 
 # Known residue, predating the gate. MAY ONLY SHRINK.
 BASELINE: set[tuple[str, str]] = {
-    # agents/algorithm.py
-    ('agents/algorithm.py', '---\n\n> Hinweis: Das Memo wurde zwischenzeitlich manuell bearbeitet. Di'),
     # agents/control_ports.py
-    ('agents/control_ports.py', 'Aufgabe vor der Ausfuehrung abgebrochen.'),
     ('agents/control_ports.py', 'Der Lauf endete, bevor die Freigabe entschieden wurde.'),
     # agents/kernel/algorithm.py
     # agents/kernel/tools.py
@@ -104,8 +101,6 @@ BASELINE: set[tuple[str, str]] = {
     ('knowledge/grounding.py', 'Die Antwort wurde nicht veröffentlicht, weil der erforderliche Belegbl'),
     ('knowledge/grounding.py', 'Die Antwort wurde nicht veröffentlicht, weil mindestens ein als wörtli'),
     # nodes.py
-    ('nodes.py', 'Belege ausserhalb des Evidenz-Budgets ('),
-    ('nodes.py', 'Evidenzlage noch zu duenn ('),
     ('nodes.py', 'Mehrere zentrale Aussagen sind zwischen Quellen umstritten.'),
     ('nodes.py', 'Was ist die Primärquelle für'),
     ('nodes.py', 'Welche Primärdaten verifizieren die zentralen Zahlen zu'),

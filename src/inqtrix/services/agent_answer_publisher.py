@@ -71,11 +71,10 @@ class AgentAnswerPublisher:
         # never reinterpret or discard an already completed answer.
         #
         # The question is read for ONE thing: the language the row is named
-        # in.  A fixed German title reached every reader of an English run,
-        # and the answer's own name has a translation pair already - the
-        # mission's chat deliverable uses it.  The question is what this
-        # boundary has; the algorithm's resolved answer language never
-        # travels with the answer.
+        # in.  A fixed German title would reach every reader of an English
+        # run, and the answer's own name has a translation pair.  The
+        # question is what this boundary has; the algorithm's resolved
+        # answer language never travels with the answer.
         #
         # Resolved by the SAME rule every other boundary uses
         # (``server/streaming.py``, the kernel's answer), not by

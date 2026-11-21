@@ -47,6 +47,7 @@ from inqtrix.providers.base import (
     responses_usage_details,
     response_raw_payload,
 )
+from inqtrix.search_form import ANSWER_FORM_PARAMETER, answer_form_brief
 from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource, ProviderNotice
 from inqtrix.urls import (
     CredentialBearingUrlError,
@@ -101,6 +102,7 @@ class AzureFoundryWebSearch(AsyncNativeSearchProvider):
         "recency_filter",
         "language_filter",
         "domain_filter",
+        ANSWER_FORM_PARAMETER,
     })
     def __init__(
         self,
@@ -224,6 +226,7 @@ class AzureFoundryWebSearch(AsyncNativeSearchProvider):
         search_mode: str | None = None,
         return_related: bool = False,
         deadline: float | None = None,
+        answer_form: str | None = None,
     ) -> GroundedSearchResult:
         """Execute one deadline-bounded search through the shared gate."""
         operation_deadline = _operation_deadline(self._timeout, deadline)
@@ -252,6 +255,7 @@ class AzureFoundryWebSearch(AsyncNativeSearchProvider):
                 return_related=return_related,
                 deadline=operation_deadline,
                 outer_deadline=deadline,
+                answer_form=answer_form,
             )
         finally:
             gate.release()
@@ -268,6 +272,7 @@ class AzureFoundryWebSearch(AsyncNativeSearchProvider):
         return_related: bool = False,
         deadline: float | None = None,
         outer_deadline: float | None = None,
+        answer_form: str | None = None,
     ) -> GroundedSearchResult:
         """Execute a search through the Foundry agent's Responses API.
 
@@ -284,6 +289,10 @@ class AzureFoundryWebSearch(AsyncNativeSearchProvider):
             search_mode: Accepted for ABC compatibility; not used.
             return_related: Accepted for ABC compatibility; not used.
             deadline: Optional absolute monotonic deadline for the run.
+            answer_form: Optional form of the answer. A table or a timeline
+                goes out as the fixed brief of that form in a developer
+                message before the question; no form, the default form and
+                any other name send the request without one.
 
         Returns:
             GroundedSearchResult: The agent's synthesized answer plus the
@@ -299,6 +308,18 @@ class AzureFoundryWebSearch(AsyncNativeSearchProvider):
         effective_query = _apply_domain_filters(query, domain_filter)
         hint = _build_recency_language_hints(recency_filter, language_filter)
         user_content = f"{hint}\n\n{effective_query}" if hint else effective_query
+        # Without a brief the request is the one it always was. The service
+        # takes more than one message only in the typed form, so a brief
+        # puts both messages into it; the user message stays word for word.
+        brief = answer_form_brief(answer_form)
+        request_input: list[dict[str, str]] = (
+            [
+                {"type": "message", "role": "developer", "content": brief},
+                {"type": "message", "role": "user", "content": user_content},
+            ]
+            if brief
+            else [{"role": "user", "content": user_content}]
+        )
 
         # Reference the agent (and pin its version when configured) per call,
         # the documented Foundry pattern. Without the version the backend runs
@@ -311,7 +332,7 @@ class AzureFoundryWebSearch(AsyncNativeSearchProvider):
         try:
             response = await call_with_retries(
                 lambda: client.responses.create(
-                    input=[{"role": "user", "content": user_content}],
+                    input=request_input,
                     extra_body={"agent_reference": agent_ref},
                     timeout=_bounded_timeout(self._timeout, deadline),
                 ),
@@ -323,7 +344,9 @@ class AzureFoundryWebSearch(AsyncNativeSearchProvider):
                 timeout_label="Azure-Foundry-WebSearch",
                 configured_timeout_seconds=self._timeout,
                 kind="search",
-                estimated_input_tokens=estimate_request_tokens(user_content),
+                estimated_input_tokens=estimate_request_tokens(
+                    f"{brief}\n{user_content}" if brief else user_content
+                ),
             )
         except RateLimitError as exc:
             raise AgentRateLimited(self._agent_name, exc) from exc

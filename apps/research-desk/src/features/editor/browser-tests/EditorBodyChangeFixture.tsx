@@ -247,15 +247,12 @@ function canvasRun(artifact: AgentArtifactRecord): AgentRunRecord {
     createdAt: '2026-09-01T08:00:00.000Z',
     kind: 'agent',
     lastSequence: 0,
-    patchStale: false,
     phase: 'done',
-    planStale: false,
     question: 'Fixture question',
     runId: RUN_ID,
-    station: 'critic',
+    station: 'execution',
     status: 'completed',
     stepLog: [],
-    taskStates: {},
     touchedArtifacts: [],
   }
 }
@@ -293,16 +290,13 @@ function CanvasFixture({ heldAnswers, storedBody }: { heldAnswers: boolean; stor
   }))
   const [saveRegistry] = useState(createCanvasSaveRegistry)
   const context = useMemo<AgentCanvasContextValue>(() => ({
-    applyPatch: async () => unavailable('applyPatch'),
     canvasCommentEdit: null,
     canvasComments: [],
-    cancelTask: async () => unavailable('cancelTask'),
     clearCanvasCommentEdit: noOp,
     clientOptions: null,
-    decideApproval: async () => unavailable('decideApproval'),
+    collections: [],
     exportArtifact: async () => unavailable('exportArtifact'),
     fileAssets: {},
-    inspectChildRun: async () => unavailable('inspectChildRun'),
     knowledgeDataSource: {
       canLoadFileContent: null,
       loadDocumentText: async () => unavailable('loadDocumentText'),
@@ -310,21 +304,12 @@ function CanvasFixture({ heldAnswers, storedBody }: { heldAnswers: boolean; stor
       search: async () => unavailable('search'),
     },
     loadArtifact: async () => unavailable('loadArtifact'),
-    loadTaskResult: async () => unavailable('loadTaskResult'),
     openCanvasView: (view) => {
       window.__canvasViews = [...(window.__canvasViews ?? []), view]
     },
-    planDrafts: {},
-    planSource: { collections: [], vectorBackendLabel: null },
     pollingRunIds: [],
-    prefetchTaskResult: noOp,
     queueCanvasComment: () => false,
-    rejectPatch: async () => unavailable('rejectPatch'),
     renameArtifact: async () => unavailable('renameArtifact'),
-    reportGuidanceMaxChars: 0,
-    reportRuleIdsMax: 0,
-    reportRuleOptions: [],
-    requestPlanRefresh: noOp,
     runs,
     saveArtifact: async (_runId, _artifactId, markdown, expectedRevision) => {
       window.__canvasSaves = [...(window.__canvasSaves ?? []), { expectedRevision, markdown }]
@@ -340,7 +325,6 @@ function CanvasFixture({ heldAnswers, storedBody }: { heldAnswers: boolean; stor
     saveRegistry,
     sessionArtifacts: {},
     sessionFileNames: {},
-    setPlanDraft: noOp,
     updateCanvasComment: noOp,
     workspaceId: 'browser-fixture',
   }), [heldAnswers, runs, saveRegistry])

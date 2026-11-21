@@ -616,7 +616,7 @@ def _compose_worker(
         incognito_ttl_seconds=settings.server.run_incognito_retention_seconds,
         worker_id=worker_id,
         # The per-user cap is an ADMISSION bound firing in submit() --
-        # and the worker DOES call submit(): a workspace agent running
+        # and the worker DOES call submit(): an agent run executing
         # here submits its child runs through this very store
         # (kernel/tools.py delegate paths -> run_service.submit). Child
         # runs count against the parent's user, so the cap governs

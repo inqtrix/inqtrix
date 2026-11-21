@@ -9,18 +9,26 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from inqtrix.settings import AGENT_MODE_IDS, AgentPlatformSettings
-from tests.agents.test_workspace_agent import make_agent_client, wait_status
+from inqtrix.core.constants import AGENT_MODE_IDS
+from inqtrix.settings import AgentPlatformSettings
+from tests.agents.test_kernel_walking_skeleton import (
+    ScriptedToolLLM,
+    _answer_turn,
+    make_kernel_client,
+    wait_status,
+)
 
 _SETTLED = {"waiting_for_approval", "completed", "failed"}
 
 
-def _platform(**fields: object) -> AgentPlatformSettings:
-    return AgentPlatformSettings(INQTRIX_AGENT_ALLOW_VOLATILE=True, **fields)
+def _client(**fields: object):
+    """A server with the kernel and the given agent settings; one answer per run."""
+    return make_kernel_client(ScriptedToolLLM([_answer_turn()]), platform_overrides=dict(fields))
 
 
 def _capabilities(monkeypatch: pytest.MonkeyPatch, **fields: object) -> dict:
-    client = make_agent_client(monkeypatch, platform=_platform(**fields))
+    del monkeypatch
+    client = _client(**fields)
     with client:
         return client.get("/v1/capabilities").json()["agent"]
 
@@ -69,15 +77,14 @@ def test_a_default_with_spaces_around_it_stops_the_start_too() -> None:
 
 
 def test_an_agent_run_in_the_turned_off_mode_is_refused(monkeypatch) -> None:
-    client = make_agent_client(
-        monkeypatch, platform=_platform(INQTRIX_AGENT_ALLOW_AUTONOMOUS=False)
-    )
+    del monkeypatch
+    client = _client(INQTRIX_AGENT_ALLOW_AUTONOMOUS=False)
     with client:
         response = client.post(
             "/v1/runs",
             json={
                 "question": "Schreibe ein Memo.",
-                "mode": "workspace_agent",
+                "mode": "agent_kernel",
                 "autonomy": "autonomous",
             },
         )
@@ -89,20 +96,19 @@ def test_an_agent_run_in_the_turned_off_mode_is_refused(monkeypatch) -> None:
 
 
 def test_the_refusal_covers_every_agent_engine() -> None:
-    # The route decides on this set; the kernel is not registered in this fixture.
-    assert {"workspace_agent", "agent_kernel"} <= set(AGENT_MODE_IDS)
+    # The route decides on this set: the kernel is the one agent engine.
+    assert AGENT_MODE_IDS == ("agent_kernel",)
 
 
 def test_an_agent_run_in_the_standard_mode_still_starts(monkeypatch) -> None:
-    client = make_agent_client(
-        monkeypatch, platform=_platform(INQTRIX_AGENT_ALLOW_AUTONOMOUS=False)
-    )
+    del monkeypatch
+    client = _client(INQTRIX_AGENT_ALLOW_AUTONOMOUS=False)
     with client:
         response = client.post(
             "/v1/runs",
             json={
                 "question": "Schreibe ein Memo.",
-                "mode": "workspace_agent",
+                "mode": "agent_kernel",
                 "autonomy": "balanced",
             },
         )
@@ -111,13 +117,14 @@ def test_an_agent_run_in_the_standard_mode_still_starts(monkeypatch) -> None:
 
 
 def test_the_same_request_runs_where_the_mode_is_on(monkeypatch) -> None:
-    client = make_agent_client(monkeypatch, platform=_platform())
+    del monkeypatch
+    client = _client()
     with client:
         response = client.post(
             "/v1/runs",
             json={
                 "question": "Schreibe ein Memo.",
-                "mode": "workspace_agent",
+                "mode": "agent_kernel",
                 "autonomy": "autonomous",
             },
         )
@@ -126,9 +133,8 @@ def test_the_same_request_runs_where_the_mode_is_on(monkeypatch) -> None:
 
 
 def test_the_field_stays_inert_for_a_run_that_is_no_agent(monkeypatch) -> None:
-    client = make_agent_client(
-        monkeypatch, platform=_platform(INQTRIX_AGENT_ALLOW_AUTONOMOUS=False)
-    )
+    del monkeypatch
+    client = _client(INQTRIX_AGENT_ALLOW_AUTONOMOUS=False)
     with client:
         response = client.post(
             "/v1/runs",

@@ -1,4 +1,4 @@
-"""Composition of the result requirement set at submit time or at a plan gate.
+"""Composition of the result requirement a run is submitted with.
 
 The requirement can come from two places: prompt-library rules the user
 attached, and the free text they typed. Both answer the same question —
@@ -26,6 +26,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.i18n import t
+from inqtrix.untrusted_content import neutralize_fence_delimiters
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -33,18 +34,19 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 FREE_REQUIREMENT_MARKER = "[Free requirement]"
-"""Origin marker of the text the user typed (at submit time or at the gate)."""
+"""Origin marker of the text the user typed."""
 
 REPORT_GUIDANCE_MAX_CHARS = 2_000
-"""Ceiling for the typed half of the requirement, at BOTH entry points.
+"""Ceiling for the typed half of the requirement.
 
-The requirement can be set before the run and at the plan gate, and the
-two must agree: a text the composer accepts and the gate rejects (or the
-reverse) would be a limit the user cannot predict.
+Published under ``agent.report_requirement.max_chars`` and enforced by the
+submit route, so the composer and the server agree: a text the composer
+accepts and the server rejects (or the reverse) would be a limit the user
+cannot predict.
 """
 
 REPORT_RULE_IDS_MAX = 3
-"""How many library rules one requirement may attach, at both entry points."""
+"""How many library rules one requirement may attach."""
 
 MAX_COMPOSED_REQUIREMENT_CHARS = 20_000
 """Ceiling for the composed requirement.
@@ -93,14 +95,19 @@ Cyrillic small ie, U+0435, in ``rule``), a fullwidth colon (U+FF1A), and
 
 
 def neutralize_frame_label(label: str) -> str:
-    """*label* folded to one line, its brackets defused.
+    """*label* folded to one line, its brackets and fence delimiters defused.
 
     Labels sit INSIDE a frame marker. Template labels are free text
     without a pattern or a length limit, so a line break or a bracket
     in one would close the marker early and forge a frame of its own.
-    Fullwidth brackets read like ASCII ones and fold the same way.
+    Fullwidth brackets read like ASCII ones and fold the same way. The
+    marker stands outside every fence, in the opener and in the closer, so
+    a fence delimiter in a label is defused like one in a body: it would
+    open a data region over the instructions that follow.
     """
-    return " ".join(label.split()).translate(_LABEL_BRACKETS)
+    return neutralize_fence_delimiters(
+        " ".join(label.split()).translate(_LABEL_BRACKETS)
+    )
 
 
 def neutralize_frame_body(text: str) -> str:
@@ -113,17 +120,32 @@ def neutralize_frame_body(text: str) -> str:
     rule posing as the user's typed text, a skill posing as a rule. Only
     the opening bracket of a marker changes (to ``(``), so the text stays
     readable, keeps its length and every other bracket — citation labels,
-    numbered markers, Markdown links — is left untouched.
+    numbered markers, Markdown links — is left untouched. The frames stand
+    outside every fence, so fence delimiters are defused as well: a rule or
+    a skill must neither close nor forge a data fence of the first message.
     """
-    return _FRAME_MARKER_OPENING.sub("(", text)
+    return neutralize_fence_delimiters(_FRAME_MARKER_OPENING.sub("(", text))
 
 
 _BLOCK_SEPARATOR = "\n\n"
 """The joint between two blocks of a composed requirement: one blank line."""
 
 
-def rule_requirement_marker(label: str) -> str:
-    """Origin marker of one attached library rule."""
+SHARED_SOURCE_KIND = "shared by another user"
+"""What a frame says about content another user shared: its source as a
+kind, never the person. Skill and rule frames both name it."""
+
+
+def rule_requirement_marker(label: str, *, shared: bool = False) -> str:
+    """Origin marker of one attached library rule.
+
+    A rule another user shared names its source after the label. The
+    marker stays a ``[Rule:`` spelling, so a body cannot forge it past the
+    neutraliser; an own rule keeps the marker every stored run was composed
+    with, so those still split.
+    """
+    if shared:
+        return f"[Rule: {label} ({SHARED_SOURCE_KIND})]"
     return f"[Rule: {label}]"
 
 
@@ -132,17 +154,19 @@ def rule_requirement_closer(label: str) -> str:
     return f"[End rule: {label}]"
 
 
-def rule_requirement_block(label: str, content: str) -> str:
+def rule_requirement_block(label: str, content: str, *, shared: bool = False) -> str:
     """The framed block one attached rule contributes (``""`` without a body).
 
     Label and body pass the frame neutraliser, so the block's own opener
-    and closer are the only markers in it.
+    and closer are the only markers in it. *shared* marks a rule another
+    user shared (:func:`rule_requirement_marker`).
     """
     body = neutralize_frame_body(content.strip())
     if not body:
         return ""
     name = neutralize_frame_label(label)
-    return f"{rule_requirement_marker(name)}\n{body}\n{rule_requirement_closer(name)}"
+    opener = rule_requirement_marker(name, shared=shared)
+    return f"{opener}\n{body}\n{rule_requirement_closer(name)}"
 
 
 def compose_requirement_blocks(
@@ -150,9 +174,9 @@ def compose_requirement_blocks(
 ) -> str:
     """Framed rule blocks in order, then the typed text under its marker.
 
-    The one place that joins a requirement: a fresh composition and one
-    that keeps rule blocks a run is already frozen under (a plan gate that
-    leaves the selection alone) produce the same text from the same parts.
+    The one place that joins a requirement: a fresh composition and a
+    read-back of the blocks a run is frozen under produce the same text
+    from the same parts.
     """
     parts = [block for block in rule_blocks if block]
     typed = neutralize_frame_body(free_text.strip())
@@ -169,7 +193,7 @@ def compose_report_requirement(
     """The requirement block, rules first, typed text last.
 
     Args:
-        free_text: What the user typed (at submit time or at the gate).
+        free_text: What the user typed.
         rules: ``(label, content)`` of each attached library rule, in
             attachment order. Labels are resolved server-side from the
             caller's own catalog — a client-supplied label would be a
@@ -188,16 +212,16 @@ def compose_report_requirement(
 
 
 def split_composed_requirement(
-    composed: str, labels: "Sequence[str]"
+    composed: str, rules: "Sequence[Mapping[str, Any]]"
 ) -> tuple[list[str], str] | None:
     """The rule blocks (one per label, in order) and the typed text of
     *composed* — or ``None`` when it is not exactly that composition.
 
     A run is frozen under the composed text, not under the catalog: the
     rule bodies it works under exist nowhere else once a template is
-    edited or deleted. Keeping a rule at a plan gate, or counting the
-    typed half for the transcript, therefore reads them back from that
-    text. The read is exact rather than heuristic because the neutraliser
+    edited or deleted. Counting the typed half for the transcript
+    therefore reads them back from that text. The read is exact rather
+    than heuristic because the neutraliser
     leaves each block's own opener and closer as the only markers in it,
     and the result must compose back to *composed* byte for byte. A text
     composed before markers were defused, or one whose parts were not
@@ -206,14 +230,18 @@ def split_composed_requirement(
     Args:
         composed: A requirement as :func:`compose_report_requirement`
             made it.
-        labels: The labels of the rules it was composed from, in
-            attachment order (the stored rule parts).
+        rules: The stored parts of the rules it was composed from, in
+            attachment order: each one's label and, for a rule another
+            user shared, ``shared`` (a part stored before that was kept
+            reads as an own rule, the marker it was composed with).
     """
     rest = composed
     blocks: list[str] = []
-    for label in labels:
+    for rule in rules:
+        label = str(rule.get("label") or "")
+        shared = bool(rule.get("shared"))
         folded = neutralize_frame_label(label)
-        opener = f"{rule_requirement_marker(folded)}\n"
+        opener = f"{rule_requirement_marker(folded, shared=shared)}\n"
         closer = f"\n{rule_requirement_closer(folded)}"
         if not rest.startswith(opener):
             return None
@@ -221,7 +249,7 @@ def split_composed_requirement(
         if end < 0:
             return None
         block = rest[: end + len(closer)]
-        if rule_requirement_block(label, block[len(opener):end]) != block:
+        if rule_requirement_block(label, block[len(opener):end], shared=shared) != block:
             return None
         blocks.append(block)
         rest = rest[end + len(closer):]
@@ -268,7 +296,9 @@ def reviews_rule_by_rule(
 
 def _rule_marker(part: "Mapping[str, Any]") -> str:
     """The marker *part*'s block opens with in the composed requirement."""
-    return rule_requirement_marker(neutralize_frame_label(str(part["label"])))
+    return rule_requirement_marker(
+        neutralize_frame_label(str(part["label"])), shared=bool(part.get("shared"))
+    )
 
 
 def rule_review_criteria(rules: "Sequence[Mapping[str, Any]]") -> tuple[str, ...]:
@@ -348,6 +378,10 @@ def rule_part(part: "Mapping[str, Any]") -> dict[str, Any]:
     if title.strip():
         shaped["title"] = title
     shaped["revision"] = int(part["revision"])
+    if part.get("shared"):
+        # Only a rule another user shared carries the flag, so an own
+        # rule's part keeps the shape every stored part has.
+        shaped["shared"] = True
     return shaped
 
 
@@ -358,9 +392,10 @@ def _rule_parts(rules: "Sequence[Mapping[str, Any]]") -> list[dict[str, Any]]:
 def requirement_parts(
     composed: str, rules: "Sequence[Mapping[str, Any]]"
 ) -> dict[str, Any] | None:
-    """What a composed requirement was made of, in the form a plan-gate
-    decision stores it: ``{"free_text", "rules": [{template_id, label,
-    title, revision}]}``.
+    """What a composed requirement was made of: ``{"free_text", "rules":
+    [{template_id, label, title, revision, shared}]}`` (``title`` and
+    ``shared`` only when set), the form a stored plan-gate decision of a
+    mission run holds as ``report_requirement``.
 
     *rules* are the stored parts; the typed text is read back from
     *composed* (:func:`split_composed_requirement`). ``None`` when the
@@ -368,9 +403,7 @@ def requirement_parts(
     offer then.
     """
     parts = _rule_parts(rules)
-    split = split_composed_requirement(
-        composed, [part["label"] for part in parts]
-    )
+    split = split_composed_requirement(composed, parts)
     if split is None:
         return None
     return {"free_text": split[1], "rules": parts}

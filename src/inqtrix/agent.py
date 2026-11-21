@@ -73,6 +73,7 @@ from inqtrix.providers.base import LLMProvider, SearchProvider, ProviderContext
 from inqtrix.report_profiles import ReportProfile
 from inqtrix.result import ResearchResult
 from inqtrix.settings import AgentSettings, ModelSettings
+from inqtrix.state import is_reader_step
 from inqtrix.strategies import (
     ClaimConsolidationStrategy,
     ClaimExtractionStrategy,
@@ -466,7 +467,7 @@ def _remaining_progress(progress_queue: Queue | None) -> Iterator[str]:
                 type(exc).__name__,
             )
             break
-        if kind == "progress" and msg != "done":
+        if kind == "progress" and is_reader_step(msg):
             yield f"> {msg}\n"
 
 
@@ -698,7 +699,7 @@ class ResearchAgent:
             while include_progress and progress_queue is not None and not future.done():
                 try:
                     kind, msg = progress_queue.get(timeout=0.3)
-                    if kind == "progress" and msg != "done":
+                    if kind == "progress" and is_reader_step(msg):
                         yield f"> {msg}\n"
                 except Empty:
                     continue
@@ -777,7 +778,7 @@ class ResearchAgent:
                     )
                 except Empty:
                     continue
-                if kind == "progress" and msg != "done":
+                if kind == "progress" and is_reader_step(msg):
                     yield f"> {msg}\n"
             for line in _remaining_progress(progress_queue):
                 yield line

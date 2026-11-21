@@ -10,7 +10,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { readStoredLocale } from './LocaleProvider'
+import { localeFromStorage, readStoredLocale, saveStoredLocale } from './LocaleProvider'
 
 const KEY = 'inqtrix.researchDesk.locale'
 
@@ -20,6 +20,31 @@ function withStorage(value: string | null) {
     setItem: () => undefined,
   })
 }
+
+describe('a device that refuses its storage', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function refusing() {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new DOMException('blocked', 'SecurityError')
+      },
+      setItem: () => {
+        throw new DOMException('blocked', 'SecurityError')
+      },
+    })
+  }
+
+  it('paints in English instead of failing', () => {
+    refusing()
+    expect(readStoredLocale()).toBe('en')
+  })
+
+  it('keeps a chosen language without failing', () => {
+    refusing()
+    expect(() => saveStoredLocale('de')).not.toThrow()
+  })
+})
 
 describe('readStoredLocale', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -46,5 +71,22 @@ describe('readStoredLocale', () => {
   it('an unreadable stored value resolves to English, never to German', () => {
     withStorage('klingon')
     expect(readStoredLocale()).toBe('en')
+  })
+})
+
+describe('a language another tab saved', () => {
+  // The desk saves the whole preference row on every change: a tab that kept
+  // an older language would send it back with its next save.
+  it.each(['de', 'en'] as const)('is taken over when it reads %s', (locale) => {
+    expect(localeFromStorage(KEY, locale)).toBe(locale)
+  })
+
+  it.each([
+    [KEY, 'klingon'],
+    [KEY, null],
+    ['inqtrix.researchDesk.theme', 'de'],
+    [null, null],
+  ] as const)('is ignored for %s = %s', (key, value) => {
+    expect(localeFromStorage(key, value)).toBeNull()
   })
 })

@@ -23,6 +23,8 @@ server/routers/*          thin, one module per surface (chat, runs, knowledge, f
 
 ## Endpoints
 
+**Request bodies.** A route that takes a JSON body reads it as one JSON object. A body that does not parse, or that parses to anything but an object (an array, a string, a number, `true`, `false` or `null`), is refused with HTTP 400 `invalid_request_error`, as a rule with the message `Invalid JSON body`; a few routes answer with a message of their own instead. One route does not refuse such a body: `POST /v1/knowledge/collections/{collection_id}/reindex` reads it as an empty object and queues the rebuild without the fields the body carried. A route that requires sign-in checks it before it reads the body, so an unauthenticated request gets 401, not 400. A route whose fields are all optional, such as `DELETE /v1/vector-indexes/{index_id}`, also accepts a request without a body. The boolean fields `stream` and `include_progress` of `/v1/chat/completions`, `incognito` of `/v1/chat/completions` and `/v1/runs`, `enable_agent_memory` of `/v1/account/preferences` and `text_truncated` of the file records under `/v1/assets` take only JSON `true` or `false`; any other value is refused with HTTP 400 and the message `Field '<name>' must be true or false.`, and a field that is left out keeps its default. `null` is refused as well, except for `stream`, where it means the default, as in the OpenAI API. The guest-link routes of shared documents and SCIM provisioning answer in their own error formats.
+
 ### Meta and discovery (always registered, unauthenticated)
 
 | Route | Method | Purpose |
@@ -110,7 +112,7 @@ See [Knowledge engine](../architecture/knowledge-engine.md) for the data model, 
 | `/v1/knowledge-session-groups` | GET | List Knowledge Desk folders for the caller/workspace. |
 | `/v1/knowledge-session-groups/{group_id}` | PUT / DELETE | Upsert or delete one Knowledge Desk folder. Delete orphans member sessions to `group_id=null`. |
 | `/v1/knowledge-sessions` | GET | List Knowledge Desk session metadata. Rows include `group_id`; `items_json` is excluded. |
-| `/v1/knowledge-sessions/{session_id}` | GET / PUT / DELETE | Load, upsert, or delete one Knowledge Desk session. PUT accepts `title`, `items_json`, `created_at`, `updated_at`, and `group_id` (`string` or `null`). |
+| `/v1/knowledge-sessions/{session_id}` | GET / PUT / DELETE | Load, upsert, or delete one Knowledge Desk session. PUT accepts `title`, `items_json`, `created_at`, `updated_at`, and `group_id` (`string` or `null`). A session id belongs to the owner of the runs stored under it: PUT answers 404 for an id whose runs another user owns, as it does for another user's session. |
 | `/v1/agent-session-groups*` | GET / PUT / DELETE | List and manage private Agent Desk session folders. |
 | `/v1/agent-sessions` | GET | List Agent Desk sessions with their small `items_json` settings body (source policy, knowledge switch, model pick), so the client compares its sessions against the real rows. |
 | `/v1/agent-sessions/{session_id}` | GET / PUT / DELETE | Load, upsert, or delete one Agent Desk session. The UI-owned `items_json` includes the session source policy; PUT also carries `title`, `created_at`, `updated_at`, and optional `group_id`. |
@@ -119,11 +121,11 @@ See [Knowledge engine](../architecture/knowledge-engine.md) for the data model, 
 | `/v1/deletion-operations/{operation_id}` | GET | Read authoritative progress for asset, group, section, vector-index, knowledge-document, or knowledge-collection deletion, or for an account erasure (read by the administrator who started it, without a workspace). |
 | `/v1/deletion-operations/{operation_id}/retry` | POST | Resume the same failed cleanup manifest (HTTP 202). |
 | `/v1/vector-indexes/{index_id}` | DELETE | Fence the index and its backing collection, then start the same durable deletion lifecycle. |
-| `/v1/editor/documents/{document_id}` | PUT | Autosave upsert of one editor document. `revision` is the client's last-synced SERVER revision plus one, and the write applies only when the stored revision is EXACTLY that base (compare-and-swap). Any other stored value answers 409 `conflict` with `current_revision` — not only a stale-or-equal counter but also a forward jump past the base, because a writer that never saw a concurrent agent patch or peer edit must rebase rather than clobber with a higher counter. |
-| `/v1/editor/documents/{document_id}/patches` | GET | Patch metadata of one editor document (no edit bodies), newest first by creation time, compared in one unit although a proposal is stamped in Unix seconds and a patch from a shared-document suggestion in epoch milliseconds; `?status=pending\|accepted\|rejected` filters. |
+| `/v1/editor/documents/{document_id}` | PUT | Autosave upsert of one editor document. `revision` is the client's last-synced SERVER revision plus one, and the write applies only when the stored revision is EXACTLY that base (compare-and-swap). Any other stored value answers 409 `conflict` with `current_revision` — not only a stale-or-equal counter but also a forward jump past the base, because a writer that never saw a concurrent agent patch or peer edit must rebase rather than clobber with a higher counter. A document in collaboration mode answers 409 `conflict` with `reason: content_mode_changed`. |
+| `/v1/editor/documents/{document_id}/patches` | GET | Patch metadata of one editor document (no edit bodies), newest first by creation time, compared in one unit although a proposal is stamped in Unix seconds and a patch from a shared-document suggestion in epoch milliseconds; `?status=pending\|accepted\|rejected` filters. A private AI patch of a collaboration document is listed only to its creator. |
 | `/v1/editor/patches/{patch_id}` | GET | One patch with its anchored edits, warnings, and the document's CURRENT revision. |
-| `/v1/editor/patches/{patch_id}:apply` | POST | Apply a pending patch server-side. Body `{"expected_revision": int}` (CAS against the document); stale revision answers 409 with `current_revision` + `revision_before`; replaying the same apply answers 200 with the stored outcome. |
-| `/v1/editor/patches/{patch_id}:reject` | POST | Reject a pending patch. Body `{"note"?: string}`; already-applied answers 409, a reject replay 200. |
+| `/v1/editor/patches/{patch_id}:apply` | POST | Apply a pending patch server-side. Body `{"expected_revision": int}` (CAS against the document); stale revision answers 409 with `current_revision` + `revision_before`; replaying the same apply answers 200 with the stored outcome. For a document in collaboration mode the body is `{"expected_sequence": int, "decision_id": uuid}` and the call needs a browser session: a private AI patch, which only its creator sees, is published once as a shared suggestion, and a shared patch is accepted; the answer carries `status`, `sequence`, `suggestion_ids` and `command_id`. Such a private patch can also be an agent proposal recorded before the document was converted, or by an earlier version at a collaboration document; the agent proposes no new one there. Further answers: 403 `reason: cookie_session_required` without a browser session, 409 `conflict` with a `reason` (among them `content_mode_changed` for a Markdown patch whose document was converted meanwhile), 413 `reason: document_too_large`, 503 `reason: collaboration_unavailable` or `collaboration_projection_unavailable`. |
+| `/v1/editor/patches/{patch_id}:reject` | POST | Reject a pending patch. Body `{"note"?: string}`; already-applied answers 409, a reject replay 200. A shared patch of a collaboration document is rejected through the collaboration service and needs `expected_sequence` and `decision_id` as for `:apply`, with the same further answers. |
 
 These routes are wired with the project-persistence tier's private
 owner/workspace scoping. The volatile memory implementation is available for
@@ -178,14 +180,16 @@ How to pass a provider of your own is in [Writing a custom auth provider](../ext
 - `research` — the classify/plan/search/evaluate/answer web-research graph.
 - `direct_llm` — straight to the active LLM provider (same path as the legacy `agent_overrides.skip_search=true`, which remains supported; conflicts return 400).
 - `knowledge` — retrieval over knowledge collections, only registered when the engine is enabled. Scope and profile travel in `knowledge_filters` (see [Retrieval profiles](../configuration/knowledge-profiles.md)). Streaming (`stream=true`) is supported: streamed chat dispatches through the `AlgorithmRegistry` like every other mode, so the cited answer streams as content chunks. The granular progress (gate rounds, grounding) is emitted only on the native `/v1/runs` SSE surface — the chat-completions stream carries the answer, not the progress narration.
-- `workspace_agent` — the staged Mission engine with plan, approval,
-  execution, synthesis, and optional canvas/editor delivery. It is registered
-  only when the agent-platform durability gate passes.
-- `agent_kernel` — the automatic conversational front door. It may answer
-  directly, use instant tools, or delegate a Mission. Registration additionally
-  requires the kernel rollout gate and a tool-calling-capable provider.
+- `agent_kernel` — the Agent Desk's engine. It may answer directly, use
+  instant tools, or delegate research and knowledge subtasks. It registers
+  only when agent runs are set up (the durable checkpoint store, or the
+  volatile escape), the kernel rollout gate passes, the agent runtime is
+  installed and the provider supports native tool calling.
+- `workspace_agent` — retired: the former staged mission engine. A submission
+  naming it returns 400 with `reason: "workflow_retired"`; its earlier runs
+  stay readable, exportable and deletable.
 
-`agent_overrides` is a strict whitelist (`extra="forbid"`, unknown keys → 400): `max_rounds`, `min_rounds`, `confidence_stop`, `report_profile`, `depth`, `agent_tier`, `max_total_seconds`, `first_round_queries`, `skip_search`, `model_tier`, `model`, `effort`. `depth` (`normal`/`deep`) is the legacy thoroughness knob and `agent_tier` (`schnell`/`gruendlich`/`tief`) its successor; a tier bridges into `depth`, and a `depth` that contradicts the tier returns 400. `model_tier` selects among operator-configured tiers; `model`/`effort` pick a concrete model for direct chat and the Agent Desk's scoped thinking nodes. In the kernel this includes the conversation turn, both quick-web LLM calls and final review; in a Mission it includes planning, synthesis, critique and answer nodes while classifiers stay on the operator tier map. Mission children inherit the selected settings before the kernel's automatic Deep effort increase. Ordinary research-graph node names remain operator configuration. See [LLM calls, model tiers, and reasoning effort](../architecture/websearch/nodes.md) for tier wiring and `/health`'s `chat_model_options` discovery.
+`agent_overrides` is a strict whitelist (`extra="forbid"`, unknown keys → 400): `max_rounds`, `min_rounds`, `confidence_stop`, `report_profile`, `depth`, `agent_tier`, `max_total_seconds`, `first_round_queries`, `skip_search`, `model_tier`, `model`, `effort`. `depth` (`normal`/`deep`) is the legacy thoroughness knob and `agent_tier` (`schnell`/`gruendlich`/`tief`) its successor; a tier bridges into `depth`, and a `depth` that contradicts the tier returns 400. `model_tier` selects among operator-configured tiers; `model`/`effort` pick a concrete model for direct chat and the Agent Desk's scoped thinking nodes. In the kernel this includes the conversation turn, both quick-web LLM calls and final review; its knowledge children and role runs inherit the selected settings before the kernel's automatic Deep effort increase, while research children keep their own model routing. Ordinary research-graph node names remain operator configuration. See [LLM calls, model tiers, and reasoning effort](../architecture/websearch/nodes.md) for tier wiring and `/health`'s `chat_model_options` discovery.
 
 ```json
 {
@@ -203,24 +207,21 @@ policy](../architecture/agent-platform.md#source-policy) for the request
 example, how the Agent Desk derives the policy, and the enforcement
 precedence.
 
-Mission plan tasks use one server-validated web contract (`web_instant` or a
-delegated `web_research` child) — see [Agent
-platform](../architecture/agent-platform.md) for when each is accepted.
-Task `params.recency` accepts only `day`, `week`, `month`, `year`, or omission.
-Task model selection belongs to the server: new plans reject `params.model_tier`,
-and editing a persisted plan removes that parameter before validating its task
-fields. Existing task records cannot forward it into child research overrides.
-The caller's `agent_overrides.model_tier` remains available for mid/high steps;
-fast steps retain their assigned tier and effort.
-Task resource budgets are deployment-owned: non-empty `budget` objects on new
-or edited plans fail with `task_budget_server_managed` instead of silently
-changing execution limits.
+The kernel searches the web through one instant search (`web_instant`, one
+search-provider call) or a delegated research child (`run_web_research`, or a
+research assignment of `delegate_batch`), whose optional `recency` accepts only
+`day`, `week`, `month`, `year`, or omission (see [Agent
+platform](../architecture/agent-platform.md#cognitive-kernel-modeagent_kernel)).
+A research child's model selection belongs to the server: it keeps its own
+routing. The caller's `agent_overrides.model_tier` remains available for
+mid/high steps; fast steps retain their assigned tier and effort.
 
 Completed Agent Desk results expose one evidence shape through
 `result.references`. Each entry retains its stable `K#`/`W#` label, canonical
 URL or knowledge identity, exact `excerpt`/`source_text` when available, and
-optional `grounded_support`. The latter is bounded provider-answer context for
-a cited web URL, not a quote from the linked page; clients must label it
+optional `grounded_support`. The latter is what the search provider's answer
+says where it cites the web URL (as a rule the line of that citation), bounded
+in length. It is not a quote from the linked page; clients must label it
 accordingly. `report_references` remains the canonical internal state key, with
 the older Agent `references` key accepted only as an export compatibility
 alias.
@@ -249,8 +250,8 @@ Clients discover features here instead of hardcoding them; the manifest is unaut
 
 | Block | Content |
 |---|---|
-| `algorithms` | Manifest of registered algorithm ids (`research`, `direct_llm`, plus `knowledge`, `workspace_agent`, and `agent_kernel` when their gates pass) with their capability dicts. |
-| `features` | Booleans: `knowledge`, `files`, `openapi`, `embedding_provider`, `document_parser`; plus, when knowledge is on: `hybrid_retrieval`, `reranker`, `contextual_retrieval`. Infrastructure-backed flags are false when the configured object store/vector store is not reachable; `document_parser` reports the server-side file parser and depends neither on knowledge nor on its vector store. |
+| `algorithms` | Manifest of registered algorithm ids (`research`, `direct_llm`, plus `knowledge` and `agent_kernel` when their gates pass) with their capability dicts. |
+| `features` | Booleans: `knowledge`, `files`, `openapi`, `embedding_provider`, `document_parser`, `agent_desk` (agent runs are set up: the Agent Desk shows, and while the kernel is missing it names `feature_status.agent_kernel.reason_code` instead of starting runs), `agent_kernel`; plus, when knowledge is on: `hybrid_retrieval`, `reranker`, `contextual_retrieval`. Infrastructure-backed flags are false when the configured object store/vector store is not reachable; `document_parser` reports the server-side file parser and depends neither on knowledge nor on its vector store. |
 | `files` | `max_file_bytes` (when files are enabled). |
 | `knowledge` | `default_embedding_model`, the annotated `embedding_catalog`, `default_top_k`, `evidence_k_max` (the final-evidence ceiling that bounds a `final_k` override), `default_profile`, `reranker_provider`, and `profiles[]` — the effective stage plan per retrieval profile including each profile's `final_k_factor` and its `degraded` stages, derived from the SAME ceiling instance the algorithm runs against. |
 | `agent` | Agent modes, permission/depth presets, tools, and the source surface. `source_controls[]` publishes `web`/`knowledge` entries with `default`, effective `available` and a `reason_code` (`operator_disabled`, `store_unreachable`) when unavailable. Clients must not render a server-disabled source as switchable. |
@@ -328,7 +329,7 @@ the API must do the same for server-side cancellation to trigger.
 
 The research graph and document re-embedding are **synchronous work on a bounded thread pool**: each active job holds one OS thread for its full duration, and you scale *out* (more worker processes) rather than *up* (thousands of threads in one process). See [Settings and environment](../configuration/settings-and-env.md) for `MAX_CONCURRENT`, the AI thread lane it sizes, and the real ceiling (provider rate limit, host CPU/RAM).
 
-Streaming disconnects and `POST /v1/runs/{run_id}/cancel` set the same cancel event. Every engine binds that event once for its whole run, so a provider call the run waits for ends at once, wherever in the run it is made; other work stops at the next safe boundary. Explicit cancellation locks and transitions the complete descendant tree, then reconciles every affected Agent plan task from the terminal run rows. A read of an older partially reconciled plan repeats that idempotent settlement, covering a process failure after the run transaction committed. Queued and waiting rows cancel immediately. Agent Desk additionally exposes `POST /v1/runs/{run_id}/tasks/{task_id}/cancel`: pending work ends immediately, research children reuse run cancellation, and an in-flight synchronous instant request records `cancel_requested`, performs no retry or result commit, and ends naturally. Hard network interruption of that synchronous provider request is out of scope.
+Streaming disconnects and `POST /v1/runs/{run_id}/cancel` set the same cancel event. Every engine binds that event once for its whole run, so a provider call the run waits for ends at once, wherever in the run it is made; other work stops at the next safe boundary. Explicit cancellation locks and transitions the complete descendant tree, then reconciles the control rows of every affected agent run that is already cancelled or failed: artifacts left `writing` become `ready` and pending approvals `rejected`; the settlement is idempotent. Queued and waiting rows cancel immediately. Hard network interruption of a synchronous provider request already in flight is out of scope.
 
 ## Deployment sizing: with or without Valkey
 

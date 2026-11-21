@@ -5,7 +5,7 @@ export type CollectionMentionState = {
 }
 
 /** Detect the active `@`-collection mention at the caret — shared by the
- * Knowledge composer, the Agent composer and the plan-gate task editor. */
+ * Knowledge composer and the Agent composer. */
 export function detectCollectionMention(
   value: string,
   caret: number,

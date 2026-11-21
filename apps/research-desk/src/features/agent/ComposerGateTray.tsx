@@ -1,11 +1,17 @@
 import { useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { ChevronDown, ExternalLink, PenLine, Search } from '@/components/icons'
+import { Search } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Chip } from '@/components/ui/chip'
 import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { useLocale } from '@/i18n/LocaleProvider'
-import { countLabel } from '@/i18n/plural'
 import { cn } from '@/lib/utils'
 import type { TranslationDictionary } from '@/i18n/translations'
 import {
@@ -25,19 +31,32 @@ import {
   type AgentRunRecord,
 } from './model'
 import type { ResearchRunStatus } from '@/features/researchRuns/types'
-import { usePatchReview } from './patch/usePatchReview'
-import { usePlanApproval } from './plan/usePlanApproval'
 import type { AgentTimelineActions } from './timeline/AgentTimeline'
-import { discoveryProbeDisplay, kernelToolLabel } from './activityPresentation'
-import { canGrantForRun, fullDelegationText, gateActionRow, gateKnowledgeScope, toolGateExplanation, toolGateHeadline, replanGateSummary } from './gateSummary'
+import { kernelToolLabel } from './activityPresentation'
+import {
+  ANSWER_FORM_ARG,
+  DEFAULT_SEARCH_ANSWER_FORM,
+  SEARCH_ANSWER_FORMS,
+  canGrantForRun,
+  choosesSearchAnswerForm,
+  editableTextArgs,
+  editedToolArgs,
+  fullDelegationText,
+  gateActionRow,
+  gateKnowledgeScope,
+  initialEditDraft,
+  searchAnswerFormLabel,
+  toolGateExplanation,
+  toolGateHeadline,
+} from './gateSummary'
 
 /**
- * The ONE gate surface: every pending human decision of the
- * active run — clarification, plan/replan approval, discovery approval,
- * patch review — grows out of the composer as a tray, is answered at
- * the input locus, and afterwards appears in the transcript as a
- * user-side decision entry (the events append the markers). At most one
- * gate is pending at a time (runs are sequentially gated).
+ * The ONE gate surface: every pending human decision of the active run —
+ * a clarification, a tool approval, and the same two of a delegated child —
+ * grows out of the composer as a tray, is answered at the input locus, and
+ * afterwards appears in the transcript as a user-side decision entry (the
+ * events append the markers). At most one gate is pending at a time (runs
+ * are sequentially gated).
  */
 export function ComposerGateTray({
   actions,
@@ -80,21 +99,6 @@ export function ComposerGateTray({
                   )}
                 t={t}
               />
-            )}
-            {gate.kind === 'plan' && (
-              <PlanGate actions={actions} canEdit={canEdit} run={run} t={t} />
-            )}
-            {gate.kind === 'discovery' && (
-              <DiscoveryGate
-                approval={gate.approval}
-                actions={actions}
-                canEdit={canEdit}
-                run={run}
-                t={t}
-              />
-            )}
-            {gate.kind === 'patch' && (
-              <PatchGate actions={actions} canEdit={canEdit} run={run} t={t} />
             )}
             {gate.kind === 'tool' && (
               <ToolGate
@@ -146,9 +150,6 @@ export function ComposerGateTray({
 
 type PendingGate =
   | { kind: 'clarification'; clarification: AgentClarificationRecord }
-  | { kind: 'plan'; approval: AgentApprovalRecord }
-  | { kind: 'discovery'; approval: AgentApprovalRecord }
-  | { kind: 'patch'; approval: AgentApprovalRecord }
   | { kind: 'tool'; approval: AgentApprovalRecord }
   | {
     kind: 'child_clarification'
@@ -167,20 +168,19 @@ type PendingGate =
  * The run's own rows come first; a delegated child parked on a human
  * decision surfaces after them — gated on the child's CURRENT status,
  * so a stale pending row can never re-open a gate the child has already
- * left. */
+ * left. Only a tool approval has a tray: an approval of another kind (a
+ * parked run of the retired mission engine waiting for its plan) offers
+ * nothing this desk could decide. */
 export function pendingGate(run: AgentRunRecord): PendingGate | null {
   if (!isActiveAgentRun(run.status)) return null
   const clarification = run.clarifications.find(
     (item) => item.status === 'pending',
   )
   if (clarification) return { clarification, kind: 'clarification' }
-  const approval = run.approvals.find((item) => item.status === 'pending')
-  if (approval) {
-    if (approval.kind === 'discovery') return { approval, kind: 'discovery' }
-    if (approval.kind === 'patch') return { approval, kind: 'patch' }
-    if (approval.kind === 'tool') return { approval, kind: 'tool' }
-    return { approval, kind: 'plan' }
-  }
+  const approval = run.approvals.find(
+    (item) => item.status === 'pending' && item.kind === 'tool',
+  )
+  if (approval) return { approval, kind: 'tool' }
   for (const child of Object.values(run.children)) {
     if (!child.runStatus || !isGateAgentRun(child.runStatus as ResearchRunStatus)) continue
     const gates = run.childGates[child.childRunId]
@@ -198,7 +198,7 @@ export function pendingGate(run: AgentRunRecord): PendingGate | null {
       }
     }
     const childApproval = gates.approvals.find(
-      (item) => item.status === 'pending',
+      (item) => item.status === 'pending' && item.kind === 'tool',
     )
     if (childApproval) {
       return {
@@ -212,10 +212,6 @@ export function pendingGate(run: AgentRunRecord): PendingGate | null {
   return null
 }
 
-/** What the parked child is working ON, from the best source the parent
- * holds: the plan task it fulfils, else the delegation's tool row in the
- * transcript (its args preview carries the delegated question), else the
- * child's last progress message. */
 /**
  * Whether the edit control should appear DISABLED with its reason.
  *
@@ -237,6 +233,10 @@ export function toolEditIsBlockedByMultiAction(
   return canEdit && proposedActions > 1
 }
 
+/** What the parked child is working ON, from the best source the parent
+ * holds: the child's full question, else the delegation's tool row in the
+ * transcript (its args preview carries the delegated question), else the
+ * child's last progress message. */
 function childGateLabel(
   run: AgentRunRecord,
   child: AgentRunRecord['children'][string],
@@ -250,10 +250,6 @@ function childGateLabel(
   if (question) {
     return fullDelegationText(run.approvals, question) ?? question
   }
-  const planTask = run.plan?.tasks.find(
-    (task) => task.childRunId === child.childRunId,
-  )
-  if (planTask) return planTask.title || planTask.objective
   const toolCallId = child.taskId.split(':')[0]
   const toolRow = toolCallId
     ? run.stepLog.find((entry) => entry.activityKey === `tool:${toolCallId}`)
@@ -356,10 +352,9 @@ function ChildGateContext({
 }
 
 /**
- * Approve/reject for a gate raised INSIDE a delegated child run. Kept
- * deliberately compact: the child's own plan is not fetched here — the
- * delegation objective plus the proposed actions are the decision
- * context. Argument editing stays a root-gate affordance.
+ * Approve/reject for a tool gate raised INSIDE a delegated child run. Kept
+ * deliberately compact: the delegation objective plus the proposed actions
+ * are the decision context. Argument editing stays a root-gate affordance.
  */
 function ChildApprovalGate({
   approval,
@@ -378,11 +373,6 @@ function ChildApprovalGate({
   const proposed = Array.isArray(approval.payload.actions)
     ? (approval.payload.actions as Record<string, unknown>[])
     : []
-  const probes = Array.isArray(approval.payload.probes)
-    ? (approval.payload.probes as Record<string, unknown>[])
-    : []
-  // A replan says why the plan grew and what it adds.
-  const replan = replanGateSummary(approval.payload, t)
   const decide = (decision: 'approve' | 'reject') => {
     if (!canEdit || submitting) return
     setSubmitting(true)
@@ -393,30 +383,8 @@ function ChildApprovalGate({
       <GateTitle pulse title={t.agent.tray.childApprovalTitle} tone="warning" />
       <ChildGateContext label={childLabel} t={t} />
       <p className="t-meta text-muted-foreground">
-        {approval.kind === 'tool'
-          ? t.agent.tray.childToolHint
-          : approval.kind === 'discovery'
-            ? t.agent.tray.childDiscoveryHint
-            : approval.kind === 'replan'
-              ? replan.hint
-              : t.agent.tray.childPlanHint}
+        {t.agent.tray.childToolHint}
       </p>
-      {approval.kind === 'replan' && replan.rows.length > 0 && (
-        <div className="mt-1.5">
-          <p className="t-meta text-muted-foreground">{replan.heading}</p>
-          <ul className="mt-0.5 space-y-0.5">
-            {replan.rows.map((row, index) => (
-              <li
-                className="flex items-start gap-1.5 t-meta text-foreground/85"
-                key={index}
-              >
-                <Search className="mt-0.5 icon-xs shrink-0 text-muted-foreground" />
-                <span className="min-w-0 break-words">{row}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
       {proposed.length > 0 && (
         <ul className="mt-1.5 space-y-1">
           {proposed.map((action, index) => {
@@ -434,25 +402,11 @@ function ChildApprovalGate({
                       {row.text}
                     </span>
                   )}
-                </span>
-              </li>
-            )
-          })}
-        </ul>
-      )}
-      {probes.length > 0 && (
-        <ul className="mt-1.5 space-y-0.5">
-          {probes.map((probe, index) => {
-            const display = discoveryProbeDisplay(probe, t)
-            return (
-              <li
-                className="flex items-start gap-1.5 t-meta text-foreground/85"
-                key={index}
-              >
-                <Search className="mt-0.5 icon-xs shrink-0 text-muted-foreground" />
-                <span className="min-w-0 break-words">
-                  <span className="font-medium">{display.title}</span>
-                  {display.detail ? ` · ${display.detail}` : ''}
+                  {row.note && (
+                    <span className="mt-0.5 block text-muted-foreground">
+                      {row.note}
+                    </span>
+                  )}
                 </span>
               </li>
             )
@@ -600,227 +554,8 @@ export function StructuredClarificationForm({
   )
 }
 
-function PlanGate({
-  actions,
-  canEdit,
-  run,
-  t,
-}: {
-  actions: AgentTimelineActions
-  canEdit: boolean
-  run: AgentRunRecord
-  t: TranslationDictionary
-}) {
-  const [queriesExpanded, setQueriesExpanded] = useState(false)
-  // THE one decision lane (shared with the canvas plan tab): approving
-  // with a dirty draft becomes `decision:'edit'` carrying the edits —
-  // a raw decideApproval here would silently DROP changes made in the
-  // plan tab before the user pressed Freigeben in the tray.
-  const planApproval = usePlanApproval({
-    decideApproval: actions.decideApproval,
-    draft: actions.planDrafts[run.runId] ?? null,
-    onDraftChange: (draft) => actions.setPlanDraft(run.runId, draft),
-    run,
-  })
-  const decide = (decision: 'approve' | 'reject') => {
-    if (!canEdit) return
-    void planApproval.decide(decision)
-  }
-  const submitting = planApproval.submitting
-  const rejectPending = planApproval.draft?.rejectPending ?? false
-  const tasks = run.plan?.tasks ?? []
-  const counts = {
-    internal: tasks.filter(
-      (task) =>
-        task.toolKind === 'rag_query' || task.toolKind === 'file_analysis',
-    ).length,
-    synthesis: tasks.filter((task) => task.toolKind === 'synthesis').length,
-    web: tasks.filter(
-      (task) =>
-        task.toolKind === 'web_research' || task.toolKind === 'web_instant',
-    ).length,
-  }
-  // Concrete numbers against rubber-stamping: the user sees WHAT they
-  // approve before the primary action even exists.
-  const summary = t.agent.tray.planSummary
-    .replace('{version}', String(run.plan?.version ?? 1))
-    .replace('{tasks}', () => countLabel(tasks.length, t.agent.timeline.taskCountOne, t.agent.timeline.taskCount))
-    .replace('{internal}', String(counts.internal))
-    .replace('{web}', String(counts.web))
-    .replace('{synthesis}', String(counts.synthesis))
-  // Informed web consent: the approved plan
-  // is the ONLY surface where Standard mode consents to web searches —
-  // the concrete queries therefore show INLINE, not just behind "Plan
-  // ansehen".
-  const webQueries = tasks
-    .filter(
-      (task) =>
-        task.toolKind === 'web_research' || task.toolKind === 'web_instant',
-    )
-    .flatMap((task) => task.queries)
-  const shownQueries = queriesExpanded ? webQueries : webQueries.slice(0, 1)
-  return (
-    <div>
-      <GateTitle pulse title={t.agent.tray.planTitle} tone="brand" />
-      <p className="mt-1 t-meta tabular-nums text-foreground/90">{summary}</p>
-      {shownQueries.length > 0 && (
-        <div className="mt-1.5 space-y-0.5">
-          {shownQueries.map((query) => (
-            <p
-              className="flex min-w-0 items-center gap-1.5 t-meta text-foreground/85"
-              key={query}
-            >
-              <Search className="icon-xs shrink-0 text-muted-foreground" />
-              <span className={cn('min-w-0 break-words', !queriesExpanded && 'line-clamp-2')}>
-                {query}
-              </span>
-            </p>
-          ))}
-          {webQueries.length > 0 && (
-            <button
-              aria-expanded={queriesExpanded}
-              className="flex items-center gap-1 t-hint font-medium text-muted-foreground transition-colors hover:text-foreground"
-              onClick={() => setQueriesExpanded((current) => !current)}
-              type="button"
-            >
-              {queriesExpanded
-                ? t.agent.tray.fewerQueries
-                : countLabel(
-                  webQueries.length,
-                  t.agent.tray.expandQueriesOne,
-                  t.agent.tray.expandQueries,
-                )}
-              <ChevronDown
-                className={cn(
-                  'icon-xs transition-transform',
-                  queriesExpanded && 'rotate-180',
-                )}
-              />
-            </button>
-          )}
-        </div>
-      )}
-      {planApproval.error && (
-        <p className="mt-1 break-words t-meta-sm text-destructive">
-          {planApproval.error}
-        </p>
-      )}
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <Button
-          className="h-7 gap-1 bg-brand px-2.5 text-xs text-brand-foreground hover:bg-brand/90"
-          onClick={() =>
-            actions.onOpenCanvas({ runId: run.runId, view: 'plan' })}
-          size="sm"
-          type="button"
-        >
-          <ExternalLink className="size-3" />
-          {t.agent.tray.viewPlan}
-        </Button>
-        {/* One decision at a time: while a rejection note is being
-            written in the plan tab, this bar must not offer a plain
-            approve — the click would land, the note would be gone, and
-            nothing would say so. The intent lives in the shared draft,
-            so both surfaces see it. */}
-        {!rejectPending && (
-          <>
-            <Button
-              className="h-7 px-2.5 text-xs"
-              disabled={!canEdit || submitting}
-              onClick={() => decide('approve')}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              {t.agent.timeline.approve}
-            </Button>
-            <Button
-              className="h-7 px-2.5 text-xs text-muted-foreground hover:text-destructive"
-              disabled={!canEdit || submitting}
-              onClick={() => decide('reject')}
-              size="sm"
-              type="button"
-              variant="ghost"
-            >
-              {t.agent.timeline.reject}
-            </Button>
-          </>
-        )}
-        {canEdit && (
-          <span className="t-hint text-muted-foreground">
-            {rejectPending
-              ? t.agent.tray.rejectPendingHint
-              : t.agent.tray.editHint}
-          </span>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function DiscoveryGate({
-  actions,
-  approval,
-  canEdit,
-  run,
-  t,
-}: {
-  actions: AgentTimelineActions
-  approval: AgentApprovalRecord
-  canEdit: boolean
-  run: AgentRunRecord
-  t: TranslationDictionary
-}) {
-  const [submitting, setSubmitting] = useState(false)
-  const probes = Array.isArray(approval.payload.probes)
-    ? (approval.payload.probes as Record<string, unknown>[])
-    : []
-  const decide = (decision: 'approve' | 'reject') => {
-    if (!canEdit || submitting) return
-    setSubmitting(true)
-    void actions
-      .decideApproval(run.runId, approval.approvalId, { decision })
-      .finally(() => setSubmitting(false))
-  }
-  return (
-    <div>
-      <GateTitle pulse title={t.agent.timeline.waitingApprovalTitle} tone="warning" />
-      <p className="mt-1 t-meta text-muted-foreground">
-        {t.agent.timeline.discoveryApprovalHint}
-      </p>
-      <ul className="mt-1.5 space-y-0.5">
-        {probes.map((probe, index) => (
-          <DiscoveryProbeRow key={index} probe={probe} t={t} />
-        ))}
-      </ul>
-      <div className="mt-2 flex items-center gap-1.5">
-        <Button
-          className="h-7 bg-brand px-2.5 text-xs text-brand-foreground hover:bg-brand/90"
-          disabled={!canEdit || submitting}
-          onClick={() => decide('approve')}
-          size="sm"
-          type="button"
-        >
-          {t.agent.timeline.approve}
-        </Button>
-        <Button
-          className="h-7 px-2.5 text-xs"
-          disabled={!canEdit || submitting}
-          onClick={() => decide('reject')}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          {t.agent.timeline.reject}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
 /** The kernel's per-tool consent gate (Standard keeps web contact
- * behind an approval). Rendered as a plan gate before, whose approve
- * button silently did nothing — usePlanApproval only decides
- * plan/replan approvals. */
+ * behind an approval). */
 function ToolGate({
   actions,
   approval,
@@ -844,14 +579,14 @@ function ToolGate({
   // Editable only when the gate proposes exactly ONE action (backend
   // constraint: _validated_tool_edit rejects multi-action edits and cannot
   // swap the tool); v1 edits string-valued args — the web query is the case
-  // that matters — and passes non-string args through unchanged.
+  // that matters — and passes non-string args through unchanged. The form
+  // of a web search answer is a choice among its names, never free text,
+  // and is offered also where the call names none.
   const single = proposed.length === 1 ? proposed[0] : null
-  const singleArgs =
-    (single?.args as Record<string, unknown> | undefined) ?? {}
-  const editableKeys = Object.keys(singleArgs).filter(
-    (key) => typeof singleArgs[key] === 'string',
-  )
-  const canEditArgs = Boolean(single) && canEdit && editableKeys.length > 0
+  const editableKeys = editableTextArgs(single)
+  const choosesForm = choosesSearchAnswerForm(single)
+  const canEditArgs =
+    Boolean(single) && canEdit && (editableKeys.length > 0 || choosesForm)
   // A gate proposing SEVERAL actions cannot be edited — the HITL resume
   // contract carries one action per decision, and swapping a tool would
   // grant something the gate never showed. An absent button would read
@@ -875,23 +610,17 @@ function ToolGate({
   const submitEdit = () => {
     if (!single || !canEdit || submitting) return
     setSubmitting(true)
-    const args: Record<string, unknown> = { ...singleArgs }
-    for (const key of editableKeys) {
-      if (key in draft) args[key] = draft[key]
-    }
     void actions
       .decideApproval(run.runId, approval.approvalId, {
         decision: 'edit',
-        actions: [{ tool: String(single.tool ?? ''), args }],
+        actions: [
+          { tool: String(single.tool ?? ''), args: editedToolArgs(single, draft) },
+        ],
       })
       .finally(() => setSubmitting(false))
   }
   const startEditing = () => {
-    setDraft(
-      Object.fromEntries(
-        editableKeys.map((key) => [key, String(singleArgs[key] ?? '')]),
-      ),
-    )
+    setDraft(initialEditDraft(single))
     setEditing(true)
   }
   return (
@@ -910,25 +639,13 @@ function ToolGate({
         </p>
       )}
       {editing && single ? (
-        <div className="mt-1.5 space-y-1.5">
-          <p className="t-meta font-medium text-foreground/85">
-            {kernelToolLabel(String(single.tool ?? ''), t)}
-          </p>
-          {editableKeys.map((key) => (
-            <label className="block" key={key}>
-              <span className="t-hint text-muted-foreground">{key}</span>
-              <Input
-                className="mt-0.5 h-7 text-xs"
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    [key]: event.target.value,
-                  }))}
-                value={draft[key] ?? ''}
-              />
-            </label>
-          ))}
-        </div>
+        <ToolEditFields
+          action={single}
+          draft={draft}
+          onChange={(key, value) =>
+            setDraft((current) => ({ ...current, [key]: value }))}
+          t={t}
+        />
       ) : (
         <ul className="mt-1.5 space-y-1">
           {proposed.map((action, index) => {
@@ -947,6 +664,11 @@ function ToolGate({
                   {row.text && (
                     <span className="mt-0.5 block whitespace-pre-wrap">
                       {row.text}
+                    </span>
+                  )}
+                  {row.note && (
+                    <span className="mt-0.5 block text-muted-foreground">
+                      {row.note}
                     </span>
                   )}
                   {row.items.length > 0 && (
@@ -1059,97 +781,63 @@ function ToolGate({
 }
 
 
-function DiscoveryProbeRow({
-  probe,
+/**
+ * The fields of an edited tool call: every text argument as a text field,
+ * and for a web search the form of its answer as a choice among the names
+ * the search takes, never as free text.
+ */
+export function ToolEditFields({
+  action,
+  draft,
+  onChange,
   t,
 }: {
-  probe: Record<string, unknown>
+  action: Record<string, unknown>
+  draft: Record<string, string>
+  onChange: (key: string, value: string) => void
   t: TranslationDictionary
 }) {
-  const display = discoveryProbeDisplay(probe, t)
   return (
-    <li className="flex items-start gap-1.5 t-meta text-foreground/85">
-      <Search className="mt-0.5 icon-xs shrink-0 text-muted-foreground" />
-      <span className="min-w-0 break-words">
-        <span className="font-medium">{display.title}</span>
-        {display.detail ? ` · ${display.detail}` : ''}
-      </span>
-    </li>
-  )
-}
-
-function PatchGate({
-  actions,
-  canEdit,
-  run,
-  t,
-}: {
-  actions: AgentTimelineActions
-  canEdit: boolean
-  run: AgentRunRecord
-  t: TranslationDictionary
-}) {
-  const review = usePatchReview({
-    actions: {
-      applyPatch: actions.applyPatch,
-      decideApproval: actions.decideApproval,
-      rejectPatch: actions.rejectPatch,
-    },
-    run,
-  })
-  const patch = run.patch
-  if (!patch || !run.patchId) return null
-  return (
-    <div>
-      <GateTitle pulse title={t.agent.patch.title} tone="brand" />
-      <p className="mt-1 t-meta text-foreground/90">
-        {countLabel(
-          patch.edits.length,
-          t.agent.patch.editCountOne,
-          t.agent.patch.editCount,
-        )}
-        {patch.summary ? ` · ${patch.summary}` : ''}
+    <div className="mt-1.5 space-y-1.5">
+      <p className="t-meta font-medium text-foreground/85">
+        {kernelToolLabel(String(action.tool ?? ''), t)}
       </p>
-      {review.notice && (
-        <p className="mt-1 t-meta-sm text-warning">{review.notice}</p>
+      {editableTextArgs(action).map((key) => (
+        <label className="block" key={key}>
+          <span className="t-hint text-muted-foreground">{key}</span>
+          <Input
+            className="mt-0.5 h-7 text-xs"
+            onChange={(event) => onChange(key, event.target.value)}
+            value={draft[key] ?? ''}
+          />
+        </label>
+      ))}
+      {choosesSearchAnswerForm(action) && (
+        <label className="block">
+          <span className="t-hint text-muted-foreground">
+            {t.agent.timeline.gateSearchFormLabel}
+          </span>
+          <Select
+            onValueChange={(value) => onChange(ANSWER_FORM_ARG, value)}
+            value={draft[ANSWER_FORM_ARG] ?? DEFAULT_SEARCH_ANSWER_FORM}
+          >
+            <SelectTrigger
+              aria-label={t.agent.timeline.gateSearchFormLabel}
+              className="mt-0.5"
+              density="table"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SEARCH_ANSWER_FORMS.map((form) => (
+                <SelectItem key={form} value={form}>
+                  {searchAnswerFormLabel(form, t)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </label>
       )}
-      <div className="mt-2 flex items-center gap-1.5">
-        <Button
-          className="h-7 gap-1 bg-brand px-2.5 text-xs text-brand-foreground hover:bg-brand/90"
-          onClick={() =>
-            run.patchId
-            && actions.onOpenCanvas({
-              patchId: run.patchId,
-              runId: run.runId,
-              view: 'patch',
-            })}
-          size="sm"
-          type="button"
-        >
-          <PenLine className="size-3" />
-          {t.agent.tray.view}
-        </Button>
-        <Button
-          className="h-7 px-2.5 text-xs"
-          disabled={!canEdit || review.submitting}
-          onClick={() => void review.approveAndApply()}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          {t.agent.patch.applyAndApprove}
-        </Button>
-        <Button
-          className="h-7 px-2.5 text-xs text-muted-foreground hover:text-destructive"
-          disabled={!canEdit || review.submitting}
-          onClick={() => void review.reject()}
-          size="sm"
-          type="button"
-          variant="ghost"
-        >
-          {t.agent.timeline.reject}
-        </Button>
-      </div>
     </div>
   )
 }

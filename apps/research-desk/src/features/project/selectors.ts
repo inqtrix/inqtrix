@@ -24,6 +24,7 @@ import type {
   VectorIndexRecord,
 } from './types'
 import { type JobPhase, type LocalizedText, type ResearchJob } from '@/features/researchDesk/types'
+import { reportProfileOf } from '@/features/researchDesk/components/Composer'
 import type { ReferenceDoc } from '@/features/files/referenceBlocks'
 import { sortExplorerFolders, sortExplorerItems } from './explorerSort'
 import {
@@ -1109,6 +1110,12 @@ export function researchRunToJob(run: ResearchRunRecord, locale: Locale): Resear
     metrics: run.metrics,
     phaseVisitCounts: phaseVisitCountsFromEvents(run),
     queueNote: run.summary.queueNote ? text(run.summary.queueNote) : undefined,
+    // The server stores the request as admitted (`report_profile`); a run
+    // the demo starts in the browser keeps the composer's request
+    // (`reportProfile`). A run that stored neither is not given one by guess.
+    reportProfile: reportProfileOf(run.agentOverrides?.report_profile)
+      ?? reportProfileOf(run.agentOverrides?.reportProfile)
+      ?? undefined,
     score: run.summary.score,
     startedAt: run.startedAt ? formatTimeOfDay(run.startedAt, locale) : undefined,
     startedAtIso: run.startedAt,
@@ -1230,7 +1237,7 @@ function phaseVisitCountsFromEvents(run: ResearchRunRecord): Record<JobPhase, nu
   let previousPhase: JobPhase | null = null
 
   for (const event of run.events.filter(isDisplayableResearchEvent)) {
-    const phase = event.phase ?? phaseFromEventTitle(event.title)
+    const phase = event.phase
     if (!phase || phase === previousPhase) continue
 
     counts[phase] += 1
@@ -1252,29 +1259,6 @@ function emptyPhaseVisitCounts(): Record<JobPhase, number> {
     planning: 0,
     search: 0,
   }
-}
-
-function phaseFromEventTitle(title: string): JobPhase | undefined {
-  const normalized = title.trim()
-  if (!normalized) return undefined
-
-  if (/\b(analysiere|analyzing|analyseziele|analysis goals|analysis targets|websuche erforderlich|web search required|detected analysis)\b/i.test(normalized)) {
-    return 'analysis'
-  }
-  if (/\b(plane suchanfragen|planning search queries|neue suchanfragen|suchanfragen generiert|generated \d+ new search queries|generated .* search queries)\b/i.test(normalized)) {
-    return 'planning'
-  }
-  if (/\b(durchsuche|searching \d+|suchantworten verarbeitet|processed \d+ search responses|referenzen gesammelt|references|evidence units|evidence records|evidence-records|evidenz|claims-lage|claim status|report evidence|source mix|quellenmix|related questions|verwandte fragen|semantically grouping)\b/i.test(normalized)) {
-    return 'search'
-  }
-  if (/\b(formuliere|formulating answer|writing report|preparing final report|schreibe bericht|run completed|bericht wird|answer)\b/i.test(normalized)) {
-    return 'answer'
-  }
-  if (/\b(bewerte|evaluating|confidence|vertrauen|weitere recherche|more research|research completed|recherche abgeschlossen|contradiction|contradictions|widerspruch|moegliche erklaerungen|mögliche erklärungen|quality)\b/i.test(normalized)) {
-    return 'evaluation'
-  }
-
-  return undefined
 }
 
 function formatDuration(seconds: number) {

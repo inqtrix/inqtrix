@@ -310,8 +310,8 @@ def collect(
                 "turns": [{k: v for k, v in turn.items() if k != "user"} for turn in ordered],
             })
     # One identity under several keys is one response contract when a schema
-    # names it, when only the mode differs (a mission's review and a kernel's
-    # review ask the same question) or when all are tool conversations, which a
+    # names it, when only the mode differs (one review recorded under two modes
+    # asks the same question) or when all are tool conversations, which a
     # replay tells apart by the tools a request offers. Left apart they would be
     # ambiguous and stay unmatched. Anything else stays ambiguous and is reported.
     owners: dict[str, list[str]] = defaultdict(list)

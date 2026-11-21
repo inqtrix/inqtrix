@@ -9,7 +9,7 @@ import {
 } from '@/components/ui/animated-panel'
 import { useAnimatedResizablePanelCollapse } from '@/components/ui/animated-panel-motion'
 import { ResponsiveSidePanel } from '@/components/ui/responsive-side-panel'
-import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
+import type { CreateResearchRunRequest, LastResearchProfile } from '@/features/researchRuns/types'
 import { ReportPanel } from '@/features/report/ReportPanel'
 import type { ResearchRunRecord } from '@/features/project/types'
 import { useLocale } from '@/i18n/LocaleProvider'
@@ -36,11 +36,15 @@ type ResearchWorkspaceProps = {
    * while the auth session is still resolving, instead of a silent no-op. */
   isSubmitDisabled: boolean
   jobs: ResearchJob[]
+  /** The report profile the composer starts with: the user's last pick. */
+  lastReportProfile: LastResearchProfile
   onActiveFilterChange: (filter: JobFilter) => void
   onCancelJob: (jobId: string) => void
   onAuthenticationRequired: () => void
   onComposerSubmit: (request: CreateResearchRunRequest) => Promise<ResearchSubmissionOutcome>
   onComposerVisibleChange: (isComposerVisible: boolean) => void
+  /** The user picked a report profile in the composer menu. */
+  onReportProfileChange: (profile: Exclude<LastResearchProfile, ''>) => void
   onResearchQuestionChange: (question: string) => void
   researchQuestion: string
   onDeleteJob: (jobId: string) => void
@@ -78,11 +82,13 @@ export function ResearchWorkspace({
   isReportVisible,
   isSubmitDisabled,
   jobs,
+  lastReportProfile,
   onActiveFilterChange,
   onAuthenticationRequired,
   onCancelJob,
   onComposerSubmit,
   onComposerVisibleChange,
+  onReportProfileChange,
   onResearchQuestionChange,
   researchQuestion,
   onDeleteJob,
@@ -147,11 +153,13 @@ export function ResearchWorkspace({
       isReportVisible={controlReportVisible}
       isSubmitDisabled={isSubmitDisabled}
       jobs={jobs}
+      lastReportProfile={lastReportProfile}
       onActiveFilterChange={onActiveFilterChange}
       onAuthenticationRequired={onAuthenticationRequired}
       onCancelJob={onCancelJob}
       onComposerSubmit={onComposerSubmit}
       onComposerVisibleChange={onComposerVisibleChange}
+      onReportProfileChange={onReportProfileChange}
       onReportVisibleChange={handleReportVisibleChange}
       reportPanelId={RESEARCH_REPORT_PANEL_ID}
       onResearchQuestionChange={onResearchQuestionChange}

@@ -218,7 +218,7 @@ class AuditEntry:
         detail: Small free-form context (requested permission, route).
             Must never contain secrets or full request bodies.
         actor_type: ``user`` (default, every direct principal action),
-            ``agent`` — actions a workspace-agent run performs on the
+            ``agent`` — actions an agent run performs on the
             owner's behalf (``agent.*`` actions from the agent runtime),
             or ``provisioning`` for lifecycle changes the identity provider
             makes through provisioning, without a user id.

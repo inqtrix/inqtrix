@@ -14,7 +14,6 @@ function waitingForChildren(child: Record<string, unknown>): AgentRunRecord {
       run_child: { childRunId: 'run_child', taskId: 'call_1', ...child },
     },
     status: 'waiting_for_children',
-    taskStates: {},
   } as unknown as AgentRunRecord
 }
 
@@ -28,27 +27,26 @@ describe('activityText while children work', () => {
         waitingForChildren({
           runStatus: 'running',
           snapshot: { phase: 'execution' },
-          openTasks: [5],
           checkedAnswers: 12,
         }),
         t,
         'de',
       ),
-    ).toBe('Unterauftrag · Aufgabe 6 · 12 Belege geprüft')
+    ).toBe('Unterauftrag · Führt Aufgaben aus · 12 Belege geprüft')
   })
 
-  it('names the parallel wave through the same path', () => {
+  it('names the latest step of a role child through the same path', () => {
     expect(
       activityText(
         waitingForChildren({
           runStatus: 'running',
-          snapshot: { phase: 'execution' },
-          openTasks: [0, 1, 2, 3, 4],
+          lastTool: 'read_evidence',
+          toolCalls: 3,
         }),
         t,
         'de',
       ),
-    ).toBe('Unterauftrag · 5 Aufgaben parallel')
+    ).toBe('Unterauftrag · Belege nachlesen · 3 Schritte')
   })
 
   it('falls through when the child has reported nothing yet', () => {
@@ -66,7 +64,6 @@ describe('activityText shows the server label as the server wrote it', () => {
   it('passes a discarded critic revision through unchanged', () => {
     const run = {
       status: 'running',
-      taskStates: {},
       children: {},
       activity: {
         kind: 'critic_revision_discarded',
@@ -84,7 +81,6 @@ describe('activityText shows the server label as the server wrote it', () => {
   it('passes an English run label through unchanged too', () => {
     const run = {
       status: 'running',
-      taskStates: {},
       children: {},
       activity: {
         kind: 'replan_invalid',
@@ -110,7 +106,6 @@ describe('activityText shows the server label as the server wrote it', () => {
     ]) {
       const run = {
         status: 'running',
-        taskStates: {},
         children: {},
         activity: { kind: 'critic_research_exhausted', label },
       } as unknown as AgentRunRecord
@@ -121,7 +116,7 @@ describe('activityText shows the server label as the server wrote it', () => {
 
 describe('activityText for kernel tool rows', () => {
   const running = (activity: Record<string, unknown>): AgentRunRecord =>
-    ({ children: {}, status: 'running', taskStates: {}, activity }) as unknown as AgentRunRecord
+    ({ children: {}, status: 'running', activity }) as unknown as AgentRunRecord
 
   it('names the kernel tool and its subject instead of "Durchsucht Quellen"', () => {
     // The regression: a delegation row read "Durchsucht Quellen · <Auftrag>"

@@ -1,6 +1,6 @@
 /**
- * THE canvas reading width. Every canvas view (report, plan, evidence,
- * run overview, task detail, diff, patch) centers its content in this
+ * THE canvas reading width. Every canvas view (document, evidence, file,
+ * run overview, diff) centers its content in this
  * one measure so tab switches never jump between widths — `max-w-4xl`
  * matches the inline chat-answer block, keeping the same text at the
  * same measure inline and in canvas. Change it HERE, never per view.

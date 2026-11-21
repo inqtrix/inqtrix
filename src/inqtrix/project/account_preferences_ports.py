@@ -39,6 +39,13 @@ class AccountPreferences:
             silently raise agent spend. A tier rather than a model id,
             because this row follows the user across stacks where a concrete
             id may not exist.
+        last_research_profile: The report profile last picked in the
+            research composer — ``''`` (no pick yet), ``schnell``,
+            ``compact`` or ``deep``. The composer starts with it.
+        last_agent_tier: The Stufe last picked in the Agent Desk composer —
+            ``''`` (no pick yet), ``schnell``, ``gruendlich`` or ``tief``.
+            The composer starts with it while the server publishes it. The
+            server derives nothing from either value.
         updated_at: Unix timestamp of the last save.
         tenant_id: The tenant scope (RLS).
     """
@@ -53,6 +60,8 @@ class AccountPreferences:
     enable_agent_memory: bool = False
     chat_model_tier: str = ""
     agent_model_tier: str = ""
+    last_research_profile: str = ""
+    last_agent_tier: str = ""
     tenant_id: str = "default"
 
 
@@ -79,6 +88,8 @@ class AccountPreferencesStore(Protocol):
         enable_agent_memory: bool = False,
         chat_model_tier: str = "",
         agent_model_tier: str = "",
+        last_research_profile: str = "",
+        last_agent_tier: str = "",
     ) -> AccountPreferences:
         """Insert or replace the user's preferences row (whole-row upsert)."""
         ...

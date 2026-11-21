@@ -43,7 +43,7 @@ from inqtrix.settings import (
     Settings,
     StorageSettings,
 )
-from inqtrix.untrusted_content import UNTRUSTED_FENCE_OPEN
+from inqtrix.untrusted_content import UNTRUSTED_FENCE_CLOSE
 
 
 class ScriptedToolLLM(LLMProvider):
@@ -283,7 +283,6 @@ def test_default_mode_flip_requires_registered_kernel():
     settings.agent_platform = AgentPlatformSettings(
         INQTRIX_AGENT_ALLOW_VOLATILE=True,
         INQTRIX_AGENT_KERNEL_ENABLED=True,
-        INQTRIX_AGENT_DEFAULT_MODE="agent_kernel",
     )
     with _client_for(settings, ScriptedToolLLM([])) as client:
         agent = client.get("/v1/capabilities").json()["agent"]
@@ -291,7 +290,8 @@ def test_default_mode_flip_requires_registered_kernel():
         assert agent["default_depth"] == "deep"
 
     # Kernel configured as default but NOT registered (rollout switch
-    # off): capabilities fall back so the desk never submits a 400 mode.
+    # off): no mode is published, so the desk never submits a 400 mode;
+    # the desk itself stays, blocked with the switch as its reason.
     settings2 = Settings(
         models=ModelSettings(),
         agent=AgentSettings(),
@@ -301,12 +301,15 @@ def test_default_mode_flip_requires_registered_kernel():
     settings2.agent_platform = AgentPlatformSettings(
         INQTRIX_AGENT_ALLOW_VOLATILE=True,
         INQTRIX_AGENT_KERNEL_ENABLED=False,
-        INQTRIX_AGENT_DEFAULT_MODE="agent_kernel",
     )
     with _client_for(settings2, ScriptedToolLLM([])) as client:
-        agent = client.get("/v1/capabilities").json()["agent"]
-        assert agent["default_mode"] == "workspace_agent"
+        payload = client.get("/v1/capabilities").json()
+        agent = payload["agent"]
+        assert agent["default_mode"] is None
         assert agent["default_depth"] == "normal"
+        assert payload["features"]["agent_desk"] is True
+        assert "workspace_agent" not in payload["features"]
+        assert payload["feature_status"]["agent_kernel"]["reason_code"] == "operator_disabled"
 
 
 def test_kernel_model_retries_use_agent_activity_channel():
@@ -823,9 +826,15 @@ def test_a_second_compaction_after_a_park_folds_the_first_and_keeps_the_assignme
         for message in sent
         if "The assignment of this run" in str(message.get("content"))
     ]
-    outside = summary.split(UNTRUSTED_FENCE_OPEN, 1)[0]
+    # Everything ahead of the summary's own fence survived the compaction
+    # verbatim: the assignment, and the record of the run's question. The
+    # user picked an option, whose wording is the model's, so the choice
+    # stands in the record's fence.
+    outside = summary.split('<untrusted_content source="conversation-summary">', 1)[0]
     assert outside.count(instruction) == summary.count(instruction) == 1
-    assert "Tabelle" in outside
+    answers = outside.split('<untrusted_content source="run-clarifications">', 1)[1]
+    (entry,) = json.loads(answers.split(UNTRUSTED_FENCE_CLOSE, 1)[0])
+    assert entry["chosen_options"] == ["Tabelle"] and entry["status"] == "answered"
     assert all(
         section_id in summary
         for event in compacted
@@ -893,10 +902,32 @@ def test_a_missed_gate_names_itself_instead_of_reading_as_switched_off():
     with _client_for(settings, NoToolsLLM([])) as client:
         payload = client.get("/v1/capabilities").json()
         assert payload["features"]["agent_kernel"] is False
-        assert payload["agent"]["default_mode"] == "workspace_agent"
+        # The desk stays where agent runs are set up and names the reason;
+        # no mode is published that the server would refuse.
+        assert payload["features"]["agent_desk"] is True
+        assert payload["agent"]["default_mode"] is None
         status = payload["feature_status"]["agent_kernel"]
         assert status["state"] == "degraded"
         assert status["reason_code"] == "tool_calls_required"
+
+
+def test_without_agent_runs_there_is_no_desk():
+    settings = Settings(
+        models=ModelSettings(),
+        agent=AgentSettings(),
+        server=ServerSettings(),
+        storage=StorageSettings(backend="memory", database_url=""),
+    )
+    settings.agent_platform = AgentPlatformSettings(
+        INQTRIX_AGENT_ENABLED=False,
+        INQTRIX_AGENT_KERNEL_ENABLED=True,
+    )
+    with _client_for(settings, ScriptedToolLLM([])) as client:
+        payload = client.get("/v1/capabilities").json()
+
+    assert payload["features"]["agent_desk"] is False
+    assert payload["features"]["agent_kernel"] is False
+    assert payload["agent"]["default_mode"] is None
 
 
 def test_a_switched_off_kernel_is_an_unknown_mode():
@@ -1311,7 +1342,7 @@ def test_the_durable_request_hands_over_the_users_half_of_its_transcript():
 
     text = _request_user_text(RunRequest(
         question="Fasse zusammen.",
-        history="Nutzer: bitte kd_user\nAssistent: laut kd_model gilt X.",
+        history="User: bitte kd_user\nAssistant: laut kd_model gilt X.",
         report_requirement="Beziehe dich auf kd_guide.",
     ))
     assert "kd_user" in text and "kd_guide" in text

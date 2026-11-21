@@ -1,16 +1,8 @@
-"""Deterministic report-quality building blocks shared by BOTH engines.
+"""Deterministic report-quality building blocks of the kernel.
 
-The mission phase machine (``synthesis.py``/``algorithm.py``) and the
-cognitive kernel (``kernel/tools.py``) consume the SAME citation
-validation, quote grounding, and evidence ranking — one definition,
-never a per-engine copy. Everything here except
-:func:`validate_and_repair_citations` is pure and LLM-free.
-
-Quote verification is EXCERPT-BASED: quoted passages are checked
-verbatim against the evidence texts stored at retrieval time (internal
-chunks and web excerpts alike). Nothing is re-fetched and model memory
-is never consulted, so a quote that only exists beyond the stored
-excerpt window stays visibly unverified rather than silently trusted.
+Citation validation and the reader guard that keeps internal identifiers
+out of reader text — one definition each. Everything here except :func:`validate_and_repair_citations`
+is pure and LLM-free.
 """
 
 from __future__ import annotations
@@ -18,9 +10,11 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from inqtrix.agents.evidence_context import INTERNAL_SOURCE_SCHEME
+from inqtrix.agents.session_context import USER_CONTINUATION_PREFIX
+from inqtrix.untrusted_content import UNTRUSTED_FENCE_CLOSE, UNTRUSTED_FENCE_OPEN
 from inqtrix.agents.markdown import normalize_writer_markdown
 from inqtrix.citation_labels import (
     AGENT_FAMILIES,
@@ -29,18 +23,10 @@ from inqtrix.citation_labels import (
 )
 from inqtrix.agents.phase_models import CitationRepairText
 from inqtrix.agents.patterns._structured import structured_call
-from inqtrix.domains import SOURCE_TIER_WEIGHTS
-from inqtrix.observability import semconv
-from inqtrix.observability.otel import add_span_event
 
 if TYPE_CHECKING:
     from inqtrix.providers.base import LLMProvider
 
-_QUOTE = re.compile(
-    r'"([^"]{20,400})"|„([^“]{20,400})“|“([^”]{20,400})”|'
-    r'«([^»]{20,400})»|»([^«]{20,400})«'
-)
-_WORD = re.compile(r"[^\W_]+(?:['’\u2010-\u2015][^\W_]+)*")
 log = logging.getLogger(__name__)
 
 
@@ -184,20 +170,21 @@ REFERENCE_ID_FIELDS = REFERENCE_RECORD_ID_FIELDS + (
     "source_run_id",
     "source_run_ids",
 )
-"""EVERY id field a reference dict of either engine may carry.
+"""EVERY id field a reference dict may carry: of a kernel run, or of the
+stored evidence of an older mission run the kernel reads.
 
 One definition, because two lists of "the ids a reference has" drift apart
 in exactly the way that leaves a guard reading half of them. Every field
 here has a producer, or it would be dead:
 
 - ``reference_id`` — ``kernel/deps.py`` (``register_references``,
-  ``hydrate_evidence``), and the mission's section handover;
+  ``hydrate_evidence``);
 - ``document_id``, ``chunk_index``, ``revision_id``, ``generation_id`` —
   the knowledge projector, through ``search_project_knowledge`` and
   ``knowledge/algorithm.py``;
 - ``chunk_id``, ``collection_id`` — the SAME projector, but only along
   ``knowledge.document.cite`` -> ``document_analysis``, which appends the
-  citation's evidence dict whole. Narrow, yet real: a mission that reads
+  citation's evidence dict whole. Narrow, yet real: a run that analyses
   documents carries both, and a role reads them in the provenance;
 - ``source_id``, ``query_id(s)``, ``citation_id(s)``, ``source_run_id(s)``
   — ``evidence.attach_web_search_lineage`` copies them from the search
@@ -247,10 +234,10 @@ _IDENTIFIER_NEIGHBOUR = r"[0-9A-Za-z_-]"
 def reference_identifiers(ref: dict[str, Any]) -> frozenset[str]:
     """Every identifier ONE reference carries, without its reader label.
 
-    The ledger id first: a mission reference carries no ``reference_id`` of
-    its own, so a guard built from that field alone compared the prose
-    against empty strings — and the id a role actually reads its
-    preselection under is the derived one. Then every field of
+    The ledger id first: a reference without a ``reference_id`` of its own
+    (a stored mission reference) is filed under the derived id
+    (``KernelDeps.ledger_id``), so a guard built from that field alone
+    would compare the prose against empty strings. Then every field of
     :data:`REFERENCE_ID_FIELDS`, lists flattened. A label-shaped value is
     dropped: the reader is supposed to write that one.
     """
@@ -310,10 +297,13 @@ def writer_identifiers(references: list[dict[str, Any]]) -> list[str]:
     )
 
 
-USER_TURN_MARKERS = ("User: ", "Nutzer: ")
+USER_TURN_MARKERS = ("User: ",)
 """How a transcript marks a line the USER wrote."""
 
-MODEL_TURN_MARKERS = ("Agent: ", "Assistent: ", "System: ", "Tool: ", "Note: ", "[... ")
+MODEL_TURN_MARKERS = (
+    "Agent: ", "Assistant: ", "System: ", "Tool: ", "Note: ", "[... ",
+    UNTRUSTED_FENCE_OPEN, UNTRUSTED_FENCE_CLOSE,
+)
 """How a transcript marks a line the user did NOT write: a model, system or
 tool turn, a note, or the line that stands for left-out turns."""
 
@@ -325,8 +315,9 @@ answered. Only the answer half is the user's.
 
 These markers are written by :mod:`inqtrix.agents.session_context`
 (``User:``/``Agent:``/``Clarification: … — Answer: …``/``Note:``),
-:mod:`inqtrix.services.request_parsing` (``Nutzer:``/``Assistent:``/
-``System:``/``Tool:`` and ``[... n earlier messages omitted]``) and the
+:mod:`inqtrix.services.request_parsing` (``User:``/``Assistant:``/
+``System:``/``Tool:``, every turn but the user's in a ``client-history``
+fence, and ``[... n earlier messages omitted]``) and the
 kernel's ``ask_user`` transcript
 (``Question: …\nUser's answer: …``). They are repeated here because the
 writer guard, not the producers, is where reading a model line as a user
@@ -373,11 +364,26 @@ def _after(text: str, marker: str) -> str:
 
 
 def _user_lines(history: str) -> list[str]:
-    """The lines of *history* the user wrote, continuations included."""
+    """The lines of *history* the user wrote, continuations included.
+
+    Between a fence's opening line and its closing line stands stored text
+    in the wording of whoever wrote it: an earlier answer of the agent, a
+    turn of a client-sent history, the record of a clarification. Nothing in
+    there counts, whatever a line begins with - an answer that quotes a
+    dialogue carries lines that open like the user's own turn. The fence
+    defuses its delimiter inside the payload, so only the helper's own
+    closing line ends it; a fence that never closes keeps the rest out,
+    which is the failure this side can afford.
+    """
     kept: list[str] = []
     mine = False
+    fenced = False
     for line in history.splitlines():
-        if line.startswith(USER_TURN_MARKERS):
+        if fenced:
+            fenced = not line.startswith(UNTRUSTED_FENCE_CLOSE)
+        elif line.startswith(UNTRUSTED_FENCE_OPEN):
+            fenced, mine = True, False
+        elif line.startswith(USER_TURN_MARKERS):
             mine = True
             kept.append(line.split(": ", 1)[1])
         elif line.startswith(MODEL_TURN_MARKERS):
@@ -389,7 +395,7 @@ def _user_lines(history: str) -> list[str]:
             if mine:
                 kept.append(_after(line, CLARIFICATION_ANSWER_MARKER))
         elif mine:
-            kept.append(line)
+            kept.append(line.removeprefix(USER_CONTINUATION_PREFIX))
     return [line for line in kept if line.strip()]
 
 
@@ -472,11 +478,11 @@ def mask_identifiers(text: str, identifiers: list[str], *, marker: str) -> str:
     """Replace every identifier in *text* with a VISIBLE marker.
 
     The deterministic repair, for the reader surfaces that have no writer
-    left to ask back. A memo section or an answer is produced by a call
-    this server can repeat, so a leak there goes to the bounded repair
-    round. A narration line, a plan card and a task result are assembled
-    from what a finished phase already produced: there is nobody left to
-    re-ask, and one short line is not worth a model call of its own.
+    left to ask back. An answer is produced by a call this server can
+    repeat, so a leak there goes to the bounded repair round. A narration
+    line or an activity is assembled from what a finished step already
+    produced: there is nobody left to re-ask, and one short line is not
+    worth a model call of its own.
 
     Dropping the text instead would be a silent cap - the reader loses a
     step of the run and learns nothing about why. So it is written with
@@ -530,45 +536,19 @@ def guarded_reader_text(
 
     Only the AUTHORSHIP question is asked, never "was it already
     standing": this is the repair for a surface with no writer left to
-    ask. A memo section can be re-requested from the model that wrote it;
-    a transcript line, a plan card and a task result describe something
-    that already happened, and the turn that produced them is over.
+    ask. A canvas write can be refused back to the model that made it; a
+    transcript line or an activity describes something that already
+    happened, and the turn that produced it is over.
 
-    Each engine binds this to what ITS run can see - the mission to its
-    phase state, the kernel to its evidence lock, the reconciling service
-    to the child's own ledger. One mechanism, three bindings: a second
-    mechanism would have to be kept in agreement with the first, and the
-    surfaces it did not cover would be invisible again.
+    The kernel binds this to what its run can see, under its evidence lock
+    (``KernelDeps.guard_reader_text``). One mechanism: a second one would
+    have to be kept in agreement with the first, and the surfaces it did
+    not cover would be invisible again.
     """
     leaked = introduced_identifiers(text, identifiers, authored_by=authored_by)
     if not leaked:
         return text
     return mask_identifiers(text, leaked, marker=marker)
-
-
-def report_word_count(markdown: str) -> int:
-    """Lexical word count, using the editor's letter/number boundary rules.
-
-    Count the supplied Markdown, including headings, citation labels and code.
-    This is a declared measurement, not tokenization or a language-aware count
-    of the rendered body alone. Apostrophes and typographic dashes join words.
-    """
-    return len(_WORD.findall(markdown))
-
-
-def citation_coverage(markdown: str) -> dict[str, int]:
-    """Deterministic citation stats the critic receives as facts."""
-    paragraphs = [
-        paragraph.strip()
-        for paragraph in markdown.split("\n\n")
-        if paragraph.strip() and not paragraph.lstrip().startswith("#")
-    ]
-    cited = sum(1 for paragraph in paragraphs if cited_labels(paragraph))
-    return {
-        "paragraphs": len(paragraphs),
-        "cited_paragraphs": cited,
-        "labels_used": len(cited_labels(markdown)),
-    }
 
 
 def cited_references(
@@ -577,7 +557,7 @@ def cited_references(
     """Return known references actually cited by the rendered output.
 
     Order follows the canonical ledger, not textual citation order, so label
-    identity stays stable across partial memo flushes and revisions.
+    identity stays stable across canvas writes and revisions.
     """
     used = set(cited_labels(markdown))
     return [
@@ -612,164 +592,7 @@ def malformed_citation_brackets(
 
     *families* are K/W by default; a revision reads K/W/E,
     :data:`~inqtrix.citation_labels.DELEGATED_FAMILIES`. Loud like an unknown
-    label: the mission repairs them once, the kernel hands them back or marks
-    them; a range is never expanded.
+    label: the kernel hands them back or marks them; a range is never
+    expanded.
     """
     return malformed_citations(markdown, families)
-
-
-def verify_quotes(
-    markdown: str, references: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Verbatim-verify quoted passages against ALL stored evidence texts.
-
-    Internal chunks AND web excerpts count — a quote attributed to a web
-    source is checked against the excerpt captured at retrieval time,
-    never against a re-fetch or model memory.
-    Uses :func:`inqtrix.knowledge.grounding.quote_is_verbatim` — the
-    platform's ONE normalizer chain, shared by every quote check.
-    ``check_grounding`` is not a substitute: that parser expects
-    ``[K#]`` lines and an ``ANSWER:`` scaffold, so a memo quote would
-    silently come back unverified.
-    Returns ``[{"quote", "verified"}]``; unverified stays visible.
-    """
-    from inqtrix.knowledge.grounding import quote_is_verbatim
-
-    evidence_texts = [
-        text
-        for ref in references
-        if (text := str(ref.get("excerpt") or ref.get("source_text") or ""))
-    ]
-    quotes = [
-        next(group for group in match.groups() if group is not None)
-        for match in _QUOTE.finditer(markdown)
-    ]
-    if not quotes:
-        return []
-    # Missing original text is not the same as "nothing to verify".  A web
-    # result may legitimately carry only a URL or provider summary; treating
-    # that state as an empty check list made the strict/tief critic believe no
-    # unverified quote existed.  Preserve every quote as an explicit failed
-    # verification until canonical evidence is available.
-    if not evidence_texts:
-        return [{"quote": quote, "verified": False} for quote in quotes]
-    return [
-        {"quote": quote, "verified": quote_is_verbatim(quote, evidence_texts)}
-        for quote in quotes
-    ]
-
-
-def quoted_passages(markdown: str) -> list[tuple[str, str]]:
-    """Every quoted passage as ``(inner text, passage with its marks)``.
-
-    An edit that turns a quote into a paraphrase has to own the quotation
-    marks too, so an anchor is the passage WITH them.
-    """
-    return [
-        (next(group for group in match.groups() if group is not None), match.group(0))
-        for match in _QUOTE.finditer(markdown)
-    ]
-
-
-def unverified_web_quotes(
-    markdown: str, quote_checks: list[dict[str, Any]]
-) -> list[str]:
-    """Unverified quotes standing in a web-cited ([W#]) paragraph.
-
-    The deterministic escalation trigger of the ``tief`` tier: a quoted
-    claim that leans on a web citation but could not be matched against
-    any stored excerpt. Paragraph scope keeps the attribution honest
-    without a claim-to-source model that the ledger does not carry.
-    """
-    unverified = {
-        str(check.get("quote") or "")
-        for check in quote_checks
-        if not check.get("verified")
-    }
-    if not unverified:
-        return []
-    flagged: list[str] = []
-    for paragraph in markdown.split("\n\n"):
-        if not any(label.startswith("W") for label in cited_labels(paragraph)):
-            continue
-        for quote in unverified:
-            if quote and quote in paragraph and quote not in flagged:
-                flagged.append(quote)
-    return flagged
-
-
-SYNTHESIS_EVIDENCE_BUDGET_LIMIT = "synthesis_evidence_budget"
-"""``limit_name`` of the truncation event the digest cap raises."""
-
-SECTION_REGISTER_LIMIT = "section_register"
-"""``limit_name`` of the truncation event the section register's cap raises.
-
-Its own name, because the two caps answer different questions and are set by
-different knobs: a reader who sees a register cut must not go looking for the
-digest budget."""
-
-
-def rank_evidence(
-    references: list[dict[str, Any]],
-    *,
-    budget: int,
-    tier_for_url: Callable[[str], str] | None = None,
-    limit_name: str = SYNTHESIS_EVIDENCE_BUDGET_LIMIT,
-) -> list[dict[str, Any]]:
-    """Deterministic relevance selection for the synthesis PROMPT digests.
-
-    Below or at ``budget`` the ledger passes through untouched (no
-    behavior change for typical runs); above it the top-``budget``
-    references are kept in a stable order. The score is built only from
-    signals the ledger actually carries, never from inert fields:
-
-    - source tier (``domains.py`` weights; internal document references
-      count as ``primary`` — the user selected that corpus deliberately),
-    - cross-task corroboration (how many independent tasks surfaced the
-      same source),
-    - whether a real excerpt exists (only those can ground quotes).
-
-    This caps what the outline/answer PROMPT sees; the citation ledger
-    itself is never truncated — labels stay resolvable end-to-end.
-    No LLM call.
-    """
-    if budget <= 0 or len(references) <= budget:
-        return references
-
-    def score(ref: dict[str, Any]) -> float:
-        if ref.get("document_id") is not None:
-            tier_weight = SOURCE_TIER_WEIGHTS["primary"]
-        else:
-            tier = str(ref.get("tier") or "")
-            if not tier and tier_for_url is not None:
-                tier = tier_for_url(str(ref.get("url") or ""))
-            tier_weight = SOURCE_TIER_WEIGHTS.get(tier, SOURCE_TIER_WEIGHTS["unknown"])
-        corroboration = 0.3 * min(len(ref.get("tasks") or []) - 1, 3)
-        has_excerpt = bool(
-            str(ref.get("excerpt") or ref.get("source_text") or "").strip()
-        )
-        return tier_weight + max(corroboration, 0.0) + (0.25 if has_excerpt else 0.0)
-
-    ordered = sorted(
-        range(len(references)),
-        key=lambda index: (-score(references[index]), index),
-    )
-    kept = sorted(ordered[:budget])
-    # A cap the writer never sees is a silent cap: name it in the log and
-    # on the active span (the same truncation event every capped value
-    # raises), so a thin digest is findable in the trace.
-    log.warning(
-        "rank_evidence capped %s to %d of %d references.",
-        limit_name,
-        budget,
-        len(references),
-    )
-    add_span_event(
-        semconv.TRUNCATION_EVENT,
-        {
-            semconv.TRUNCATION_LIMIT_NAME: limit_name,
-            semconv.TRUNCATION_ORIGINAL_SIZE: len(references),
-            semconv.TRUNCATION_CAPPED_SIZE: budget,
-        },
-    )
-    return [references[index] for index in kept]

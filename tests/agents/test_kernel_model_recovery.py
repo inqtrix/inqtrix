@@ -7,6 +7,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import time
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -137,9 +138,14 @@ def agent(llm, tools, *, saver=None, usage=None, gate=None):
 
 
 def deps(llm, archives, events):
+    async def no_clarifications(run_id: str) -> list:
+        # A compaction restates the run's clarifications from the control
+        # store; this run asked nothing.
+        return []
+
     context = KernelDeps(
         run_id="run_recovery_fixture",
-        control=None,
+        control=SimpleNamespace(list_clarifications=no_clarifications),  # type: ignore[arg-type]
         platform=AgentPlatformSettings(INQTRIX_AGENT_KERNEL_SUFFICIENCY_GATE=False),
         llm=llm,
         model=None,

@@ -47,8 +47,10 @@ class _Search:
     def search(self, *args, **kwargs):
         self.calls += 1
         urls = URLS if self.calls == 1 else [*URLS[:2], "https://agency.gov.uk/gamma"]
-        # Each page returns its own text (a provider snippet), so the claims
-        # are checked against source text and the assessment says verified.
+        # Each source carries the search provider's excerpt of its own claim:
+        # the two agency excerpts carry their claims' support on their own
+        # (verified); the forum excerpt states GAMMA but carries no support
+        # (unverified).
         return GroundedSearchResult(
             answer="\n".join((ALPHA, BETA, GAMMA)),
             sources=[

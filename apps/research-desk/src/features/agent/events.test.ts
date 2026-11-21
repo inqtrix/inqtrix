@@ -1,13 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import {
-  acknowledgeAgentTaskCancellation,
-  applyAgentRunEvent,
-  nextFailedChildTasks,
-  nextOpenChildTasks,
-} from './events'
-import { agentRunFromSummary, type AgentPlanTaskRecord } from './model'
-import { agentTaskGroups } from './plan/taskPresentation'
+import { applyAgentRunEvent, RETIRED_AGENT_EVENT_TYPES } from './events'
+import { agentRunFromSummary } from './model'
 import type { ResearchRunEvent, ResearchRunSummary } from '@/features/researchRuns/types'
 
 function summary(overrides: Partial<ResearchRunSummary> = {}): ResearchRunSummary {
@@ -28,7 +22,6 @@ function summary(overrides: Partial<ResearchRunSummary> = {}): ResearchRunSummar
     snapshot: { current_node: 'agent', last_message: '' },
     error: null,
     events_url: '/v1/runs/run_agent_1/events',
-    result_url: '/v1/runs/run_agent_1/result',
     ...overrides,
   }
 }
@@ -70,148 +63,66 @@ describe('applyAgentRunEvent', () => {
     expect(stored.error).toBe('Invalid provider arguments.')
   })
 
-  it('applies an HTTP task-cancel acknowledgement without waiting for SSE', () => {
-    const record = {
-      ...agentRunFromSummary(summary()),
-      taskStates: {
-        t1: { attempt: 1, status: 'running' as const },
-      },
-    }
-
-    const acknowledged = acknowledgeAgentTaskCancellation(
-      record,
-      't1',
-      'cancel_requested',
-      null,
-    )
-
-    expect(acknowledged.taskStates.t1?.status).toBe('cancel_requested')
-    expect(acknowledged.planStale).toBe(true)
-
-    const completed = {
-      ...record,
-      taskStates: {
-        t1: { attempt: 1, status: 'completed' as const },
-      },
-    }
-    expect(acknowledgeAgentTaskCancellation(
-      completed,
-      't1',
-      'cancel_requested',
-      null,
-    ).taskStates.t1?.status).toBe('completed')
-    expect(applyAgentRunEvent(
-      completed,
-      event(1, 'inqtrix.agent.task.cancel_requested', {
-        status: 'cancel_requested',
-        task_id: 't1',
-      }),
-    ).taskStates.t1?.status).toBe('completed')
-  })
-
-  it('keeps an HTTP cancel acknowledgement monotone across delayed events', () => {
-    const running = {
-      ...agentRunFromSummary(summary()),
-      taskStates: {
-        t1: { attempt: 1, status: 'running' as const },
-      },
-    }
-    let record = acknowledgeAgentTaskCancellation(
-      running,
-      't1',
-      'cancel_requested',
-      null,
-    )
-
-    record = applyAgentRunEvent(
-      record,
-      event(1, 'inqtrix.agent.task.started', {
-        attempt: 1,
-        task_id: 't1',
-      }),
-    )
-    expect(record.taskStates.t1?.status).toBe('cancel_requested')
-
-    record = applyAgentRunEvent(
-      record,
-      event(2, 'inqtrix.agent.child.progress', {
-        child_run_id: 'run_child_1',
-        run_status: 'running',
-        task_id: 't1',
-      }),
-    )
-    expect(record.taskStates.t1?.status).toBe('cancel_requested')
-
-    record = applyAgentRunEvent(
-      record,
-      event(3, 'inqtrix.agent.child.progress', {
-        child_run_id: 'run_child_1',
-        run_status: 'completed',
-        task_id: 't1',
-      }),
-    )
-    expect(record.taskStates.t1?.status).toBe('cancel_requested')
-
-    record = applyAgentRunEvent(
-      record,
-      event(4, 'inqtrix.agent.task.finished', {
-        status: 'cancelled',
-        task_id: 't1',
-      }),
-    )
-    expect(record.taskStates.t1?.status).toBe('cancelled')
-  })
-
-  it('advances phase and station, never backwards on gate phases', () => {
-    let record = agentRunFromSummary(summary())
-    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.phase.changed', { phase: 'discovery' }))
-    expect(record.station).toBe('discovery')
-    // clarification is a gate, not a station: track keeps discovery
-    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.phase.changed', { phase: 'clarification' }))
-    expect(record.phase).toBe('clarification')
-    expect(record.station).toBe('discovery')
-    record = applyAgentRunEvent(record, event(3, 'inqtrix.agent.phase.changed', { phase: 'execution' }))
+  it('advances phase and station, never backwards on a phase off the kernel line', () => {
+    let record = agentRunFromSummary(summary({ mode: 'agent_kernel' }))
+    expect(record.station).toBe('intake')
+    // A stored mission run's own phases keep the station the run reached.
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.phase.changed', { phase: 'planning' }))
+    expect(record.phase).toBe('planning')
+    expect(record.station).toBe('intake')
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.phase.changed', { phase: 'execution' }))
+    expect(record.station).toBe('execution')
+    record = applyAgentRunEvent(record, event(3, 'inqtrix.agent.phase.changed', { phase: 'done' }))
+    expect(record.phase).toBe('done')
     expect(record.station).toBe('execution')
   })
 
   it('ignores replayed frames (sequence gate)', () => {
     let record = agentRunFromSummary(summary())
-    record = applyAgentRunEvent(record, event(5, 'inqtrix.agent.phase.changed', { phase: 'planning' }))
+    record = applyAgentRunEvent(record, event(5, 'inqtrix.agent.phase.changed', { phase: 'execution' }))
     const replay = applyAgentRunEvent(record, event(5, 'inqtrix.agent.phase.changed', { phase: 'intake' }))
     expect(replay).toBe(record)
-    expect(replay.station).toBe('planning')
+    expect(replay.station).toBe('execution')
   })
 
   it('flips stale flags on control-row signals instead of copying payloads', () => {
     let record = agentRunFromSummary(summary())
-    record = { ...record, planStale: false, approvalsStale: false, clarificationsStale: false }
-    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.plan.proposed', { plan_id: 'p1', version: 1 }))
-    expect(record.planStale).toBe(true)
-    expect(record.plan).toBeUndefined()
-    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.approval.requested', { approval_id: 'a1', kind: 'plan' }))
+    record = { ...record, approvalsStale: false, clarificationsStale: false }
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.approval.requested', { approval_id: 'a1', kind: 'tool' }))
     expect(record.approvalsStale).toBe(true)
-    record = applyAgentRunEvent(record, event(3, 'inqtrix.agent.clarification.requested', { clarification_id: 'c1' }))
+    expect(record.approvals).toEqual([])
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.clarification.requested', { clarification_id: 'c1' }))
     expect(record.clarificationsStale).toBe(true)
   })
 
-  it('records auto-approved replan versions for the timeline note', () => {
+  it('keeps a stored plan line, auto-approval included, as its own entry', () => {
     let record = agentRunFromSummary(summary())
-    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.plan.revised', { version: 2, auto_approved: true }))
-    expect(record.lastAutoApprovedVersion).toBe(2)
-    expect(record.planStale).toBe(true)
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.plan.proposed', { plan_id: 'p1', version: 1 }))
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.plan.revised', { version: 2, auto_approved: true }))
+    expect(record.stepLog.map((entry) => [entry.kind, entry.version, entry.autoApproved])).toEqual([
+      ['plan', 1, false],
+      ['plan', 2, true],
+    ])
   })
 
-  it('marks the plan stale when a loaded plan approval is decided', () => {
+  it('reads the artifacts again on a stored patch proposal, with no line of its own', () => {
+    const record = { ...agentRunFromSummary(summary()), artifactsStale: false }
+    const after = applyAgentRunEvent(record, event(1, 'inqtrix.agent.patch.proposed', { patch_id: 'p1' }))
+    expect(after.artifactsStale).toBe(true)
+    expect(after.stepLog).toEqual([])
+  })
+
+  it('settles a decided approval row and marks the decision in the transcript', () => {
     let record = agentRunFromSummary(summary())
     record = {
       ...record,
-      planStale: false,
+      approvalsStale: false,
       approvals: [{
-        approvalId: 'apr-plan',
-        kind: 'plan',
+        approvalId: 'apr-tool',
+        kind: 'tool',
         status: 'pending',
-        subjectType: 'plan',
-        subjectId: 'p1',
+        subjectType: 'tool',
+        subjectId: 'call-1',
         payload: {},
         decision: '',
         note: '',
@@ -220,33 +131,44 @@ describe('applyAgentRunEvent', () => {
       }],
     }
     record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.approval.decided', {
-      approval_id: 'apr-plan',
+      approval_id: 'apr-tool',
       status: 'approved',
     }))
-    expect(record.planStale).toBe(true)
+    expect(record.approvals[0]?.status).toBe('approved')
     expect(record.approvalsStale).toBe(true)
+    expect(record.stepLog.at(-1)).toMatchObject({ approvalId: 'apr-tool', detail: 'approved', kind: 'approval_decided' })
   })
 
-  it('tracks task lifecycle with child attribution and new map references', () => {
+  it('keeps a stored mission task as lines that carry their own text', () => {
+    // The plan and task rows behind them are no longer read: the start and
+    // the outcome line say what their events said.
     let record = agentRunFromSummary(summary())
-    const before = record.taskStates
-    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.task.started', { task_id: 't1', ordinal: 0, tool_kind: 'web_research', attempt: 1 }))
-    expect(record.taskStates.t1.status).toBe('running')
-    expect(record.taskStates).not.toBe(before)
+    const before = record.stepLog
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.task.started', {
+      task_id: 't1', ordinal: 0, tool_kind: 'web_research', attempt: 1, title: 'Marktlage erfassen',
+    }))
+    expect(record.stepLog).not.toBe(before)
     record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.child.progress', {
       task_id: 't1',
       child_run_id: 'run_child_1',
       snapshot: { current_node: 'search' },
     }))
     expect(record.children.run_child_1.snapshot?.current_node).toBe('search')
-    expect(record.taskStates.t1.childRunId).toBe('run_child_1')
     record = applyAgentRunEvent(record, event(3, 'inqtrix.agent.task.finished', {
       task_id: 't1',
+      title: 'Marktlage erfassen',
       status: 'completed',
       child_run_id: 'run_child_1',
+      result_summary: 'Drei Anbieter teilen den Markt.',
     }))
-    expect(record.taskStates.t1.status).toBe('completed')
-    expect(record.planStale).toBe(true)
+    expect(record.stepLog.map(({ kind, result, status, taskId, title }) => ({ kind, result, status, taskId, title })))
+      .toEqual([
+        { kind: 'task_started', result: undefined, status: undefined, taskId: 't1', title: 'Marktlage erfassen' },
+        {
+          kind: 'task_finished', result: 'Drei Anbieter teilen den Markt.', status: 'completed',
+          taskId: 't1', title: 'Marktlage erfassen',
+        },
+      ])
   })
 
   it('marks failed tasks with their error and outcome', () => {
@@ -256,10 +178,12 @@ describe('applyAgentRunEvent', () => {
       status: 'failed',
       error: 'Deadline erreicht',
     }))
-    expect(record.taskStates.t2).toMatchObject({ status: 'failed', error: 'Deadline erreicht' })
+    expect(record.stepLog.at(-1)).toMatchObject({
+      error: 'Deadline erreicht', kind: 'task_failed', status: 'failed', taskId: 't2',
+    })
   })
 
-  it('keeps cancellation requested distinct until the task settles', () => {
+  it('keeps cancellation requested on the start line until the task settles', () => {
     let record = agentRunFromSummary(summary())
     record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.task.started', {
       task_id: 't-cancel',
@@ -269,18 +193,14 @@ describe('applyAgentRunEvent', () => {
       task_id: 't-cancel',
       status: 'cancel_requested',
     }))
-
-    expect(record.taskStates['t-cancel'].status).toBe('cancel_requested')
-    expect(record.planStale).toBe(true)
-
+    expect(record.stepLog.map((entry) => [entry.kind, entry.status])).toEqual([
+      ['task_started', 'cancel_requested'],
+    ])
     record = applyAgentRunEvent(record, event(3, 'inqtrix.agent.task.finished', {
       task_id: 't-cancel',
       status: 'cancelled',
     }))
-    expect(record.taskStates['t-cancel']).toMatchObject({
-      status: 'cancelled',
-      outcome: 'cancelled',
-    })
+    expect(record.stepLog.at(-1)).toMatchObject({ kind: 'task_finished', status: 'cancelled' })
   })
 
   it('keeps insufficient evidence distinct from failure and completion', () => {
@@ -290,10 +210,37 @@ describe('applyAgentRunEvent', () => {
       status: 'insufficient_evidence',
       error: 'Only one source met the evidence contract.',
     }))
-    expect(record.taskStates.t3).toMatchObject({
+    expect(record.stepLog.at(-1)).toMatchObject({
+      kind: 'task_finished',
       status: 'insufficient_evidence',
-      outcome: 'insufficient_evidence',
     })
+  })
+
+  it('reads every retired type as retired, never as unknown', () => {
+    // The list is spelled out: a type that falls out of it would turn a
+    // stored mission run's lines into silence.
+    expect([...RETIRED_AGENT_EVENT_TYPES].sort()).toEqual([
+      'inqtrix.agent.patch.proposed',
+      'inqtrix.agent.plan.proposed',
+      'inqtrix.agent.plan.revised',
+      'inqtrix.agent.task.cancel_requested',
+      'inqtrix.agent.task.failed',
+      'inqtrix.agent.task.finished',
+      'inqtrix.agent.task.started',
+    ])
+    // An unknown type adds no line and no signal; each retired type does.
+    const before = agentRunFromSummary(summary())
+    for (const [index, type] of [...RETIRED_AGENT_EVENT_TYPES].entries()) {
+      const after = applyAgentRunEvent({ ...before, artifactsStale: false }, event(index + 1, type, {
+        task_id: 't1', version: 1,
+      }))
+      const changed = after.stepLog.length > 0 || after.artifactsStale
+      expect(changed || type === 'inqtrix.agent.task.cancel_requested', type).toBe(true)
+    }
+    const unknown = applyAgentRunEvent({ ...before, artifactsStale: false }, event(99, 'inqtrix.agent.unheard_of', {
+      task_id: 't1',
+    }))
+    expect([unknown.stepLog, unknown.artifactsStale]).toEqual([[], false])
   })
 
   it('keeps identity-only child progress in preparing state and consumes its projection', () => {
@@ -318,13 +265,7 @@ describe('applyAgentRunEvent', () => {
       attempt: 2,
       error: 'Child provider unavailable',
       errorCode: 'provider_error',
-    })
-    expect(record.taskStates.t1).toMatchObject({
-      status: 'running',
-      attempt: 2,
-      childRunId: 'run_child_1',
-      error: 'Child provider unavailable',
-      errorCode: 'provider_error',
+      taskId: 't1',
     })
   })
 
@@ -727,11 +668,7 @@ describe('applyAgentRunEvent', () => {
       activityOperation: 'knowledge_search',
       current: 2,
       total: 4,
-    })
-    expect(record.taskStates.k1.activity).toMatchObject({
-      operation: 'knowledge_search',
-      current: 2,
-      total: 4,
+      taskId: 'k1',
     })
   })
 
@@ -807,12 +744,12 @@ describe('applyAgentRunEvent', () => {
       task_id: 'k1',
       status: 'started',
       query: 'EU AI Act Fristen',
-      detail: 'EU AI Act Fristen · Provider-Versuch 2/3 fehlgeschlagen',
+      detail: 'EU AI Act Fristen · Beim Anbieter ist Versuch 2/3 fehlgeschlagen',
       attempt: 2,
     }))
     let rows = record.stepLog.filter((entry) => entry.kind === 'activity')
     expect(rows).toHaveLength(1)
-    expect(rows[0].detail).toContain('Provider-Versuch 2/3')
+    expect(rows[0].detail).toContain('Beim Anbieter ist Versuch 2/3')
     // Hard-terminal task: the still-open row must not stay "running".
     record = applyAgentRunEvent(record, event(3, 'inqtrix.agent.task.finished', {
       task_id: 'k1',
@@ -866,18 +803,30 @@ describe('applyAgentRunEvent', () => {
       metrics: { result_count: 6 },
       attempt: 1,
     }))
-    const activity = record.stepLog.find((entry) => entry.kind === 'activity')
-    expect(activity?.activityCount).toBe(1)
-    expect(record.taskStates.w1.activityHistory).toHaveLength(1)
-    expect(record.taskStates.w1.activityHistory?.[0].status).toBe('completed')
-    expect(record.taskStates.w1.activityHistory?.[0].detail).toBe(
-      'EU AI Act latest changes',
-    )
-    expect(record.taskStates.w1.activityHistory?.[0]).toMatchObject({
+    const rows = record.stepLog.filter((entry) => entry.kind === 'activity')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      activityCount: 1,
       attempt: 1,
+      detail: 'EU AI Act latest changes',
       metrics: { result_count: 6 },
       purpose: 'Check the current regulatory state',
+      status: 'completed',
     })
+  })
+
+  it('settles a stored retry notice without a detail on the row of its invocation', () => {
+    // The completion carries neither a detail nor an id: the task's latest
+    // activity of the same operation names the invocation it settles.
+    let record = agentRunFromSummary(summary())
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.activity', {
+      operation: 'web_instant', task_id: 'w1', status: 'started', detail: 'Marktgröße 2026',
+    }))
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.activity', {
+      operation: 'web_instant', task_id: 'w1', status: 'completed',
+    }))
+    const rows = record.stepLog.filter((entry) => entry.kind === 'activity')
+    expect(rows.map((row) => [row.detail, row.status])).toEqual([['Marktgröße 2026', 'completed']])
   })
 
   it('uses nested activity errors instead of mislabelling the query as failure', () => {
@@ -890,12 +839,11 @@ describe('applyAgentRunEvent', () => {
       query: 'AI market size',
       error: { code: 'search_timeout', message: 'Search provider timed out' },
     }))
-    expect(record.taskStates.w2.error).toBe('Search provider timed out')
-    expect(record.taskStates.w2.errorCode).toBe('search_timeout')
-    expect(record.taskStates.w2.error).not.toBe('AI market size')
+    expect(record.activity).toMatchObject({ error: 'Search provider timed out', errorCode: 'search_timeout' })
+    expect(record.stepLog.at(-1)).toMatchObject({ detail: 'AI market size', error: 'Search provider timed out' })
   })
 
-  it('retains terminal task metrics for local work units', () => {
+  it('keeps the result a stored task reported on its outcome line', () => {
     let record = agentRunFromSummary(summary())
     record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.task.finished', {
       task_id: 'k1',
@@ -903,44 +851,10 @@ describe('applyAgentRunEvent', () => {
       metrics: { sources: 7, queries: 3, claims: 4 },
       result_summary: 'Seven relevant sources support the finding.',
     }))
-    expect(record.taskStates.k1.metrics).toEqual({
-      sources: 7,
-      queries: 3,
-      claims: 4,
-    })
-    expect(record.taskStates.k1.resultSummary).toBe(
-      'Seven relevant sources support the finding.',
-    )
+    expect(record.stepLog.at(-1)?.result).toBe('Seven relevant sources support the finding.')
   })
 
-  it('preserves the earlier activity finish when a parallel wave folds later', () => {
-    let record = agentRunFromSummary(summary())
-    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.task.started', {
-      task_id: 'w1',
-    }))
-    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.activity', {
-      activity_id: 'web-1',
-      operation: 'web_instant',
-      status: 'started',
-      task_id: 'w1',
-    }))
-    record = applyAgentRunEvent(record, event(19, 'inqtrix.agent.activity', {
-      activity_id: 'web-1',
-      operation: 'web_instant',
-      status: 'completed',
-      task_id: 'w1',
-    }))
-    record = applyAgentRunEvent(record, event(47, 'inqtrix.agent.task.finished', {
-      status: 'completed',
-      task_id: 'w1',
-    }))
-    expect(record.taskStates.w1).toMatchObject({
-      finishedAt: 1_700_000_119,
-      startedAt: 1_700_000_101,
-    })
-  })
-
-  it('marks a visible fallback on its task state', () => {
+  it('marks a visible fallback on its row', () => {
     let record = agentRunFromSummary(summary())
     record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.activity', {
       operation: 'task.legacy_budget_ignored',
@@ -949,23 +863,14 @@ describe('applyAgentRunEvent', () => {
       status: 'completed',
       fallback: true,
     }))
-    expect(record.taskStates.w1.fallback).toBe(true)
-    expect(record.taskStates.w1.activity?.detail).toBe('Legacy task budget ignored')
+    expect(record.stepLog.at(-1)).toMatchObject({
+      detail: 'Legacy task budget ignored', fallback: true, taskId: 'w1',
+    })
   })
 
-  it('keeps a completed task with an evidence limit in the completed group', () => {
-    const planned = (taskId: string, ordinal: number): AgentPlanTaskRecord => ({
-      taskId, ordinal, title: taskId, toolKind: 'web_research', objective: '',
-      queries: [], gapIds: [], dependsOn: [], budget: {}, params: {},
-      expectedOutput: '', status: 'running', childRunId: null, resultSummary: '',
-    })
-    const withLimit = planned('w1', 0)
-    const withFallback = planned('w2', 1)
+  it('reads an evidence limit as a note on its row, never as a fallback', () => {
     let record = agentRunFromSummary(summary())
-    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.task.started', {
-      task_id: 'w1',
-    }))
-    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.activity', {
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.activity', {
       activity_id: 'evidence-review:w1',
       operation: 'task.evidence_partial',
       detail: 'Teilaufgabe „Marktlage“: 3 Quellen nicht ausgewertet',
@@ -973,44 +878,23 @@ describe('applyAgentRunEvent', () => {
       status: 'completed',
       evidence_limit: true,
     }))
-    record = applyAgentRunEvent(record, event(3, 'inqtrix.agent.task.finished', {
-      status: 'completed',
-      task_id: 'w1',
-    }))
     // The counter-case: a real fallback path on an equally completed task.
-    record = applyAgentRunEvent(record, event(4, 'inqtrix.agent.activity', {
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.activity', {
       operation: 'task.legacy_budget_ignored',
       detail: 'Legacy task budget ignored',
       task_id: 'w2',
       status: 'completed',
       fallback: true,
     }))
-    record = applyAgentRunEvent(record, event(5, 'inqtrix.agent.task.finished', {
-      status: 'completed',
-      task_id: 'w2',
-    }))
-    const live = record.taskStates.w1
-    expect(live.evidenceLimit).toBe(true)
-    expect(live.fallback).toBeUndefined()
-    // The run view's own grouping, fed the reducer's task states.
-    expect(agentTaskGroups([withLimit, withFallback], record.taskStates)).toEqual([
-      { kind: 'attention', tasks: [withFallback] },
-      { kind: 'completed', tasks: [withLimit] },
-    ])
-    const row = record.stepLog.find((entry) => entry.activityOperationCode === 'task.evidence_partial')
-    expect(row?.evidenceLimit).toBe(true)
-    expect(row?.fallback).toBe(false)
+    const note = record.stepLog.find((entry) => entry.activityOperationCode === 'task.evidence_partial')
+    expect([note?.evidenceLimit, note?.fallback]).toEqual([true, false])
+    const fallback = record.stepLog.find((entry) => entry.activityOperationCode === 'task.legacy_budget_ignored')
+    expect([fallback?.evidenceLimit, fallback?.fallback]).toEqual([false, true])
   })
 
   it('reads the fallback flag of a stored evidence-limit event as its evidence limit', () => {
     // Events stored by earlier versions carry ``fallback: true`` on both
-    // evidence-limit codes; a reopened run keeps those completed tasks in
-    // the completed group instead of under attention.
-    const planned = (taskId: string, ordinal: number): AgentPlanTaskRecord => ({
-      taskId, ordinal, title: taskId, toolKind: 'web_research', objective: '',
-      queries: [], gapIds: [], dependsOn: [], budget: {}, params: {},
-      expectedOutput: '', status: 'running', childRunId: null, resultSummary: '',
-    })
+    // evidence-limit codes; a reopened run shows those notes as notes.
     const stored = [
       { taskId: 'w1', operation: 'task.evidence_partial', detail: 'Teilaufgabe „Marktlage“: 3 Quellen nicht ausgewertet' },
       { taskId: 'w2', operation: 'task.evidence_needs_review', detail: 'Teilaufgabe „Preise“: nur einfach belegt' },
@@ -1034,20 +918,14 @@ describe('applyAgentRunEvent', () => {
         task_id: taskId,
       }))
     }
-    for (const { taskId, operation } of stored) {
-      expect(record.taskStates[taskId].evidenceLimit).toBe(true)
-      expect(record.taskStates[taskId].fallback).toBeUndefined()
+    for (const { operation } of stored) {
       const row = record.stepLog.find((entry) => entry.activityOperationCode === operation)
       expect(row?.evidenceLimit).toBe(true)
       expect(row?.fallback).toBe(false)
     }
-    const tasks = [planned('w1', 0), planned('w2', 1)]
-    expect(agentTaskGroups(tasks, record.taskStates)).toEqual([
-      { kind: 'completed', tasks },
-    ])
   })
 
-  it('returns a failed child task to running on a queued retry projection', () => {
+  it('keeps a retried child running on a queued projection, with the earlier error', () => {
     let record = agentRunFromSummary(summary())
     record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.child.progress', {
       task_id: 't1',
@@ -1062,13 +940,12 @@ describe('applyAgentRunEvent', () => {
       run_status: 'queued',
       attempt: 2,
     }))
-    expect(record.taskStates.t1).toMatchObject({
-      status: 'running',
+    expect(record.children['child-1']).toMatchObject({
+      runStatus: 'queued',
       attempt: 2,
       error: 'First attempt timed out',
       errorCode: 'timeout',
     })
-    expect(record.taskStates.t1.finishedAt).toBeUndefined()
   })
 
   it('preserves an unknown stable operation code for technical detail', () => {
@@ -1078,7 +955,7 @@ describe('applyAgentRunEvent', () => {
       task_id: 'x1',
       status: 'started',
     }))
-    expect(record.taskStates.x1.activity).toMatchObject({
+    expect(record.activity).toMatchObject({
       operation: undefined,
       operationCode: 'vendor.custom.lookup',
     })
@@ -1691,36 +1568,6 @@ describe('touchedArtifacts (file chips)', () => {
   })
 })
 
-describe('nextOpenChildTasks', () => {
-  it('collects a mission’s whole parallel wave', () => {
-    let open = nextOpenChildTasks(undefined, 'inqtrix.agent.task.started', 0)
-    for (const ordinal of [1, 2, 4, 3]) {
-      open = nextOpenChildTasks(open, 'inqtrix.agent.task.started', ordinal)
-    }
-    expect(open).toEqual([0, 1, 2, 3, 4])
-  })
-
-  it('closes exactly the task that finished, keeping the straggler', () => {
-    let open: number[] | undefined = [0, 1, 2, 3, 4]
-    for (const ordinal of [1, 2, 4, 0]) {
-      open = nextOpenChildTasks(open, 'inqtrix.agent.task.finished', ordinal)
-    }
-    expect(open).toEqual([3])
-  })
-
-  it('leaves the set alone for an unrelated event', () => {
-    expect(
-      nextOpenChildTasks([2], 'inqtrix.agent.phase.changed', undefined),
-    ).toEqual([2])
-  })
-
-  it('has nothing to say before the first task', () => {
-    expect(
-      nextOpenChildTasks(undefined, 'inqtrix.agent.phase.changed', undefined),
-    ).toBeUndefined()
-  })
-})
-
 describe('answer.started announces the citation labels', () => {
   it('keeps them so the STREAMED text can render its citations', () => {
     // Without them the body streams with plain `[W1]` and is rewritten
@@ -1771,90 +1618,6 @@ describe('critic revision discard activity', () => {
   })
 })
 
-describe('failed child tasks settle and are counted', () => {
-  it('a task.failed leaves the open set and joins the failed set', () => {
-    let open = nextOpenChildTasks(undefined, 'inqtrix.agent.task.started', 5)
-    open = nextOpenChildTasks(open, 'inqtrix.agent.task.started', 6)
-    expect(open).toEqual([5, 6])
-    open = nextOpenChildTasks(open, 'inqtrix.agent.task.failed', 5)
-    expect(open).toEqual([6])
-    let failed = nextFailedChildTasks(undefined, 'inqtrix.agent.task.failed', 5)
-    failed = nextFailedChildTasks(failed, 'inqtrix.agent.task.finished', 6)
-    expect(failed).toEqual([5])
-    failed = nextFailedChildTasks(failed, 'inqtrix.agent.task.failed', 6)
-    expect(failed).toEqual([5, 6])
-  })
-
-  it('remembers a started task title by ordinal for the child line', () => {
-    let record = agentRunFromSummary(summary())
-    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.child.progress', {
-      child_run_id: 'run_child',
-      task_id: 'call_1',
-      run_status: 'running',
-      event_type: 'inqtrix.agent.task.started',
-      ordinal: 4,
-      tool_kind: 'web_research',
-      title: 'Prüfe strittige Wochenmeldungen',
-    }))
-    expect(record.children.run_child.taskTitles).toEqual({ 4: 'Prüfe strittige Wochenmeldungen' })
-    expect(record.children.run_child.openTasks).toEqual([4])
-    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.child.progress', {
-      child_run_id: 'run_child',
-      task_id: 'call_1',
-      run_status: 'running',
-      event_type: 'inqtrix.agent.task.failed',
-      ordinal: 4,
-      status: 'failed',
-    }))
-    expect(record.children.run_child.openTasks).toEqual([])
-    expect(record.children.run_child.failedTasks).toEqual([4])
-    expect(record.children.run_child.taskTitles).toEqual({ 4: 'Prüfe strittige Wochenmeldungen' })
-  })
-})
-
-describe('a mission child\'s searches and synthesis lines reach its record', () => {
-  it('keeps the latest started query, counts completed searches, ignores run scope', () => {
-    let record = agentRunFromSummary(summary())
-    const progress = (sequence: number, data: Record<string, unknown>) =>
-      event(sequence, 'inqtrix.agent.child.progress', {
-        child_run_id: 'run_child', task_id: 'call_1', run_status: 'running', ...data,
-      })
-    record = applyAgentRunEvent(record, progress(1, {
-      event_type: 'inqtrix.agent.activity', operation: 'web.search.instant', status: 'started', query: 'Erste Suche',
-    }))
-    expect(record.children.run_child.lastQuery).toBe('Erste Suche')
-    expect(record.children.run_child.searchesDone).toBeUndefined()
-    record = applyAgentRunEvent(record, progress(2, {
-      event_type: 'inqtrix.agent.activity', operation: 'web.search.instant', status: 'completed', query: 'Erste Suche',
-    }))
-    expect(record.children.run_child.searchesDone).toBe(1)
-    record = applyAgentRunEvent(record, progress(3, {
-      event_type: 'inqtrix.agent.activity', operation: 'knowledge.search', status: 'started', query: 'Zweite Suche',
-    }))
-    expect(record.children.run_child.lastQuery).toBe('Zweite Suche')
-    // A non-search activity changes nothing.
-    record = applyAgentRunEvent(record, progress(4, {
-      event_type: 'inqtrix.agent.activity', operation: 'agent.model.turn', status: 'started',
-    }))
-    expect(record.children.run_child.lastQuery).toBe('Zweite Suche')
-    expect(record.children.run_child.searchesDone).toBe(1)
-  })
-
-  it('stores only synthesis narration as the section line', () => {
-    let record = agentRunFromSummary(summary())
-    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.child.progress', {
-      child_run_id: 'run_child', task_id: 'call_1', run_status: 'running',
-      event_type: 'inqtrix.agent.narration', kind: 'task', text: 'Modellprosa',
-    }))
-    expect(record.children.run_child.section).toBeUndefined()
-    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.child.progress', {
-      child_run_id: 'run_child', task_id: 'call_1', run_status: 'running',
-      event_type: 'inqtrix.agent.narration', narration_id: 'n-section-0', kind: 'synthesis', text: "Abschnitt 'Lage' geschrieben.",
-    }))
-    expect(record.children.run_child.section).toBe("Abschnitt 'Lage' geschrieben.")
-  })
-})
-
 describe('phase headings fold when a segment re-enters the same phase', () => {
   const phases = (record: ReturnType<typeof agentRunFromSummary>) =>
     record.stepLog.filter((item) => item.kind === 'phase').map((item) => item.phase)
@@ -1895,7 +1658,7 @@ describe('tool rows remember the todo they served and when they started', () => 
     expect(settled?.todoIndex).toBe(1)
   })
 
-  it('counts written sections and remembers the first child projection', () => {
+  it('remembers the first child projection', () => {
     let record = agentRunFromSummary(summary())
     const progress = (sequence: number, data: Record<string, unknown>) =>
       event(sequence, 'inqtrix.agent.child.progress', {
@@ -1903,65 +1666,10 @@ describe('tool rows remember the todo they served and when they started', () => 
       })
     record = applyAgentRunEvent(record, progress(1, { event_type: 'inqtrix.agent.phase.changed' }))
     expect(record.children.run_child.startedAt).toBe(1_700_000_101)
-    record = applyAgentRunEvent(record, progress(2, {
-      event_type: 'inqtrix.agent.narration', narration_id: 'n-synthesis', kind: 'synthesis', text: 'Memo mit 3 Abschnitten.',
-    }))
-    record = applyAgentRunEvent(record, progress(3, {
-      event_type: 'inqtrix.agent.narration', narration_id: 'n-section-0', kind: 'synthesis', text: 'Abschnitt A geschrieben.',
-    }))
-    record = applyAgentRunEvent(record, progress(4, {
-      event_type: 'inqtrix.agent.narration', narration_id: 'n-section-1', kind: 'synthesis', text: 'Abschnitt B geschrieben.',
-    }))
-    expect(record.children.run_child.sectionsDone).toBe(2)
+    record = applyAgentRunEvent(record, progress(2, { event_type: 'inqtrix.agent.tool.finished', tool: 'read_evidence', tool_calls: 1 }))
     expect(record.children.run_child.startedAt).toBe(1_700_000_101)
   })
-})
 
-describe('child mission projections for the card', () => {
-  it('joins a task\'s searches and result line to its row and keeps the latest decision', () => {
-    let record = agentRunFromSummary(summary())
-    const child = (sequence: number, data: Record<string, unknown>) =>
-      event(sequence, 'inqtrix.agent.child.progress', {
-        child_run_id: 'run_child_1', task_id: 'call_1', run_status: 'running', ...data,
-      })
-    record = applyAgentRunEvent(record, child(1, { event_type: 'inqtrix.agent.task.started', ordinal: 0, title: 'Regulierung erfassen', child_task_id: 't1' }))
-    record = applyAgentRunEvent(record, child(2, { event_type: 'inqtrix.agent.activity', operation: 'web.search.instant', status: 'started', query: 'EU AI Act Leitlinien', child_task_id: 't1' }))
-    record = applyAgentRunEvent(record, child(3, { event_type: 'inqtrix.agent.activity', operation: 'web.search.instant', status: 'completed', query: 'EU AI Act Leitlinien', child_task_id: 't1' }))
-    record = applyAgentRunEvent(record, child(4, { event_type: 'inqtrix.agent.narration', narration_id: 'n-task-t1', kind: 'task', text: 'Regulierung erfassen: EU-Leitlinien vom 02.09. belegt.' }))
-    record = applyAgentRunEvent(record, child(5, { event_type: 'inqtrix.agent.task.finished', ordinal: 0, status: 'completed', child_task_id: 't1' }))
-    record = applyAgentRunEvent(record, child(6, { event_type: 'inqtrix.agent.narration', narration_id: 'n-plan', kind: 'plan', text: 'Mein Plan (2 Aufgaben): Regulierung und Markt.' }))
-    record = applyAgentRunEvent(record, child(7, { event_type: 'inqtrix.agent.activity', kind: 'critic_research', label: 'Critic fordert Recherche', detail: 'Das Memo braucht weitere Evidenz zu: Gegenposition belegt.' }))
-    const projected = record.children.run_child_1
-    expect(projected?.taskIds).toEqual({ t1: 0 })
-    expect(projected?.taskStartedAt).toEqual({ 0: 1_700_000_101 })
-    expect(projected?.taskSettledAt).toEqual({ 0: 1_700_000_105 })
-    expect(projected?.taskSearches).toEqual({ 0: 1 })
-    expect(projected?.lastQueryTask).toBe(0)
-    expect(projected?.lastQuery).toBe('EU AI Act Leitlinien')
-    expect(projected?.taskResults).toEqual({ 0: 'EU-Leitlinien vom 02.09. belegt.' })
-    expect(projected?.planLine).toBe('Mein Plan (2 Aufgaben): Regulierung und Markt.')
-    expect(projected?.decision).toEqual({
-      kind: 'critic_research',
-      label: 'Critic fordert Recherche',
-      detail: 'Das Memo braucht weitere Evidenz zu: Gegenposition belegt.',
-      at: 1_700_000_107,
-    })
-    expect(projected?.researchRounds).toBe(1)
-    // A result line for an unknown task id and a non-decision kind change nothing.
-    record = applyAgentRunEvent(record, child(8, { event_type: 'inqtrix.agent.narration', narration_id: 'n-task-t9', kind: 'task', text: 'Fremd: x' }))
-    record = applyAgentRunEvent(record, child(9, { event_type: 'inqtrix.agent.activity', kind: 'memory', label: 'Memory' }))
-    expect(record.children.run_child_1?.taskResults).toEqual({ 0: 'EU-Leitlinien vom 02.09. belegt.' })
-    expect(record.children.run_child_1?.decision?.kind).toBe('critic_research')
-    // The tool kind per task lets the card leave the search count off a
-    // task that delegates to a grandchild (its searches never cross).
-    record = applyAgentRunEvent(record, child(10, { event_type: 'inqtrix.agent.task.started', ordinal: 1, title: 'Markt', child_task_id: 't2', tool_kind: 'web_research' }))
-    expect(record.children.run_child_1?.taskKinds).toEqual({ 1: 'web_research' })
-    expect(record.children.run_child_1?.taskIds).toEqual({ t1: 0, t2: 1 })
-    record = applyAgentRunEvent(record, child(11, { event_type: 'inqtrix.agent.activity', kind: 'critic_unavailable', label: 'Kontrolle nicht auswertbar', detail: 'Kein gültiges Prüfurteil.' }))
-    expect(record.children.run_child_1?.decision?.kind).toBe('critic_unavailable')
-    expect(record.children.run_child_1?.decision?.label).toBe('Kontrolle nicht auswertbar')
-    expect(record.children.run_child_1?.researchRounds).toBe(1)
-  })
 })
 
 describe('the outcome record', () => {

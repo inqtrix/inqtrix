@@ -13,7 +13,7 @@ from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import InvalidCursor, decode_cursor
 from inqtrix.project.editor_collaboration_ports import CollaborationConflict
 from inqtrix.server.routers._collaboration_errors import collaboration_error_view
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import error_response, read_json_object
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -49,11 +49,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         expected_revision = body.get("expected_revision")
         expected_metadata_revision = body.get("expected_metadata_revision")
         schema_version = body.get("schema_version")
@@ -100,11 +98,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         protocol_version = body.get("protocol_version")
         schema_version = body.get("schema_version")
         current_lease_token = body.get("lease_token")
@@ -283,11 +279,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             generation, expected_revision, command_id = _comment_command(body)
             result = await service.create_comment(
@@ -322,11 +316,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             generation, expected_revision, command_id = _comment_command(body)
             result = await service.reply_to_comment(
@@ -358,11 +350,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             generation, expected_revision, command_id = _comment_command(body)
             status = body.get("status")
@@ -395,11 +385,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             generation, expected_revision, command_id = _comment_command(body)
             result = await service.delete_comment_thread(
@@ -430,11 +418,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             generation, expected_revision, command_id = _comment_command(body)
             result = await service.update_comment_message(
@@ -469,11 +455,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             generation, expected_revision, command_id = _comment_command(body)
             result = await service.update_comment_message(
@@ -505,11 +489,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             generation = _integer_field(body, "generation", minimum=1)
             revision = _integer_field(body, "revision", minimum=0)
@@ -566,11 +548,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         patch_ids = body.get("patch_ids")
         decision = body.get("decision")
         expected_sequence = body.get("expected_sequence")
@@ -627,11 +607,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         patch_id = body.get("patch_id")
         command_id = body.get("command_id")
         actor_kind = body.get("actor_kind")
@@ -690,14 +668,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         }
 
     return router
-
-
-async def _json_object(request: Request) -> dict[str, Any] | None:
-    try:
-        payload = await request.json()
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _bounded_integer(

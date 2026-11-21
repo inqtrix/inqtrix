@@ -1,4 +1,4 @@
-"""Governed workspace-agent long-term memory service.
+"""Governed agent long-term memory service.
 
 This is the enterprise boundary around provider-backed memory. Routers and
 the agent pass a verified :class:`~inqtrix.auth.principal.Principal`; client
@@ -203,7 +203,7 @@ class AgentMemoryService:
         """Return non-evidentiary memory context for the agent prompt.
 
         Returns:
-            ``(briefing, status)`` where status is ``used`` or
+            ``(briefing, status)`` where status is ``used``, ``empty`` or
             ``unavailable``. The briefing intentionally has no citations.
         """
         try:
@@ -261,12 +261,12 @@ class AgentMemoryService:
         if self._mode == "off":
             return []
         # Idempotent per source run: a terminal segment can be redelivered
-        # after a crash (both engines stage from the terminal write), which
+        # after a crash (the kernel stages from the terminal write), which
         # would otherwise DUPLICATE this run's candidates. If any already
-        # exist for this run, return them instead of staging again. Shared
-        # sink for the mission engine and the kernel — one root, no per-
-        # engine guard. (The reflection LLM call upstream still re-runs on
-        # redelivery; that cost residual is bounded to the rare crash path.)
+        # exist for this run, return them instead of staging again — one
+        # guard at the sink, none at the caller. (The reflection LLM call
+        # upstream still re-runs on redelivery; that cost residual is
+        # bounded to the rare crash path.)
         if source_run_id:
             tenant_id, user_id = self._principal_key(principal)
             existing = await self._candidate_store.list_candidates(

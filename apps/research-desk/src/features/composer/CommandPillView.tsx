@@ -20,7 +20,7 @@ const PILL_CLASS: Record<CommandPillKind, string> = {
   editTarget: 'border-file/35 bg-file-subtle text-file',
 }
 
-/** A capsule the selected engine refuses, or whose document is gone. */
+/** A capsule whose document is gone. */
 const WARNING_CLASS = 'border-warning/50 bg-warning-subtle text-warning'
 
 function PillIcon({ kind, label }: { kind: CommandPillKind; label: string }) {
@@ -74,7 +74,6 @@ export function CommandPillView({ node }: NodeViewProps) {
   const kind = String(node.attrs.pillKind) as CommandPillKind
   const label = String(node.attrs.pillLabel)
   const unavailable = state.unavailable.includes(commandPillKey(kind, String(node.attrs.pillId ?? '')))
-  const refused = state.refusedKinds.includes(kind)
   const named = unavailable ? `${label} (${t.agent.composer.pillUnavailable})` : label
   return (
     <NodeViewWrapper as="span" className="inline-flex max-w-full align-baseline">
@@ -82,11 +81,10 @@ export function CommandPillView({ node }: NodeViewProps) {
           role may — the glyph and the visible title are then read once,
           as that name. */}
       <span
-        aria-describedby={refused ? state.refusalNoticeId : undefined}
         aria-label={pillAriaLabel(kind, named, t)}
         className={cn(
           'mx-0.5 inline-flex max-w-full select-none items-center gap-1 rounded-[0.35rem] border px-1.5 py-px text-[0.85em] font-medium leading-tight',
-          unavailable || refused
+          unavailable
             ? WARNING_CLASS
             : PILL_CLASS[kind] ?? 'border-border bg-muted text-muted-foreground',
         )}
@@ -94,7 +92,6 @@ export function CommandPillView({ node }: NodeViewProps) {
         data-command-pill-kind={kind}
         data-command-pill-label={label}
         data-command-pill-unavailable={unavailable ? 'true' : undefined}
-        data-engine-refused={refused ? 'true' : undefined}
         role="img"
         title={label}
       >

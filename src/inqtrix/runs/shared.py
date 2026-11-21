@@ -18,12 +18,9 @@ from typing import Any, Mapping, Protocol, TypeVar
 from inqtrix import aio
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.runtime_logging import sanitize_event_payload
-from inqtrix.text import LOG_CUT_MARKER, shorten_visibly
+from inqtrix.text import QUESTION_CLIP_MARK
 from inqtrix.harness.contracts.events import (
-    ACTIVITY_EVENT,
     CHILD_PROGRESS_EVENT,
-    NARRATION_EVENT,
-    OUTCOME_EVENT,
     PHASE_CHANGED_EVENT,
     RUN_CANCELLED_EVENT,
     RUN_CANCEL_REQUESTED_EVENT,
@@ -34,9 +31,6 @@ from inqtrix.harness.contracts.events import (
     RUN_STARTED_EVENT,
     RUN_WAITING_EVENT,
     SNAPSHOT_EVENT,
-    TASK_FAILED_EVENT,
-    TASK_FINISHED_EVENT,
-    TASK_STARTED_EVENT,
     TOOL_FINISHED_EVENT,
 )
 
@@ -138,63 +132,10 @@ _CHILD_PROJECTED_EVENTS = frozenset(
         "inqtrix.knowledge.retrieval.warning",
         "inqtrix.knowledge.answer.retry",
         "inqtrix.knowledge.grounding.checked",
-        # A delegated MISSION reports its progress under `agent.*`, not in
-        # the research vocabulary above. Without these three a kernel
-        # parent saw ONLY lifecycle transitions — eleven events while a
-        # whole mission with five research children ran beneath it, and
-        # nothing at all about what was being worked on.
+        # A kernel role child reports its phase under `agent.*`, not in
+        # the research vocabulary above; its settled tool calls cross by
+        # name and counter (see should_project_child_event).
         PHASE_CHANGED_EVENT,
-        TASK_STARTED_EVENT,
-        TASK_FINISHED_EVENT,
-        # A failed task settles too. Without it the parent's line kept
-        # the failed tasks "open" and read "2 Aufgaben parallel" while
-        # the mission was already planning its next round.
-        TASK_FAILED_EVENT,
-        # How the mission ended, as numbers and its bounded summary: its
-        # reading lines and codes stay in the child's own record.
-        OUTCOME_EVENT,
-    }
-)
-
-#: Child activity operations whose bounded facts cross to the parent: the
-#: searches a mission task runs. Provider retries and model-turn brackets
-#: carry ``scope="run"`` and stay in the child's own stream.
-_CHILD_ACTIVITY_OPERATIONS = frozenset({"web.search.instant", "knowledge.search"})
-
-#: Child narration kinds that cross. Every line is DERIVED by
-#: ``narration.py`` from artifacts the mission already produced:
-#: ``synthesis`` (outline and section titles), ``task`` (the plan task's
-#: title plus the head of its result, <= 240 chars), ``plan`` (the plan's
-#: own summary head) and ``discovery`` (fact and gap counts). They are the
-#: mission's intermediate results in one line each — what the parent's
-#: card shows under the task they belong to. A task's whole result
-#: summary never crosses; the narration cap (400) bounds each line.
-_CHILD_NARRATION_KINDS = frozenset({"synthesis", "task", "plan", "discovery"})
-
-#: Run-scoped activity kinds that cross: the mission's DECISIONS after a
-#: check — why it keeps researching or why it stops. Bounded label and
-#: detail only; no evidence text. How the review ended crosses with the
-#: outcome record, never as a decision.
-_CHILD_DECISION_KINDS = frozenset(
-    {
-        "critic_unavailable",
-        "critic_revise",
-        "critic_research",
-        "critic_research_exhausted",
-        "replan_invalid",
-    }
-)
-
-#: Visible bound for a projected decision detail (the label is short by
-#: construction; the detail names the criteria a check left open).
-_CHILD_DECISION_DETAIL_CAP = 240
-
-#: Mission task events whose bounded identifiers cross to the parent.
-_CHILD_TASK_EVENTS = frozenset(
-    {
-        TASK_STARTED_EVENT,
-        TASK_FINISHED_EVENT,
-        TASK_FAILED_EVENT,
     }
 )
 
@@ -296,18 +237,22 @@ def clipped_question(question: str) -> str:
     """
     if len(question) <= QUESTION_COLUMN_LIMIT:
         return question
-    return question[:QUESTION_COLUMN_LIMIT] + "…"
+    return question[:QUESTION_COLUMN_LIMIT] + QUESTION_CLIP_MARK
 
 
 def question_was_clipped(record: Any) -> bool:
-    """Whether this row's stored question is shorter than what was asked.
+    """Whether this row's stored question is a cut of what was asked.
 
     Decided by COMPARING the column against the durable payload, never by
     sniffing a trailing ellipsis: a user may legitimately end a question
-    with one, and guessing would put a dead "show more" on their text.
+    with one, and guessing would put a dead "show more" on their text. The
+    column is a cut when it differs from what was asked and what was asked
+    is at least as long. Lengths alone would miss a question one character
+    over the limit: its cut is the limit plus the mark, exactly as long as
+    the question itself.
     """
     full = getattr(record, "question_full", None)
-    return bool(full) and len(full) > len(record.question)
+    return bool(full) and full != record.question and len(full) >= len(record.question)
 
 
 def build_run_summary(
@@ -361,7 +306,6 @@ def build_run_summary(
     if kind != "standard":
         agent_tree["kind"] = kind
         agent_tree["children_url"] = f"/v1/runs/{record.run_id}/children"
-        agent_tree["plan_url"] = f"/v1/runs/{record.run_id}/plan"
         agent_tree["artifacts_url"] = f"/v1/runs/{record.run_id}/artifacts"
     for key in ("parent_run_id", "root_run_id", "session_id", "origin_key", "work_profile"):
         value = getattr(record, key, None)
@@ -574,80 +518,14 @@ def build_child_progress_payload(
         projected["message"] = message
     if metrics:
         projected["metrics"] = metrics
-    if event_type in _CHILD_TASK_EVENTS:
-        # Which unit of work the mission is on — nothing more. The
-        # payload also carries `result_summary`, the child's whole
-        # executive summary with source URLs: that belongs to the child's
-        # own record, never to the parent's live feed. Its `child_run_id`
-        # names a GRANDCHILD and must not clobber the projected one, so
-        # both stay off this list by construction.
-        # `title` is the plan task's own title (capped by the sanitizer's
-        # text cap), so the parent can name the unit of work. The child's
-        # own plan-task id crosses under its own name (as a search's does)
-        # so the parent can join a task's searches and its result line to
-        # the row; `task_id` stays the PARENT's tool-call id.
-        for key in ("ordinal", "tool_kind", "status", "title"):
-            if clean.get(key) is not None:
-                projected[key] = clean[key]
-        if clean.get("task_id"):
-            projected["child_task_id"] = str(clean["task_id"])
     if event_type == TOOL_FINISHED_EVENT:
         # A kernel role child's step: the tool's name and the server's
         # counter, nothing else — its arguments and its result name the
         # material the role reads, and stay with the child.
         projected["tool"] = str(clean.get("tool") or "")
         projected["tool_calls"] = _tool_calls_used(clean)
-    if event_type == ACTIVITY_EVENT:
-        # The search a mission task runs right now: operation, bracket
-        # status, the query (text-capped under its own key), and the
-        # counter. `purpose`/`detail` duplicate the query or the task
-        # objective and stay behind; the child's task id crosses under
-        # its own name so it can never clobber the PARENT task id.
-        for key in ("operation", "status", "query", "current", "total"):
-            if clean.get(key) is not None:
-                projected[key] = clean[key]
-        if clean.get("task_id"):
-            projected["child_task_id"] = str(clean["task_id"])
-        if clean.get("kind") in _CHILD_DECISION_KINDS:
-            # A decision line: its kind, label and a bounded detail.
-            projected["kind"] = str(clean["kind"])
-            for key in ("label", "detail"):
-                value = clean.get(key)
-                if value:
-                    projected[key] = shorten_visibly(
-                        value, _CHILD_DECISION_DETAIL_CAP, marker=LOG_CUT_MARKER
-                    )
-    if event_type == OUTCOME_EVENT:
-        # The parent learns how the mission ended and how much stayed open,
-        # counted per code and per kind, and the record's summary: a closed
-        # sentence built from the record's states and counts (the reading
-        # limit and the review's reach among them), cut visibly at the
-        # decision bound. Never a line, a code list or evidence text.
-        for key in ("final", "review", "round", "revision", "accounting"):
-            if clean.get(key) is not None:
-                projected[key] = clean[key]
-        if clean.get("applied") is not None:
-            projected["applied"] = int(clean["applied"])
-        if clean.get("summary"):
-            projected["summary"] = shorten_visibly(
-                clean["summary"], _CHILD_DECISION_DETAIL_CAP, marker=LOG_CUT_MARKER
-            )
-        raw_open = clean.get("open")
-        if isinstance(raw_open, dict):
-            projected["open"] = {
-                group: {
-                    str(name): int(count)
-                    for name, count in dict(raw_open.get(group) or {}).items()
-                }
-                for group in ("by_code", "by_kind")
-            }
-    if event_type == NARRATION_EVENT:
-        # Already excerpt-capped by the narration schema on entry.
-        for key in ("narration_id", "kind", "text"):
-            if clean.get(key) is not None:
-                projected[key] = clean[key]
     if event_type == "inqtrix.knowledge.grounding.checked":
-        # A delegated mission's child stream owns the full event.  The parent
+        # The knowledge child's stream owns the full event.  The parent
         # receives only the bounded verdict/count projection needed to explain
         # why a Knowledge task did not complete; quote/source text never
         # crosses the run boundary.
@@ -730,18 +608,14 @@ def should_project_child_event(
 ) -> bool:
     """Whether a child event belongs in the parent's bounded live feed.
 
-    A kernel ROLE child (*work_profile* set: a review, a section writer)
-    crosses its settled tool calls by name and counter, at the first call
-    and every :data:`CHILD_TOOL_PROGRESS_EVERY`-th by the call's position
+    A kernel ROLE child (*work_profile* set: a review) crosses its settled
+    tool calls by name and counter, at the first call and every
+    :data:`CHILD_TOOL_PROGRESS_EVERY`-th by the call's position
     (``call_ordinal``), so a batch of parallel calls that settles with one
     shared counter still crosses; a step without its position stays (fail
-    closed). Its typed result call (``result_call``) is no step. A mission
-    child's own tool rows never cross. Two more families are payload-gated,
-    and fail CLOSED without a payload:
-    ``agent.activity`` crosses only for a task's searches (``scope ==
-    "task"`` and a search operation) — a provider retry or a model-turn
-    bracket carries ``scope="run"`` and stays; ``agent.narration``
-    crosses only for the derived synthesis lines, never for model prose.
+    closed). Its typed result call (``result_call``) is no step. Every other
+    event crosses when its type is one of the projected lifecycle, research
+    and knowledge types.
     """
     if event_type == TOOL_FINISHED_EVENT:
         if not work_profile or payload is None or payload.get("result_call"):
@@ -750,17 +624,6 @@ def should_project_child_event(
         return ordinal is not None and (
             ordinal == 1 or ordinal % CHILD_TOOL_PROGRESS_EVERY == 0
         )
-    if event_type == ACTIVITY_EVENT:
-        if payload is None:
-            return False
-        if payload.get("kind") in _CHILD_DECISION_KINDS:
-            return True
-        return (
-            payload.get("scope") == "task"
-            and payload.get("operation") in _CHILD_ACTIVITY_OPERATIONS
-        )
-    if event_type == NARRATION_EVENT:
-        return payload is not None and payload.get("kind") in _CHILD_NARRATION_KINDS
     return event_type in _CHILD_PROJECTED_EVENTS
 
 

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import { agentRunFromSummary } from './model'
 import type { AgentArtifactRecord } from './model'
@@ -6,7 +6,6 @@ import type { ResearchRunSummary } from '@/features/researchRuns/types'
 import {
   agentTranscriptHydrated,
   currentAgentControlFetchFailures,
-  refreshPlanAfterApprovalDecision,
 } from './useAgentControlApi'
 
 function agentRun() {
@@ -19,10 +18,9 @@ function agentRun() {
     events_url: '/events',
     finished_at: null,
     kind: 'agent',
-    mode: 'workspace_agent',
+    mode: 'agent_kernel',
     question: 'Research',
     queue_position: null,
-    result_url: '/result',
     run_id: 'run-1',
     snapshot: {},
     stack: 'default',
@@ -30,41 +28,6 @@ function agentRun() {
     status: 'completed',
   } satisfies ResearchRunSummary)
 }
-
-describe('refreshPlanAfterApprovalDecision', () => {
-  it('loads the authoritative plan after plan approval returns', async () => {
-    const load = vi.fn(async () => ({ status: 'approved' }))
-    const onLoaded = vi.fn()
-    await refreshPlanAfterApprovalDecision({
-      kind: 'plan',
-      load,
-      onError: vi.fn(),
-      onLoaded,
-    })
-    expect(load).toHaveBeenCalledOnce()
-    expect(onLoaded).toHaveBeenCalledWith({ status: 'approved' })
-  })
-
-  it('skips non-plan approvals and surfaces refresh errors', async () => {
-    const skippedLoad = vi.fn(async () => ({}))
-    await refreshPlanAfterApprovalDecision({
-      kind: 'patch',
-      load: skippedLoad,
-      onError: vi.fn(),
-      onLoaded: vi.fn(),
-    })
-    expect(skippedLoad).not.toHaveBeenCalled()
-
-    const onError = vi.fn()
-    await refreshPlanAfterApprovalDecision({
-      kind: 'replan',
-      load: async () => { throw new Error('Plan refresh failed') },
-      onError,
-      onLoaded: vi.fn(),
-    })
-    expect(onError).toHaveBeenCalledWith('Plan refresh failed')
-  })
-})
 
 describe('agentTranscriptHydrated', () => {
   it('waits for initial control rows and the terminal answer body', () => {
@@ -84,7 +47,6 @@ describe('agentTranscriptHydrated', () => {
       artifacts: { [answer.artifactId]: answer },
       artifactsStale: false,
       clarificationsStale: false,
-      planStale: false,
     }
     expect(agentTranscriptHydrated(rowsLoaded)).toBe(false)
     expect(agentTranscriptHydrated(
@@ -103,7 +65,7 @@ describe('agentTranscriptHydrated', () => {
 describe('currentAgentControlFetchFailures', () => {
   it('suppresses the active failed cycle but re-arms a later invalidation', () => {
     const stale = agentRun()
-    const failed = new Set(['run-1:plan'])
+    const failed = new Set(['run-1:approvals'])
 
     const sameCycle = currentAgentControlFetchFailures(
       { [stale.runId]: stale },
@@ -111,14 +73,14 @@ describe('currentAgentControlFetchFailures', () => {
     )
     expect(sameCycle).toEqual(failed)
 
-    const settled = { ...stale, planStale: false }
+    const settled = { ...stale, approvalsStale: false }
     const afterSettlement = currentAgentControlFetchFailures(
       { [settled.runId]: settled },
       sameCycle,
     )
     expect(afterSettlement).toEqual(new Set())
 
-    const invalidatedAgain = { ...settled, planStale: true }
+    const invalidatedAgain = { ...settled, approvalsStale: true }
     expect(currentAgentControlFetchFailures(
       { [invalidatedAgain.runId]: invalidatedAgain },
       afterSettlement,
@@ -164,7 +126,6 @@ describe('currentAgentControlFetchFailures', () => {
       artifacts: { [answer.artifactId]: answer },
       artifactsStale: false,
       clarificationsStale: false,
-      planStale: false,
     }
 
     const sameRevision = currentAgentControlFetchFailures(

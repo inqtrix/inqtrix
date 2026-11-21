@@ -103,7 +103,7 @@ def test_resolve_tier_requested_overrides_reasoning_defaults() -> None:
 
 @pytest.mark.parametrize("node", [
     "classify", "claim_extract", "knowledge_gate", "knowledge_contextualize",
-    "knowledge_decompose", "knowledge_rerank", "agent_intake", "agent_sufficiency",
+    "knowledge_decompose", "knowledge_rerank", "agent_sufficiency",
     "agent_skill_point_check",
     "session_title",
 ])
@@ -277,6 +277,7 @@ def test_describe_unresolved_resolution_shape_is_stable() -> None:
         "model": "",
         "tier": "fast",
         "effort": "",
+        "verbosity": "",
         "model_source": "provider_models_missing",
         "effort_source": "provider_default_unseen",
         "requested_tier": "fast",

@@ -170,7 +170,7 @@ import {
   type EditorSurfaceRegistration,
 } from './core/editorSurfaceRegistration'
 import { isAuthoredComment } from './commentKinds'
-import { editorCopy, type EditorCopy } from './editorCopy'
+import { editorConflictCopyNotice, editorCopy, type EditorCopy } from './editorCopy'
 import { escapeCssIdentifier } from './editorDom'
 import { suggestionDiffPlan } from './suggestionDiff'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
@@ -300,7 +300,9 @@ import {
 import { persistCollaborationDiffAnchor } from './collaborationDiffAnchor'
 import { resolveMaterializedAnchor } from './anchoring'
 import type {
+  EditorConflictCopy,
   EditorDocumentBodyHydration,
+  EditorDocumentMergeOutcome,
   EditorDocumentPushOutcome,
 } from './useEditorHistoryApi'
 import { readerError } from '@/api/requestErrorText'
@@ -308,6 +310,10 @@ import { formatTimeOfDay } from '@/lib/time'
 
 type EditorWorkspaceProps = {
   apiKey?: string
+  /** The conflict copies of this session (from the sync hook): a copy
+   * keeps this tab's version of a document when it could not be merged
+   * with a version saved elsewhere. */
+  conflictCopies: readonly EditorConflictCopy[]
   /** Server capability manifest; forwarded to useEditorSuggestions so the
    * client editor-run abort tracks the server wait. */
   capabilities: InqtrixCapabilities | null
@@ -351,15 +357,26 @@ type EditorWorkspaceProps = {
     intent: 'details' | 'share',
     returnFocusTarget?: HTMLElement | null,
   ) => void
-  /** Pushes the document's current body to the server before collaboration
-   * activation and returns the fresh server revisions (null = a concurrent
-   * writer won; retry). With this wired, the share flow does not depend on
-   * the GLOBAL project dirty flag — which server-synced deployments never
-   * clear, so depending on it would leave the Share button permanently
-   * disabled. */
+  /** Pushes the document's current body to the server now and returns the
+   * outcome: `saved` with the fresh server revisions, also after a concurrent
+   * writer's version was merged in and saved; `merged` or `conflict` when a
+   * further writer won that second save too (retry); `converted` when the
+   * document was converted to collaboration elsewhere; `skipped` when
+   * nothing could be pushed. Collaboration activation and accepting an agent
+   * patch on the server both save first. With this wired, the share flow does
+   * not depend on the GLOBAL project dirty flag — which server-synced
+   * deployments never clear, so depending on it would leave the Share button
+   * permanently disabled. */
   onFlushDocumentForShare?: (
     documentId: string,
   ) => Promise<EditorDocumentPushOutcome>
+  /** Merges a version the server holds into a document's record by the rule
+   * of the autosave's lost save; accepting an agent patch hands it the
+   * server's text after the patch was applied. */
+  onMergeServerDocument: (
+    documentId: string,
+    server: EditorDocumentRecord,
+  ) => Promise<EditorDocumentMergeOutcome>
   onCollaborationControllerChange?: (
     registration: { controller: CollaborationProjectionController; documentId: string } | null,
   ) => void
@@ -476,6 +493,7 @@ const EDITOR_CENTER_COMMENTS_PANEL_ID = 'editor-center-comments-panel'
 export default function EditorWorkspace({
   apiKey,
   assetBodyLoadStates = {},
+  conflictCopies,
   capabilities,
   chatModelOptions,
   chatModelOptionsStatus,
@@ -487,6 +505,7 @@ export default function EditorWorkspace({
   ensureUploadTarget,
   onCollaborationControllerChange,
   onFlushDocumentForShare,
+  onMergeServerDocument,
   onRecoveryCaptureProviderChange,
   onShareDocument,
   onServerDocumentObserved,
@@ -504,10 +523,17 @@ export default function EditorWorkspace({
 }: EditorWorkspaceProps) {
   const { locale } = useLocale()
   const copy = editorCopy[locale]
+  // The conflict copy that shows its comparison with the original, if any.
+  const [comparingCopyId, setComparingCopyId] = useState<string | null>(null)
   const isDesktop = useMediaQuery('(min-width: 1024px)')
   const folders = useMemo(() => projectEditorFolders(state), [state.editorFolderOrder, state.editorFolders])
   const documents = useMemo(() => projectEditorDocuments(state), [state.editorDocumentOrder, state.editorDocuments])
   const activeDocument = selectedEditorDocument(state)
+  // The original the open conflict copy is compared with; the comparison
+  // ends when another document opens.
+  const comparingWithOriginal = activeDocument && comparingCopyId === activeDocument.id
+    ? conflictCopyOriginal(conflictCopies, state.editorDocuments, activeDocument.id)
+    : null
   const collaborationFeatureAvailable =
     capabilities?.features.collaboration === true
   const activeDocumentIdRef = useRef(activeDocument?.id ?? null)
@@ -1158,17 +1184,18 @@ export default function EditorWorkspace({
       let expectedRevision = document.revision
       let expectedMetadataRevision = document.metadataRevision
       if (onFlushDocumentForShare) {
-        // Der Rumpf wird zuerst geschrieben, damit die Umwandlung auf dem
-        // aktuellen Inhalt geschieht. Der Flush liest den Record selbst und
-        // innerhalb seiner Sperre -- hier wird nur die Id gereicht.
+        // The body is written first, so the conversion happens on the current
+        // content. The flush reads the record itself, inside its lock — only
+        // the id is handed over here.
         const outcome = await onFlushDocumentForShare(document.id)
-        // 'rebased' ist der EINZIGE Fall, in dem "gleichzeitig geaendert"
-        // wahr ist: ein anderer Schreiber hat den Revisionsschutz gewonnen,
-        // der lokale Stand wurde nachgezogen, und der naechste Klick setzt
-        // darauf auf. Ein einziges `null` fuer alle Ausgaenge wuerde vier
-        // Bedeutungen tragen und allen diese Meldung geben -- auch denen, in
-        // denen Wiederholen nichts aendert.
-        if (outcome.kind === 'rebased') {
+        // A save that lost against another writer was merged and saved once
+        // more inside the flush, which then reports `saved`. `merged` or
+        // `conflict` here means a further writer won that second save too:
+        // the only case in which "changed concurrently, try again" is true,
+        // and the next click starts from the merged record. A conversion
+        // elsewhere, nothing pushed, and every other outcome end with the
+        // general message, since trying again changes nothing there.
+        if (outcome.kind === 'merged' || outcome.kind === 'conflict') {
           throw new Error(collaborationActivationConflictError(locale))
         }
         if (outcome.kind !== 'saved') {
@@ -1190,9 +1217,9 @@ export default function EditorWorkspace({
         { apiKey, workspaceId },
       )
       // The dialog snapshot is only the ADDRESS — the record is re-read
-      // LIVE here: a rebase during the flush has already advanced
+      // LIVE here: a merge during the flush has already advanced
       // body/title/updatedAt, and the two observer
-      // callbacks below must never republish the pre-rebase snapshot
+      // callbacks below must never republish the pre-merge snapshot
       // (a stale updatedAt fingerprint would misdescribe the server view
       // that registerOpenedServerDocument records).
       const liveDocument =
@@ -1653,8 +1680,10 @@ export default function EditorWorkspace({
     comments,
     dispatch,
     ensureAssetBodiesLoaded,
+    flushDocument: onFlushDocumentForShare,
     handedOverDiscussions: discussions,
     locale,
+    mergeServerDocument: onMergeServerDocument,
     onCollaborationPublication: handleCollaborationPublication,
     onGlobalSuccess: () => {
       setAttachedCommentIds([])
@@ -2023,6 +2052,15 @@ export default function EditorWorkspace({
         documents={state.editorDocuments}
         locale={locale}
       />
+      <EditorConflictCopyNotice
+        comparing={comparingWithOriginal !== null}
+        conflictCopies={conflictCopies}
+        dispatch={dispatch}
+        document={activeDocument}
+        documents={state.editorDocuments}
+        locale={locale}
+        onCompareChange={(comparing) => setComparingCopyId(comparing ? activeDocument.id : null)}
+      />
       {collaborationActive
         && collaboration.recoverability === 'retry'
         && collaboration.reconnectAttempt >= 3 ? (
@@ -2102,11 +2140,14 @@ export default function EditorWorkspace({
                         comments={inspectorTab === 'assistant' ? surfaceCommentAnchors.comments : []}
                         copy={copy}
                         document={activeDocument}
-                        diffAnchorMarkdown={activeDocument.diffAnchorMarkdown ?? null}
-                        isDiffVisible={state.editorUi.isDiffVisible}
+                        diffAnchorMarkdown={comparingWithOriginal
+                          ? comparingWithOriginal.contentMarkdown
+                          : activeDocument.diffAnchorMarkdown ?? null}
+                        isDiffVisible={comparingWithOriginal !== null || state.editorUi.isDiffVisible}
                         mode={state.editorUi.viewMode}
-                        onChange={(contentMarkdown) => {
+                        onChange={(contentMarkdown, baseContentMarkdown) => {
                           dispatch({
+                            baseContentMarkdown,
                             contentMarkdown,
                             documentId: activeDocument.id,
                             type: 'updateEditorDocumentMarkdown',
@@ -3382,7 +3423,6 @@ export function editorRecoveryMarkdown({
   return `${body}\n\n---\n\n## ${sectionTitle}\n\n${drafts.join('\n\n')}`
 }
 
-/** A local recovery copy: why it exists, and the two decisions it offers. */
 /** What an export into a Word template wants the user to know. A menu is closed by then, so it has its own bar. */
 function EditorWordTemplateNotice({
   copy,
@@ -3410,6 +3450,7 @@ function EditorWordTemplateNotice({
   )
 }
 
+/** A local recovery copy: why it exists, and the two decisions it offers. */
 export function EditorRecoveryBar({
   locale,
   onDiscard,
@@ -3487,6 +3528,107 @@ export function EditorDocumentRecoveryNotice({
         type: 'openEditorDocument',
       })}
     />
+  )
+}
+
+/** The original a conflict copy is compared with: the document whose
+ * version the copy's text could not be merged with, as it is now. `null`
+ * when `documentId` names no conflict copy of this session, or its original
+ * is gone. */
+export function conflictCopyOriginal(
+  conflictCopies: readonly EditorConflictCopy[],
+  documents: Readonly<Record<string, EditorDocumentRecord>>,
+  documentId: string,
+): EditorDocumentRecord | null {
+  const entry = conflictCopies.find((candidate) => candidate.copyDocumentId === documentId)
+  return entry ? documents[entry.originalDocumentId] ?? null : null
+}
+
+/** What an open document says about the conflict copies of this session.
+ * A copy shows a bar: whose version it holds, a comparison with the
+ * original's current text, and deleting the copy. An original whose own
+ * version went to a copy shows a calm notice that opens the newest copy;
+ * the notice shows whenever that original is opened. Every other document
+ * shows nothing. */
+export function EditorConflictCopyNotice({
+  comparing,
+  conflictCopies,
+  dispatch,
+  document,
+  documents,
+  locale,
+  onCompareChange,
+}: {
+  /** Whether the copy shows the comparison with its original. */
+  comparing: boolean
+  conflictCopies: readonly EditorConflictCopy[]
+  dispatch: Dispatch<ResearchDeskAction>
+  document: EditorDocumentRecord
+  documents: Readonly<Record<string, EditorDocumentRecord>>
+  locale: 'de' | 'en'
+  onCompareChange: (comparing: boolean) => void
+}) {
+  const copy = editorCopy[locale]
+  const asCopy = conflictCopies.find((entry) => entry.copyDocumentId === document.id)
+  if (asCopy) {
+    const original = conflictCopyOriginal(conflictCopies, documents, document.id)
+    if (!original) return null
+    return (
+      <div
+        className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-muted/40 px-3 py-1"
+        data-editor-conflict-copy="copy"
+        role="status"
+      >
+        <Info aria-hidden className="icon-sm shrink-0 text-muted-foreground" />
+        <p className="t-meta min-w-64 flex-1 text-foreground">
+          {editorConflictCopyNotice(locale, asCopy.reason, 'copy', original.title)}
+        </p>
+        {/* The label says what a click does; a toggle state on top would
+            read "close comparison, pressed". */}
+        <Button
+          onClick={() => onCompareChange(!comparing)}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          {comparing ? copy.conflictCopyCompareClose : copy.conflictCopyCompare}
+        </Button>
+        <Button
+          onClick={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          {copy.conflictCopyDelete}
+        </Button>
+      </div>
+    )
+  }
+  const newest = conflictCopies
+    .filter((entry) => entry.originalDocumentId === document.id)
+    .at(-1)
+  const newestCopy = newest ? documents[newest.copyDocumentId] : undefined
+  if (!newest || !newestCopy) return null
+  return (
+    <div
+      className="flex min-h-9 flex-wrap items-center gap-x-2 border-b border-border bg-muted/40 px-3 py-1"
+      data-editor-conflict-copy="original"
+      role="status"
+    >
+      <Info aria-hidden className="icon-sm shrink-0 text-muted-foreground" />
+      <p className="t-meta min-w-0 flex-1 text-foreground">
+        {editorConflictCopyNotice(locale, newest.reason, 'original', newestCopy.title)}
+      </p>
+      <Button
+        className="h-7 px-1"
+        onClick={() => dispatch({ documentId: newestCopy.id, type: 'openEditorDocument' })}
+        size="sm"
+        type="button"
+        variant="link"
+      >
+        {copy.conflictCopyOpen}
+      </Button>
+    </div>
   )
 }
 
@@ -4663,12 +4805,16 @@ function EditorCommentsPanel({
   // meaning.
   const visibleComments = statusTab === 'open' ? openComments : resolvedComments
   const commentNumbers = buildCommentNumbers(authoredComments)
-  // Genau die Vorschlaege eines Anweisungslaufs. Im Markdown-Modus haben sie
-  // keinen Traeger ('global_run' ohne commentId), im Kollaborationsmodus
-  // haengen sie an einer Maschinenzeile ('assistant_edit'). Ein 'global_run'
-  // MIT commentId stammt dagegen aus einer Sammel-Notiz des Nutzers und
-  // gehoert in deren Karte -- hier erschiene er ein zweites Mal, mit einem
-  // zweiten Uebernehmen-Knopf.
+  // The changes that belong to no note of the user's: the suggestions of
+  // instruction runs, without a commentId in Markdown mode ('global_run') and
+  // on a machine carrier row in collaboration mode ('assistant_edit'), and
+  // those mirrored from agent patches, which carry the Markdown run's origin.
+  // The agent patches are listed on purpose, one group per patch, which is
+  // decided there as a whole; the next instruction run still does not replace
+  // them, as its rule tells them apart by their `serverPatch`
+  // (isReplacedByNextInstructionRun). A 'global_run' WITH a commentId comes
+  // from a note of the user's and belongs on that note's card: here it would
+  // show a second time, with a second accept button.
   const documentChangeSuggestions = suggestions
     .filter((suggestion) =>
       (suggestion.status === 'pending' || suggestion.status === 'stale')

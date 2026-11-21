@@ -240,7 +240,7 @@ counts.
 |---|---|---|
 | **No citations** | `not has_citations` (`len(all_citations) == 0`) | `conf = min(conf, 6)` |
 | **No claims** | `has_citations` AND `has_evidence_records` AND `not has_claims` | `conf = min(conf, 5)` -- the `if` half of an `if`/`elif` pair with the next row; when citations exist but neither evidence records nor claims do, both branches are skipped and nothing caps `conf` |
-| **No report bundles** | `has_citations` AND `has_claims` AND `not has_report_bundles` (no supported -- verified or attributed -- and no contested claim; `has_report_bundles()` in `nodes.py`, so a provider without page text is no reason) -- the `elif` branch of the row above, so at most one of the two fires | `conf = min(conf, 6)` |
+| **No report bundles** | `has_citations` AND `has_claims` AND `not has_report_bundles` (no supported -- verified or attributed -- and no contested claim; `has_report_bundles()` in `nodes.py`, so an attributed claim, whose support the stating excerpts of the search provider do not carry on their own, counts as well) -- the `elif` branch of the row above, so at most one of the two fires | `conf = min(conf, 6)` |
 | **Low-tier majority** | `low_n > (primary_n + mainstream_n)` AND `conf > 7` | `conf = 7` |
 | **Needs-primary missing** | the extractor flagged at least one claim as primary-needing (`claim_needs_primary_total > 0`) AND none of them is supported, verified or attributed (`claim_needs_primary_supported == 0`) AND `conf > 8`; primary sources elsewhere in the citation pool do not satisfy those claims | `conf = 8` |
 | **Open sub-questions** | `len(uncovered_aspects) > 0` AND `conf > 8` (the evaluator's own `COVERED_ASPECTS` judgement, see below) | `conf = 8` |
@@ -389,7 +389,8 @@ s["final_confidence"] = conf       # nodes.py
 This is where the adjusted `conf` becomes `final_confidence`, but it is
 not the last write: the answer node's three algorithm-failure paths lift a
 stored `0` to `3`, and the evidence-contract cap lowers `final_confidence`
-to 3, 4 or 6 depending on the contract status.
+to 3, 4 or 6 depending on the contract status, and to 6 for a claim-bound
+answer while the evidence-depth gap is active.
 
 ## Stage 6 -- Unjustified-drop diagnostic
 
@@ -543,7 +544,7 @@ global `min_rounds` suppression.
 |--------|-------------|------------|-------------|
 | working `conf` / `final_confidence` | `evaluate` parses `CONFIDENCE` into working `conf`; stores `final_confidence` after Group C | Group A + guardrails + Group C in `evaluate` | final stop gate (`confidence_stop`), plateau/stagnation/utility, answer metrics |
 | `evidence_consistency` | `extract_evidence_scores` | same | evidence sanity cap (only `0/0` + high confidence case), diagnostics |
-| `evidence_depth_gap` | `search` and recomputed in `evaluate` from the complete claim assessment (see [_evidence_depth_gap()](#evidence-depth-gap)) | same | evaluate prompt, next-round query slots, plateau suppression, answer-prompt `EVIDENCE DEPTH` block trigger |
+| `evidence_depth_gap` | `search` (after the claims are written) and recomputed at the start of `plan` and `evaluate` from the complete claim assessment (see [_evidence_depth_gap()](#evidence-depth-gap)) | same | evaluate prompt (`EVIDENCE DEPTH GAP` block; its `gap` text becomes the gap hint when the evaluator names no gaps), next-round `primary_source` query slot, plateau suppression, answer-prompt `EVIDENCE DEPTH` block trigger, answer-node confidence ceiling and basis line |
 | `evidence_sufficiency` | `extract_evidence_scores` | same | utility formula and weak-evidence confidence cap |
 | `competing_events` | `extract_competing_events` | same | competing-events cap and plateau suppression logic |
 | `falsification_triggered` | `check_falsification` | trigger/release in same method | plan-mode query distribution; stagnation precondition |
@@ -585,8 +586,8 @@ Compact-list caps do not change the assessed population. Existing profile
 limits still bound the research loop; a different complete evidence assessment
 can change its stop decision.
 
-Threshold constant: `_EVIDENCE_DEPTH_MIN_VERIFIED_BUNDLES = 3` (despite
-the name, it counts verified consolidated claims, not bundles).
+Threshold constant: `_EVIDENCE_DEPTH_MIN_SUPPORTED_CLAIMS = 3` (it counts
+supported consolidated claims, verified and attributed alike).
 
 The diagnostic is **active** when **any** of:
 
@@ -594,11 +595,11 @@ The diagnostic is **active** when **any** of:
 |---|---|
 | `no_cross_checked_claims` | `supported_count >= 3` AND `cross_checked_count == 0` |
 | `majority_single_source_claims` | `supported_count >= 3` AND `single_source_count / supported_count > 0.5` |
-| `central_claim_single_quality_source` | at least one supported claim with `verification_basis == "quality_source"`, only one citation URL, and a claim text that matches the central-claim regex (numeric / benchmark / regulatory keyword) |
+| `central_claim_single_quality_source` | at least one supported claim with `verification_basis == "quality_source"`, only one citation URL, and a claim text that states a number |
 
 Supported claims are the verified and the attributed ones alike: the gap
-measures the depth of the support structure, not whether a provider returned
-page text.
+measures the depth of the support structure, not whether a claim was checked
+against the search provider's excerpt.
 
 The returned dict carries `active`, `reason` (comma-joined), `gap`
 (human-readable explanation when active), and the per-trigger counts
@@ -614,16 +615,39 @@ of them containing a percentage:
 - `central_single_quality_source_count=1` → `central_claim_single_quality_source`
 - `active=True`, `reason="no_cross_checked_claims,majority_single_source_claims,central_claim_single_quality_source"`.
 
-The gap has three downstream effects:
+A claim with a primary source keeps the basis `primary_source` however many
+sources it has; only `cross_checked` counts here. Four claims with two
+primary sources each therefore trigger `no_cross_checked_claims` without a
+single-source majority.
 
-1. The next `plan()` round receives a cross-check query slot via
-   `_select_crosscheck_targets()` (see [Research loop](loop.md)).
+The gap has five downstream effects:
+
+1. The next `plan()` round receives a `primary_source` query slot
+   (`_build_query_slots()`): it asks for the original primary source or
+   official data behind the strongest cross-check candidate, or behind the
+   question when there is none, while the batch still has room. The
+   cross-check targets themselves (`_select_crosscheck_targets()`) come
+   from the claims in every round from the second on, whether or not the
+   gap is active (see [Research loop](loop.md)).
 2. `check_plateau()` suppresses a plateau stop while the gap is active
    (search continues even if confidence has been flat for two rounds).
-3. The answer-node system prompt emits the **EVIDENCE DEPTH** block, which
+3. The `evaluate()` prompt carries an **EVIDENCE DEPTH GAP** block with the
+   diagnosis and the counts. When the evaluator names no gaps, the gap's
+   `gap` text becomes the gap hint, which the next `plan()` turns into a
+   gap query slot.
+4. The answer-node system prompt emits the **EVIDENCE DEPTH** block, which
    tells the LLM to inline-attribute single-source-verified claims and to
    mention the limited evidence depth in the report (see
    [Evidence pipeline — Final answer system prompt](evidence.md#final-answer-system-prompt)).
+5. In the answer node an active gap caps a claim-bound answer (`clean` or
+   `needs_review`) at a confidence of 6 and is no cause of `needs_review`:
+   an answer that is otherwise clean stays `clean` and gets no evidence
+   notice. The result names the reasons from the table above in
+   `metrics.evidence_depth_gap_reasons` and, after any cause of
+   `needs_review`, as the reasons of the ceiling in
+   `metrics.confidence_cap_reasons`; the basis line under the report gives
+   the counts (see
+   [Evidence notice and basis line](evidence.md#evidence-notice-and-basis-line)).
 
 The gap does not override `confidence_stop` or `max_rounds`.
 

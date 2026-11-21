@@ -60,9 +60,9 @@ export async function ensureTemporaryUsers({
  *
  * An account without a saved language shows the product default, while the
  * run's pages look for their labels in the run's language. The save replaces
- * the whole preference row (theme, contrast, agent memory and model tiers
- * included), so only accounts the run created are written; the row goes
- * with the account when the run erases it.
+ * the whole preference row (theme, contrast, agent memory, the model tiers
+ * and the last report profile and Stufe included), so only accounts the run
+ * created are written; the row goes with the account when the run erases it.
  */
 export async function setAccountLocale(actor, locale, { now = Date.now } = {}) {
   await fetchActorJson(actor, 'PUT', '/v1/account/preferences', {

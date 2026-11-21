@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import type { AgentPlanTaskRecord, AgentRunRecord, AgentStepEntry, AgentTaskLiveState } from '../model'
+import type { AgentRunRecord, AgentStepEntry } from '../model'
 import {
   groupStepEntries,
   isEvidenceReadEntry,
   isSectionLine,
+  retiredTaskRow,
   taskResultShownByRow,
-  taskRowResultPreview,
+  taskStartConcluded,
 } from './stepGroups'
 
 const entry = (seq: number, kind: AgentStepEntry['kind'], narrationId?: string): AgentStepEntry =>
@@ -52,62 +53,64 @@ describe('groupStepEntries', () => {
   })
 })
 
-describe('a finished task in the transcript', () => {
-  const planTask = (taskId: string, overrides: Partial<AgentPlanTaskRecord> = {}): AgentPlanTaskRecord => ({
-    taskId, ordinal: 0, title: 'Regulierung erfassen', toolKind: 'rag_query', objective: '', queries: [],
-    gapIds: [], dependsOn: [], budget: {}, params: {}, expectedOutput: '', status: 'completed',
-    childRunId: null, resultSummary: '', ...overrides,
+describe('a task of a stored mission run in the transcript', () => {
+  const finished = (extra: Partial<AgentStepEntry> = {}): AgentStepEntry => ({
+    seq: 10, at: 10, kind: 'task_finished', taskId: 't1', status: 'completed',
+    title: 'Regulierung erfassen', result: '**EU-Leitlinien** belegt.', ...extra,
   })
-  const finished = (taskId: string, extra: Partial<AgentStepEntry> = {}): AgentStepEntry =>
-    ({ seq: 10, at: 10, kind: 'task_finished', taskId, ...extra })
   const narration = (narrationId: string, detail = 'task'): AgentStepEntry =>
     ({ seq: 11, at: 11, kind: 'narration', narrationId, detail, text: 'Regulierung erfassen: EU-Leitlinien belegt.' })
-  const run = (
-    stepLog: AgentStepEntry[],
-    live: Partial<AgentTaskLiveState> = { status: 'completed', resultSummary: 'EU-Leitlinien belegt.' },
-    task: AgentPlanTaskRecord = planTask('t1'),
-  ): Pick<AgentRunRecord, 'plan' | 'stepLog' | 'taskStates'> => ({
-    plan: {
-      planId: 'p', version: 1, status: 'approved', createdBy: 'agent', reason: '', createdAt: 0,
-      summaryMarkdown: '', assumptions: [], successCriteria: [], tasks: [task], versions: [],
-    },
-    stepLog,
-    taskStates: { t1: { attempt: 1, status: 'completed', ...live } as AgentTaskLiveState },
+  const run = (stepLog: AgentStepEntry[]): Pick<AgentRunRecord, 'stepLog'> => ({ stepLog })
+
+  it('names the task by the title and shows the result head as plain text', () => {
+    expect(retiredTaskRow(finished(), [finished()])).toEqual({
+      title: 'Regulierung erfassen', result: 'EU-Leitlinien belegt.',
+    })
+    // A result that repeats the title says it once.
+    expect(retiredTaskRow(finished({ result: 'Regulierung erfassen: belegt.' }), []).result).toBe('belegt.')
+  })
+
+  it('names a task stored without its title by its result line, else by its id', () => {
+    const untitled = finished({ title: undefined })
+    expect(retiredTaskRow(untitled, [untitled, narration('n-task-t1')])).toEqual({
+      title: 'Regulierung erfassen: EU-Leitlinien belegt.', result: '',
+    })
+    expect(retiredTaskRow(untitled, [untitled])).toEqual({ title: 't1', result: 'EU-Leitlinien belegt.' })
+    // A start line has no result yet.
+    expect(retiredTaskRow({ seq: 1, at: 1, kind: 'task_started', taskId: 't1' }, [])).toEqual({ title: 't1', result: '' })
   })
 
   it('shows the result once: the row carries it and the narration folds', () => {
-    // Otherwise every finished task stands twice, as its row and as the
-    // "Titel: …" narration below it.
-    const log = [finished('t1'), narration('n-task-t1')]
-    expect(taskRowResultPreview(log[0], run(log))).toBe('EU-Leitlinien belegt.')
+    const log = [finished(), narration('n-task-t1')]
     expect(taskResultShownByRow(log[1], run(log))).toBe(true)
+    // The row named by the narration itself folds it as well.
+    const untitled = [finished({ title: undefined }), narration('n-task-t1')]
+    expect(taskResultShownByRow(untitled[1], run(untitled))).toBe(true)
   })
 
   it('keeps the narration when the row shows no result of its own', () => {
-    const withError = [finished('t1', { error: 'Anbieter nicht erreichbar' }), narration('n-task-t1')]
-    expect(taskResultShownByRow(withError[1], run(withError))).toBe(false)
-    const insufficient = [finished('t1'), narration('n-task-t1')]
-    const thin = run(insufficient, { status: 'insufficient_evidence', resultSummary: 'EU-Leitlinien belegt.' })
-    expect(taskRowResultPreview(insufficient[0], thin)).toBe('')
-    expect(taskResultShownByRow(insufficient[1], thin)).toBe(false)
-    const noRow = [narration('n-task-t1')]
-    expect(taskResultShownByRow(noRow[0], run(noRow))).toBe(false)
-    const noSummary = [finished('t1'), narration('n-task-t1')]
-    expect(taskResultShownByRow(noSummary[1], run(noSummary, { status: 'completed', resultSummary: '' }))).toBe(false)
-  })
-
-  it('keeps the narration when the plan does not name the task', () => {
-    // The row then shows only the raw id as its title; the narration is the
-    // one line that names the task in words.
-    const log = [finished('t1'), narration('n-task-t1')]
-    const unplanned = run(log, undefined, planTask('t9'))
-    expect(taskRowResultPreview(log[0], unplanned)).toBe('EU-Leitlinien belegt.')
-    expect(taskResultShownByRow(log[1], unplanned)).toBe(false)
+    for (const row of [
+      finished({ error: 'Anbieter nicht erreichbar' }),
+      finished({ status: 'insufficient_evidence' }),
+      finished({ result: undefined }),
+    ]) {
+      const log = [row, narration('n-task-t1')]
+      expect(taskResultShownByRow(log[1], run(log))).toBe(false)
+    }
+    expect(taskResultShownByRow(narration('n-task-t1'), run([narration('n-task-t1')]))).toBe(false)
   })
 
   it('folds only the task narration of the same task', () => {
-    const log = [finished('t1'), narration('n-t1'), narration('n-task-t1', 'plan'), narration('n-task-t2')]
-    const record = run(log)
-    expect(log.slice(1).map((entry) => taskResultShownByRow(entry, record))).toEqual([false, false, false])
+    const log = [finished(), narration('n-t1'), narration('n-task-t1', 'plan'), narration('n-task-t2')]
+    expect(log.slice(1).map((entry) => taskResultShownByRow(entry, run(log)))).toEqual([false, false, false])
+  })
+
+  it('answers a start line by the outcome line that follows it', () => {
+    const started: AgentStepEntry = { seq: 5, at: 5, kind: 'task_started', taskId: 't1' }
+    expect(taskStartConcluded(started, [started])).toBe(false)
+    expect(taskStartConcluded(started, [started, finished()])).toBe(true)
+    // An outcome before a retry's start does not answer it.
+    expect(taskStartConcluded({ ...started, seq: 20 }, [finished(), { ...started, seq: 20 }])).toBe(false)
+    expect(taskStartConcluded(started, [started, finished({ taskId: 't2' })])).toBe(false)
   })
 })

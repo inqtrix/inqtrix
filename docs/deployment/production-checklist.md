@@ -73,6 +73,23 @@ not a parallel normal startup path. Without Postgres everything is in-memory
 and lost on restart, including sessions and the user mirror — so a restart
 logs everyone out.
 
+Knowledge in production keeps its vectors in Qdrant
+(`INQTRIX_VECTOR_BACKEND=qdrant`, `--profile knowledge`). The default
+`memory` index suits a one-process trial only: it has no size limit, lives
+inside one process and is empty after every restart, while Postgres keeps the
+documents, so searches miss everything indexed before a restart until each
+collection is rebuilt, which embeds every chunk again. With the knowledge
+engine on, the start is refused when that index would sit beside Valkey
+workers or more than one declared replica (`INQTRIX_REPLICA_COUNT`), and
+beside Postgres it logs a `WARNING` at startup; treat that line as a release
+blocker. Memory is no fallback for an outage either: when Qdrant stops
+answering, knowledge is reported unavailable (a run, `POST /v1/runs`, that
+asks for knowledge is refused with HTTP 503 `knowledge_store_unavailable`;
+`/v1/chat/completions` has no such admission, so a knowledge request there
+meets the outage while it runs: without streaming it ends with HTTP 502
+`server_error`, streamed it ends with an error message in the stream) and
+indexing pauses and can resume once Qdrant answers again.
+
 ## Backups
 
 Back up two things:
@@ -93,7 +110,9 @@ See [Runbooks](runbooks.md#backup) for the commands and the restore order.
 | OIDC | Configure your external IdP without the bundled profile and register the exact `https://…/api/auth/callback`; Dex is a dev reference, not for production. |
 
 Misconfiguration fails loudly at startup (e.g. `INQTRIX_QUEUE_BACKEND=valkey`
-without a URL, or `valkey` without `postgres`) rather than degrading silently.
+without a URL, `valkey` without `postgres`, or the knowledge engine on the
+in-memory vector index beside workers or replicas) rather than degrading
+silently.
 
 ## Auth in production
 

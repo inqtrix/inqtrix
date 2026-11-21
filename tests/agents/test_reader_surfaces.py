@@ -449,8 +449,6 @@ NARRATION_GUARDS = frozenset({
     "deps.guard_reader_text",
     # The kernel's again, from a middleware that holds its deps on self.
     "self.deps.guard_reader_text",
-    # The mission's, which needs the phase state the line is emitted from.
-    "lambda line: _guard_reader_text(state, line, evidence=evidence)",
 })
 """The guards a narration line may be emitted with.
 
@@ -479,9 +477,9 @@ def test_every_narration_line_is_emitted_with_a_real_guard():
             if not isinstance(node, ast.Call):
                 continue
             name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-            # THE shared emitter only. A wrapper (the mission has one)
-            # reaches the reader through this call like everyone else, so
-            # checking here covers every path without knowing the wrappers.
+            # THE shared emitter only. A wrapper reaches the reader through
+            # this call like everyone else, so checking here covers every
+            # path without knowing the wrappers.
             if name != "emit_narration":
                 continue
             guards = [kw for kw in node.keywords if kw.arg == "guard"]
@@ -497,8 +495,7 @@ def test_every_narration_line_is_emitted_with_a_real_guard():
     )
 
 
-RECORD_PORTS = ("save_plan", "_transition_task", "transition_plan_task",
-                "build_clarification")
+RECORD_PORTS = ("build_clarification",)
 """The ports that write a DURABLE record a person is later shown.
 
 Separated from the other ports because the guarantee has a different
@@ -511,8 +508,6 @@ checking.
 """
 
 READER_TEXT_GUARDS = frozenset({
-    "_guarded_plan",
-    "_guard_reader_text",
     "guard_reader_text",
     "guarded_reader_text",
     "guarded_questions",
@@ -522,9 +517,8 @@ READER_TEXT_GUARDS = frozenset({
 Named rather than derived, for the same reason ``NARRATION_GUARDS`` is:
 what makes a call a guard cannot be read off its syntax. The list is
 short and every entry is a binding of the one mechanism in
-``report_quality`` — the mission's, the kernel's, the reconciling
-service's, and the two shape-aware projections over a plan and a
-clarification round.
+``report_quality`` — the kernel's, the function it binds, and the
+shape-aware projection over a clarification round.
 """
 
 

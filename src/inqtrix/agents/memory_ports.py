@@ -1,4 +1,4 @@
-"""Workspace-agent long-term memory contracts.
+"""Agent long-term memory contracts.
 
 Run artifacts and session memos remain the canonical short-lived memory.
 This module defines the optional long-term memory seam: provider-backed
@@ -79,7 +79,7 @@ class AgentMemoryCandidate:
 
 @dataclass(frozen=True)
 class AgentFeedbackRecord:
-    """One personal feedback entry for a workspace-agent run."""
+    """One personal feedback entry for an agent run."""
 
     feedback_id: str
     tenant_id: str

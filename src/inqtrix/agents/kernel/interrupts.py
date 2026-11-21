@@ -31,7 +31,7 @@ approval row; the policy gates map its resume."""
 CHILDREN_INTERRUPT = "children"
 """Origin C: a child-run tool parked slot-free; NO control row backs it
 (the child RUN rows are the truth) — the store wakes the parent when
-the last child terminates, exactly the workspace-agent contract."""
+the last child terminates."""
 
 
 def ask_user_clarification_id(run_id: str, tool_call_id: str) -> str:

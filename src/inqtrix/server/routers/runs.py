@@ -316,9 +316,9 @@ def build_router(container: "AppContainer") -> APIRouter:
             messages, max_messages=settings.server.max_messages_history
         )
 
-        # Workspace-agent submission extras: validated here,
-        # inert for every other mode. The agent kind drives the additive
-        # summary keys and the cancel cascade.
+        # Agent submission extras: validated here, inert for every
+        # other mode. The agent kind drives the additive summary keys and
+        # the cancel cascade.
         autonomy = body.get("autonomy")
         if autonomy is not None and autonomy not in (
             "strict",
@@ -427,10 +427,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                     + f' — Limits: max. {CANVAS_CONTEXT_MAX_COMMENTS} comments; quote {CANVAS_QUOTE_MAX_CHARS}, context {CANVAS_QUOTE_CONTEXT_MAX_CHARS}, comment {CANVAS_COMMENT_MAX_CHARS} characters. Content is never truncated during transfer.',
                     "invalid_request_error",
                 )
-        # Result requirement set BEFORE the run. The plan gate is
-        # the other entry point, but three mission paths never reach one
-        # — autonomous, the speed tier and delegated children — and the
-        # kernel has no plan gate at all. Ids only: the server resolves
+        # Result requirement set BEFORE the run, its only entry point.
+        # Ids only: the server resolves
         # label, revision and body from the CALLER's own catalog, so a
         # client can never put unchecked text into the writing prompts.
         raw_report_guidance = body.get("report_guidance")
@@ -658,8 +656,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 session_id=session_id,
                 autonomy=(autonomy or "") if is_agent else "",
                 document_id=(document_id or "") if is_agent else "",
-                # "auto" is the wire default — stored as "" (no override,
-                # the intake profile decides the deliverable form).
+                # "auto" is the wire default — stored as "" (no choice;
+                # the run's Stufe and the model decide the deliverable form).
                 response_form=(
                     ""
                     if not is_agent or response_form in (None, "auto")
@@ -893,9 +891,9 @@ def build_router(container: "AppContainer") -> APIRouter:
                 visible_to=visible_to,
             )
             # Waiting/queued runs become terminal synchronously and will not
-            # re-enter the algorithm to close their plan rows. Running runs
-            # retain their worker; its cancellation boundary performs the
-            # same domain transition without racing this request.
+            # re-enter the algorithm to close their control rows. Running
+            # runs retain their worker; its cancellation boundary performs
+            # the same domain transition without racing this request.
             control_service = container.agent_control_service
             if control_service is not None:
                 await control_service.reconcile_terminal_run_tree(

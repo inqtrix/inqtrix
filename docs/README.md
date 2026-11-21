@@ -33,7 +33,7 @@ Start here when you know what you want to do but not which page owns it. The roo
 | Configure env vars or report profiles | [Settings and env](configuration/settings-and-env.md), [Report profiles](configuration/report-profiles.md) |
 | Understand how the research loop works | [Research loop](architecture/websearch/loop.md) |
 | Understand the knowledge/RAG retrieval pipeline (hybrid, RRF, gate loop) | [Knowledge engine](architecture/knowledge-engine.md) |
-| Understand the workspace agent (plans, approvals, child runs, memo canvas) | [Agent platform](architecture/agent-platform.md) |
+| Understand the agent (kernel, approvals, child runs, canvas) | [Agent platform](architecture/agent-platform.md) |
 | Understand the live editor data and trust model | [Editor collaboration architecture](architecture/editor-collaboration.md) |
 | Debug a bad or expensive run | [Debugging runs](observability/forensic-cookbook.md#debugging-runs), [Logging](observability/logging.md), [Forensic cookbook](observability/forensic-cookbook.md) |
 | Scrape metrics / wire readiness probes | [Metrics](observability/metrics.md) |
@@ -61,7 +61,7 @@ Start here when you know what you want to do but not which page owns it. The roo
 |--------|------------|
 | `getting-started/` | Install it, get the first research answer and the first knowledge answer, bring up the full stack, and decide which infrastructure you actually need. |
 | `deployment/` | Run it for real: Compose and Kubernetes, library and HTTP mode, auth modes and user management, the React UI, editor collaboration, database and object storage, the security model, version upgrades, AI transparency, and the production checklist. |
-| `architecture/` | How each subsystem works, including `architecture/websearch/` for the research engine: the loop and its scoring pages, the knowledge engine, the workspace agent, editor collaboration, the data model, and the library API. |
+| `architecture/` | How each subsystem works, including `architecture/websearch/` for the research engine: the loop and its scoring pages, the knowledge engine, the agent platform, editor collaboration, the data model, and the library API. |
 | `extending/` | Build your own implementation against a seam: provider, auth provider, storage backend, your own UI or client, and the Runs API wire contract. |
 | `configuration/` | `AgentConfig`, every environment variable, report and retrieval profiles, model cards, and the provider settings that back them. |
 | `observability/` | Logs, run events, the iteration and score ledgers, metrics, and the forensic cookbook for reading a finished run back out. |

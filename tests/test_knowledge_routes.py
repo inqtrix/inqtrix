@@ -960,7 +960,6 @@ def test_capabilities_publishes_agent_tool_manifest():
         "strict", "balanced", "autonomous",
     ]
     assert payload["agent"]["default_autonomy"]
-    assert isinstance(payload["agent"]["max_plan_tasks"], int)
     # The composer maps the two-mode Standard/Auto presets onto the
     # unchanged wire vocabulary above; advanced_autonomy
     # republishes the legacy three-way control (default off).
@@ -970,19 +969,15 @@ def test_capabilities_publishes_agent_tool_manifest():
     ]
     assert payload["agent"]["advanced_autonomy"] is False
     # The run-overview contract (published == enforced): what each
-    # permission mode gates, derived from the kernel policy config and
-    # the web-replan rule. A policy change must surface here — the
+    # permission mode gates, derived from the kernel policy config. A policy
+    # change must surface here — the
     # composer overview renders exactly this block.
     modes = payload["agent"]["permission_modes"]
     assert set(modes) == {"strict", "balanced", "autonomous"}
     balanced = modes["balanced"]
-    assert balanced["plan_gate"] is True
-    assert balanced["web_replan_regate"] is True
-    assert balanced["patch_gate"] is True
     assert balanced["kernel_gated_tools"] == [
         "delegate_batch",
         "load_skill",
-        "run_deep_mission",
         "run_web_research",
         "web_instant",
     ]
@@ -991,12 +986,8 @@ def test_capabilities_publishes_agent_tool_manifest():
     ]
     assert balanced["kernel_always_gated"] == ["propose_editor_patch"]
     auto = modes["autonomous"]
-    assert auto["plan_gate"] is False
-    assert auto["web_replan_regate"] is False
-    assert auto["patch_gate"] is True
     assert auto["kernel_gated_tools"] == []
     strict = modes["strict"]
-    assert strict["web_replan_regate"] is True
     assert "read_project_document" in strict["kernel_gated_tools"]
     # Skill limits ride the agent block; the skill list stays on the
     # authenticated /v1/skills endpoint because this endpoint is unauthenticated.
@@ -1025,12 +1016,13 @@ def test_capabilities_publishes_agent_tool_manifest():
         "steps": 120,
         "steps_ceiling": 240,
     }
-    assert limits["mission"]["discovery_tool_calls"] == 15
-    assert limits["mission"]["plan_tasks"] == 8
-    # Published == enforced: the document-analysis bounds the executor applies.
-    assert limits["mission"]["documents_per_analysis"] == 3
-    assert limits["mission"]["document_windows_per_analysis"] == 40
-    assert limits["mission"]["document_windows_per_run"] == 80
+    # Published == enforced: the bounds of every document analysis, the
+    # settings the executor applies.
+    assert limits["document_analysis"] == {
+        "documents_per_analysis": 3,
+        "document_windows_per_analysis": 40,
+        "document_windows_per_run": 80,
+    }
     assert limits["tokens"]["extendable"] is False
     assert limits["tokens"]["recoverable"] is False
     # Memory backend: routes mounted, but the volatile store must not

@@ -10,14 +10,12 @@ import { OptionMenuHeader, optionMenuContentClassName } from '@/components/ui/op
 import { StatusRow, SummaryGroup, type StatusRowTone } from '@/components/ui/status-summary'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
-import type { AgentTierCapability, AgentTierId } from '@/features/researchRuns/types'
+import type { AgentTierId } from '@/features/researchRuns/types'
 import { useLocale } from '@/i18n/LocaleProvider'
-import { countLabel } from '@/i18n/plural'
 import { effortLevelLabel } from '@/lib/modelCard'
 import { cn } from '@/lib/utils'
 import type {
   AgentOverview,
-  AgentToolUseCounts,
   ApprovalRow,
 } from './agentStatusOverview'
 import type {
@@ -26,6 +24,8 @@ import type {
 } from './executionPolicy'
 import { kernelToolLabel } from './activityPresentation'
 import { resolveAgentExecutionDisplay } from './executionPolicy'
+import type { AgentRunRecord } from './model'
+import { knowledgeUseRow, webUseRow } from './runPresentation'
 
 /**
  * Read-only overview of what THIS run would actually do — the Agent Desk
@@ -60,6 +60,7 @@ function kernelReasonText(
 export function AgentStatusMenu({
   autonomyHint,
   autonomyLabel,
+  childRuns,
   depthDeep = false,
   disabled,
   memoryEnabled,
@@ -68,15 +69,16 @@ export function AgentStatusMenu({
   responseFormValue,
   responseForm,
   tier = null,
-  tiers = null,
   execution = null,
   sourcePolicy,
-  toolUseCounts = { web: 0, knowledge: 0 },
 }: {
   /** The selected mode's meaning, reused from the toggle tooltip. */
   autonomyHint: string
   /** Display label of the selected permission mode (header value). */
   autonomyLabel: string
+  /** The accepted run's delegated children: a research child reports the
+   * web searches it ran, which the "web used" row counts and names. */
+  childRuns?: AgentRunRecord['children']
   /** Live composer depth toggle: true = Deep selected. */
   depthDeep?: boolean
   disabled: boolean
@@ -92,25 +94,22 @@ export function AgentStatusMenu({
   responseForm: 'auto' | 'chat' | 'canvas'
   /** Published thoroughness tier; null on legacy depth-only servers. */
   tier?: AgentTierId | null
-  /** Published Stufen ladder (`capabilities.agent.tiers`): the selected
-   * tier's entry carries the round caps the server enforces for it. */
-  tiers?: AgentTierCapability[] | null
+  /** The execution snapshot of the session's latest run. */
   execution?: AgentExecutionSnapshot | null
   sourcePolicy: AgentSourcePolicy
-  /** Actual completed tool calls when task-level data is available. */
-  toolUseCounts?: AgentToolUseCounts
 }) {
   const { t } = useLocale()
   const o = t.agent.overview
+  // Only a kernel run is shown as what it did. A stored run of the retired
+  // mission engine is not a kernel run: its model, depth and spend would
+  // read as the kernel's, so the menu shows what the next run would do.
+  const acceptedExecution = execution?.effectiveMode === 'agent_kernel' ? execution : null
   const display = resolveAgentExecutionDisplay({
-    execution,
+    execution: acceptedExecution,
     selectedDepth: depthDeep ? 'deep' : 'normal',
-    selectedMode: overview.brain,
     selectedResponseForm: responseForm,
   })
-  const acceptedExecution = execution
   const effectiveSourcePolicy = acceptedExecution?.sourcePolicy ?? sourcePolicy
-  const effectiveMode = display.effectiveMode
   const effectiveResponseForm = display.responseForm === 'chat'
     ? t.agent.composer.responseFormChat
     : display.responseForm === 'canvas'
@@ -126,48 +125,44 @@ export function AgentStatusMenu({
       : o.modelAutoValue
     : modelValue
   const effectiveDepthDeep = display.depth === 'deep'
-  const effectiveToolUseCounts = acceptedExecution?.toolUseCounts ?? toolUseCounts
-  const routeValue = effectiveMode === 'agent_kernel'
-    ? o.routeAutomatic
-    : o.brainMission
+  // What the run did with each source, counted where its settings line
+  // counts; before a run there is nothing to count.
+  const webUsed = acceptedExecution ? webUseRow(acceptedExecution, childRuns, t) : null
+  const knowledgeUsed = acceptedExecution ? knowledgeUseRow(acceptedExecution, t) : null
   const kernelLimitKey = tier === 'schnell'
     ? 'schnell'
     : effectiveDepthDeep
       ? 'deep'
       : 'normal'
   const depthLimits = overview.limits?.kernel[kernelLimitKey]
-  // The selected Stufe caps clarification rounds below the operator
-  // ceiling (`effective_clarification_rounds` on the server); before a run
-  // publishes its live limit, the tier's entry is the enforced number.
-  // Without a tier the operator ceiling is the enforced one.
-  const tierEntry = tier ? tiers?.find((entry) => entry.id === tier) : undefined
   const tokenLimits = overview.limits?.tokens
   const liveLimits = acceptedExecution?.limits ?? {}
-  const limitValue = (
+  // One limit row: the numbers in the pill, the words on the line under it.
+  // The pill is narrow and cuts what does not fit, so a row that carried
+  // both lost the ceiling a limit can be extended to.
+  const limitRow = (
     key: string,
     fallback: { limit: number; ceiling?: number } | null,
-  ): string => {
+  ): { hint?: string; value: string } => {
     const live = liveLimits[key]
     if (live) {
-      if (live.used !== null) {
-        return (live.extendable ? o.limitUsageExtendable : o.limitUsageHard)
-          .replace('{used}', String(live.used))
-          .replace('{limit}', String(live.limit))
-          .replace('{ceiling}', String(live.ceiling))
+      const used = live.used !== null
+      return {
+        hint: (live.extendable
+          ? (used ? o.limitHintUsedExtendable : o.limitHintExtendable)
+          : (used ? o.limitHintUsedHard : o.limitHintHard)
+        ).replace('{ceiling}', String(live.ceiling)),
+        value: used ? `${live.used} / ${live.limit}` : String(live.limit),
       }
-      return live.extendable
-        ? o.limitExtendable
-          .replace('{limit}', String(live.limit))
-          .replace('{ceiling}', String(live.ceiling))
-        : o.limitHard.replace('{limit}', String(live.limit))
     }
-    if (!fallback) return o.limitUnavailable
+    if (!fallback) return { value: o.limitUnavailable }
     const ceiling = Math.max(fallback.limit, fallback.ceiling ?? fallback.limit)
-    return ceiling > fallback.limit
-      ? o.limitExtendable
-        .replace('{limit}', String(fallback.limit))
-        .replace('{ceiling}', String(ceiling))
-      : o.limitHard.replace('{limit}', String(fallback.limit))
+    return {
+      hint: ceiling > fallback.limit
+        ? o.limitHintExtendable.replace('{ceiling}', String(ceiling))
+        : o.limitHintHard,
+      value: String(fallback.limit),
+    }
   }
 
   const sourceValue = (
@@ -183,8 +178,6 @@ export function AgentStatusMenu({
 
   const approvalLabel = (row: ApprovalRow): string => {
     switch (row.id) {
-      case 'plan':
-        return o.rowPlan
       case 'web_search':
         return o.rowWebSearch
       case 'knowledge_search':
@@ -231,24 +224,21 @@ export function AgentStatusMenu({
           <SummaryGroup label={o.groupExecution}>
             <StatusRow
               label={o.rowRoute}
-              value={routeValue}
+              value={o.routeAutomatic}
             />
             <StatusRow
               label={o.rowBrain}
-              value={effectiveMode === 'agent_kernel' ? o.brainKernel : o.brainMission}
+              value={o.brainKernel}
             />
             {/* Feature transparency: the engine is listed even when the
-               deployment does not offer it — an absent picker alone would
-               hide that it exists. "Unavailable" means the operator turned
-               the kernel off or a registration gate was missed; the reason
-               travels in feature_status.agent_kernel. */}
+               deployment does not offer it. "Unavailable" means the
+               operator turned the kernel off or a registration gate was
+               missed; the reason travels in feature_status.agent_kernel. */}
             <StatusRow
               label={o.brainKernel}
               {...(overview.kernel === 'active'
                 ? { tone: 'success' as const, value: o.stateActive }
-                : overview.kernel === 'selectable'
-                  ? { tone: 'muted' as const, value: o.stateSelectable }
-                  : { tone: 'muted' as const, value: o.stateUnavailable })}
+                : { tone: 'muted' as const, value: o.stateUnavailable })}
               hint={kernelReasonText(o.kernelReasons, overview.kernelReason)}
             />
             <StatusRow label={t.agent.composer.responseForm} value={effectiveResponseForm} />
@@ -278,73 +268,30 @@ export function AgentStatusMenu({
             <>
               <DropdownMenuSeparator className="mx-0 my-1" />
               <SummaryGroup label={o.groupLimits}>
-                {effectiveMode === 'agent_kernel' && depthLimits ? (
+                {depthLimits ? (
                   <>
                     <StatusRow
                       label={o.rowToolCalls}
-                      value={limitValue('tool_calls', {
+                      {...limitRow('tool_calls', {
                         limit: depthLimits.tool_calls,
                         ceiling: depthLimits.tool_calls_ceiling,
                       })}
                     />
                     <StatusRow
                       label={o.rowSteps}
-                      value={limitValue('steps', {
+                      {...limitRow('steps', {
                         limit: depthLimits.steps,
                         ceiling: depthLimits.steps_ceiling,
                       })}
                     />
                   </>
-                ) : (
-                  <>
-                    <StatusRow
-                      label={o.rowDiscoveryCalls}
-                      value={limitValue('discovery_tool_calls', {
-                        limit: overview.limits.mission.discovery_tool_calls,
-                      })}
-                    />
-                    <StatusRow
-                      label={o.rowPlanTasks}
-                      value={limitValue('plan_tasks', {
-                        limit: overview.limits.mission.plan_tasks,
-                      })}
-                    />
-                    <StatusRow
-                      label={o.rowReplanRounds}
-                      value={limitValue('replan_rounds', {
-                        limit: overview.limits.mission.replan_rounds,
-                      })}
-                    />
-                    <StatusRow
-                      label={o.rowClarificationRounds}
-                      value={limitValue('clarification_rounds', {
-                        limit: tierEntry
-                          ? tierEntry.clarification_rounds
-                          : overview.limits.mission.clarification_rounds,
-                      })}
-                    />
-                    <StatusRow
-                      label={o.rowParallelChildren}
-                      value={o.limitHard.replace(
-                        '{limit}',
-                        String(overview.limits.mission.parallel_children),
-                      )}
-                    />
-                    <StatusRow
-                      label={o.rowResearchRounds}
-                      value={o.limitHard.replace(
-                        '{limit}',
-                        String(overview.limits.research.rounds),
-                      )}
-                    />
-                  </>
-                )}
+                ) : null}
                 <StatusRow
                   label={o.rowTokens}
                   tone={tokenLimits?.enabled ? 'warning' : 'muted'}
-                  value={tokenLimits?.enabled
-                    ? limitValue('tokens', { limit: tokenLimits.limit })
-                    : o.limitDisabled}
+                  {...(tokenLimits?.enabled
+                    ? limitRow('tokens', { limit: tokenLimits.limit })
+                    : { value: o.limitDisabled })}
                 />
               </SummaryGroup>
               <div className="px-2.5 pb-1 pt-1.5 t-meta-sm text-muted-foreground">
@@ -405,19 +352,11 @@ export function AgentStatusMenu({
                   : sourceValue(row.id, row.available))}
               />
             ))}
-            {effectiveToolUseCounts.web > 0 ? (
-              <StatusRow
-                label={o.toolWebUsed}
-                tone="success"
-                value={countLabel(effectiveToolUseCounts.web, o.toolUseCountOne, o.toolUseCount)}
-              />
+            {webUsed ? (
+              <StatusRow label={o.toolWebUsed} tone="success" {...webUsed} />
             ) : null}
-            {effectiveToolUseCounts.knowledge > 0 ? (
-              <StatusRow
-                label={o.toolKnowledgeUsed}
-                tone="success"
-                value={countLabel(effectiveToolUseCounts.knowledge, o.toolUseCountOne, o.toolUseCount)}
-              />
+            {knowledgeUsed ? (
+              <StatusRow label={o.toolKnowledgeUsed} tone="success" {...knowledgeUsed} />
             ) : null}
           </SummaryGroup>
         </div>

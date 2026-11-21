@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from inqtrix.agents.control_memory import MemoryAgentControlStore
@@ -89,6 +90,7 @@ def _pack(
     current_run_id: str = "run_current",
     full_questions: dict[str, str] | None = None,
     store: "FakeRunStore | None" = None,
+    cite_questions: bool = False,
 ) -> SessionContextPack:
     return build_session_context(
         "sess-1",
@@ -97,6 +99,7 @@ def _pack(
         run_async=asyncio.run,
         visible_to=None,
         current_run_id=current_run_id,
+        cite_questions=cite_questions,
     )
 
 
@@ -364,11 +367,57 @@ def test_whole_turns_drop_only_after_bodies_hit_the_floor():
 
 def test_a_question_that_cannot_fit_is_cut_with_a_visible_marker():
     """Last resort, and never silent: a bare ellipsis is indistinguishable
-    from one the user typed, so the cut says what it is."""
+    from one the user typed, so the cut says what it is. The turn's stored
+    answer went before the question did, and the block says that too."""
     block = _within_budget([_turn("X" * 9000, "kurz")])
 
     assert len(block) <= TOTAL_HISTORY_CHAR_BUDGET
-    assert block.endswith("[... question shortened]")
+    assert " [... question shortened]\n[... " in block
+    assert block.endswith("of this turn left out]")
+    assert "kurz" not in block and "<untrusted_content" not in block
+
+
+def test_a_question_that_fits_is_not_marked_as_shortened():
+    """The question is cut only when it alone exceeds the budget. A question
+    that fits beside nothing else stays whole and carries no cut marker; what
+    was left out is the turn's stored answer, and the block names that."""
+    from inqtrix.agents.session_context import _DATA_LEFT_OUT
+
+    requirement = " Antworte in hoechstens 800 Woertern."
+    room = TOTAL_HISTORY_CHAR_BUDGET - len(_DATA_LEFT_OUT) - len("User: ") - 2
+    question = "Q" * (room - len(requirement)) + requirement
+    turn = _turn(question, "Y" * 3000)
+    # The question fits; an empty fence beside it would not.
+    assert len(turn.render(0)) > TOTAL_HISTORY_CHAR_BUDGET
+    block = _within_budget([turn])
+
+    assert len(block) <= TOTAL_HISTORY_CHAR_BUDGET
+    assert question in block
+    assert "question shortened" not in block
+    assert block.endswith("[... the stored answer and clarifications of this turn left out]")
+
+
+def test_a_large_clarification_record_is_cut_inside_its_fence_before_the_question():
+    """Stored data is spent before the owner's question: the answer first,
+    then the record of the turn's clarifications. The cut stands inside the
+    fence, which stays closed, and the question is whole and unmarked."""
+    question = "Vergleiche A und B. " * 190 + "Antworte als Tabelle."
+    clarifications = "\n".join(
+        f"Clarification: Frage {index}? — Answer: " + "a" * 180 for index in range(20)
+    )
+    turn = _VerbatimTurn(
+        head=f"User: {question}", data_head=clarifications, body="Agent: " + "Y" * 3000
+    )
+    assert len(turn.head) + len(clarifications) > TOTAL_HISTORY_CHAR_BUDGET - 200
+    block = _within_budget([turn])
+
+    assert len(block) <= TOTAL_HISTORY_CHAR_BUDGET
+    assert question in block and "question shortened" not in block
+    opened = '<untrusted_content source="session-history">\n'
+    fenced = block.split(opened, 1)[1]
+    assert fenced.endswith("[... shortened]\n</untrusted_content>")
+    assert fenced.startswith("Clarification: Frage 0? — Answer: ")
+    assert block.count("<untrusted_content") == block.count("</untrusted_content>") == 1
 
 
 def test_one_oversized_latest_turn_does_not_claim_older_turns_were_trimmed():
@@ -676,3 +725,73 @@ def test_builder_never_raises(caplog):
     assert any(
         "Session context" in record.message for record in caplog.records
     )
+
+
+_CITED = re.compile(r'read_context\(source_id="(src_[A-Za-z0-9_=-]+)"\)')
+
+
+def test_a_shortened_older_question_names_its_original_where_the_run_can_read_it():
+    """The cut is visible everywhere; where the run can read conversation
+    sources it also names the original, per line."""
+    from inqtrix.agents.context_sources import decode_source
+
+    long_question = "Vergleiche A und B. " * 20
+    summaries = [_summary("run_0", long_question)] + [
+        _summary(f"run_{i}", f"Frage {i}") for i in range(1, 5)
+    ]
+    results = {f"run_{i}": {"answer": f"Antwort {i}."} for i in range(5)}
+    cited = _pack(summaries, results=results, cite_questions=True).history_block
+    plain = _pack(summaries, results=results).history_block
+
+    line = next(row for row in cited.splitlines() if row.startswith('Earlier: "Vergleiche'))
+    source = _CITED.search(line)
+    assert source is not None, line
+    assert decode_source(source.group(1)) == ("question", "run_0", "", "request")
+    assert "[... question shortened" in line
+    assert "read_context" not in plain and "[... question shortened]" in plain
+
+
+def test_a_question_that_cannot_fit_names_its_original_too():
+    from inqtrix.agents.context_sources import decode_source
+
+    block = _pack(
+        [_summary("run_1", "X" * 9000)],
+        results={"run_1": {"answer": "Antwort."}},
+        cite_questions=True,
+    ).history_block
+
+    assert len(block) <= TOTAL_HISTORY_CHAR_BUDGET
+    # The cut question names its original on its own line; the line after it
+    # says that the turn's stored answer was left out.
+    cut, left_out = block.splitlines()[-2:]
+    source = _CITED.search(cut)
+    assert source is not None, block[-200:]
+    assert decode_source(source.group(1)) == ("question", "run_1", "", "request")
+    assert left_out == "[... the stored answer and clarifications of this turn left out]"
+
+
+def test_the_kernel_cites_questions_exactly_where_it_can_read_conversation_sources(monkeypatch):
+    from types import SimpleNamespace
+
+    from inqtrix.agents import session_context
+    from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
+
+    seen: list[bool] = []
+
+    def capture(session_id, **kwargs):
+        seen.append(kwargs["cite_questions"])
+        return SessionContextPack()
+
+    monkeypatch.setattr(session_context, "build_session_context", capture)
+    algorithm = KernelAgentAlgorithm.__new__(KernelAgentAlgorithm)
+    algorithm._run_service = SimpleNamespace(run_store=None)
+    algorithm._control = None
+    algorithm._recall_memory_briefing = lambda request, deps: None
+    for available in (True, False):
+        deps = SimpleNamespace(
+            session_id="sess-1", run_id="run_current", capability_context=None,
+            artifact_registry=(), last_response_form="", prior_evidence_count=0,
+            context_sources_available=available,
+        )
+        algorithm._hydrate_session_context(SimpleNamespace(history=""), deps)
+    assert seen == [True, False]

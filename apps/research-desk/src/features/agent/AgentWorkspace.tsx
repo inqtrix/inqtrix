@@ -21,7 +21,6 @@ import {
 } from '@/features/project/selectors'
 import {
   reportComposedCharsMax,
-  reportGuidanceMaxChars,
   reportRuleIdsMax,
 } from '@/features/agent/reportRequirement'
 import {
@@ -30,7 +29,6 @@ import {
   ruleIdsForSubmit,
   settleRuleIdsAfterSubmit,
 } from './contextCategories'
-import { gateRuleCatalog } from './plan/reportGuidance'
 import { sendThenSettle } from './submitSettlement'
 import { decideConversationAppend } from '@/features/scroll/conversationAppend'
 import { clearScrollMemory } from '@/features/scroll/scrollMemory'
@@ -40,8 +38,6 @@ import {
   FileText,
   Folder,
   Globe2,
-  ListChecks,
-  PenLine,
   Plus,
   Repeat2,
   Waypoints,
@@ -111,7 +107,7 @@ import {
   AgentCanvasReactContext,
   type AgentCanvasContextValue,
 } from './canvas/context'
-import { routeAgentRunToView } from './followTarget'
+import { fallbackCanvasDescriptor, routeAgentRunToView } from './followTarget'
 import { agentOverridesFromSelection } from '@/features/researchRuns/modelSelection'
 import { assignArtifactFileNames } from './artifactNames'
 import {
@@ -124,11 +120,6 @@ import {
   type AgentSessionRecord,
 } from './model'
 import { agentComposerAvailability, startExclusive } from './sessionComposer'
-import {
-  vectorBackendDisplay,
-  type PlanSourceInfo,
-} from './plan/sourceLabel'
-import type { ReportRuleOption } from './plan/PlanReviewBody'
 import { agentScrollKey, agentTranscriptVersion, transcriptSettled } from './agentScroll'
 import {
   DEMO_AGENT_ATTACHED_REPORTS,
@@ -139,12 +130,11 @@ import {
 } from './demo'
 import {
   sourceAvailabilityFromOverviewSource,
+  agentRunsAvailable,
   buildAgentOverview,
-  countAgentToolUse,
-  defaultEngineMode,
-  type AgentEngineMode,
 } from './agentStatusOverview'
 import { retainHydratedAgentRunIds } from './runPresentation'
+import { effectiveAgentTier } from './runSetupLabels'
 import {
   DEFAULT_AGENT_SOURCE_POLICY,
   type AgentKnowledgeSwitch,
@@ -193,6 +183,7 @@ export function AgentWorkspace({
   selectedDepth = 'normal',
   onDepthChange,
   selectedTier = null,
+  lastTier = '',
   onTierChange,
   modelCatalog = [],
   modelOptions = [],
@@ -245,8 +236,11 @@ export function AgentWorkspace({
   onSessionsPanelSizeChange: (size: number) => void
   selectedAutonomy: string
   onAutonomyChange: (autonomy: string) => void
-  /** User-picked Stufe; null = server default (capabilities). */
+  /** Stufe picked on this page; null = none, then `lastTier` or the server
+   * default (capabilities). */
   selectedTier?: import('@/features/researchRuns/types').AgentTierId | null
+  /** The user's last pick (account preference); `''` = none yet. */
+  lastTier?: import('@/features/researchRuns/types').LastAgentTier
   onTierChange?: (
     tier: import('@/features/researchRuns/types').AgentTierId | null,
   ) => void
@@ -326,11 +320,6 @@ export function AgentWorkspace({
     },
     [canvasCommentQueue.length, setCanvasCommentQueue, setPinnedCanvasArtifactId],
   )
-  // Engine selection: user-selectable only when the
-  // server registered the kernel; initialized from the published default
-  // once capabilities arrive. The demo simulates a current server.
-  const [engineMode, setEngineMode] =
-    useDraftField(composerDraft, onComposerDraftChange, 'engineMode')
   // Attached skills; they go with an accepted submission.
   const [selectedSkillIds, setSelectedSkillIds] =
     useDraftField(composerDraft, onComposerDraftChange, 'skillIds')
@@ -375,13 +364,12 @@ export function AgentWorkspace({
   const saveRegistry = useRef(createCanvasSaveRegistry()).current
   const canvas = state.agentCanvas
   const agentBlock = capabilities?.agent ?? null
-  // Published == enforced: the composer and the plan gate render the
-  // SERVER's limits, so a text a surface accepts is never one the
-  // submission is then refused for. The demo simulates a current server
-  // and reads its mirror of the same block, so the caps show there too.
+  // Published == enforced: the composer renders the SERVER's limits, so a
+  // requirement it accepts is never one the submission is then refused
+  // for. The demo simulates a current server and reads its mirror of the
+  // same block, so the caps show there too.
   const publishedRequirement = agentBlock?.report_requirement
     ?? (demo ? DEMO_AGENT_REPORT_REQUIREMENT : null)
-  const reportGuidanceLimit = reportGuidanceMaxChars(publishedRequirement)
   const reportRuleLimit = reportRuleIdsMax(publishedRequirement)
   // No fallback number: a server that publishes no composed ceiling is
   // not pre-checked, and the rule menu says so.
@@ -417,8 +405,8 @@ export function AgentWorkspace({
         .map((preset) => preset.autonomy)
         .filter((mode) => allAutonomyModes.includes(mode))
       : allAutonomyModes
-  const agentAvailable =
-    !serverEnabled || capabilities?.features.workspace_agent === true
+  const agentAvailable = agentRunsAvailable(capabilities?.features, serverEnabled)
+  const kernelReason = capabilities?.feature_status?.agent_kernel?.reason_code ?? null
   // Run overview (composer status menu): server facts, or the demo's
   // current-server mirror — new UI must be demo-visible. Recomputed on
   // mode switch so the approvals group always describes the SELECTED mode.
@@ -450,9 +438,12 @@ export function AgentWorkspace({
     : demo
       ? DEMO_AGENT_TIERS
       : null
-  const effectiveTier = tiers
-    ? selectedTier ?? agentBlock?.default_tier ?? 'gruendlich'
-    : null
+  const effectiveTier = effectiveAgentTier({
+    defaultTier: agentBlock?.default_tier,
+    last: lastTier,
+    selected: selectedTier,
+    tiers,
+  })
   const sourceAvailability = useMemo(
     () => sourceAvailabilityFromOverviewSource(overviewSource),
     [overviewSource],
@@ -483,20 +474,14 @@ export function AgentWorkspace({
           dispatch({ effort, type: 'setSelectedAgentEffort' }),
       }
       : null
-  const effectiveEngineMode: AgentEngineMode =
-    (kernelSelectable ? engineMode : null)
-    ?? (demo
-      ? 'agent_kernel'
-      : defaultEngineMode(overviewSource, capabilities?.features ?? null))
   const overview = useMemo(
     () => buildAgentOverview({
       agent: overviewSource,
       autonomy: selectedAutonomy,
-      kernelReason: capabilities?.feature_status?.agent_kernel?.reason_code ?? null,
+      kernelReason,
       kernelSelectable,
-      mode: effectiveEngineMode,
     }),
-    [capabilities, effectiveEngineMode, kernelSelectable, overviewSource, selectedAutonomy],
+    [kernelReason, kernelSelectable, overviewSource, selectedAutonomy],
   )
 
   const clientOptions = useMemo<ClientOptions | null>(
@@ -749,14 +734,6 @@ export function AgentWorkspace({
     () => normalizeAgentExecutionSnapshot(latestRun?.snapshot),
     [latestRun?.snapshot],
   )
-  const toolUseCounts = useMemo(
-    () => statusExecution?.toolUseCounts
-      ?? countAgentToolUse({
-        tasks: latestRun?.plan?.tasks ?? [],
-        taskStates: latestRun?.taskStates ?? {},
-      }),
-    [latestRun?.plan?.tasks, latestRun?.taskStates, statusExecution?.toolUseCounts],
-  )
 
   const openCanvasView = useCallback(
     (descriptor: CanvasViewDescriptor) => {
@@ -780,21 +757,6 @@ export function AgentWorkspace({
       })
     },
     [dispatch, state.agentRuns, state.agentSessionArtifacts],
-  )
-
-  const setPlanDraft = useCallback(
-    (runId: string, draft: Parameters<AgentCanvasContextValue['setPlanDraft']>[1]) => {
-      if (!canEditAgentRun(state.agentRuns[runId])) return
-      dispatch({ draft, runId, type: 'setAgentPlanDraft' })
-    },
-    [dispatch, state.agentRuns],
-  )
-
-  const requestPlanRefresh = useCallback(
-    (runId: string) => {
-      dispatch({ runId, type: 'markAgentRunPlanStale' })
-    },
-    [dispatch],
   )
 
   // ONE derived file name per session document, computed from
@@ -838,19 +800,6 @@ export function AgentWorkspace({
   // as no longer available, and the composer holds the send until the user
   // removes it — a stale id is never submitted, and no word disappears.
 
-  // Display context for plan tasks (id -> title + backend label): the
-  // "wo" of the approval transparency, shared by the timeline card and
-  // the canvas plan view.
-  const planSource = useMemo<PlanSourceInfo>(
-    () => ({
-      collections,
-      vectorBackendLabel: vectorBackendDisplay(
-        capabilities?.knowledge?.vector_backend,
-      ),
-    }),
-    [capabilities, collections],
-  )
-
   // Finished Research-Desk reports, attachable as agent input.
   const attachableReports = useMemo(
     () => mentionableReportOptions(state),
@@ -861,21 +810,14 @@ export function AgentWorkspace({
   const knownReports = useMemo(() => completedReportOptions(state), [state])
 
   // Library rules the user opted into for the agent surface. Opt-in by
-  // design: a rule written for chat must not start shaping reports. ONE
-  // list for the composer and the plan gate, keyed by the id the server
-  // resolves — the template id, never the chat's local id (a rule pushed
-  // to the server keeps its local id until the next hydrate, and sending
-  // that is refused). The demo has no server: its own ids are the ones
-  // it resolves.
+  // design: a rule written for chat must not start shaping reports. Keyed
+  // by the id the server resolves — the template id, never the chat's
+  // local id (a rule pushed to the server keeps its local id until the next
+  // hydrate, and sending that is refused). The demo has no server: its own
+  // ids are the ones it resolves.
   const agentRules = useMemo(
     () => agentRuleSources(chatRuleOptions(state, 'agent'), { localIds: Boolean(demo) }),
     [demo, state],
-  )
-  // The gate adds only what the composer lets the user pick: no context
-  // pack with linked files, no rule the server does not know yet.
-  const reportRuleOptions = useMemo<ReportRuleOption[]>(
-    () => gateRuleCatalog(agentRules),
-    [agentRules],
   )
   // The transcript names a rule the way its pill did: by its title.
   const ruleTitles = useMemo(
@@ -885,27 +827,15 @@ export function AgentWorkspace({
 
   const canvasContext = useMemo<AgentCanvasContextValue>(
     () => ({
-      applyPatch: demo ? demo.applyPatch : control.applyPatch,
-      cancelTask: control.cancelTask,
       clientOptions,
-      inspectChildRun: control.inspectChildRun,
+      collections,
       knowledgeDataSource,
-      decideApproval: demo ? demo.decideApproval : control.decideApproval,
-      rejectPatch: demo ? demo.rejectPatch : control.rejectPatch,
       exportArtifact: control.exportArtifact,
       fileAssets: state.fileAssets,
       loadArtifact: control.loadArtifact,
-      loadTaskResult: control.loadTaskResult,
       openCanvasView,
       saveRegistry,
-      planDrafts: state.agentPlanDrafts,
-      planSource,
-      reportRuleOptions,
-      reportGuidanceMaxChars: reportGuidanceLimit,
-      reportRuleIdsMax: reportRuleLimit,
       pollingRunIds: pollingRunIds ?? [],
-      prefetchTaskResult: control.prefetchTaskResult,
-      requestPlanRefresh,
       queueCanvasComment,
       canvasComments: canvasCommentQueue,
       canvasCommentEdit,
@@ -920,29 +850,19 @@ export function AgentWorkspace({
       saveArtifact: control.saveArtifact,
       sessionArtifacts: state.agentSessionArtifacts,
       sessionFileNames,
-      setPlanDraft,
       workspaceId,
     }),
     [
       canvasCommentEdit,
       canvasCommentQueue,
       clientOptions,
+      collections,
       control,
-      demo,
       knowledgeDataSource,
       openCanvasView,
-      planSource,
       pollingRunIds,
       queueCanvasComment,
-      // The gate reads these too: without them a rule catalog that
-      // changed while no run did kept offering the previous list.
-      reportGuidanceLimit,
-      reportRuleLimit,
-      reportRuleOptions,
-      requestPlanRefresh,
       sessionFileNames,
-      setPlanDraft,
-      state.agentPlanDrafts,
       state.agentRuns,
       state.agentSessionArtifacts,
       state.fileAssets,
@@ -987,10 +907,8 @@ export function AgentWorkspace({
       // Demo runs never delegate, so the child-gate twins have no demo
       // variant — the control path is the only producer of childGates.
       answerChildClarification: control.answerChildClarification,
-      applyPatch: demo ? demo.applyPatch : control.applyPatch,
       decideApproval: demo ? demo.decideApproval : control.decideApproval,
       decideChildApproval: control.decideChildApproval,
-      rejectPatch: demo ? demo.rejectPatch : control.rejectPatch,
       onCancelRun: demo
         ? (runId) => demo.cancel(runId)
         : (runId) => {
@@ -1037,9 +955,6 @@ export function AgentWorkspace({
           artifactId,
           revision,
         ),
-      planDrafts: state.agentPlanDrafts,
-      planSource,
-      setPlanDraft,
     }),
     [
       cancelRun,
@@ -1050,9 +965,6 @@ export function AgentWorkspace({
       onDraftQuestionChange,
       openCanvasView,
       restartNotice,
-      planSource,
-      setPlanDraft,
-      state.agentPlanDrafts,
       state.agentRuns,
       state.agentSessionArtifacts,
     ],
@@ -1065,7 +977,6 @@ export function AgentWorkspace({
       depth,
       tier,
       documentId,
-      engineMode: submitEngineMode,
       knowledgeScope,
       knowledgeSwitch: submitKnowledgeSwitch,
       question,
@@ -1154,17 +1065,11 @@ export function AgentWorkspace({
         demo.submit({
           agentTier: tier ?? '',
           autonomy,
-          collectionIds,
           depth,
-          documentId,
-          engineMode: submitEngineMode,
           question,
           responseForm,
           ruleIds,
           sessionId,
-          skillLabels: skillIds.map(
-            (id) => slashSkills.find((skill) => skill.id === id)?.label ?? id,
-          ),
           sourcePolicy: submitSourcePolicy,
           modelSelection: {
             model: state.ui.selectedAgentModel,
@@ -1203,7 +1108,8 @@ export function AgentWorkspace({
               : knowledgeScope === 'all'
                 ? { collectionIds: [], scope: 'all' }
                 : undefined,
-          mode: submitEngineMode,
+          // The kernel is the only engine a run starts on.
+          mode: 'agent_kernel',
           question,
           responseForm,
           sessionId,
@@ -1241,7 +1147,6 @@ export function AgentWorkspace({
       selectedRuleIds,
       settleSubmittedAttachments,
       transcriptScroll,
-      slashSkills,
       state.agentSessionArtifacts,
       state.agentSessions,
       state.selectedAgentSessionId,
@@ -1293,6 +1198,17 @@ export function AgentWorkspace({
     }
     startExclusive(creatingSessionRef, () => persistAgentSession(session), setCreatingSession)
   }, [demo, dispatch, persistAgentSession, t])
+
+  // Opening the panel shows the tab the user left, else the session's
+  // latest run; a session without a run gets the canvas's own empty state.
+  const openCanvas = useCallback(() => {
+    const descriptor = activeCanvasView(canvas) ?? fallbackCanvasDescriptor(latestRun)
+    if (descriptor) {
+      dispatch({ descriptor, source: 'user', type: 'openAgentCanvasView' })
+    } else {
+      dispatch({ type: 'openAgentCanvas' })
+    }
+  }, [canvas, dispatch, latestRun])
 
   const railVisible = state.ui.isAgentSessionsVisible
   const railMotion = useAnimatedResizablePanelCollapse({
@@ -1404,10 +1320,10 @@ export function AgentWorkspace({
   )
 
   const activeGate = runningRun ? pendingGate(runningRun) : null
-  // The report pill surfaces the run's document artifact — a mission
-  // `memo` OR a kernel `deliverable` (a kernel run writes the latter, so
-  // a memo-only check would leave a finished kernel document unreachable
-  // from the composer).
+  // The report pill surfaces the run's document artifact — a stored
+  // mission run's `memo` OR a kernel `deliverable` (a kernel run writes
+  // the latter, so a memo-only check would leave a finished kernel
+  // document unreachable from the composer).
   // The session index is the anchor-independent SSOT: a document's
   // run_id moves to the newest updating run, so latestRun-only lookups
   // lose documents that older turns produced. latestRun stays the live
@@ -1427,9 +1343,6 @@ export function AgentWorkspace({
     ?? null
   const reportRunId =
     sessionDocuments[0]?.runId ?? latestRun?.runId ?? null
-  const earlyPhase =
-    runningRun
-    && ['intake', 'discovery', 'planning'].includes(runningRun.phase)
   // Context pills: one tap from the composer to the live
   // canvas surface; the pulsing dot marks the live one.
   const pills = (runningRun || reportArtifactId) && (
@@ -1448,9 +1361,7 @@ export function AgentWorkspace({
               !reduceMotion && 'inqtrix-running-dot',
             )}
           />
-          {earlyPhase
-            ? t.agent.pills.followPlanning
-            : t.agent.pills.followExecution}
+          {t.agent.pills.followExecution}
         </button>
       )}
       {reportArtifactId && reportRunId && (
@@ -1513,13 +1424,14 @@ export function AgentWorkspace({
         tierMode={effectiveTier}
         tiers={tiers}
         onTierModeChange={onTierChange}
-        engineMode={effectiveEngineMode}
         kernelSelectable={kernelSelectable}
         memoryEnabled={memoryEnabled}
         modelPicker={modelPicker}
         notice={
           !agentAvailable
-            ? t.agent.composer.notAvailable
+            ? (kernelReason
+              ? (t.agent.overview.kernelReasons as Record<string, string>)[kernelReason]
+              : undefined) ?? t.agent.composer.notAvailable
             : runningRun && !canEditAgentRun(runningRun)
               ? t.sharing.sharedViewOnly
               : null
@@ -1527,7 +1439,6 @@ export function AgentWorkspace({
         onAutonomyChange={onAutonomyChange}
         onDepthModeChange={onDepthChange}
         onDraftQuestionChange={onDraftQuestionChange}
-        onEngineModeChange={setEngineMode}
         onEditCanvasComment={(id) => {
           const draft = canvasCommentQueue.find((item) => item.id === id)
           if (!draft) return
@@ -1567,9 +1478,9 @@ export function AgentWorkspace({
         selectedDocumentId={selectedDocumentId}
         selectedSkillIds={selectedSkillIds}
         statusExecution={statusExecution}
+        statusChildRuns={latestRun?.children}
         sourcePolicy={sourcePolicy}
         sourceAvailability={sourceAvailability}
-        toolUseCounts={toolUseCounts}
         maxAttachedSkills={agentBlock?.skills?.max_attached ?? 3}
         slashSkills={slashSkills}
       />
@@ -1609,17 +1520,8 @@ export function AgentWorkspace({
             expandLabel={t.agent.canvas.title}
             expanded={canvas.open}
             onToggle={(next) => {
-              if (next) {
-                dispatch({
-                  descriptor:
-                    activeCanvasView(canvas)
-                    ?? fallbackCanvasDescriptor(latestRun),
-                  source: 'user',
-                  type: 'openAgentCanvasView',
-                })
-              } else {
-                dispatch({ type: 'closeAgentCanvas' })
-              }
+              if (next) openCanvas()
+              else dispatch({ type: 'closeAgentCanvas' })
             }}
             side="right"
           />
@@ -1667,7 +1569,7 @@ export function AgentWorkspace({
                     {[
                       t.agent.empty.exampleWeb,
                       t.agent.empty.exampleKnowledge,
-                      t.agent.empty.exampleMission,
+                      t.agent.empty.exampleDocument,
                     ].map((example) => (
                       <button
                         className="inline-flex min-h-8 max-w-full items-center justify-center rounded-md border border-border bg-background px-3 py-1.5 text-center text-xs font-medium leading-snug text-muted-foreground transition-colors hover:bg-surface hover:text-foreground sm:max-w-56"
@@ -1754,13 +1656,6 @@ export function AgentWorkspace({
         sideOffset={6}
       >
         <div className="py-1">
-          <OptionMenuItem
-            active={false}
-            icon={ListChecks}
-            label={t.agent.canvas.views.plan}
-            onSelect={() =>
-              openCanvasView({ runId: latestRun.runId, view: 'plan' })}
-          />
           <OptionMenuItem
             active={false}
             icon={Waypoints}
@@ -1945,17 +1840,8 @@ export function AgentWorkspace({
               closeLabel={t.agent.canvas.title}
               controlsId={CANVAS_PANEL_ID}
               onOpenChange={(open) => {
-                if (open) {
-                  dispatch({
-                    descriptor:
-                  activeCanvasView(canvas)
-                  ?? fallbackCanvasDescriptor(latestRun),
-                    source: 'user',
-                    type: 'openAgentCanvasView',
-                  })
-                  return
-                }
-                dispatch({ type: 'closeAgentCanvas' })
+                if (open) openCanvas()
+                else dispatch({ type: 'closeAgentCanvas' })
               }}
               open={canvas.open}
               showHeader={false}
@@ -1974,8 +1860,6 @@ export function AgentWorkspace({
 /** Per-view tab glyphs for the canvas tab row (host stays agnostic). */
 function canvasIconFor(descriptor: CanvasViewDescriptor): LucideIcon {
   switch (descriptor.view) {
-    case 'plan':
-      return ListChecks
     case 'run':
       return Waypoints
     case 'document':
@@ -1986,34 +1870,5 @@ function canvasIconFor(descriptor: CanvasViewDescriptor): LucideIcon {
       return Folder
     case 'diff':
       return Repeat2
-    case 'patch':
-      return PenLine
   }
-}
-
-function fallbackCanvasDescriptor(
-  run: AgentRunRecord | undefined,
-): CanvasViewDescriptor {
-  if (run) {
-    const documentId =
-      run.artifactOrder.find(
-        (artifactId) => run.artifacts[artifactId]?.kind === 'memo',
-      )
-      ?? [...run.artifactOrder]
-        .reverse()
-        .find(
-          (artifactId) =>
-            run.artifacts[artifactId]?.kind === 'deliverable',
-        )
-    if (documentId) {
-      return { view: 'document', runId: run.runId, artifactId: documentId }
-    }
-    // A live run without a memo/deliverable: the Verlauf is what the user opens
-    // the canvas for; settled runs land on the plan.
-    if (run.status === 'running' || run.status === 'queued') {
-      return { view: 'run', runId: run.runId }
-    }
-    return { view: 'plan', runId: run.runId }
-  }
-  return { view: 'plan', runId: '' }
 }

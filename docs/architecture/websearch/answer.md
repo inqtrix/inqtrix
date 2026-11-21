@@ -104,11 +104,14 @@ written first.
 ## System prompt per section call
 
 The system prompt for every section call is assembled from the same
-blocks, but three of them change with the section: the style block from
+blocks, but four of them change with the section: the style block from
 `_build_section_answer_style()`, the closing line of SUB-QUESTION COVERAGE,
-and the sub-section directive inside TRANSPARENCY OBLIGATION -- the latter
-two switch on `owns_evidence_limits`, which the section plan assigns to
-exactly one section (`evidence_limits_section_index()`).
+the closing line of EVIDENCE DEPTH and the sub-section directive inside
+TRANSPARENCY OBLIGATION -- the latter three switch on `owns_evidence_limits`,
+which the section plan assigns to exactly one section
+(`evidence_limits_section_index()`). The owning section is told, under its
+own heading, to name a thin cross-check as an evidence limit of the report;
+every other section is told to leave that to it.
 It is built by
 `build_answer_section_system_prompt()` in `src/inqtrix/prompts.py`, which
 delegates to `_build_answer_system_prompt_with_style()` for the bulk of the
@@ -237,9 +240,10 @@ return "\n".join(lines)
   spreads naturally across sections. This is the only place the
   composer's running state mutates the renderer's behaviour.
 - `synthesizing_existing=True` only changes the user-prompt wording
-  ("Stuetze deine Verdichtung auf diese Labels …" instead of "Nutze neue
-  Evidence bevorzugt …"). It does not forbid new citations -- a write-last
-  section may still cite a record that no body section touched.
+  ("Base your condensation on these labels …" instead of "Prefer new
+  evidence when it fits this section equally well."). It does not forbid new
+  citations -- a write-last section may still cite a record that no body
+  section touched.
 
 ## `report_so_far_summary`: what goes to the summary-LLM
 
@@ -278,24 +282,24 @@ known coupling.
 
 ### Synthetic example (after 3 rendered body sections)
 
+The user prompt is written in English like every prompt; the summary lines
+are the report's own text, here German:
+
 ```text
-Bisherige Report-Zusammenfassung:
+Report summary so far:
 Hintergrund / Kontext: Die GKV-Reformkommission hat im April 2026 erstmals
 einen Vorschlag zur Privatisierung bestimmter Zahnersatzleistungen formuliert
-[E3], begruendet ueber die laufenden Beitragsdebatten ... [E7][E12]
+[E3], begründet über die laufenden Beitragsdebatten ... [E7] [E12]
 Analyse: Drei zentrale Treiber wurden identifiziert: 1) Beitragssatzanstieg
-in 2025 [E1], 2) wachsende Demografie-Last [E4], 3) Praezedenzfaelle in NL
+in 2025 [E1], 2) wachsende Demografie-Last [E4], 3) Präzedenzfälle in NL
 und CH [E15] ...
 Perspektiven / Positionen: KZBV widerspricht (Pressemitteilung [E3]),
-waehrend Patientenschutzverbaende einen Mittelweg vorschlagen [E8] [E20] ...
+während Patientenschutzverbände einen Mittelweg vorschlagen [E8] [E20] ...
+Continue the argument without rebuilding the same points.
 
-Fuehre die Argumentation fort, ohne dieselben Punkte neu aufzubauen.
-
-Bereits verwendete Evidence-Labels:
+Evidence labels already used:
 E1, E3, E4, E7, E8, E12, E15, E20
-
-Stuetze deine Verdichtung auf diese Labels, wenn du Aussagen
-aus den geschriebenen Abschnitten zusammenfasst.
+Base your condensation on these labels when you summarise statements from the sections already written.
 ```
 
 ## `used_evidence_labels` tracking
@@ -326,8 +330,8 @@ File: `src/inqtrix/report_profiles.py` (`class AnswerSectionSpec`, lines
 | Field | Type | Meaning |
 |---|---|---|
 | `heading` | `str` | The Markdown `##` heading rendered for the section. |
-| `prompt_instruction` | `str` | Section instruction; goes into both the system style block and the user prompt as "Abschnittsfokus". |
-| `length_guidance` | `str` | Qualitative length hint ("3-4 Saetze", "ausfuehrlich, 6-10 Saetze"). |
+| `prompt_instruction` | `str` | Section instruction; goes into both the system style block and the user prompt as "Section focus". |
+| `length_guidance` | `str` | Qualitative length hint ("short and complete", "as long as the question needs; no artificial shortening"). |
 | `required` | `bool` | Extension hook only: defaults to `True` and is `True` in every stock section of all three profiles. The composer never evaluates it -- it only copies the flag into the section log entry (`nodes.py:1658`) and the forensic `section_plan` (`nodes.py:5580`); no code path skips a section because of it. |
 | `write_last` | `bool` | When True, this section is written **after** all `write_last=False` sections, so it can see the body via `report_so_far_summary`. |
 | `owns_evidence_limits` | `bool` | Owns the consolidated disclosure of evidence limits and open questions. At most one explicit owner; otherwise the last non-summary section owns it, falling back to the last section in an all-summary plan. Headings do not determine ownership. |

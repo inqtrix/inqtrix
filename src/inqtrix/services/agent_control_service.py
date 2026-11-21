@@ -1,5 +1,5 @@
-"""Orchestration for the agent control surface (plans, approvals,
-clarifications, artifacts).
+"""Orchestration for the agent control surface (approvals, clarifications,
+artifacts).
 
 Sits between the thin routers in
 :mod:`inqtrix.server.routers.agent_runs` and the store pair behind
@@ -9,9 +9,8 @@ Sits between the thin routers in
   and the ``waiting -> queued`` flip stay atomic per backend (the store's
   ``*_and_resume`` methods own the mechanics, this service supplies the
   resume callable);
-* validate edit decisions through THE plan schema/validator
-  (:mod:`inqtrix.agents.plan_models` / ``plan_validation`` — the same
-  rules the planner runs against);
+* validate edit decisions of a tool approval against the input schema of
+  the tool it gates;
 * emit the agent event signals (decision/answer signals BEFORE the
   resume while the run is still parked — never droppable by the
   ends-terminal log guard; artifact-edit signals after their commit)
@@ -26,77 +25,36 @@ revocation between routing and the control write cannot revive stale access.
 
 from __future__ import annotations
 
-import functools
 import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from inqtrix import aio
-from inqtrix.agents.report_requirement import split_composed_requirement
-from inqtrix.constants import MAX_PLAN_TASKS_DEFAULT
-from inqtrix.services.report_requirement_resolver import (
-    ReportRequirementError,
-    distinct_rule_ids,
-    resolve_report_requirement,
-)
 from inqtrix.agents.control_ports import (
     APPROVAL_DECISIONS,
     APPROVAL_STATUS_BY_DECISION,
+    DECIDABLE_APPROVAL_KINDS,
     ApprovalAlreadyDecided,
     ApprovalRecord,
     ArtifactRecord,
     ArtifactRevisionRecord,
     ClarificationAlreadyAnswered,
     ClarificationRecord,
-    PlanNotFound,
-    PlanRecord,
-    PlanTaskNotFound,
-    PlanTaskRecord,
-    additive_replan_errors,
-    carry_forward_terminal_task_results,
-    decided_requirement_parts,
-    settle_cancelled_plan_tasks,
-    settle_terminal_plan_tasks,
 )
-from inqtrix.agents.plan_collections import (
-    CollectionCatalogEntry,
-    resolve_plan_collections,
-)
-from inqtrix.agents.intake import without_stale_web_note
-from inqtrix.agents.plan_models import ExecutionPlanModel
-from inqtrix.agents.plan_validation import validate_plan
-from inqtrix.agents.scheduler import (
-    project_child_run_outcome,
-    task_result_payload,
-    task_result_summary,
-)
-from inqtrix.agents.report_quality import (
-    guarded_reader_text,
-    writer_identifiers,
-)
-from inqtrix.agents.web_execution_policy import derive_web_research_policy
 from inqtrix.auth.permissions import AuditEntry
 from inqtrix.exceptions import RunNotFound
-from inqtrix.i18n import t
-from inqtrix.execution_authority import pinned_knowledge_collection_ids
-from inqtrix.prompt_language import resolve_answer_language
 from inqtrix.runs.records import RunActive
 from inqtrix.runs.shared import TERMINAL_RUN_STATUS_VALUES
 from inqtrix.harness.contracts.events import (
     APPROVAL_DECIDED_EVENT,
     ARTIFACT_UPDATED_EVENT,
     CLARIFICATION_ANSWERED_EVENT,
-    TASK_CANCEL_REQUESTED_EVENT,
 )
 
 if TYPE_CHECKING:
-    from inqtrix.services.prompt_template_service import (
-        PromptTemplateService,
-    )
     from inqtrix.agents.control_ports import AgentControlStore
     from inqtrix.auth.principal import Principal, UserContext
     from inqtrix.runs.ports import RunStorePort
@@ -105,25 +63,6 @@ if TYPE_CHECKING:
     )
 
 
-class CollectionPreflight(Protocol):
-    """Collection visibility, narrowed to what the approval-edit path
-    needs — satisfied by ``KnowledgeService``.
-
-    Kept a Protocol so this service depends on the lookup, not the whole
-    knowledge service, and stays trivially fakeable in tests. The edit
-    path builds the caller-visible CATALOG from this (the same
-    per-collection access rule the retrieval gate enforces) and runs THE
-    shared resolver + validator against it, so agent plans and user edits can
-    never drift apart.
-    """
-
-    async def list_collections(
-        self,
-        *,
-        visible_to: "UserContext | None" = None,
-    ) -> list[Any]:
-        ...
-
 log = logging.getLogger(__name__)
 
 
@@ -131,9 +70,10 @@ class AgentControlValidationError(ValueError):
     """Invalid decision/answer/edit input (HTTP 400).
 
     Attributes:
-        errors: Every collected violation (German, user-facing) — the plan
-            validator reports ALL problems at once so the user fixes the
-            edit in one round.
+        errors: Every collected violation, reported at once so the caller
+            fixes the input in one round.
+        reason: A machine-readable reason the response carries beside the
+            type, or ``None``.
     """
 
     def __init__(
@@ -141,10 +81,12 @@ class AgentControlValidationError(ValueError):
         errors: list[str],
         *,
         error_type: str = "invalid_request_error",
+        reason: str | None = None,
     ) -> None:
         super().__init__("; ".join(errors))
         self.errors = errors
         self.error_type = error_type
+        self.reason = reason
 
 
 class AgentControlUnavailable(RuntimeError):
@@ -154,38 +96,11 @@ class AgentControlUnavailable(RuntimeError):
 def _same_decision(
     stored: ApprovalRecord, decision: str, decision_payload: dict[str, Any]
 ) -> bool:
-    """Replay identity: verb AND payload (the edited plan) must match."""
+    """Replay identity: verb AND payload (the edited actions) must match."""
     return (
         stored.decision == decision
         and dict(stored.decision_payload) == decision_payload
     )
-
-
-def _stored_requirement(
-    stored: ApprovalRecord,
-    report_guidance: str | None,
-    report_rule_ids: list[str] | None,
-) -> dict[str, Any] | None:
-    """The requirement a decided gate stored, when a request names it again.
-
-    The same requirement is the same typed text and the same distinct rule
-    ids in the same order, read against the parts the decision kept; the
-    result is the stored ``report_guidance`` and ``report_requirement``,
-    so the replay answers with exactly what was decided. ``None`` when the
-    request names another requirement, or the decision stored none.
-    """
-    parts = stored.decision_payload.get("report_requirement")
-    if not isinstance(parts, dict):
-        return None
-    same = parts.get("free_text") == (report_guidance or "") and [
-        str(rule.get("template_id")) for rule in parts.get("rules") or []
-    ] == distinct_rule_ids(report_rule_ids or [])
-    if not same:
-        return None
-    return {
-        "report_guidance": stored.decision_payload["report_guidance"],
-        "report_requirement": parts,
-    }
 
 
 def _validated_tool_edit(
@@ -362,19 +277,13 @@ class AgentControlService:
         run_store: "RunStorePort",
         audit: Any = None,
         editor_persistence: "EditorPersistenceService | None" = None,
-        knowledge: "CollectionPreflight | None" = None,
-        prompt_templates: "PromptTemplateService | None" = None,
         durable: bool = False,
-        max_plan_tasks: int = MAX_PLAN_TASKS_DEFAULT,
     ) -> None:
         self._store = store
         self._run_store = run_store
         self._audit = audit
         self._editor_persistence = editor_persistence
-        self._knowledge = knowledge
-        self._prompt_templates = prompt_templates
         self._durable = durable
-        self._max_plan_tasks = max_plan_tasks
 
     @property
     def store(self) -> "AgentControlStore":
@@ -418,91 +327,19 @@ class AgentControlService:
             context = await self._execution_context(run_id)
         return await self._run_store.aget(run_id, visible_to=context)
 
-    # -- plans ------------------------------------------------------------ #
+    # -- terminal runs ------------------------------------------------------ #
 
-    async def get_plan(
-        self, run_id: str, *, version: int | None = None
-    ) -> tuple[PlanRecord, list[PlanTaskRecord], list[PlanRecord]]:
-        """One plan version (latest by default), its tasks, all versions."""
-        plan, tasks = await self._store.get_plan(run_id, version=version)
-        if await self.reconcile_terminal_tasks(run_id) and version is None:
-            plan, tasks = await self._store.get_plan(run_id)
-        versions = await self._store.list_plan_versions(run_id)
-        return plan, tasks, versions
+    async def reconcile_terminal_control_rows(self, run_id: str) -> bool:
+        """Settle the control rows a cancelled or failed agent run left open.
 
-    async def get_task_result(
-        self,
-        run_id: str,
-        task_id: str,
-        *,
-        version: int | None = None,
-    ) -> PlanTaskRecord:
-        """Return one task whose complete result is loaded on demand.
-
-        The plan response intentionally remains compact. This lookup resolves
-        the same authoritative plan version and returns the task row whose
-        internal payload contains complete answer Markdown and evidence.
-        """
-        _plan, tasks, _versions = await self.get_plan(run_id, version=version)
-        try:
-            return next(task for task in tasks if task.task_id == task_id)
-        except StopIteration as exc:
-            raise PlanTaskNotFound(task_id) from exc
-
-    async def request_task_cancel(
-        self,
-        run_id: str,
-        task_id: str,
-        *,
-        workspace_id: str | None,
-        principal: "Principal | None",
-        visible_to: "UserContext | None" = None,
-    ) -> PlanTaskRecord:
-        """Cancel one source task without cancelling its parent run.
-
-        The task-row CAS and an optional research-child cancellation share the
-        run store's live authorization transaction. A synchronous local task
-        remains ``cancel_requested`` until its current provider call returns
-        and the mission discards that result.
-        """
-        plan, tasks = await self._store.get_plan(run_id)
-        if not any(row.task_id == task_id for row in tasks):
-            raise PlanTaskNotFound(task_id)
-        stored, child_status = await self._store.request_plan_task_cancel(
-            run_id=run_id,
-            plan_id=plan.plan_id,
-            task_id=task_id,
-            authorize=self._authorized_control_callable(
-                run_id,
-                principal=principal,
-                visible_to=visible_to,
-                workspace_id=workspace_id,
-            ),
-        )
-        await self._emit(
-            run_id,
-            TASK_CANCEL_REQUESTED_EVENT,
-            {
-                "task_id": stored.task_id,
-                "status": stored.status,
-                "child_run_id": stored.child_run_id,
-                **(
-                    {"child_run_status": child_status}
-                    if child_status is not None
-                    else {}
-                ),
-            },
-        )
-        return stored
-
-    async def reconcile_terminal_tasks(self, run_id: str) -> bool:
-        """Repair unfinished control rows for a terminal agent run.
-
-        Run terminal state and plan rows live in separate ports. Normal graph
-        unwinding closes its own tasks, while immediate queue/wait cancellation,
-        worker failure, or a process crash can prevent that code from running.
-        This idempotent read-side recovery keeps reloads authoritative without
-        adding another event consumer or persistence layer.
+        Run terminal state and control rows live in separate ports. A run
+        that ends normally releases its canvas itself; a run ended from
+        outside may not reach that code. This idempotent repair releases
+        artifacts left ``writing`` and closes approvals left ``pending``,
+        without adding another event consumer or persistence layer. The
+        cancel route calls it for every run of the cancelled tree
+        (:meth:`reconcile_terminal_run_tree`); a run the system ends (binding
+        end, wait sweep and expiry, restart sweep) does not pass through it.
 
         Returns:
             ``True`` when the run is cancelled/failed and reconciliation was
@@ -515,12 +352,6 @@ class AgentControlService:
         status = str(summary.get("status") or "")
         if status not in ("cancelled", "failed"):
             return False
-        if status == "cancelled":
-            await self.settle_cancelled_tasks(run_id)
-        else:
-            await settle_terminal_plan_tasks(
-                self._store, run_id, status="failed"
-            )
         released, settled = await self._store.settle_terminal_control_rows(
             run_id
         )
@@ -538,83 +369,7 @@ class AgentControlService:
     ) -> None:
         """Reconcile every run affected by one store-level tree cancel."""
         for run_id in run_ids:
-            await self.reconcile_terminal_tasks(run_id)
-
-    async def settle_cancelled_tasks(self, run_id: str) -> None:
-        """Fold terminal children before closing a cancelled parent plan.
-
-        A waiting or queued parent becomes terminal inside the run store and
-        never re-enters its graph. Its child may already have completed in the
-        narrow wake/cancel race, so the HTTP path uses the same pure child
-        projector as the graph before the generic pending/running settlement.
-        """
-        try:
-            _plan, tasks = await self._store.get_plan(run_id)
-        except PlanNotFound:
-            return
-        for task in tasks:
-            if task.status != "running" or not task.child_run_id:
-                continue
-            child_context = None
-            try:
-                child_context = await self._execution_context(
-                    task.child_run_id
-                )
-                child = await self._run_store.aget(
-                    task.child_run_id,
-                    visible_to=child_context,
-                )
-            except RunNotFound:
-                child = {}
-            attempt = max(1, int(child.get("parent_task_attempt", 1) or 1))
-            outcome = await aio.run_legacy_segment(
-                functools.partial(
-                    project_child_run_outcome,
-                    self._run_store,
-                    task.child_run_id,
-                    attempt,
-                    visible_to=child_context,
-                )
-            )
-            if outcome is None:
-                continue
-            # The same reader surface the run writes itself, reached on
-            # the recovery path: this row is what the task card shows
-            # after a parent died mid-flight, so it passes the same
-            # guard. Bound to what is available HERE - the child's own
-            # ledger, and no user text: the parent's words are not in
-            # reach, and exempting the child's question instead would
-            # exempt a planner-written objective, which is the opposite
-            # of what the exemption is for. A user's own identifier is
-            # masked on this path and stays visible as a marker; that is
-            # an over-repair on a recovery row, not a leak.
-            summary = task_result_summary(
-                guarded_reader_text(
-                    outcome.summary or outcome.failure_reason,
-                    writer_identifiers(list(outcome.evidence)),
-                    authored_by="",
-                    marker=t(
-                        {
-                            "language": resolve_answer_language(
-                                str(child.get("question") or "")
-                            ).code
-                        },
-                        "agent_reader_identifier_removed",
-                    ),
-                )
-            )
-            await self._store.transition_plan_task(
-                run_id=task.run_id,
-                plan_id=task.plan_id,
-                task_id=task.task_id,
-                status=outcome.status,
-                child_run_id=outcome.child_run_id,
-                result_summary=summary,
-                result_payload=task_result_payload(
-                    outcome, persisted_summary=summary
-                ),
-            )
-        await settle_cancelled_plan_tasks(self._store, run_id)
+            await self.reconcile_terminal_control_rows(run_id)
 
     # -- approvals --------------------------------------------------------- #
 
@@ -627,10 +382,7 @@ class AgentControlService:
         run_id: str,
         approval_id: str,
         decision: str,
-        plan_body: dict[str, Any] | None,
         note: str,
-        report_guidance: str | None = None,
-        report_rule_ids: list[str] | None = None,
         principal: "Principal | None" = None,
         visible_to: "UserContext | None" = None,
         actions_body: list[Any] | None = None,
@@ -641,15 +393,13 @@ class AgentControlService:
         ``replayed`` is True when the SAME decision was already recorded —
         the idempotent 200 path (no second resume, no second event).
 
-        ``visible_to`` is the deciding caller's context: an edited plan's
-        collection references run through THE shared resolver + validator
-        (name -> id canonicalization, allowed-ids check against the
-        caller-visible catalog), so an invisible or unknown collection is
-        a 400 at edit time, not a mid-run task failure (the same
-        collection-visibility rule the planner enforces).
+        Only a ``kind="tool"`` approval is decided. A stored approval of
+        another kind of :data:`~inqtrix.agents.control_ports.APPROVAL_KINDS`
+        belongs to the retired mission workflow: it stays readable, and a
+        decision on it is refused with the reason ``workflow_retired`` before
+        a replay of the decision it stored would answer.
 
-        ``actions_body`` is the tool-gate counterpart of ``plan_body``:
-        editing a ``kind="tool"`` approval carries the revised
+        ``actions_body`` carries the edit of a tool approval: the revised
         action list — exactly one action whose args replace the proposed
         ones; the tool itself is not swappable through an edit.
 
@@ -661,14 +411,14 @@ class AgentControlService:
         identity of a plain approve is unchanged. Because
         ``decision_payload`` IS replay identity, an approve-once retry
         after an approve-run (or vice versa) conflicts with 409 — exactly
-        like a retry carrying a different edited plan.
+        like a retry carrying different edited actions.
         ``ALWAYS_GATED_TOOLS`` are never grantable.
 
         Raises:
-            AgentControlValidationError: Unknown decision verb, edit
-                without/with-invalid body, edit on a kind that does not
-                support it, or an edited rag task referencing an
-                invisible collection.
+            AgentControlValidationError: Unknown decision verb, a stored
+                approval of a retired kind (reason ``workflow_retired``),
+                edit without/with an invalid actions body, actions without
+                an edit, or an invalid ``approval_scope``.
             ApprovalNotFound / ApprovalAlreadyDecided / RunNotFound /
             RunActive: Mapped by the router (404 / 409).
         """
@@ -680,120 +430,23 @@ class AgentControlService:
                 ]
             )
         approval = await self._store.get_approval(run_id, approval_id)
-        edited_plan: PlanRecord | None = None
-        edited_tasks: list[PlanTaskRecord] = []
+        if approval.kind not in DECIDABLE_APPROVAL_KINDS:
+            raise AgentControlValidationError(
+                [
+                    f"An approval of kind {approval.kind} belongs to the retired "
+                    "mission workflow and can no longer be decided."
+                ],
+                reason="workflow_retired",
+            )
         decision_payload: dict[str, Any] = {}
         if decision == "edit":
-            if approval.kind == "tool":
-                if plan_body is not None:
-                    raise AgentControlValidationError(
-                        [
-                            "Edit a tool approval using an actions body, not a plan."
-                        ]
-                    )
-                decision_payload = {
-                    "actions": _validated_tool_edit(approval, actions_body)
-                }
-            elif approval.kind in ("plan", "replan"):
-                if actions_body is not None:
-                    raise AgentControlValidationError(
-                        [
-                            "An actions body is allowed only for tool approvals."
-                        ]
-                    )
-                if not isinstance(plan_body, dict):
-                    raise AgentControlValidationError(
-                        ["An edit decision requires a plan body."]
-                    )
-                edited_plan, edited_tasks = await self._parse_edited_plan(
-                    run_id, plan_body, visible_to
-                )
-                decision_payload = {"plan": plan_body}
-            else:
-                raise AgentControlValidationError(
-                    [
-                        f'Only plan and tool approvals can be decided with changes (kind={approval.kind}).'
-                    ]
-                )
-        elif plan_body is not None:
-            raise AgentControlValidationError(
-                ["A plan body is allowed only for decision=edit."]
-            )
+            decision_payload = {
+                "actions": _validated_tool_edit(approval, actions_body)
+            }
         elif actions_body is not None:
             raise AgentControlValidationError(
                 ["An actions body is allowed only for decision=edit."]
             )
-        if (
-            report_guidance is not None or report_rule_ids is not None
-        ) and approval.kind not in (
-            "plan",
-            "replan",
-        ):
-            # Guidance on a gate that cannot honor it must fail loudly —
-            # silently dropping user requirements is the one thing the
-            # report_guidance feature exists to prevent.
-            raise AgentControlValidationError(
-                [
-                    f'report_guidance/report_rule_ids are allowed only for plan/replan approvals (this gate: {approval.kind}).'
-                ]
-            )
-        if (
-            report_guidance is not None or report_rule_ids is not None
-        ) and approval.status != "pending":
-            # Replay identity of a decided gate is the REQUEST, compared
-            # before anything is resolved: the decision stored the rules
-            # it added at the revision the catalog had then. Resolving
-            # again would read a template edited or deleted since and turn
-            # the replay of the same decision into a conflict, or into a
-            # 400 for a rule that is no longer visible.
-            stored_requirement = _stored_requirement(
-                approval, report_guidance, report_rule_ids
-            )
-            if stored_requirement is None:
-                raise ApprovalAlreadyDecided(approval)
-            decision_payload = {**decision_payload, **stored_requirement}
-        elif report_guidance is not None or report_rule_ids is not None:
-            # Decision-scoped result requirement rides the SAME payload
-            # the edit decision already uses — no schema change; the
-            # resume hands it to the synthesis prompts.
-            # PRESENCE, not truthiness: an empty value is a real one
-            # ("drop my earlier requirement"). Storing only non-empty
-            # text made a once-set requirement unremovable — the cleared
-            # field vanished on the way and the old text kept shaping
-            # every later revision.
-            # SAME resolution as the submit-time requirement: one
-            # catalog lookup, one composition, one ceiling. Two copies
-            # would drift, and a drift here is a security drift.
-            # A rule the run already works under stays the text and the
-            # revision it is frozen under; only a rule the selection adds
-            # reads the catalog. Otherwise a change of the typed text alone
-            # would pick up a later edit of a rule, or fail on one deleted
-            # since.
-            frozen = (
-                await self._rules_in_force(run_id, approval)
-                if report_rule_ids
-                else {}
-            )
-            try:
-                composed, rule_parts = await resolve_report_requirement(
-                    free_text=report_guidance or "",
-                    template_ids=report_rule_ids or [],
-                    prompt_templates=self._prompt_templates,
-                    visible_to=visible_to,
-                    frozen_rules=frozen,
-                )
-            except ReportRequirementError as exc:
-                raise AgentControlValidationError(exc.messages) from exc
-            decision_payload = {
-                **decision_payload,
-                "report_guidance": composed,
-                # The parts, for the read-back: the composed text is
-                # what the model sees, this is what the user chose.
-                "report_requirement": {
-                    "free_text": report_guidance or "",
-                    "rules": rule_parts,
-                },
-            }
         if approval_scope:
             if approval_scope not in ("once", "run"):
                 raise AgentControlValidationError(
@@ -804,12 +457,6 @@ class AgentControlService:
             if decision != "approve":
                 raise AgentControlValidationError(
                     ["approval_scope is allowed only for decision=approve."]
-                )
-            if approval.kind != "tool":
-                raise AgentControlValidationError(
-                    [
-                        f'approval_scope is allowed only for tool approvals (this gate: {approval.kind}).'
-                    ]
                 )
             if approval_scope == "run":
                 from inqtrix.agents.kernel.policy import ALWAYS_GATED_TOOLS
@@ -837,9 +484,9 @@ class AgentControlService:
         decided_by = principal.user_id if principal is not None else None
         if approval.status != "pending":
             # Sequential replay: the SAME decision answers 200 with the
-            # stored state, a different one conflicts. For edit the plan
-            # payload IS the decision — a retry carrying a DIFFERENT
-            # plan must conflict, never be swallowed as a replay.
+            # stored state, a different one conflicts. For edit the actions
+            # payload IS the decision — a retry carrying DIFFERENT actions
+            # must conflict, never be swallowed as a replay.
             if _same_decision(approval, decision, decision_payload):
                 summary = await self._run_summary(
                     run_id, principal=principal, visible_to=visible_to
@@ -856,8 +503,6 @@ class AgentControlService:
                 note=note,
                 decided_by_user_id=decided_by,
                 resume=self._resume_callable(run_id, principal),
-                edited_plan=edited_plan,
-                edited_tasks=edited_tasks,
             )
         except Exception as exc:
             # Concurrent race: a parallel request may have decided AND
@@ -924,260 +569,6 @@ class AgentControlService:
             return stored
         return None
 
-    async def _parse_edited_plan(
-        self,
-        run_id: str,
-        plan_body: dict[str, Any],
-        visible_to: "UserContext | None",
-    ) -> tuple[PlanRecord, list[PlanTaskRecord]]:
-        # Persisted plans can carry a planner-selected model tier. Editing
-        # canonicalizes that field away; model routing belongs to the server.
-        # Copy only the affected structure, and leave malformed or unknown
-        # fields intact so ordinary schema validation still rejects them.
-        raw_tasks = plan_body.get("tasks")
-        if isinstance(raw_tasks, list):
-            plan_body = {
-                **plan_body,
-                "tasks": [
-                    {
-                        **task,
-                        "params": {
-                            key: value for key, value in task["params"].items()
-                            if key != "model_tier"
-                        },
-                    }
-                    if isinstance(task, dict) and isinstance(task.get("params"), dict)
-                    else task
-                    for task in raw_tasks
-                ],
-            }
-        try:
-            plan = ExecutionPlanModel.model_validate(plan_body)
-        except ValidationError as exc:
-            raise AgentControlValidationError(
-                [
-                    f"{'.'.join(str(part) for part in error['loc'])}: "
-                    f"{error['msg']}"
-                    for error in exc.errors()
-                ]
-            ) from exc
-        budgeted = [
-            task.id
-            for task in plan.tasks
-            if task.budget.model_dump(exclude_none=True)
-        ]
-        if budgeted:
-            raise AgentControlValidationError(
-                [
-                    ("Task budgets are managed by the server; remove budget from these "
-                    "tasks: ")
-                    + ", ".join(budgeted)
-                    + "."
-                ],
-                error_type="task_budget_server_managed",
-            )
-        run_summary = await self._run_summary(
-            run_id, visible_to=visible_to
-        )
-        overrides = run_summary.get("agent_overrides") or {}
-        depth = (
-            str(overrides.get("depth") or "normal")
-            if isinstance(overrides, dict)
-            else "normal"
-        )
-        tier = (
-            str(overrides.get("agent_tier") or "")
-            if isinstance(overrides, dict)
-            else ""
-        )
-        research_policy = derive_web_research_policy(
-            depth=depth,
-            edited_plan=True,
-            tier=tier or None,
-        )
-        # THE shared collection rule (resolver + allowed-ids check) the
-        # planner runs — a user edit naming a collection ("EU-AI-Act")
-        # is canonicalized to its id, an invisible/unknown reference is a
-        # 400 now instead of a task failure after approval (same
-        # visibility rule, earlier surface). A missing knowledge
-        # collaborator (memory/dev) skips the check: the runtime
-        # per-collection gate still guards retrieval.
-        catalog = await self._collection_catalog(run_id, visible_to)
-        errors = (
-            resolve_plan_collections(plan, catalog)
-            if catalog is not None
-            else []
-        )
-        errors += validate_plan(
-            plan,
-            max_tasks=self._max_plan_tasks,
-            allowed_collection_ids=(
-                {entry.collection_id for entry in catalog}
-                if catalog is not None
-                else None
-            ),
-            # Editing the plan is itself the explicit research consent.
-            web_research_allowed=research_policy.allowed,
-            web_research_profile=(
-                None
-                if research_policy.max_profile is not None
-                else research_policy.profile
-            ),
-            web_research_profile_ceiling=research_policy.max_profile,
-            max_web_instant_tasks=research_policy.max_instant_tasks,
-        )
-        plan_id = f"plan_{uuid.uuid4().hex}"
-        record = PlanRecord(
-            plan_id=plan_id,
-            run_id=run_id,
-            version=0,
-            status="approved",
-            created_by="user",
-            summary_markdown=plan.summary_markdown,
-            assumptions=tuple(
-                without_stale_web_note(
-                    plan.assumptions,
-                    (task.tool_kind for task in plan.tasks),
-                )
-            ),
-            success_criteria=tuple(plan.success_criteria),
-            reason="user_edit",
-            created_at=time.time(),
-        )
-        tasks = [
-            PlanTaskRecord(
-                task_id=task.id,
-                plan_id=plan_id,
-                run_id=run_id,
-                ordinal=index,
-                title=task.title,
-                tool_kind=task.tool_kind,
-                objective=task.objective,
-                queries=tuple(task.queries),
-                gap_ids=tuple(task.gap_ids),
-                depends_on=tuple(task.depends_on),
-                budget={},
-                params=task.params.model_dump(exclude_none=True),
-                expected_output=task.expected_output,
-            )
-            for index, task in enumerate(plan.tasks)
-        ]
-        previous_tasks: list[PlanTaskRecord] = []
-        try:
-            _previous_plan, previous_tasks = await self._store.get_plan(run_id)
-        except PlanNotFound:
-            pass
-        errors += additive_replan_errors(previous_tasks, tasks)
-        if errors:
-            raise AgentControlValidationError(errors)
-        tasks = carry_forward_terminal_task_results(previous_tasks, tasks)
-        return record, tasks
-
-    async def _rules_in_force(
-        self, run_id: str, approval: ApprovalRecord
-    ) -> dict[str, tuple[dict[str, Any], str]]:
-        """The rules the run works under when *approval* is decided, by id.
-
-        The requirement in force is the one the last EARLIER plan or replan
-        decision set, else the submitted one — the record the mission's
-        own state follows from submission through every gate. Each rule
-        comes with the composed block the run is frozen under, read back
-        from that text (``(part, block)``). Decisions after *approval*
-        never count. A decided approval never gets here: its replay is
-        compared with what it stored (:func:`_stored_requirement`).
-        """
-        approvals = await self._store.list_approvals(run_id)  # newest first
-        position = [record.approval_id for record in approvals].index(
-            approval.approval_id
-        )
-        composed: str | None = None
-        rules: list[Any] = []
-        for record in approvals[position + 1:]:
-            payload = record.decision_payload
-            if (
-                record.kind in ("plan", "replan")
-                and record.decision in ("approve", "edit")
-                and "report_guidance" in payload
-            ):
-                composed = str(payload.get("report_guidance") or "")
-                rules = list(
-                    decided_requirement_parts(
-                        payload, approval_id=record.approval_id
-                    ).get("rules")
-                    or []
-                )
-                break
-        if composed is None:
-            body = await self._run_store.aexecution_request_body(run_id)
-            composed = str(body.get("report_requirement") or "")
-            rules = list(body.get("report_rules") or [])
-        if not rules:
-            return {}
-        split = split_composed_requirement(
-            composed, [str(rule.get("label") or "") for rule in rules]
-        )
-        if split is None:
-            log.warning(
-                "Run %s: the requirement in force at approval %s does not "
-                "split into its %d rule(s); every rule this decision "
-                "attaches is resolved from the catalog again.",
-                run_id,
-                approval.approval_id,
-                len(rules),
-            )
-            return {}
-        return {
-            str(rule["template_id"]): (dict(rule), block)
-            for rule, block in zip(rules, split[0], strict=True)
-        }
-
-    async def _collection_catalog(
-        self,
-        run_id: str,
-        visible_to: "UserContext | None",
-    ) -> list[CollectionCatalogEntry] | None:
-        """Caller-visible, run-admitted catalog for edit canonicalization.
-
-        ``None`` degrades (no knowledge collaborator wired — memory/dev);
-        the runtime per-collection gate still guards retrieval. A scoped
-        run's persisted collection IDs are authoritative, including an
-        explicit empty list. The live listing is intersected with that
-        immutable boundary, so a share accepted while a plan is parked
-        cannot expand the run.
-        """
-        if self._knowledge is None:
-            return None
-        request_body = await self._run_store.aexecution_request_body(run_id)
-        knowledge_filters = request_body.get("knowledge_filters")
-        if knowledge_filters is None:
-            knowledge_filters = {}
-        if not isinstance(knowledge_filters, dict):
-            raise RuntimeError(
-                "Persisted run knowledge filters are invalid."
-            )
-        context = visible_to
-        if context is None:
-            context = await self._execution_context(run_id)
-        admitted_ids = pinned_knowledge_collection_ids(
-            knowledge_filters,
-            scoped_principal=(
-                context is not None
-                and context.principal.user_id is not None
-            ),
-        )
-        if admitted_ids == frozenset():
-            return []
-        collections = await self._knowledge.list_collections(
-            visible_to=context
-        )
-        return [
-            CollectionCatalogEntry(
-                collection_id=str(item.id),
-                name=str(item.name),
-            )
-            for item in collections
-            if admitted_ids is None or str(item.id) in admitted_ids
-        ]
 
     # -- clarifications ------------------------------------------------------ #
 

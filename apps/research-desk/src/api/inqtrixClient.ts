@@ -35,11 +35,8 @@ import type {
   AgentPatchWire,
   AgentArtifactDetailWire,
   AgentArtifactMetaWire,
-  AgentTaskCancelWire,
-  AgentTaskResultWire,
   AgentClarificationAnswerRequest,
   AgentClarificationWire,
-  AgentPlanWire,
   ServerAgentSession,
   ServerAgentSessionGroup,
 } from '@/features/agent/types'
@@ -2383,6 +2380,8 @@ export type ServerAccountPreferences = {
   enable_agent_memory?: boolean
   chat_model_tier?: string
   agent_model_tier?: string
+  last_research_profile?: string
+  last_agent_tier?: string
   updated_at: number
 }
 
@@ -2400,6 +2399,8 @@ export type AccountPreferencesPayload = {
   enable_agent_memory: boolean
   chat_model_tier: string
   agent_model_tier: string
+  last_research_profile: string
+  last_agent_tier: string
   updated_at: number
 }
 
@@ -2848,48 +2849,6 @@ export async function getKnowledgeChunk(
 
 // --- Workspace-agent control surfaces ---------------------------------------
 // Rows are the truth: SSE events are signals to (re-)fetch these.
-
-export async function listRunChildren(
-  runId: string,
-  options: ClientOptions = {},
-) {
-  const payload = await requestJson<{ data: ResearchRunSummary[] }>(
-    `/v1/runs/${runId}/children`,
-    options,
-  )
-  return payload.data
-}
-
-export async function getAgentRunPlan(
-  runId: string,
-  version: number | undefined,
-  options: ClientOptions = {},
-) {
-  const query = version === undefined ? '' : `?version=${version}`
-  return requestJson<AgentPlanWire>(`/v1/runs/${runId}/plan${query}`, options)
-}
-
-export async function getAgentRunTaskResult(
-  runId: string,
-  taskId: string,
-  options: ClientOptions = {},
-) {
-  return requestJson<AgentTaskResultWire>(
-    `/v1/runs/${runId}/tasks/${taskId}/result`,
-    options,
-  )
-}
-
-export async function cancelAgentRunTask(
-  runId: string,
-  taskId: string,
-  options: ClientOptions = {},
-) {
-  return requestJson<AgentTaskCancelWire>(
-    `/v1/runs/${runId}/tasks/${taskId}/cancel`,
-    { ...options, method: 'POST' },
-  )
-}
 
 export async function listAgentRunApprovals(
   runId: string,

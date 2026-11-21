@@ -20,7 +20,11 @@ from inqtrix.agents.memory_ports import (
     AgentMemoryValidationError,
 )
 from inqtrix.auth.principal import Principal
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import (
+    error_response,
+    read_json_object,
+    read_optional_json_object,
+)
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -90,9 +94,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(400, "Invalid JSON body", "invalid_request_error")
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         owner_error = _reject_body_owner_fields(body)
         if owner_error is not None:
             return owner_error
@@ -130,9 +134,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(req, allow_empty=True)
-        if body is None:
-            return error_response(400, "Invalid JSON body", "invalid_request_error")
+        body, error = await read_optional_json_object(req)
+        if error is not None:
+            return error
         owner_error = _reject_body_owner_fields(body)
         if owner_error is not None:
             return owner_error
@@ -174,9 +178,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(req, allow_empty=True)
-        if body is None:
-            return error_response(400, "Invalid JSON body", "invalid_request_error")
+        body, error = await read_optional_json_object(req)
+        if error is not None:
+            return error
         owner_error = _reject_body_owner_fields(body)
         if owner_error is not None:
             return owner_error
@@ -200,9 +204,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(req, allow_empty=True)
-        if body is None:
-            return error_response(400, "Invalid JSON body", "invalid_request_error")
+        body, error = await read_optional_json_object(req)
+        if error is not None:
+            return error
         owner_error = _reject_body_owner_fields(body)
         if owner_error is not None:
             return owner_error
@@ -224,9 +228,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(req)
-        if body is None:
-            return error_response(400, "Invalid JSON body", "invalid_request_error")
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         owner_error = _reject_body_owner_fields(body)
         if owner_error is not None:
             return owner_error
@@ -247,16 +251,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         return _feedback_payload(row)
 
     return router
-
-
-async def _json_object(
-    req: Request, *, allow_empty: bool = False
-) -> dict[str, Any] | None:
-    try:
-        body = await req.json()
-    except Exception:  # noqa: BLE001 - malformed body is a client error
-        return {} if allow_empty else None
-    return body if isinstance(body, dict) else None
 
 
 def _reject_query_owner_fields(req: Request):

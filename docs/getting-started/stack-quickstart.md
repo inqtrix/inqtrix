@@ -61,7 +61,6 @@ EDITOR_ASSISTANT_TIMEOUT=600
 SEARCH_TIMEOUT=600
 CLAIM_EXTRACT_TIMEOUT=600
 MAX_TOTAL_SECONDS=3600
-INQTRIX_AGENT_MAX_PARALLEL_CHILDREN=6
 INQTRIX_AZURE_FOUNDRY_MAX_CONCURRENCY=6
 INQTRIX_QUOTA_MAX_TOKENS_PER_RUN=900000
 ```
@@ -108,6 +107,13 @@ once through the automatic `migrate` dependency, then starts the API and Python
 web container. A normal install/update never requires a separate manual
 `inqtrix-migrate` command. Managed PostgreSQL can place its dedicated direct DSN
 in the optional migration-only env file; see [Database migrations](../deployment/database-migrations.md).
+With `--profile s3` the API also waits until SeaweedFS answers on its S3 port.
+API, worker and web do not wait for Langfuse, so they also start when
+`--profile observability` cannot (for example when one of the services
+Langfuse needs fails). On a cold start where Langfuse comes up after the API,
+the traces of the first seconds are lost, and the exporter logs an `ERROR`
+`Failed to export spans batch due to timeout, max retries or shutdown.` for
+each batch it could not deliver.
 First build pulls images and installs dependencies, so it takes a few minutes;
 subsequent starts are fast.
 

@@ -417,7 +417,7 @@ def test_project_child_run_outcome_keeps_only_cited_references() -> None:
     )
     child_id = child["run_id"]
     _wait_until(lambda: store.get(child_id)["status"] == "completed")
-    outcome = project_child_run_outcome(store, child_id, 1)
+    outcome = project_child_run_outcome(store, child_id)
     assert outcome is not None and outcome.status == "completed"
     assert [reference["url"] for reference in outcome.evidence] == [
         "https://example.com/q",
@@ -468,12 +468,12 @@ def test_project_child_run_outcome_needs_visible_to_for_owned_child() -> None:
 
     # Without the owner context the owned child is hidden -> the exact
     # live symptom (child_row_missing), NOT the true outcome.
-    blind = project_child_run_outcome(store, child_id, 1)
+    blind = project_child_run_outcome(store, child_id)
     assert blind is not None
     assert blind.status == "failed"
     assert blind.failure_reason == "child_row_missing"
     # With the owner context, the real completed outcome comes through.
-    seen = project_child_run_outcome(store, child_id, 1, visible_to=ctx)
+    seen = project_child_run_outcome(store, child_id, visible_to=ctx)
     assert seen is not None
     assert seen.status == "completed"
 
@@ -1105,7 +1105,8 @@ def test_agent_run_summary_carries_tree_keys() -> None:
 
     assert parent["kind"] == "agent"
     assert parent["children_url"] == f"/v1/runs/{parent['run_id']}/children"
-    assert parent["plan_url"] == f"/v1/runs/{parent['run_id']}/plan"
+    # The retired plan route has no link any more.
+    assert "plan_url" not in parent
     assert parent["artifacts_url"] == f"/v1/runs/{parent['run_id']}/artifacts"
     assert parent["session_id"] == "sess-1"
     assert child["kind"] == "agent_child"

@@ -4,18 +4,9 @@ import type { ClientOptions } from '@/api/inqtrixClient'
 import type { KnowledgeDataSource } from '@/features/knowledge/types'
 import type { CanvasViewDescriptor } from '@/features/canvas/types'
 import type { FileAssetRecord } from '@/features/project/types'
-import type { RunEventTransport } from '@/features/researchRuns/runEventChannel'
 import type { AgentRunRecord } from '../model'
 import type { AgentSessionArtifactIndex } from '../model'
 import type { CanvasSaveRegistry } from './saveRegistry'
-import type { ReportRuleOption } from '../plan/PlanReviewBody'
-import type { PlanSourceInfo } from '../plan/sourceLabel'
-import type { AgentPlanDraft } from '../plan/usePlanApproval'
-import type {
-  AgentApprovalDecisionRequest,
-  AgentTaskCancelWire,
-  AgentTaskResultWire,
-} from '../types'
 import type {
   ArtifactRenameResult,
   ArtifactSaveResult,
@@ -25,38 +16,17 @@ import type {
  * Data plane of the agent canvas views. A React context (not per-render
  * closures) so the view registry stays a MODULE CONSTANT — otherwise every
  * workspace render would recreate the renderer component types and
- * remount the active view (killing the editor cursor and the task view's
- * SSE subscription).
+ * remount the active view (killing the editor cursor).
  */
 export type AgentCanvasContextValue = {
-  applyPatch: (
-    runId: string,
-    patchId: string,
-    expectedRevision: number,
-  ) => Promise<
-    | { kind: 'applied'; revision: number; appliedEditIds: string[] }
-    | { kind: 'conflict'; currentRevision: number | null }
-  >
   clientOptions: ClientOptions | null
-  inspectChildRun: (runId: string, signal: AbortSignal, onTransport: (value: RunEventTransport) => void) => Promise<void>
+  /** The caller-visible knowledge collections (id -> display title): the
+   * evidence view names a citation's collection by its title. */
+  collections: { id: string; title: string }[]
   /** Knowledge document reader for the evidence view's knowledge
    * citations: the same reader the Knowledge Desk uses, so "verify the
    * source" is one experience across desks. */
   knowledgeDataSource: KnowledgeDataSource
-  cancelTask: (
-    runId: string,
-    taskId: string,
-  ) => Promise<AgentTaskCancelWire>
-  decideApproval: (
-    runId: string,
-    approvalId: string,
-    decision: AgentApprovalDecisionRequest,
-  ) => Promise<unknown>
-  rejectPatch: (
-    runId: string,
-    patchId: string,
-    note: string,
-  ) => Promise<unknown>
   exportArtifact: (
     runId: string,
     artifactId: string,
@@ -68,33 +38,10 @@ export type AgentCanvasContextValue = {
     artifactId: string,
     revision?: number,
   ) => Promise<{ content_markdown: string; revision: number }>
-  loadTaskResult: (
-    runId: string,
-    taskId: string,
-  ) => Promise<AgentTaskResultWire>
-  /** Fire-and-forget cache warm for a settled task's result (hover /
-   * idle) — errors stay silent, the on-open fetch is the loud path. */
-  prefetchTaskResult: (runId: string, taskId: string) => void
   openCanvasView: (descriptor: CanvasViewDescriptor) => void
-  /** Re-flags the run's plan as stale so the control hook refetches it —
-   * the plan view's on-open trigger (rows stay the truth). */
-  requestPlanRefresh: (runId: string) => void
   /** Pending canvas saves keyed by artifact; the composer flushes ALL
    * of them before any submit — including one that answers a gate. */
   saveRegistry: CanvasSaveRegistry
-  planDrafts: Record<string, AgentPlanDraft>
-  /** Collection titles + vector-backend label for the plan view's
-   * per-task source line (same data plane as the timeline card). */
-  planSource: PlanSourceInfo
-  /** Library rules the user marked visible for the agent — attachable
-   * as a saved result requirement at the plan gate. */
-  reportRuleOptions: ReportRuleOption[]
-  /** The server's OWN limits for that requirement (published ==
-   * enforced): the gate must not accept a text or a rule count the
-   * decision would then be refused for. */
-  reportGuidanceMaxChars: number
-  /** null = not published: the gate does not pre-check the count. */
-  reportRuleIdsMax: number | null
   /** Parent runs currently using the visible polling fallback. */
   pollingRunIds: readonly string[]
   runs: Record<string, AgentRunRecord>
@@ -135,7 +82,6 @@ export type AgentCanvasContextValue = {
   /** Derived session file names (artifactId -> `name.md`); empty while
    * the session index has not loaded. */
   sessionFileNames: Record<string, string>
-  setPlanDraft: (runId: string, draft: AgentPlanDraft | null) => void
   workspaceId: string
 }
 

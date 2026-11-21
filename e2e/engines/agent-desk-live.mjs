@@ -18,6 +18,8 @@ import {
   fetchActorJson as fetchJson,
 } from '../../tests/verification/fixtures/api.mjs'
 import { attemptCleanup } from '../../tests/verification/fixtures/cleanup-step.mjs'
+import { judgeCompleteReading, judgeRoleRelease } from '../../tests/verification/fixtures/document-reading.mjs'
+import { judgeReviewBand, judgeReviewOutcome } from '../../tests/verification/fixtures/review-outcome.mjs'
 import { createScenarioBook, writeScenarioSidecar } from '../../tests/verification/fixtures/scenario-sidecar.mjs'
 import {
   requireAccountLocale,
@@ -80,7 +82,6 @@ const SCENARIOS = [
   'agent.conversation-history-material',
   'agent.conversation-file-attachment',
   'agent.conversation-review-role',
-  'agent.conversation-mission-review',
   'agent.conversation-stop-continue',
   'agent.conversation-manual-title',
   'agent.conversation-canvas-copy',
@@ -96,9 +97,14 @@ let measuring = null
 const networkFindings = []
 let abortedWrites = 0
 // The review a Stufe owes is judged per completed turn in a scenario of its
-// own: an unusable review stays visible as red, and it does not hide the
-// turns after it.
+// own: a mismatch stays visible as red, and it does not hide the turns after
+// it. A review that ended without a usable verdict for one of the two reasons
+// the band names is a warning with its reason, up to the band's ceiling.
 const reviewMismatches = []
+const reviewBand = []
+// The reader text of every judged review the surface shows, by turn: the
+// answer block must state it.
+const reviewReaderText = new Map()
 let reviewedTurns = 0
 
 let browser
@@ -111,6 +117,12 @@ let activeSession
 let activeTitle
 let documentMaterial
 let publishedTiers = []
+let defaultTierId = null
+// The account's last choices as the run found them. A Stufe the run chooses
+// in the visible UI is saved as the account's last choice, like any user's
+// pick; the run chooses the noted one again through the UI at its end.
+let lastChoicesAtStart = null
+const TIER_LABELS = { schnell: 'Schnell', gruendlich: 'Gründlich', tief: 'Tief' }
 // Answers the stopped turn rendered before it ended; the replay counts them.
 let stoppedTurnAnswers = 0
 // A stop that did not hold may have left an answer of its own, uncounted.
@@ -145,6 +157,7 @@ try {
   )
   // The run reads German labels; the page shows the tester's saved language.
   await requireAccountLocale(tester, 'de')
+  lastChoicesAtStart = await readLastChoices(tester)
   // Network hygiene on top of the shared pageerror/console collectors.
   tester.page.on('requestfailed', (request) => {
     const failure = request.failure()?.errorText ?? 'failed'
@@ -177,22 +190,24 @@ try {
       + `(state=${kernelStatus?.state ?? 'unset'}, `
       + `reason=${kernelStatus?.reason_code ?? 'none'}).`,
   )
-  // Published == enforced: the tier the composer preselects promises a
-  // report-quality level, and the rounds below check that the engine
-  // delivers exactly what this table says.
+  // Published == enforced: every Stufe promises a report-quality level, and
+  // the rounds below check that the engine delivers exactly what this table
+  // says. The composer starts on the account's last choice while the server
+  // still publishes it, so the opening turn chooses the published default
+  // explicitly; the turns after it keep that choice until R10 picks Tief.
   publishedTiers = capabilities.agent?.tiers ?? []
-  const defaultTier = publishedTiers.find(
-    (tier) => tier.id === capabilities.agent?.default_tier,
-  )
+  defaultTierId = capabilities.agent?.default_tier ?? null
+  const defaultTier = publishedTiers.find((tier) => tier.id === defaultTierId)
   assert(
     defaultTier?.verify && defaultTier.verify !== 'labels',
     'The published default tier claims no verification '
       + `(${defaultTier?.verify ?? 'unset'}); the review rounds below would `
       + 'pass vacuously.',
   )
+  assert(TIER_LABELS[defaultTier.id], `The run setup offers no label for the default Stufe ${defaultTier.id}.`)
   // The composer submits the published default engine — this profile
-  // verifies the KERNEL answer experience, so a workspace_agent default
-  // would silently test the wrong engine.
+  // verifies the kernel answer experience, so any other default would
+  // silently test something else.
   assert(
     capabilities.agent?.default_mode === 'agent_kernel',
     'The stack default engine is not agent_kernel '
@@ -242,16 +257,11 @@ try {
     .waitFor({ state: 'visible', timeout: 20_000 })
 
   // Research executes without intermediate approval clicks. The approval
-  // workflow is covered separately by the recovery profile.
-  await tester.page
-    .getByRole('button', { name: 'Ausführung', exact: true })
-    .click()
-  await tester.page
-    .getByRole('menuitem')
-    .filter({ hasText: 'Zwischenfreigaben' })
-    .first()
-    .click()
-  await tester.page.keyboard.press('Escape')
+  // workflow is covered separately by the recovery profile. The choice goes
+  // through selectRunSetup like every other one, which returns only once the
+  // menu is gone: R1 opens the menu again right away for its Stufe, and a
+  // click while the menu still fades out is swallowed.
+  await selectRunSetup(tester.page, 'Berechtigung', 'Auto')
 
   const question = 'Wir planen einen internen KI-Arbeitsassistenten '
     + 'für ein fiktives deutsches Unternehmen mit 140 Beschäftigten. Er hilft bei Recherche und Dokumenten, '
@@ -262,7 +272,7 @@ try {
 
   progress('Kernel-Lauf einreichen')
   measuring = 'agent.kernel-run-submits'
-  runId = await submitTurn(question, 'R1', true)
+  runId = await submitTurn(question, 'R1', true, null, { tier: defaultTier.id })
   assert(typeof runId === 'string' && runId.length > 0, 'No run id returned.')
 
   verdicts.pass('agent.kernel-run-submits')
@@ -319,6 +329,7 @@ try {
   // is the anchored readiness signal for citation assertions.
   const sources = tester.page.getByTestId('agent-sources')
   await sources.waitFor({ state: 'visible', timeout: 30_000 })
+  await assertReviewReaderText('R1', answeredTurn(tester.page, terminal))
   const citationAnchors = answer.locator('a[href^="#kref-"]')
   const citationCount = await citationAnchors.count()
   assert(citationCount > 0, 'The answer rendered no citation chips.')
@@ -403,21 +414,16 @@ try {
     // Deep ends with the review ROLE: a bounded child run of the kernel that
     // re-reads what this turn read and hands back a typed verdict. Both
     // documents are in the selected collection; nothing needs research.
-    { marker: 'R10', context: 'knowledge', tier: 'tief', scenario: 'agent.conversation-review-role', prompt: 'Jetzt bitte besonders gründlich: Erstelle eine geprüfte Kurzübersicht zum Pilotbetrieb aus der ausgewählten Wissenssammlung. Nenne den Sachkostenrahmen und die Prüfregeln aus der abschließenden Sonderfreigabe des freigegebenen Einführungsleitfadens sowie das Abnahmeergebnis und die Nacharbeiten aus der Anlage „Prüfprotokoll Pilotbetrieb“. Dafür ist keine Recherche nötig; lies nur den Leitfaden und die Anlage. Belege jede Aussage mit der Fundstelle und nenne ausdrücklich, was sich nicht prüfen lässt. Keine Websuche und keine Änderungen.' },
-    // The mission engine shares the review pass with the kernel: a typed
-    // verdict that settles the plan's success criteria, anchored edits instead
-    // of a rewrite, one review per synthesis. Small material is reviewed in one
-    // call, large material by the review role; the turn says which it was.
-    { marker: 'R11', context: 'knowledge', tier: 'gruendlich', engine: 'mission', autonomy: 'autonomous', scenario: 'agent.conversation-mission-review', prompt: 'Erstelle jetzt ein eigenständiges Memo als Entscheidungsvorlage zum Pilotbetrieb, ausschließlich aus der ausgewählten Wissenssammlung: Sachkostenrahmen und Freigaberegeln, Betriebszeiten, das Abnahmeergebnis mit den offenen Nacharbeiten und die Folgen für spätere Erweiterungen. Belege jede Aussage mit der Fundstelle und nenne offen, was die Unterlagen nicht hergeben. Keine Websuche und keine Änderungen an Dokumenten.' },
+    { marker: 'R10', context: 'knowledge', tier: 'tief', scenario: 'agent.conversation-review-role', prompt: 'Jetzt bitte besonders gründlich: Erstelle eine geprüfte Kurzübersicht zum Pilotbetrieb aus der ausgewählten Wissenssammlung. Nenne den Sachkostenrahmen und die Prüfregeln aus der abschließenden Sonderfreigabe des freigegebenen Einführungsleitfadens sowie das Abnahmeergebnis und die Nacharbeiten aus der Anlage „Prüfprotokoll Pilotbetrieb“. Dafür ist keine Recherche nötig; lies nur den Leitfaden und die Anlage, beide vollständig. Belege jede Aussage mit der Fundstelle und nenne ausdrücklich, was sich nicht prüfen lässt. Keine Websuche und keine Änderungen.' },
   ]
-  for (const { marker, prompt, web = false, cites = false, context = null, scenario = null, requires = [], tier = null, engine = null, autonomy = null } of rounds) {
+  for (const { marker, prompt, web = false, cites = false, context = null, scenario = null, requires = [], tier = null, autonomy = null } of rounds) {
     measuring = scenario
     if (!manualConversation && context) {
       if (context === 'none') await clearDocumentContext(tester.page)
       else await selectDocumentContext(tester.page, context)
     }
     // A turn that cannot be submitted or never ends stops the conversation.
-    runId = await submitTurn(prompt, marker, web, context === 'none' ? 'history' : context, { tier, engine, autonomy })
+    runId = await submitTurn(prompt, marker, web, context === 'none' ? 'history' : context, { tier, autonomy })
     // A Deep turn adds a review child and one revision to the turn itself.
     const state = await waitFor(async () => {
       const current = await fetchJson(tester, 'GET', `/v1/runs/${runId}`)
@@ -426,7 +432,16 @@ try {
     // A failed expectation of one turn fails its scenario and the run, but
     // it must not hide the turns after it: they are judged on their own.
     try {
-      await captureTurn(marker, prompt, state)
+      try {
+        await captureTurn(marker, prompt, state)
+      } finally {
+        // The review's sentence is looked for under every completed answer,
+        // also when another expectation of the turn failed above. The check
+        // records a miss and never throws.
+        if (state.status === 'completed') {
+          await assertReviewReaderText(marker, answeredTurn(tester.page, state))
+        }
+      }
       assert(state.status === 'completed', `${marker} ended ${state.status}: ${runErrorText(state.error)}`)
       // The conversation has several answers. An already visible older answer
       // cannot establish that this newly completed turn rendered correctly.
@@ -525,10 +540,24 @@ try {
   } catch {
     failScenario('agent.cleanup-integrity', 'the owned runs could not be ended')
   }
+  try {
+    await restoreLastTier()
+  } catch (error) {
+    failScenario('agent.cleanup-integrity', `the account's last Stufe was not restored: ${error?.message ?? error}`)
+    progress(`The account's last Stufe was not restored: ${sanitize(String(error?.message ?? error))}`)
+  }
+  const band = judgeReviewBand(reviewBand, reviewedTurns)
+  if (band.status === 'failed') reviewMismatches.push(band.problem)
+  // The scenario's reason is one bounded line of the report; each deviation
+  // stands in full as a line of its own in the run's progress.
+  for (const mismatch of reviewMismatches) progress(`Prüfungsabweichung: ${mismatch}`)
   if (reviewMismatches.length > 0) {
     failScenario('agent.review-matches-tier', reviewMismatches.join(' | '))
   } else if (reviewedTurns > 0) {
-    verdicts.pass('agent.review-matches-tier')
+    // Inside its ceiling the band passes, and the report says so: the note
+    // carries the ceiling and what was measured.
+    verdicts.pass('agent.review-matches-tier', band.note)
+    if (band.note) progress(`Prüfungen im Warnband, nicht rot: ${band.note}`)
   }
   if (tester) {
     const hygieneFindings = [
@@ -580,7 +609,7 @@ async function endRun(id) {
   )
 }
 
-async function submitTurn(prompt, marker, webEnabled, materialKind = null, { tier = null, engine = null, autonomy = null } = {}) {
+async function submitTurn(prompt, marker, webEnabled, materialKind = null, { tier = null, autonomy = null } = {}) {
   const web = tester.page.locator('[data-source="web"]')
   if (await web.getAttribute('aria-pressed') !== String(webEnabled)) await web.click()
   await tester.page.locator(`[data-source="web"][aria-pressed="${webEnabled}"]`)
@@ -598,7 +627,7 @@ async function submitTurn(prompt, marker, webEnabled, materialKind = null, { tie
   let submitted
   if (manualConversation) {
     await writeFile(join(reportDirectory, 'manual-conversation-turn.json'),
-      JSON.stringify({ session_id: activeSession.id, title: activeTitle, marker, prompt, webEnabled, tier, engine, autonomy,
+      JSON.stringify({ session_id: activeSession.id, title: activeTitle, marker, prompt, webEnabled, tier, autonomy,
         materialKind, collection: documentMaterial?.collection_name, editor: documentMaterial?.editor_title }, null, 2), { mode: 0o600 })
     progress(`Waiting for ${marker} through the in-app browser.`)
     submitted = await waitFor(async () => {
@@ -607,8 +636,7 @@ async function submitTurn(prompt, marker, webEnabled, materialKind = null, { tie
         && expectedQuestions.some((expected) => row.question?.startsWith(expected.slice(0, 120))))
     }, 300_000, `${marker} in-app submission`)
   } else {
-    if (tier) await selectRunSetup(tester.page, 'Tempo & Tiefe', { schnell: 'Schnell', gruendlich: 'Gründlich', tief: 'Tief' }[tier])
-    if (engine) await selectRunSetup(tester.page, 'Arbeitsweise', { mission: 'Missions-Maschine', kernel: 'Automatisch' }[engine])
+    if (tier) await selectRunSetup(tester.page, 'Tempo & Tiefe', TIER_LABELS[tier])
     if (autonomy) await selectRunSetup(tester.page, 'Berechtigung', { strict: 'Strikt', balanced: 'Standard', autonomous: 'Auto' }[autonomy])
     // The question is typed after what the input already holds: the editing
     // target stands in the input as a chip, and replacing the whole text
@@ -640,10 +668,7 @@ async function submitTurn(prompt, marker, webEnabled, materialKind = null, { tie
     assert(durable.agent_overrides?.agent_tier === tier,
       `${marker} was submitted in tier ${durable.agent_overrides?.agent_tier ?? 'default'} instead of ${tier}.`)
   }
-  if (engine) {
-    const mode = { mission: 'workspace_agent', kernel: 'agent_kernel' }[engine]
-    assert(durable.mode === mode, `${marker} was submitted as ${durable.mode} instead of ${mode}.`)
-  }
+  assert(durable.mode === 'agent_kernel', `${marker} was submitted as ${durable.mode} instead of agent_kernel.`)
   return submitted.run_id
 }
 
@@ -665,6 +690,16 @@ async function captureTurn(marker, question, state) {
   conversation.push({ case: marker, run_id: runId, session_id: activeSession.id, question, state, artifacts: artifacts.data ?? [], artifact_details: details,
     trace_id: events.data?.findLast((item) => item.type === 'inqtrix.run.trace')?.data?.trace_id })
   await writeFile(join(reportDirectory, 'conversation-runs.json'), JSON.stringify(conversation, null, 2), { mode: 0o600 })
+  // How the turn's review ended is judged first and on its own: a turn whose
+  // other expectations fail further down still counts in the review scenario
+  // and in its warning band.
+  if (state.status === 'completed') {
+    try {
+      if (await assertReviewMatchesTier(marker, state, events)) reviewedTurns += 1
+    } catch (error) {
+      reviewMismatches.push(String(error?.message ?? error))
+    }
+  }
   const started = events.data.filter((item) => item.type === 'inqtrix.agent.tool.started')
     .map((item) => item.data.tool)
   const policy = state.snapshot?.execution?.source_policy?.web
@@ -672,7 +707,7 @@ async function captureTurn(marker, question, state) {
     `${marker} did not retain the intended native web policy.`)
   if (state.status === 'completed' && ['R1', 'R2', 'R3'].includes(marker)) {
     const researched = state.snapshot?.execution?.tool_use_counts?.web > 0 && started.some((tool) =>
-      ['web_instant', 'run_web_research', 'delegate_batch', 'run_deep_mission'].includes(tool))
+      ['web_instant', 'run_web_research', 'delegate_batch'].includes(tool))
     // R1 and R2 ask for research in so many words. R3 asks to check the
     // current official guidance: re-reading what this conversation already
     // researched meets that as well as a new search does, so the
@@ -682,14 +717,15 @@ async function captureTurn(marker, question, state) {
       ? 'R3 consulted neither new research nor the evidence of this conversation.'
       : `${marker} completed without the requested new research.`)
   }
-  if (['R4', 'R5', 'R6', 'R7', 'R9', 'R11'].includes(marker)) {
+  if (['R4', 'R5', 'R6', 'R7', 'R9'].includes(marker)) {
     assert(state.snapshot?.execution?.tool_use_counts?.web === 0,
       `${marker} recorded new web usage with web disabled.`)
     assert(!started.some((tool) => ['web_instant', 'run_web_research'].includes(tool)),
       `${marker} started new research with web disabled.`)
   }
   if (state.status === 'completed' && marker === 'R6') {
-    assert(started.includes('read_project_document'), 'The requested knowledge original was not read.')
+    assert(started.includes('read_project_document') || started.includes('analyze_document'),
+      'The requested knowledge original was neither read nor analysed.')
   }
   if (state.status === 'completed' && marker === 'R7') {
     assert(started.includes('read_editor_document') && started.includes('search_editor_document'),
@@ -702,7 +738,7 @@ async function captureTurn(marker, question, state) {
     // an offloaded tool-result archive of such a turn both hold the
     // transferred text and both pass the material check; the passage may be
     // read from either.
-    assert(!started.some((tool) => ['read_project_document', 'read_editor_document', 'search_editor_document', 'search_project_knowledge'].includes(tool)),
+    assert(!started.some((tool) => ['read_project_document', 'analyze_document', 'read_editor_document', 'search_editor_document', 'search_project_knowledge'].includes(tool)),
       'R8 opened a document instead of the saved conversation.')
     assert(started.includes('search_context') && started.includes('read_context'),
       'R8 did not search and read the conversation originals.')
@@ -715,32 +751,41 @@ async function captureTurn(marker, question, state) {
     })
     assert(carriers.length > 0, 'R8 read no saved original of a document turn.')
   }
-  if (state.status === 'completed' && marker === 'R10') await assertReviewRole(state, events, started)
-  if (state.status === 'completed' && marker === 'R11') await assertMissionReview(state, events, details)
-  if (state.status === 'completed') {
-    try {
-      await assertReviewMatchesTier(marker, state, events)
-      reviewedTurns += 1
-    } catch (error) {
-      reviewMismatches.push(String(error?.message ?? error))
-    }
-  }
   // The question of each document turn asks for the COMPLETE source. The
   // kernel publishes what was actually read per source version
   // (execution.source_coverage); a search excerpt alone is not that read.
-  if (state.status === 'completed' && ['R6', 'R7', 'R9'].includes(marker)) {
-    const coverage = state.snapshot?.execution?.source_coverage
-    assert(Array.isArray(coverage), `${marker} published no source coverage.`)
-    const expected = {
-      R6: { kind: 'knowledge_document', id: documentMaterial.document_id, label: 'knowledge original' },
-      R7: { kind: 'editor_document', id: documentMaterial.editor_id, label: 'editor working version' },
-      R9: { kind: 'knowledge_document', id: documentMaterial.attachment.document_id, label: 'file attachment' },
+  // R6 asks for facts out of the whole original and R10 for facts out of
+  // the guide and the attachment, both read in full, which a complete
+  // analysis by the server answers as well (execution.document_analyses);
+  // R9 asks for a page-by-page summary, which takes the text itself.
+  if (state.status === 'completed' && ['R6', 'R7', 'R9', 'R10'].includes(marker)) {
+    const execution = state.snapshot?.execution
+    const guide = { kind: 'knowledge_document', id: documentMaterial.document_id, label: 'knowledge original' }
+    const attachment = { kind: 'knowledge_document', id: documentMaterial.attachment.document_id, label: 'file attachment' }
+    const expectations = {
+      R6: [guide],
+      R7: [{ kind: 'editor_document', id: documentMaterial.editor_id, label: 'editor working version' }],
+      R9: [attachment],
+      R10: [guide, attachment],
     }[marker]
-    const entry = coverage.find((row) => row.kind === expected.kind && row.source_id === expected.id)
-    assert(entry, `${marker} never read the selected ${expected.label}.`)
-    assert(entry.complete === true && entry.continuation_open === false,
-      `${marker} did not read the ${expected.label} completely: ${JSON.stringify(entry.read_ranges)} of ${entry.total}.`)
+    const verdicts = expectations.map((expected) => [
+      expected,
+      judgeCompleteReading(execution, expected, { analysisCounts: ['R6', 'R10'].includes(marker) }),
+    ])
+    // The review role is judged first: a turn that took in too little must
+    // not hide how its review ran. Only the documents the turn took in
+    // completely count for the release check; a document it took in too
+    // little fails below.
+    if (marker === 'R10') {
+      const takenIn = verdicts.filter(([, verdict]) => verdict.status === 'passed').map(([expected, verdict]) => ({
+        id: expected.id, label: expected.label, by: verdict.by, onlyAnalysis: verdict.onlyAnalysis === true,
+      }))
+      await assertReviewRole(state, events, started, takenIn)
+    }
+    for (const [, verdict] of verdicts) assert(verdict.status === 'passed', `${marker} ${verdict.problem}`)
     if (marker === 'R7') {
+      const [[expected]] = verdicts
+      const entry = execution.source_coverage.find((row) => row.kind === expected.kind && row.source_id === expected.id)
       assert(entry.scanned_ranges.some(([start, end]) => start === 0 && end === entry.total),
         'The anchor search did not scan the whole editor working version.')
     }
@@ -756,21 +801,54 @@ async function captureTurn(marker, question, state) {
  * composer's Stufe published — not from the engine that happened to run,
  * and not from the depth flag the Stufe maps onto: `completed` where the
  * level owes a review, `waived` where the Stufe skips it, and `not_run`
- * for a request without a Stufe whose depth owes none.
+ * for a request without a Stufe whose depth owes none. Returns whether the
+ * turn was judged.
  */
 async function assertReviewMatchesTier(marker, state, events) {
-  if (state.snapshot?.execution?.effective_mode !== 'agent_kernel') return
   // A redelivered segment repeats its record; the last one is the run's end.
   const record = outcomeRecord(events)
-  assert(record, `${marker} sent no outcome record.`)
-  assert(record.review !== 'unavailable', `${marker} owed a review that did not run.`)
+  // A shown review stands under the answer, so the sentence is noted for
+  // every turn; the tier rule below judges the kernel's turns.
+  if (['completed', 'unavailable'].includes(record?.review)) reviewReaderText.set(marker, record.summary)
+  if (state.snapshot?.execution?.effective_mode !== 'agent_kernel') return false
   // The Stufe of record is the one the run was SUBMITTED with.
   const durable = await fetchJson(tester, 'GET', `/v1/runs/${state.run_id ?? runId}`)
   const tier = durable.agent_overrides?.agent_tier ?? ''
   const level = publishedVerifyLevel(tier, durable.agent_overrides?.depth ?? durable.depth ?? '')
   const expected = level !== 'labels' ? 'completed' : tier ? 'waived' : 'not_run'
-  assert(record.review === expected,
-    `${marker} ran at verify level ${level} and records its review as ${record.review}.`)
+  // Status, basis and reason are the record's; the rule that reads them is
+  // one function, tested without a stack.
+  const verdict = judgeReviewOutcome(record, expected)
+  assert(verdict.status !== 'failed', `${marker} at verify level ${level} ${verdict.problem}.`)
+  if (verdict.status === 'warning') {
+    reviewBand.push({ marker, reason: verdict.reason })
+    const flags = verdict.unexplained.length > 0 ? `: ${verdict.unexplained.join(', ')}` : ''
+    progress(`${marker}: Prüfung ohne Urteil im Warnband (${verdict.reason}${flags})`)
+  }
+  return true
+}
+
+/**
+ * The reader finds the review's sentence under the answer of its turn.
+ *
+ * A record that names its reason proves nothing about the surface: the
+ * sentence the server built must stand where the reader looks. Judged for
+ * every review the surface shows, so the probe is proven on each turn and
+ * not first on the rare one that ends inside the band. A miss counts against
+ * the review scenario, not against the turn's own.
+ */
+async function assertReviewReaderText(marker, turn) {
+  const summary = reviewReaderText.get(marker)
+  if (summary === undefined) return
+  try {
+    const line = turn.getByTestId('agent-run-outcome').first()
+    await line.waitFor({ state: 'visible', timeout: 30_000 })
+    const shown = ((await line.textContent()) ?? '').trim()
+    assert(shown.includes(summary),
+      `${marker} does not state its review under the answer: the record says ${JSON.stringify(summary)}.`)
+  } catch (error) {
+    reviewMismatches.push(String(error?.message ?? error))
+  }
 }
 
 /** The run's outcome record (`inqtrix.agent.outcome`): the last one sent. */
@@ -793,7 +871,7 @@ function publishedVerifyLevel(tier, depth) {
   return entry.verify
 }
 
-async function assertReviewRole(state, events, started) {
+async function assertReviewRole(state, events, started, takenIn) {
   // The Stufe decides WHETHER this turn is reviewed, the size of its
   // material HOW. Read how the review ran from the parent's own rows and
   // hold it to its contract, instead of assuming the role: a Deep turn
@@ -808,10 +886,18 @@ async function assertReviewRole(state, events, started) {
   const roles = children.filter((child) => child.work_profile)
   assert(roles.length === (byRole ? 1 : 0),
     `R10 has ${roles.length} review role children for ${byRole ? 'a role review' : 'a one-call review'}.`)
-  assert(!started.some((tool) => ['web_instant', 'run_web_research', 'run_deep_mission', 'delegate_batch'].includes(tool)),
-    'R10 researched although both documents were in the selected collection.')
+  // A batch of subtasks is no research by its name: its knowledge
+  // assignments ask the selected collection. What it delegated, the modes
+  // of its children say: a research child is research here.
+  const delegated = children.filter((child) => !child.work_profile).map((child) => child.mode)
+  assert(!started.some((tool) => ['web_instant', 'run_web_research'].includes(tool))
+    && delegated.every((mode) => mode === 'knowledge'),
+    `R10 researched although both documents were in the selected collection (children: ${JSON.stringify(delegated)}).`)
   assert(state.snapshot?.execution?.work_profile === '', 'The parent turn carries a work profile.')
-  if (!byRole) return
+  if (!byRole) {
+    progress('R10: reviewed in one call without a review role; the handover to a role did not occur in this run.')
+    return
+  }
   // The role is ONE child run of the kernel with a work profile: bounded
   // tools, a typed handover in, a typed result out, no answer of its own.
   assert(roles[0].work_profile === 'review' && roles[0].origin_key === 'role-review'
@@ -838,70 +924,33 @@ async function assertReviewRole(state, events, started) {
   const foreign = used.filter((tool) => !profileTools.includes(tool))
   assert(foreign.length === 0, `The review role used tools outside its profile: ${foreign.join(', ')}.`)
   // It re-read what the turn read: the documents of this turn, by address.
+  // A document the turn had the server analyse is released to the role as
+  // a read one is, so the expectation holds for either way of taking it in.
   const reread = work.read_before_result.map(([kind]) => kind)
   assert(reread.includes('knowledge_document'), `The review role did not re-read a document of the turn: ${JSON.stringify(work.read_before_result)}.`)
+  // The handover is not published; the role's own reads show it. A read it
+  // does not cover is refused, which fails the role only where it withheld
+  // a document of the turn, and a document the turn took in by analysis
+  // alone reaches the role only through the release of analysed documents.
+  const release = judgeRoleRelease(
+    takenIn,
+    work.read_before_result,
+    roleEvents.data.filter((item) => item.type === 'inqtrix.agent.tool.finished').map((item) => item.data),
+  )
+  assert(release.status === 'passed', `The review role ${release.problem}`)
+  if (release.refused.length > 0) {
+    progress(`R10 warning: the review role was refused ${release.refused.length} read(s) outside its handover `
+      + `(${release.refused.join(', ')}); it re-read ${JSON.stringify(release.reread.map((doc) => doc.label))} of the turn.`)
+  }
+  const analysedOnly = release.reread.filter((doc) => doc.onlyAnalysis).map((doc) => doc.label)
+  progress(analysedOnly.length > 0
+    ? `R10: the review role re-read ${analysedOnly.join(' and ')}, which the turn took in by analysis alone; the release of analysed documents is shown.`
+    : `R10: the review role re-read no document the turn took in by analysis alone (re-read: ${JSON.stringify(release.reread)}); the release of analysed documents did not occur in this run.`)
   // On the parent: one delegation row for the role.
   const rows = events.data.filter((item) => item.type.startsWith('inqtrix.agent.tool.') && item.data.tool === 'review_role')
     .map((item) => `${item.type.split('.').at(-1)}:${item.data.invocation_id}:${item.data.status ?? ''}`)
   assert(JSON.stringify(rows) === JSON.stringify(['started:role-review:', 'finished:role-review:success']),
     `The parent shows the review role as ${JSON.stringify(rows)}.`)
-}
-
-async function assertMissionReview(state, events, details) {
-  // The turn ran on the mission engine, free of interim approvals.
-  const execution = state.snapshot?.execution
-  assert(execution?.effective_mode === 'workspace_agent' && execution?.consent_reason === 'autonomous_policy',
-    `R11 ran as ${execution?.effective_mode} under ${execution?.consent_reason}.`)
-  // How the review ended is the outcome record's to say; the decisions
-  // only say why the mission went on or stopped.
-  const record = outcomeRecord(events)
-  assert(record?.review === 'completed' && typeof record.summary === 'string' && record.summary,
-    `The mission records its review as ${JSON.stringify(record ? [record.review, record.summary] : null)}.`)
-  const decisions = events.data.filter((item) => item.type === 'inqtrix.agent.activity'
-    && ['critic_revise', 'critic_research', 'critic_unavailable'].includes(item.data?.kind))
-    .map((item) => item.data.kind)
-  assert(!decisions.includes('critic_unavailable'), `The mission review was unavailable: ${JSON.stringify(decisions)}.`)
-  // One review per synthesis; a research round in between buys another
-  // one, and each role review is one child under its round's origin key.
-  const children = (await fetchJson(tester, 'GET', `/v1/runs/${runId}/children`)).data ?? []
-  const roles = children.filter((child) => child.work_profile)
-  assert(roles.length <= record.round, `The mission has ${roles.length} review role children for ${record.round} review rounds.`)
-  for (const role of roles) {
-    assert(role.work_profile === 'review' && role.mode === 'agent_kernel' && /^role-review:\d+$/.test(role.origin_key)
-      && role.status === 'completed', `Unexpected review role child: ${JSON.stringify([role.work_profile, role.mode, role.origin_key, role.status])}.`)
-    const rows = events.data.filter((item) => item.type.startsWith('inqtrix.agent.tool.') && item.data.invocation_id === role.origin_key)
-      .map((item) => item.type.split('.').at(-1))
-    assert(JSON.stringify(rows) === JSON.stringify(['started', 'finished']), `The role ${role.origin_key} shows as ${JSON.stringify(rows)}.`)
-  }
-  // The stored report: the decision, every criterion settled by its number,
-  // the round the record names, and a role child exactly when its
-  // transport says so.
-  const report = details.find((item) => item.kind === 'critic_report')?.payload
-  assert(report && ['pass', 'revise', 'research', 'open'].includes(report.verdict), `The mission stored no review report: ${JSON.stringify(report ?? null).slice(0, 200)}`)
-  assert(report.round === record.round, `The stored report names round ${report.round}, the record round ${record.round}.`)
-  assert(['prompt', 'role'].includes(report.transport), `The last review names no transport: ${JSON.stringify(report.transport)}.`)
-  const lastRole = roles.some((role) => role.origin_key === `role-review:${report.round}`)
-  assert(lastRole === (report.transport === 'role'),
-    `The last review ran as ${report.transport}, and its role child is ${lastRole ? 'present' : 'absent'}.`)
-  const plan = await fetchJson(tester, 'GET', `/v1/runs/${runId}/plan`)
-  const criteria = plan.success_criteria ?? []
-  const settled = (report.review?.criteria ?? []).map((item) => item.index).sort((a, b) => a - b)
-  assert(criteria.length > 0 && JSON.stringify(settled) === JSON.stringify(criteria.map((_, index) => index + 1)),
-    `The verdict settles criteria ${JSON.stringify(settled)} of ${criteria.length} planned.`)
-  assert(report.criteria_covered.length + report.criteria_uncovered.length <= criteria.length, 'The report counts more criteria than the plan has.')
-  // An applied revision replaces passages of the memo and cites only its own references.
-  const memo = details.find((item) => item.kind === 'memo')
-  assert(memo?.content_markdown, 'The mission produced no memo.')
-  const known = new Set((memo.refs ?? []).map((ref) => ref.label))
-  const cited = [...memo.content_markdown.matchAll(/\[([KW]\d+)\]/g)].map((match) => match[1])
-  const foreign = cited.filter((label) => !known.has(label))
-  assert(foreign.length === 0, `The memo cites labels outside its references: ${[...new Set(foreign)].join(', ')}.`)
-  const revised = decisions.includes('critic_revise')
-    && !events.data.some((item) => item.data?.kind === 'critic_revision_discarded')
-  if (revised) {
-    assert(memo.revision > 1, 'A revised memo kept its first revision.')
-    assert(events.data.some((item) => item.data?.kind === 'deep_review_findings'), 'A revision without visible findings.')
-  }
 }
 
 function sourceReference(sourceId) {
@@ -942,6 +991,46 @@ async function selectRunSetup(page, row, choice) {
   await option.click()
   await page.keyboard.press('Escape')
   await page.getByRole('menu').first().waitFor({ state: 'detached', timeout: 10_000 })
+}
+
+/** The account's last report profile and Stufe as the server stores them;
+ * `''` means no choice yet, also for an account that never saved a row. */
+async function readLastChoices(actor) {
+  const saved = await fetchJson(actor, 'GET', '/v1/account/preferences', { expected: [200, 404] })
+  return {
+    agentTier: typeof saved?.last_agent_tier === 'string' ? saved.last_agent_tier : '',
+    researchProfile: typeof saved?.last_research_profile === 'string' ? saved.last_research_profile : '',
+  }
+}
+
+/**
+ * Choose the Stufe the account had at the start again, through the Agent
+ * Desk, as a user does; the page's own save carries it to the account. An
+ * account that had no choice keeps the published default, because the UI
+ * cannot store "no choice". The run never chooses a report profile, so it
+ * never writes one: a profile that changed meanwhile was changed elsewhere.
+ */
+async function restoreLastTier() {
+  if (!tester || !lastChoicesAtStart) return
+  const current = await readLastChoices(tester)
+  if (current.researchProfile !== lastChoicesAtStart.researchProfile) {
+    progress("The account's last report profile changed during the run; the run does not write it.")
+  }
+  const target = lastChoicesAtStart.agentTier || defaultTierId
+  if (current.agentTier === lastChoicesAtStart.agentTier || current.agentTier === target) return
+  assert(TIER_LABELS[target], `The run setup offers no label for the Stufe ${target}.`)
+  progress(`Restore the account's last Stufe: ${target}`)
+  await tester.page.getByRole('button', { name: 'Agent Desk', exact: true }).click()
+  await tester.page.locator('.agent-run-setup-trigger').waitFor({ state: 'visible', timeout: 20_000 })
+  const saved = tester.page.waitForResponse((response) => response.request().method() === 'PUT'
+    && new URL(response.url()).pathname === '/v1/account/preferences'
+    && jsonBody(response.request())?.last_agent_tier === target, { timeout: 30_000 })
+  await selectRunSetup(tester.page, 'Tempo & Tiefe', TIER_LABELS[target])
+  const response = await saved
+  assert(response.status() === 200, `Saving the restored Stufe returned HTTP ${response.status()}.`)
+  const restored = await readLastChoices(tester)
+  assert(restored.agentTier === target,
+    `The account keeps the Stufe ${restored.agentTier || 'none'} instead of ${target}.`)
 }
 
 /** Rename the open session in the session list, as a user does: double-click, type, Enter. */

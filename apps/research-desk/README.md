@@ -90,8 +90,9 @@ namespace instead of every in-memory run on a shared API server.
 The composer creates native `/v1/runs` jobs. Web search enabled sends
 `mode="research"`; web search disabled sends `mode="direct_llm"`. The app then
 streams `events_url`, patches the selected job card from every snapshot event,
-and fetches `result_url` after `inqtrix.run.completed` to populate the report,
-evidence tab, and chat attachment data structure.
+and fetches the run's result (`/v1/runs/{run_id}/result`) after
+`inqtrix.run.completed` to populate the report, evidence tab, and chat
+attachment data structure.
 
 The visible live protocol is intentionally based on user-facing
 `inqtrix.progress.message` events plus terminal/error events. Technical

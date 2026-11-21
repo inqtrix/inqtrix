@@ -19,7 +19,10 @@ import inqtrix.research.web_research as web_research
 from inqtrix.auth.principal import Principal
 from inqtrix.server.routers import stack_error_response
 from inqtrix.services.agent_context import StackResolutionError
-from inqtrix.services.request_parsing import request_timeout_seconds
+from inqtrix.services.request_parsing import (
+    read_json_object,
+    request_timeout_seconds,
+)
 from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
@@ -49,16 +52,9 @@ def build_router(container: "AppContainer") -> APIRouter:
                 }},
             )
 
-        try:
-            body = await req.json()
-        except Exception:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {
-                    "message": "Invalid JSON body",
-                    "type": "invalid_request_error",
-                }},
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
 
         question = body.get("question", "")
         if not question or not isinstance(question, str):

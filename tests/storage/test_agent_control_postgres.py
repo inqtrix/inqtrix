@@ -33,10 +33,8 @@ from inqtrix.agents.control_ports import (
     ArtifactRevisionConflict,
     ClarificationRecord,
     ContextArchiveImmutable,
-    PlanNotFound,
     PlanRecord,
     PlanTaskRecord,
-    settle_terminal_plan_tasks,
 )
 from inqtrix.agents.context_archive import (
     ArchiveCursorError,
@@ -53,7 +51,6 @@ from inqtrix.exceptions import RunNotFound
 from inqtrix.runs.records import RunActive
 from inqtrix.services.agent_control_service import (
     AgentControlService,
-    AgentControlValidationError,
 )
 from inqtrix.storage.agent_control_postgres import PostgresAgentControlStore
 from inqtrix.storage.db import build_engine, build_session_factory
@@ -304,9 +301,21 @@ async def _grant_edit_share(
     return pending.id
 
 
-def _approval(run_id: str, *, kind: str = "plan") -> ApprovalRecord:
+def _approval(run_id: str, *, kind: str = "tool") -> ApprovalRecord:
+    """A pending approval of *kind*; by default the kernel's tool gate with
+    the one action it asks about."""
+    actions = [
+        {
+            "tool": "web_instant",
+            "args": {"query": "EU AI Act Fristen"},
+            "summary": "Websuche",
+        }
+    ]
     return ApprovalRecord(
-        approval_id=f"apr_{uuid.uuid4().hex[:8]}", run_id=run_id, kind=kind
+        approval_id=f"apr_{uuid.uuid4().hex[:8]}",
+        run_id=run_id,
+        kind=kind,
+        payload={"actions": actions} if kind == "tool" else {},
     )
 
 
@@ -323,7 +332,6 @@ async def test_decision_and_resume_commit_together(service, run_store):
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=None,
         )
@@ -355,120 +363,48 @@ async def test_decision_and_resume_commit_together(service, run_store):
 
 
 @pytest.mark.asyncio
-async def test_plan_approval_rejects_subject_from_another_run(
-    service, run_store
-):
-    run_a = await _parked_agent_run(run_store, session_id="sess-pg-a")
-    run_b = await _parked_agent_run(run_store, session_id="sess-pg-b")
-    await service.store.save_plan(
-        run_id=run_a,
-        plan=PlanRecord(
-            plan_id="plan-pg-a", run_id=run_a, version=1,
-            status="proposed", created_by="agent",
-        ),
-        tasks=[],
-    )
-    await service.store.save_plan(
-        run_id=run_b,
-        plan=PlanRecord(
-            plan_id="plan-pg-b", run_id=run_b, version=1,
-            status="proposed", created_by="agent",
-        ),
-        tasks=[],
-    )
+async def _insert_stored_rows(
+    *,
+    plans: tuple[PlanRecord, ...] = (),
+    tasks: tuple[PlanTaskRecord, ...] = (),
+    approvals: tuple[ApprovalRecord, ...] = (),
+) -> None:
+    """Rows of a mission run as stored data, written with direct SQL: no
+    write path of the store accepts a plan or a plan approval any more."""
+    from sqlalchemy import insert
 
-    with pytest.raises(PlanNotFound):
-        await service.store.create_approval(
-            ApprovalRecord(
-                approval_id="apr-cross-run-pg",
-                run_id=run_a,
-                kind="plan",
-                subject_type="plan",
-                subject_id="plan-pg-b",
-            )
-        )
+    from inqtrix.storage.agent_control_orm import run_approvals, run_plan_tasks, run_plans
 
-    assert await service.store.list_approvals(run_a) == []
-
-
-@pytest.mark.asyncio
-async def test_plan_decision_updates_plan_status_in_resume_transaction(
-    service, run_store
-):
-    run_id = await _parked_agent_run(run_store)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-pg-v1",
-            run_id=run_id,
-            version=1,
-            status="proposed",
-            created_by="agent",
-        ),
-        tasks=[],
-    )
-    approval = await service.store.create_approval(
-        ApprovalRecord(
-            approval_id="apr-plan-pg",
-            run_id=run_id,
-            kind="plan",
-            subject_type="plan",
-            payload={"plan_version": 1},
-        )
-    )
-    assert approval.subject_id == "plan-pg-v1"
-
-    await service.decide_approval(
-        run_id=run_id,
-        approval_id=approval.approval_id,
-        decision="approve",
-        plan_body=None,
-        note="",
-        principal=None,
-    )
-
-    plan, _tasks = await service.store.get_plan(run_id)
-    assert plan.status == "approved"
-
-
-@pytest.mark.asyncio
-async def test_edited_plan_discards_planner_model_tier_before_persistence(service, run_store):
-    run_id = await _parked_agent_run(run_store)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-routing", run_id=run_id, version=1,
-            status="proposed", created_by="agent",
-        ),
-        tasks=[PlanTaskRecord(
-            task_id="r", plan_id="plan-routing", run_id=run_id, ordinal=0,
-            title="Find evidence", tool_kind="web_research",
-            queries=["Which evidence supports the claim?"],
-            params={"profile": "compact", "model_tier": "high"},
-        )],
-    )
-    approval = await service.store.create_approval(ApprovalRecord(
-        approval_id="approval-routing", run_id=run_id, kind="plan",
-        subject_type="plan", payload={"plan_version": 1},
-    ))
-    await service.decide_approval(
-        run_id=run_id, approval_id=approval.approval_id, decision="edit", note="",
-        principal=None,
-        plan_body={
-            "summary_markdown": "Edited research plan",
-            "tasks": [
-                {"id": "r", "title": "Find evidence", "tool_kind": "web_research",
-                 "queries": ["Which evidence supports the claim?"],
-                 "params": {"profile": "compact", "model_tier": "high", "recency": "year"}},
-                {"id": "s", "title": "Synthesize", "tool_kind": "synthesis", "depends_on": ["r"]},
-            ],
-        },
-    )
-
-    plan, tasks = await service.store.get_plan(run_id)
-    assert plan.version == 2
-    assert plan.status == "approved"
-    assert tasks[0].params == {"profile": "compact", "recency": "year"}
+    engine = build_engine(TEST_DATABASE_URL)
+    try:
+        async with build_session_factory(engine)() as session:
+            async with session.begin():
+                for plan in plans:
+                    await session.execute(insert(run_plans).values(
+                        plan_id=plan.plan_id, tenant_id="default", run_id=plan.run_id,
+                        version=plan.version, status=plan.status, created_by=plan.created_by,
+                        summary_markdown=plan.summary_markdown,
+                        assumptions=list(plan.assumptions),
+                        success_criteria=list(plan.success_criteria),
+                        reason=plan.reason, created_at=plan.created_at,
+                    ))
+                for task in tasks:
+                    await session.execute(insert(run_plan_tasks).values(
+                        task_id=task.task_id, tenant_id="default", plan_id=task.plan_id,
+                        run_id=task.run_id, ordinal=task.ordinal, title=task.title,
+                        tool_kind=task.tool_kind, status=task.status,
+                        child_run_id=task.child_run_id,
+                    ))
+                for approval in approvals:
+                    await session.execute(insert(run_approvals).values(
+                        approval_id=approval.approval_id, tenant_id="default",
+                        run_id=approval.run_id, kind=approval.kind, status=approval.status,
+                        subject_type=approval.subject_type, subject_id=approval.subject_id,
+                        payload=dict(approval.payload), decision=approval.decision,
+                        created_at=approval.created_at or time.time(),
+                    ))
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -476,25 +412,25 @@ async def test_migration_backfills_legacy_decided_plan_subject(
     service, run_store
 ):
     run_id = await _parked_agent_run(run_store)
-    await service.store.save_plan(
+    approval = ApprovalRecord(
+        approval_id="apr-legacy-subject",
         run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-legacy-subject",
-            run_id=run_id,
-            version=1,
-            status="proposed",
-            created_by="agent",
-        ),
-        tasks=[],
+        kind="plan",
+        subject_type="plan",
+        payload={"plan_version": 1},
     )
-    approval = await service.store.create_approval(
-        ApprovalRecord(
-            approval_id="apr-legacy-subject",
-            run_id=run_id,
-            kind="plan",
-            subject_type="plan",
-            payload={"plan_version": 1},
-        )
+    await _insert_stored_rows(
+        plans=(
+            PlanRecord(
+                plan_id="plan-legacy-subject",
+                run_id=run_id,
+                version=1,
+                status="proposed",
+                created_by="agent",
+                created_at=time.time(),
+            ),
+        ),
+        approvals=(approval,),
     )
     engine = build_engine(TEST_DATABASE_URL)
     factory = build_session_factory(engine)
@@ -528,228 +464,6 @@ async def test_migration_backfills_legacy_decided_plan_subject(
 
 
 @pytest.mark.asyncio
-async def test_task_transition_retry_and_terminal_contract_postgres(
-    service, run_store
-):
-    run_id = await _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
-    child_1 = await _completed_agent_child(
-        run_store,
-        parent_run_id=run_id,
-        parent_task_id="task-pg",
-        attempt=1,
-        owner_user_id=OWNER_USER_ID,
-    )
-    child_2 = await _completed_agent_child(
-        run_store,
-        parent_run_id=run_id,
-        parent_task_id="task-pg",
-        attempt=2,
-        owner_user_id=OWNER_USER_ID,
-    )
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-task-pg",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="task-pg",
-                plan_id="plan-task-pg",
-                run_id=run_id,
-                ordinal=0,
-                title="Research",
-                tool_kind="web_research",
-            )
-        ],
-    )
-    await service.store.transition_plan_task(
-        run_id=run_id,
-        plan_id="plan-task-pg",
-        task_id="task-pg",
-        status="running",
-        child_run_id=child_1,
-    )
-    retry = await service.store.transition_plan_task(
-        run_id=run_id,
-        plan_id="plan-task-pg",
-        task_id="task-pg",
-        status="running",
-        child_run_id=child_2,
-    )
-    assert retry.child_run_id == child_2
-    terminal = await service.store.transition_plan_task(
-        run_id=run_id,
-        plan_id="plan-task-pg",
-        task_id="task-pg",
-        status="insufficient_evidence",
-        child_run_id=child_2,
-        result_summary="One source remained after verification.",
-        result_payload={
-            "claims": [{"text": "One source remained."}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
-        },
-    )
-    assert terminal.status == "insufficient_evidence"
-    assert terminal.result_payload["usage"] == {
-        "prompt_tokens": 5,
-        "completion_tokens": 1,
-    }
-    with pytest.raises(ValueError):
-        await service.store.transition_plan_task(
-            run_id=run_id,
-            plan_id="plan-task-pg",
-            task_id="task-pg",
-            status="completed",
-        )
-
-
-@pytest.mark.asyncio
-async def test_task_cancellation_state_machine_postgres(service, run_store):
-    run_id = await _parked_agent_run(run_store)
-    plan = PlanRecord(
-        plan_id="plan-task-cancel-pg",
-        run_id=run_id,
-        version=1,
-        status="approved",
-        created_by="agent",
-    )
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=plan,
-        tasks=[
-            PlanTaskRecord(
-                task_id="pending-pg",
-                plan_id=plan.plan_id,
-                run_id=run_id,
-                ordinal=0,
-                title="Pending",
-                tool_kind="web_instant",
-            ),
-            PlanTaskRecord(
-                task_id="running-pg",
-                plan_id=plan.plan_id,
-                run_id=run_id,
-                ordinal=1,
-                title="Running",
-                tool_kind="web_instant",
-            ),
-        ],
-    )
-    await service.store.transition_plan_task(
-        run_id=run_id,
-        plan_id=plan.plan_id,
-        task_id="running-pg",
-        status="running",
-    )
-
-    pending = await service.request_task_cancel(
-        run_id,
-        "pending-pg",
-        workspace_id=None,
-        principal=None,
-    )
-    running = await service.request_task_cancel(
-        run_id,
-        "running-pg",
-        workspace_id=None,
-        principal=None,
-    )
-
-    assert pending.status == "cancelled"
-    assert pending.result_payload["failure_code"] == "task_cancelled"
-    assert running.status == "cancel_requested"
-    await settle_terminal_plan_tasks(service.store, run_id, status="cancelled")
-    _settled_plan, settled_tasks = await service.store.get_plan(run_id)
-    settled = next(task for task in settled_tasks if task.task_id == "running-pg")
-    assert settled.status == "cancelled"
-    assert settled.result_payload == {
-        "failure_code": "task_cancelled",
-        "failure_reason": "user_requested_task_cancel",
-    }
-
-
-@pytest.mark.asyncio
-async def test_shared_editor_task_cancel_reaches_child_postgres(
-    service, run_store
-) -> None:
-    run_id = await _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
-    await _grant_edit_share(run_store, run_id)
-    child_started = threading.Event()
-    child_release = threading.Event()
-
-    def child_work(handle: Any) -> None:
-        child_started.set()
-        assert child_release.wait(timeout=10.0)
-        if handle.cancel_event.is_set():
-            handle.cancel("task_cancelled")
-        else:
-            handle.complete({"answer": "late"})
-
-    child = await run_store.asubmit(
-        mode="research",
-        workflow_contract=1,
-        question="Child research",
-        stack_name="default",
-        work=child_work,
-        request_payload={
-            "question": "Child research",
-            "body": {
-                "mode": "research",
-                "parent_task_id": "research",
-                "parent_task_attempt": 1,
-            },
-        },
-        kind="agent_child",
-        parent_run_id=run_id,
-        root_run_id=run_id,
-        created_by_user_id=OWNER_USER_ID,
-        created_by_tenant_id="default",
-    )
-    assert child_started.wait(timeout=5.0)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-shared-child-pg",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="research",
-                plan_id="plan-shared-child-pg",
-                run_id=run_id,
-                ordinal=0,
-                title="Research",
-                tool_kind="web_research",
-                status="running",
-                child_run_id=child["run_id"],
-            )
-        ],
-    )
-    editor = _scoped(EDITOR_USER_ID)
-
-    try:
-        task = await service.request_task_cancel(
-            run_id,
-            "research",
-            workspace_id=None,
-            principal=editor.principal,
-            visible_to=editor,
-        )
-        assert task.status == "cancel_requested"
-        child_release.set()
-        await _wait_for_status(run_store, "cancelled", child["run_id"], visible_to=_scoped(OWNER_USER_ID))
-    finally:
-        child_release.set()
-
-
-@pytest.mark.asyncio
 async def test_deleting_child_run_clears_task_reference_without_deleting_task(
     control_store, run_store
 ) -> None:
@@ -767,6 +481,7 @@ async def test_deleting_child_run_clears_task_reference_without_deleting_task(
         version=1,
         status="approved",
         created_by="agent",
+        created_at=1767225600.0,
     )
     task = PlanTaskRecord(
         task_id="research",
@@ -778,18 +493,14 @@ async def test_deleting_child_run_clears_task_reference_without_deleting_task(
         status="running",
         child_run_id=child_run_id,
     )
-    saved_plan = await control_store.save_plan(
-        run_id=run_id,
-        plan=plan,
-        tasks=[task],
-    )
+    await _insert_stored_rows(plans=(plan,), tasks=(task,))
 
     await run_store.adelete(child_run_id, requester_user_id=OWNER_USER_ID)
 
     with pytest.raises(RunNotFound):
         await run_store.aget(child_run_id, visible_to=_scoped(OWNER_USER_ID))
     stored_plan, stored_tasks = await control_store.get_plan(run_id)
-    assert stored_plan == saved_plan
+    assert stored_plan == plan
     assert stored_tasks == [replace(task, child_run_id=None)]
 
 
@@ -807,7 +518,6 @@ async def test_decision_rolls_back_when_run_is_not_waiting(service, run_store):
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=None,
         )
@@ -821,92 +531,6 @@ async def test_decision_rolls_back_when_run_is_not_waiting(service, run_store):
         }
     finally:
         events.close()
-
-
-@pytest.mark.asyncio
-async def test_edit_decision_writes_plan_in_the_same_transaction(
-    service, run_store
-):
-    run_id = await _parked_agent_run(run_store)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan_pg_v1",
-            run_id=run_id,
-            version=1,
-            status="proposed",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="t1",
-                plan_id="plan_pg_v1",
-                run_id=run_id,
-                ordinal=0,
-                title="Alt",
-                tool_kind="rag_query",
-            )
-        ],
-    )
-    approval = await service.store.create_approval(_approval(run_id))
-
-    decided, _summary, _replayed = await service.decide_approval(
-        run_id=run_id,
-        approval_id=approval.approval_id,
-        decision="edit",
-        plan_body={
-            "summary_markdown": "Neu",
-            "tasks": [
-                {
-                    "id": "t1",
-                    "title": "Suche",
-                    "tool_kind": "rag_query",
-                    "queries": ["Welche belastbare Evidenz liegt vor?"],
-                },
-                {
-                    "id": "s",
-                    "title": "Synthese",
-                    "tool_kind": "synthesis",
-                    "depends_on": ["t1"],
-                },
-            ],
-        },
-        note="",
-        principal=None,
-    )
-
-    assert decided.status == "edited"
-    plan, tasks, versions = await service.get_plan(run_id)
-    assert plan.version == 2
-    assert plan.created_by == "user"
-    assert [task.task_id for task in tasks] == ["t1", "s"]
-    assert [(v.version, v.status) for v in versions] == [
-        (2, "approved"),
-        (1, "superseded"),
-    ]
-    await _wait_for_status(run_store, "completed", run_id)
-
-
-@pytest.mark.asyncio
-async def test_invalid_edit_leaves_everything_pending(service, run_store):
-    run_id = await _parked_agent_run(run_store)
-    approval = await service.store.create_approval(_approval(run_id))
-
-    with pytest.raises(AgentControlValidationError):
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=approval.approval_id,
-            decision="edit",
-            plan_body={"tasks": [{"id": "t1", "title": "x", "tool_kind": "rag_query"}]},
-            note="",
-            principal=None,
-        )
-
-    stored = await service.store.get_approval(run_id, approval.approval_id)
-    assert stored.status == "pending"
-    assert (await run_store.aget(run_id))["status"] == "waiting_for_approval"
-    with pytest.raises(PlanNotFound):
-        await service.store.get_plan(run_id)
 
 
 @pytest.mark.asyncio
@@ -1333,8 +957,7 @@ async def test_session_memo_lineage_and_agent_cas_on_postgres(
     )
     assert edited.revision == 2
 
-    prior = await control_store.get_session_artifact("sess-pg-lin", "memo")
-    assert prior is not None
+    prior = await control_store.get_session_artifact_by_id("sess-pg-lin", "art_pg_lin")
     assert prior.revision == 2
     assert prior.content_markdown == "# Turn 1 + Nutzer"
 
@@ -1550,6 +1173,27 @@ async def test_control_rows_cascade_with_their_run(service, run_store, control_s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["discovery", "plan", "patch", "replan"])
+async def test_only_a_tool_approval_is_created_postgres(run_store, control_store, kind):
+    """Postgres twin: a retired kind is refused before a row is written."""
+    run_id = await _parked_agent_run(run_store)
+
+    with pytest.raises(ValueError) as refused:
+        await control_store.create_approval(
+            ApprovalRecord(approval_id=f"apr_{kind}", run_id=run_id, kind=kind)
+        )
+    created = await control_store.create_approval(_approval(run_id))
+
+    assert str(refused.value) == (
+        f"An approval of kind {kind} is not created any more; a run asks only for "
+        "tool approvals."
+    )
+    assert [row.approval_id for row in await control_store.list_approvals(run_id)] == [
+        created.approval_id
+    ]
+
+
+@pytest.mark.asyncio
 async def test_terminal_run_settles_control_rows_postgres(
     service, run_store, control_store
 ):
@@ -1570,7 +1214,7 @@ async def test_terminal_run_settles_control_rows_postgres(
     approval = await control_store.create_approval(_approval(run_id))
     assert (await run_store.acancel(run_id))["status"] == "cancelled"
 
-    assert await service.reconcile_terminal_tasks(run_id) is True
+    assert await service.reconcile_terminal_control_rows(run_id) is True
 
     released, _revisions = await control_store.get_artifact(
         run_id, "art_settle_pg"
@@ -1913,3 +1557,212 @@ async def test_saved_conversation_retains_originals_and_aggregate_delete_removes
     await run_store.adelete_agent_session_aggregate("sess-pg", **arguments)
     assert await control_store.list_source_artifacts([run_id]) == []
     assert not any((await run_store.aagent_session_residuals("sess-pg", **arguments)).values())
+
+
+# -- older mission runs, as stored ------------------------------------------ #
+
+STORED_READING = {
+    "documents": [{"document_id": "kd_2", "title": "Betriebsanweisung", "total_chars": 9000,
+                   "text_read_to_end": True, "windows_planned": 1, "windows_analysed": 1,
+                   "extraction_status": "recorded", "findings_cited": 1}],
+    "questions": ["Welche Fristen gelten?"], "findings": [{"id": "F1"}], "collection_documents": 2,
+}
+"""A document task's reading in the form a mission task stored it."""
+
+STORED_DOCUMENT_TASK = {
+    "task_id": "t1",
+    "title": "Betriebsanweisung lesen",
+    "tool_kind": "file_analysis",
+    "objective": "Fristen finden",
+    "status": "completed",
+    "result_summary": "Die Frist beträgt 30 Tage.",
+    "result_payload": {
+        "document_analysis": STORED_READING,
+        "evidence": [{"label": "K1", "document_id": "kd_2", "chunk_index": 4,
+                      "excerpt": "Die Frist beträgt 30 Tage."}],
+    },
+}
+"""A completed document task row of a mission plan, as stored."""
+
+
+async def _stored_mission_run(
+    run_store: PostgresRunStore,
+    *,
+    session_id: str,
+    plan_tasks: list[dict[str, Any]] | None,
+) -> str:
+    """A completed mission run of OWNER's session, stored as an older run is.
+
+    The run is admitted and completed through the store like every run, and
+    then carries the retired mode, as its stored row does. Its plan and task
+    rows are written with direct SQL: no write path for them is left, and
+    the readers serve the rows as they are stored. ``None`` stores no plan,
+    like an imported run.
+    """
+    from sqlalchemy import insert, update
+
+    from inqtrix.storage.agent_control_orm import run_plan_tasks, run_plans
+    from inqtrix.storage.runs_orm import runs
+
+    engine = build_engine(TEST_DATABASE_URL)
+    factory = build_session_factory(engine)
+    try:
+        async with factory() as session:
+            async with session.begin():
+                await session.execute(
+                    pg_insert(agent_sessions)
+                    .values(
+                        id=session_id,
+                        tenant_id="default",
+                        created_by_user_id=OWNER_USER_ID,
+                        workspace_id=None,
+                        title="Older mission",
+                        group_id=None,
+                        items_json="[]",
+                        lifecycle_status="active",
+                        created_at=time.time(),
+                        updated_at=time.time(),
+                    )
+                    .on_conflict_do_nothing(index_elements=(agent_sessions.c.id,))
+                )
+        summary = await run_store.asubmit(
+            mode="research",
+            workflow_contract=1,
+            question="Welche Fristen gelten?",
+            stack_name="default",
+            work=lambda handle: handle.complete({"answer": "Die Frist beträgt 30 Tage."}),
+            request_payload={
+                "question": "Welche Fristen gelten?",
+                "body": {"mode": "workspace_agent"},
+            },
+            kind="agent",
+            session_id=session_id,
+            created_by_user_id=OWNER_USER_ID,
+            created_by_tenant_id="default",
+        )
+        run_id = summary["run_id"]
+        await _wait_for_status(
+            run_store, "completed", run_id, visible_to=_scoped(OWNER_USER_ID)
+        )
+        async with factory() as session:
+            async with session.begin():
+                await session.execute(
+                    update(runs)
+                    .where(runs.c.run_id == run_id)
+                    .values(mode="workspace_agent")
+                )
+                if plan_tasks is not None:
+                    plan_id = f"plan_{run_id[-12:]}"
+                    await session.execute(
+                        insert(run_plans).values(
+                            plan_id=plan_id,
+                            tenant_id="default",
+                            run_id=run_id,
+                            version=1,
+                            status="approved",
+                            created_by="agent",
+                            summary_markdown="Fristen aus der Anweisung belegen.",
+                            created_at=time.time(),
+                        )
+                    )
+                    for ordinal, task in enumerate(plan_tasks):
+                        await session.execute(
+                            insert(run_plan_tasks).values(
+                                tenant_id="default",
+                                plan_id=plan_id,
+                                run_id=run_id,
+                                ordinal=ordinal,
+                                **task,
+                            )
+                        )
+    finally:
+        await engine.dispose()
+    return run_id
+
+
+async def _stored_rows(run_id: str) -> dict[str, int]:
+    """How many rows of *run_id* each table holds, counted with direct SQL."""
+    engine = build_engine(TEST_DATABASE_URL)
+    try:
+        async with build_session_factory(engine)() as session:
+            return {
+                table: (
+                    await session.execute(
+                        text(f"SELECT count(*) FROM {table} WHERE run_id = :run_id"),
+                        {"run_id": run_id},
+                    )
+                ).scalar_one()
+                for table in ("runs", "run_plans", "run_plan_tasks")
+            }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_session_removes_an_older_mission_run_with_its_plan(run_store):
+    """The deletion of a session leaves no row of an older mission run behind:
+    not the run, not its plan, not its tasks."""
+    session_id = "sess-pg-mission-delete"
+    run_id = await _stored_mission_run(
+        run_store, session_id=session_id, plan_tasks=[dict(STORED_DOCUMENT_TASK)]
+    )
+    assert await _stored_rows(run_id) == {
+        "runs": 1, "run_plans": 1, "run_plan_tasks": 1,
+    }, "precondition: the run is stored with its plan"
+    arguments = dict(
+        tenant_id="default", requester_user_id=OWNER_USER_ID, workspace_id=None, run_ids=(run_id,),
+    )
+
+    await run_store.aprepare_agent_session_aggregate_deletion(session_id, **arguments)
+    await run_store.adelete_agent_session_aggregate(session_id, **arguments)
+
+    assert await _stored_rows(run_id) == {"runs": 0, "run_plans": 0, "run_plan_tasks": 0}
+    assert not any((await run_store.aagent_session_residuals(session_id, **arguments)).values())
+
+
+@pytest.mark.asyncio
+async def test_the_kernel_reads_the_readings_of_an_older_mission_plan(run_store):
+    """A kernel turn in a session with older mission runs reads the plan of
+    one through the real store: its document task's reading reaches the
+    review as a record. The mission runs are origins of references the turn
+    cites. A mission run without plan rows, like an imported one, reads as
+    having none, and is no gap."""
+    from types import SimpleNamespace
+
+    from inqtrix.agents.kernel.deps import KernelDeps
+    from inqtrix.agents.kernel.evidence_read import build_review_evidence
+
+    session_id = "sess-pg-mission-read"
+    with_plan = await _stored_mission_run(
+        run_store, session_id=session_id, plan_tasks=[dict(STORED_DOCUMENT_TASK)]
+    )
+    imported = await _stored_mission_run(run_store, session_id=session_id, plan_tasks=None)
+    deps = KernelDeps(
+        run_id="run_kernel_followup",
+        control=PostgresAgentControlStore(
+            engine=build_engine(TEST_DATABASE_URL, null_pool=True), app_role=APP_ROLE,
+        ),
+        platform=None, llm=None, model=None, reasoning_effort=None, timeout=1,
+        run_service=SimpleNamespace(run_store=run_store),
+        capability_context=SimpleNamespace(visible_to=_scoped(OWNER_USER_ID)),
+    )
+
+    references = [
+        {"label": "W1", "url": "https://example.org/plan", "source_run_id": with_plan},
+        {"label": "W2", "url": "https://example.org/import", "source_run_id": imported},
+    ]
+
+    def review() -> dict[str, Any]:
+        return build_review_evidence(deps, references, language="de")
+
+    # Kernel code runs on the transition lane, where it may reach the loop.
+    context = await aio.run_legacy_segment(review)
+
+    assert [(record["basis_id"], record["scope"]) for record in context["run_diagnostics"]] == [
+        (f"diagnostic:{with_plan}:t1:document_analysis", "document_analysis"),
+    ]
+    (record,) = context["run_diagnostics"]
+    assert (record["values"]["complete"], record["values"]["verified_sources"]) == (
+        True, ["source:" + KernelDeps.reference_id({"document_id": "kd_2", "chunk_index": 4})],
+    )
+    assert context["unavailable_origins"] == []

@@ -38,7 +38,7 @@ from inqtrix.observability.otel import run_execute_span
 from inqtrix.observability.propagation import inject_traceparent
 from inqtrix.execution_failures import terminate_native_run
 from inqtrix.pagination import keyset_page
-from inqtrix.runs.ports import RunStoreMetrics
+from inqtrix.runs.ports import CheckpointCleanup, RunStoreMetrics
 from inqtrix.runs.records import (
     IMPORTED_RUN_CONTRACT,
     RunActive,
@@ -158,10 +158,14 @@ class RunStore:
         self._restrict_share_workspaces = False
         self._authority: MemoryAuthorityCoordinator | None = None
         self._session_retention: Callable[..., bool] | None = None
-        self._checkpoint_cleanup: Callable[[str, str], None] | None = None
+        self._checkpoint_cleanup: CheckpointCleanup | None = None
 
-    def bind_checkpoint_cleanup(self, cleanup: Callable[[str, str], None]) -> None:
-        """Bind execution-cache cleanup before deleting its authorized run anchor."""
+    def bind_checkpoint_cleanup(self, cleanup: CheckpointCleanup) -> None:
+        """Bind execution-cache cleanup before deleting its authorized run anchor.
+
+        This store keeps no claim count, so every deletion is treated as one
+        of a claimed run: the cleanup deletes its thread or fails visibly.
+        """
         self._checkpoint_cleanup = cleanup
 
     def bind_session_retention(self, predicate: Callable[..., bool]) -> None:
@@ -1006,10 +1010,7 @@ class RunStore:
         """Apply one control-table write under the caller's live run grant.
 
         The run lock and the bound identity guard remain held while the
-        callback updates the memory control store. Its ``cancel_child``
-        helper is deliberately limited to a direct child of ``run_id`` and
-        uses the already-authorized root; child runs inherit the root share
-        and never require a second, nonexistent share row.
+        callback updates the memory control store.
         """
         with self._lock:
             self._cleanup_locked()
@@ -1021,19 +1022,7 @@ class RunStore:
                     record, visible_to
                 )
                 with authority:
-
-                    def _cancel_child(child_run_id: str) -> str:
-                        child = self._records.get(child_run_id)
-                        if child is None or child.parent_run_id != run_id:
-                            raise RunNotFound(child_run_id)
-                        child_root = self._execution_root_locked(child)
-                        parent_root = self._execution_root_locked(record)
-                        if child_root.run_id != parent_root.run_id:
-                            raise RunNotFound(child_run_id)
-                        summary, _affected = self._cancel_tree_locked(child)
-                        return str(summary["status"])
-
-                    return control_write(None, _cancel_child)
+                    return control_write(None)
             except AuthorizationRevoked as exc:
                 raise RunNotFound(run_id) from exc
 
@@ -1058,8 +1047,9 @@ class RunStore:
         end of a run other than its completion: a run that failed, stopped or
         timed out must never leave its children running invisibly (orphans
         burning quota behind a dead run). The store lock also serializes
-        child admission against this traversal, so nested Kernel -> Mission
-        -> Research trees terminate as one unit.
+        child admission against this traversal, so a whole tree (a kernel
+        run with its research, knowledge and role children, at any depth)
+        terminates as one unit.
 
         ``cascade_reason`` overrides the per-state cancel reason on every
         descendant event (``parent_failed``, ``parent_cancelled``, so an

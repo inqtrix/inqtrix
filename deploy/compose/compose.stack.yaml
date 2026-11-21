@@ -271,6 +271,15 @@ services:
       valkey:
         condition: service_started
         required: false
+      # Start order for the optional s3 profile: the API starts once the S3
+      # port of SeaweedFS answers, so the object-store probe at start never
+      # meets a booting store. No service outside the observability profile
+      # waits for Langfuse: a Langfuse that never starts because a service it
+      # requires failed would keep API, worker and web from starting. The
+      # price is that a cold start can lose the traces of its first seconds.
+      seaweedfs:
+        condition: service_healthy
+        required: false
     healthcheck:
       # The slim python image ships no curl; probe with the stdlib instead.
       test:
@@ -486,7 +495,7 @@ services:
     # INQTRIX_KNOWLEDGE_ENABLED=true, INQTRIX_VECTOR_BACKEND=qdrant,
     # INQTRIX_QDRANT_URL=http://qdrant:6333 in deploy/.env.stack and a
     # non-placeholder INQTRIX_QDRANT_API_KEY in the paired secrets file.
-    image: docker.io/qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
+    image: docker.io/qdrant/qdrant:v1.20.0@sha256:9bfc89f9914fc14876a88c05270685921a55b8877b254a98bcc1cc2f0a424cd2
     profiles: ["knowledge"]
     environment:
       QDRANT__SERVICE__API_KEY: ${INQTRIX_QDRANT_API_KEY:-}

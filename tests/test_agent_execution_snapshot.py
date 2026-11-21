@@ -22,10 +22,12 @@ def test_build_run_snapshot_preserves_canonical_agent_execution() -> None:
         "consent_reason": "permission_policy",
         "tool_use_counts": {"web": 0, "knowledge": 2},
         "web_searches": 0,
+        "knowledge_searches": 1,
         "limits": {},
         "tool_grants": [],
         "source_coverage": [],
         "work_profile": "review",
+        "document_analyses": [],
     }
 
     snapshot = build_run_snapshot(
@@ -67,8 +69,9 @@ def test_snapshot_keeps_the_knowledge_boundary_and_defaults_older_payloads() -> 
     )["execution"]
     assert legacy["knowledge_scope"] is None
     assert legacy["knowledge_collection_count"] == 0
-    # Searches the provider ran were not recorded before the field existed.
+    # Searches the run ran were not recorded before the fields existed.
     assert legacy["web_searches"] is None
+    assert legacy["knowledge_searches"] is None
     with pytest.raises(RuntimeError):
         build_run_snapshot(
             {"done": True, "execution": {**base, "knowledge_scope": "everything"}},

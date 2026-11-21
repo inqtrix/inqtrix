@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from inqtrix.agents.document_table import digest_lines
 from inqtrix.agents.evidence import evidence_digest, run_sufficiency_judgement
 from inqtrix.model_routing import (
     describe_resolution,
@@ -63,7 +64,21 @@ def judge_kernel_sufficiency(deps: "KernelDeps") -> "StructuredOutcome":
         success_criteria=[deps.question] if deps.question else [],
         evidence_digest=evidence_digest(list(deps.evidence_refs.values())),
         clarified_context="\n".join(deps.clarified_answers),
-        source_coverage=deps.source_coverage.digest(),
+        source_coverage="\n".join(
+            line
+            for line in (
+                deps.source_coverage.digest(),
+                *digest_lines(
+                    deps.document_analyses,
+                    labels={
+                        str(ref.get("reference_id") or ""): str(ref.get("label") or "")
+                        for ref in deps.evidence_refs.values()
+                        if ref.get("label")
+                    },
+                ),
+            )
+            if line
+        ),
         model=desc.get("model") or None,
         reasoning_effort=desc.get("effort") or None,
         timeout=deps.timeout,

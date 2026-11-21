@@ -7,9 +7,12 @@ import {
 } from './fixtures/fault-control-server.mjs'
 import type {
   LogInspection,
+  PreflightCheck,
   ServiceLogCounters,
+  VerificationEngine,
   VerificationProfile,
 } from './model.ts'
+import { failed, passed } from './preflight.ts'
 import type { RunContext } from './run-context.ts'
 
 const INSPECTED_SERVICES = ['api', 'worker', 'web', 'collaboration'] as const
@@ -223,6 +226,42 @@ function isInspected(profile: VerificationProfile): boolean {
 }
 
 /**
+ * Whether the inspection can find the services it has to read, asked before
+ * anything runs. A run whose inspection is mandatory and cannot start ends
+ * blocked whatever its scenarios did, so it must not run them first: their
+ * time and their cost would be spent on a verdict that cannot come. It asks
+ * what the inspection itself asks: one Compose project on the stack file and
+ * a container for every active service. One check per engine, because a
+ * failed check blocks its engine and the verdict depends on all of them.
+ */
+export async function logInspectionPreflight(
+  context: RunContext,
+  engines: readonly VerificationEngine[],
+  source: LogSource = CONTAINER_LOGS,
+): Promise<PreflightCheck[]> {
+  if (!logInspectionIsMandatory(context)) return []
+  let refusal: string | null = null
+  try {
+    const containers = await source.list(context)
+    const missing = ACTIVE_SERVICES.find(
+      (service) => !containers.some((container) => container.service === service),
+    )
+    if (missing) refusal = missingServiceReason(missing)
+  } catch (error) {
+    refusal = error instanceof Error && error.message.startsWith('Log inspection: ')
+      ? error.message
+      : `Listing the service containers failed: ${error instanceof Error ? error.name : 'Error'}.`
+  }
+  return [...new Set(engines)].map((engine) => refusal === null
+    ? passed(engine, 'log-inspection', 'The log inspection finds the service containers of the canonical stack.')
+    : failed(engine, 'log-inspection', refusal))
+}
+
+function missingServiceReason(service: string): string {
+  return `No ${service} container of the canonical stack was found.`
+}
+
+/**
  * Count what the services logged in the time window of this run. Only redacted
  * counters leave this function: levels, missing fields and masked message
  * templates, never a log line. Lines already counted keep their verdict when a
@@ -247,7 +286,7 @@ export async function inspectRunLogs(
     const containers = await source.list(context)
     for (const service of ACTIVE_SERVICES) {
       if (!containers.some((container) => container.service === service)) {
-        return { reason: `No ${service} container of the canonical stack was found.`, status: 'not_run' }
+        return { reason: missingServiceReason(service), status: 'not_run' }
       }
     }
     for (const container of containers) {

@@ -1,7 +1,6 @@
-"""Lossless multi-section context archive and imperative planner pin.
+"""Lossless multi-section context archive.
 
-The archive must preserve compaction evictions beyond one section, and
-the pinned web profile must prevent repeated ``plan_invalid`` results.
+The archive must preserve compaction evictions beyond one section.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ pytest.importorskip("langchain")
 from inqtrix.agents.kernel.deps import KernelDeps
 from inqtrix.agents.context_archive import CONTEXT_ARCHIVE_SECTION_CHARS
 from inqtrix.agents.control_memory import MemoryAgentControlStore
-from inqtrix.agents.prompts import _planner_web_rule
 from inqtrix.settings import AgentPlatformSettings
 
 
@@ -54,12 +52,3 @@ def test_chunked_archive_keeps_short_sections_singular():
     assert deps.append_context_archive_chunked("Titel", "") == []
 
 
-def test_planner_pinned_profile_rule_is_imperative():
-    pinned = _planner_web_rule(True, "deep")
-    assert "MUST set params.profile=deep" in pinned
-    assert "web_instant tasks NEVER carry a profile" in pinned
-    # The ceiling variant keeps its explicit scope sentence.
-    ceiling = _planner_web_rule(
-        True, "schnell", max_profile="compact", max_instant_tasks=2
-    )
-    assert "ONLY web_research tasks may set params.profile" in ceiling

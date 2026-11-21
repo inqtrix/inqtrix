@@ -1,7 +1,5 @@
-import type { AgentTierId } from '@/features/researchRuns/types'
+import type { AgentTierCapability, AgentTierId } from '@/features/researchRuns/types'
 import type { TranslationDictionary } from '@/i18n/translations'
-
-import type { AgentEngineMode } from './agentStatusOverview'
 
 /** The run-setup vocabulary — engine, permission, Stufe — shared by the
  * composer capsule (before a run) and the transcript recap (after it), so
@@ -14,13 +12,31 @@ export function agentTierIdOf(value: unknown): AgentTierId | null {
     : null
 }
 
-export function engineModeLabel(
-  mode: AgentEngineMode,
-  t: TranslationDictionary,
-): string {
-  return mode === 'agent_kernel'
-    ? t.agent.composer.engineAuto
-    : t.agent.overview.brainMission
+/** The Stufe the composer shows and submits: a pick on this page, otherwise
+ * the user's last pick while the ladder still offers it, otherwise the
+ * published default, otherwise Gründlich. Derived on every render, so a last
+ * pick that arrives after the first paint (the account row, another tab) is
+ * shown as long as nothing was picked on this page. Null where the server
+ * publishes no ladder. */
+export function effectiveAgentTier({
+  defaultTier,
+  last,
+  selected,
+  tiers,
+}: {
+  defaultTier: AgentTierId | undefined
+  last: string
+  selected: AgentTierId | null
+  tiers: readonly AgentTierCapability[] | null
+}): AgentTierId | null {
+  if (!tiers) return null
+  if (selected) return selected
+  return tiers.find((tier) => tier.id === last)?.id ?? defaultTier ?? 'gruendlich'
+}
+
+/** The engine's name in the run setup: the kernel picks its own way. */
+export function engineModeLabel(t: TranslationDictionary): string {
+  return t.agent.composer.engineAuto
 }
 
 export function autonomyModeLabel(
@@ -44,9 +60,9 @@ export function tierLabel(
 
 /** The run-setup capsule text — what ONE turn will do and how much it
  * may do: engine · permission · Stufe · response form. The Stufe belongs
- * here because it decides the run's cost class (one search, a research
- * child, a mission); a Stufe the user cannot see before sending is a Stufe
- * they cannot correct.
+ * here because it decides the run's cost class (one search, research
+ * children, a review pass); a Stufe the user cannot see before sending is a
+ * Stufe they cannot correct.
  *
  * The response form belongs here for the same reason, and it closes a
  * measured gap: picking "Canvas" changed the capsule by nothing at all, so
@@ -56,14 +72,13 @@ export function tierLabel(
 export function runSetupSummary(
   selection: {
     autonomy: string
-    engineMode: AgentEngineMode
     responseForm?: 'auto' | 'chat' | 'canvas'
     tierMode: AgentTierId | null
   },
   t: TranslationDictionary,
 ): string {
   const parts = [
-    engineModeLabel(selection.engineMode, t),
+    engineModeLabel(t),
     autonomyModeLabel(selection.autonomy, t),
   ]
   if (selection.tierMode) parts.push(tierLabel(selection.tierMode, t))

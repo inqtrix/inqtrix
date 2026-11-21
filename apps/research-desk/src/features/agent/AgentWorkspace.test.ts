@@ -9,7 +9,7 @@ describe('where the workspace reads the requirement limits', () => {
   // no capability manifest, so without its mirror the rule cap and the
   // composed ceiling were never pre-checked there and every surface said
   // the server checks on sending. The mirror's numbers are pinned in
-  // demo.test.ts; this pins that the workspace reads all three limits
+  // demo.test.ts; this pins that the workspace reads both limits
   // from ONE block, and that the demo falls back to the mirror.
   const tree = ts.createSourceFile(
     'AgentWorkspace.tsx',
@@ -37,11 +37,9 @@ describe('where the workspace reads the requirement limits', () => {
 
   it('reads every limit from that block', () => {
     expect([
-      initializerOf('reportGuidanceLimit'),
       initializerOf('reportRuleLimit'),
       initializerOf('reportComposedLimit'),
     ]).toEqual([
-      'reportGuidanceMaxChars(publishedRequirement)',
       'reportRuleIdsMax(publishedRequirement)',
       'reportComposedCharsMax(publishedRequirement)',
     ])

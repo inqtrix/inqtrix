@@ -113,6 +113,7 @@ describe('normalizeAgentExecutionSnapshot', () => {
         consent_reason: 'explicit_directive',
         tool_use_counts: { web: 1, knowledge: 0 },
         web_searches: 1,
+        knowledge_searches: 0,
         limits: {
           tool_calls: {
             used: 12,
@@ -143,6 +144,7 @@ describe('normalizeAgentExecutionSnapshot', () => {
       consentReason: 'explicit_directive',
       toolUseCounts: { web: 1, knowledge: 0 },
       webSearches: 1,
+      knowledgeSearches: 0,
       limits: {
         tool_calls: {
           used: 12,
@@ -204,11 +206,9 @@ describe('resolveAgentExecutionDisplay', () => {
   it('shows the composer selection until a run was admitted', () => {
     expect(resolveAgentExecutionDisplay({
       execution: null,
-      selectedMode: 'workspace_agent',
       selectedResponseForm: 'canvas',
       selectedDepth: 'deep',
     })).toEqual({
-      effectiveMode: 'workspace_agent',
       responseForm: 'canvas',
       depth: 'deep',
     })
@@ -226,11 +226,9 @@ describe('resolveAgentExecutionDisplay', () => {
     })
     expect(resolveAgentExecutionDisplay({
       execution,
-      selectedMode: 'workspace_agent',
       selectedResponseForm: 'canvas',
       selectedDepth: 'deep',
     })).toEqual({
-      effectiveMode: 'agent_kernel',
       responseForm: 'chat',
       depth: 'normal',
     })

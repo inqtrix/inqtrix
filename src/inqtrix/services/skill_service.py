@@ -386,9 +386,28 @@ class SkillService:
         expected_revision: int,
         visible_to: "UserContext | None" = None,
     ) -> SkillRecord:
-        """Replace the writable fields (edit grant required)."""
+        """Replace the writable fields (edit grant required).
+
+        Who may activate the skill stays the owner's choice. The owner's
+        model activates a ``model_allowed`` skill on its own
+        (:func:`~inqtrix.content.skills.model_may_activate`), so an editor
+        who could set that value would have another user's model run the
+        editor's text unasked. A recipient's request that changes
+        ``invocation`` is refused as a whole, in either direction.
+        """
         current = await self._repository.get(skill_id, tenant_id=tenant_id)
-        await self._access(current, visible_to, minimum=SharePermission.EDIT)
+        access = await self._access(
+            current, visible_to, minimum=SharePermission.EDIT
+        )
+        fields = _validated_fields(payload)
+        if (
+            access.mode is AccessMode.SHARED
+            and fields["invocation"] != current.invocation
+        ):
+            raise SkillValidationError(
+                "Field 'invocation' can only be changed by the owner of the "
+                f"skill; it stays {current.invocation!r}"
+            )
         updated = SkillRecord(
             id=current.id,
             tenant_id=current.tenant_id,
@@ -396,7 +415,7 @@ class SkillService:
             revision=current.revision,
             created_at=current.created_at,
             updated_at=time.time(),
-            **_validated_fields(payload),
+            **fields,
         )
         stored = await self._repository.update(
             updated,

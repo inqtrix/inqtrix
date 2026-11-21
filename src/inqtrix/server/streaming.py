@@ -22,6 +22,7 @@ from inqtrix.providers.base import ProviderContext
 from inqtrix.quota.models import QuotaDimension, consumed_tokens
 from inqtrix.services.request_parsing import request_timeout_seconds
 from inqtrix.settings import AgentSettings
+from inqtrix.state import is_reader_step
 from inqtrix.strategies import StrategyContext
 from inqtrix.text import iter_word_chunks
 from inqtrix.urls import sanitize_error
@@ -325,7 +326,7 @@ async def stream_response(
             msg_type, msg_content = await loop.run_in_executor(
                 lanes.streams, partial(progress_queue.get, True, 0.3),
             )
-            if msg_type == "progress" and msg_content != "done":
+            if msg_type == "progress" and is_reader_step(msg_content):
                 progress_emitted = True
                 yield make_chunk(chat_id, f"> `{msg_content}`\n>\n")
         except Empty:
@@ -341,7 +342,7 @@ async def stream_response(
     while include_progress and progress_queue is not None and not progress_queue.empty():
         try:
             msg_type, msg_content = progress_queue.get_nowait()
-            if msg_type == "progress" and msg_content != "done":
+            if msg_type == "progress" and is_reader_step(msg_content):
                 progress_emitted = True
                 yield make_chunk(chat_id, f"> `{msg_content}`\n>\n")
         except Empty:

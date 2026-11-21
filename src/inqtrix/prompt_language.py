@@ -255,7 +255,7 @@ WRITING_STYLE_BLOCK = (
     "Push back constructively when a premise is wrong."
 )
 """The house writing style for conversational answers — the direct chat and
-the Agent Desk (kernel answers and the mission's chat answer). Research
+the Agent Desk (the kernel's answers). Research
 reports keep the form their report profile prescribes per section, so the
 research writer does not carry this block. Wording follows the published
 practice of the large assistants: prose by default and lists only for

@@ -3,17 +3,14 @@
 Pins the three layers separately: the counter's semantics, the store
 contract (only the RETURNED record carries numbers — reads stay None in
 both stores by design), and the shared event payload builder every
-agent-side emitter uses. The mission memo emitter is pinned through the
-real ``_flush_memo``, whose payload must carry ``title`` as well.
+agent-side emitter uses.
 """
 
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from typing import Any
 
-from inqtrix.agents.algorithm import _flush_memo
 from inqtrix.agents.artifact_lines import (
     MAX_COUNTED_LINES,
     count_line_changes,
@@ -124,35 +121,3 @@ def test_batch_revise_returns_the_delta_per_row():
 # -- mission memo emitter --------------------------------------------------
 
 
-class _FakeDeps:
-    def __init__(self, store: MemoryAgentControlStore, run_id: str) -> None:
-        self.control = store
-        self.context = SimpleNamespace(run_id=run_id)
-        self.events: list[tuple[str, dict[str, Any]]] = []
-
-    def emit(self, event_type: str, payload: dict[str, Any]) -> None:
-        self.events.append((event_type, payload))
-
-
-def test_memo_flush_event_carries_title_and_line_delta():
-    store = MemoryAgentControlStore()
-    deps = _FakeDeps(store, run_id="run-memo")
-    state: dict[str, Any] = {
-        "session_id": "sess-memo",
-        "artifact_id": "",
-        "memo_base_revision": 0,
-        "memo_title": "Marktmemo",
-    }
-    _flush_memo(deps, state, "zeile eins\nzeile zwei", status="ready")
-    event_type, payload = deps.events[-1]
-    assert event_type == "inqtrix.agent.artifact.created"
-    assert payload["kind"] == "memo"
-    assert payload["title"] == "Marktmemo"
-    assert (payload["lines_added"], payload["lines_removed"]) == (2, 0)
-
-    _flush_memo(deps, state, "zeile eins\nzeile drei", status="ready")
-    event_type, payload = deps.events[-1]
-    assert event_type == "inqtrix.agent.artifact.updated"
-    assert payload["title"] == "Marktmemo"
-    assert payload["from_revision"] == 1
-    assert (payload["lines_added"], payload["lines_removed"]) == (1, 1)

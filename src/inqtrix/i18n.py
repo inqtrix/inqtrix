@@ -136,406 +136,16 @@ def detect_ui_language_confident(text: str, *, lead: int = _CONFIDENT_LEAD) -> s
 # ---------------------------------------------------------------------------
 
 MESSAGES: dict[str, dict[str, str]] = {
-    # ---- mission memo texts written in the reader's language ----
-    "memo_open_points_intro": {
-        "de": "Die Prüfung am Ende des Laufs sah weiteren Recherchebedarf, der in diesem Lauf nicht mehr gedeckt wurde:",
-        "en": "The review at the end of the run saw further research needs that this run could no longer cover:",
-    },
-    "memo_open_points_intro_no_new_evidence": {
-        "de": "Die Prüfung am Ende des Laufs sah diese Punkte als offen; die letzte Nachrecherche fügte keine neuen Belege hinzu:",
-        "en": "The review at the end of the run saw these points as open; the last follow-up research added no new evidence:",
-    },
-    "memo_open_points_item": {"de": "Noch offen: {item}", "en": "Still open: {item}"},
+    # ---- agent run texts written in the reader's language ----
     "memo_title_answer": {"de": "Antwort", "en": "Answer"},
-    # The canvas name a memo falls back to before the outline has
-    # produced one. It is a document name a person reads, so it
-    # follows the run, like every other name in this table.
-    "memo_title_default": {"de": "Memo", "en": "Memo"},
-    "critic_report_title": {"de": "Prüfbericht", "en": "Review report"},
-    "task_title_synthesis": {"de": "Synthese", "en": "Synthesis"},
-    "task_evidence_label_quoted": {"de": "Teilaufgabe \u201e{title}\u201c", "en": "Subtask \u201c{title}\u201d"},
-    "task_evidence_label_id": {"de": "Teilaufgabe {task_id}", "en": "Subtask {task_id}"},
-    "task_evidence_needs_review": {"de": "nur einfach belegt", "en": "supported by a single source only"},
-    "task_evidence_source_context_only": {
-        "de": "nur Kontextquellen ohne belastbaren Beleg",
-        "en": "context sources only, without robust evidence",
-    },
-    "task_evidence_single_source_all": {
-        "de": " (alle Belege aus je einer Quelle)",
-        "en": " (every piece of evidence from a single source)",
-    },
-    "task_evidence_single_source_share": {
-        "de": " ({share} % der Belege aus je einer Quelle)",
-        "en": " ({share} % of the evidence from a single source each)",
-    },
     "task_evidence_partial_coverage": {
         "de": "teilweise ausgewertet ({cut} nicht ausgewertet)",
         "en": "partially evaluated ({cut} not evaluated)",
     },
-    "task_evidence_confidence": {"de": "Konfidenz {confidence}/10", "en": "confidence {confidence}/10"},
     # ---- Dokumentanalyse (serverseitiger Fensterdurchlauf) ----
-    "document_analysis_summary_read_one": {
-        "de": "Dokumentanalyse: {read} von {count} Dokument bis zum Ende seines gespeicherten Textes gelesen.",
-        "en": "Document analysis: {read} of {count} document read to the end of its stored text.",
-    },
-    "document_analysis_summary_read_other": {
-        "de": "Dokumentanalyse: {read} von {count} Dokumenten bis zum Ende ihres gespeicherten Textes gelesen.",
-        "en": "Document analysis: {read} of {count} documents read to the end of their stored text.",
-    },
-    "document_analysis_summary_extraction_single": {
-        "de": "Es ist nicht belegt, dass der gespeicherte Text den ganzen Inhalt enthält.",
-        "en": "It is not shown that the stored text holds the whole content.",
-    },
-    "document_analysis_summary_extraction_one": {
-        "de": "Bei einem davon ist nicht belegt, dass der gespeicherte Text den ganzen Inhalt enthält.",
-        "en": "For one of them it is not shown that the stored text holds the whole content.",
-    },
-    "document_analysis_summary_extraction_other": {
-        "de": "Bei {count} davon ist nicht belegt, dass der gespeicherte Text den ganzen Inhalt enthält.",
-        "en": "For {count} of them it is not shown that the stored text holds the whole content.",
-    },
-    "document_analysis_summary_cited_one": {
-        "de": "{count} Stelle wörtlich belegt.",
-        "en": "{count} passage verified verbatim.",
-    },
-    "document_analysis_summary_cited_other": {
-        "de": "{count} Stellen wörtlich belegt.",
-        "en": "{count} passages verified verbatim.",
-    },
-    # The whole result line of an analysis whose found documents an earlier
-    # round had all read; the _part pair follows the line of one that also
-    # read documents.
-    "document_analysis_summary_already_read_one": {
-        "de": (
-            "Dokumentanalyse: {count} gefundenes Dokument hat dieser Lauf schon "
-            "gelesen; es wurde nicht erneut gelesen."
-        ),
-        "en": (
-            "Document analysis: {count} document found was already read in this "
-            "run and was not read again."
-        ),
-    },
-    "document_analysis_summary_already_read_other": {
-        "de": (
-            "Dokumentanalyse: {count} gefundene Dokumente hat dieser Lauf schon "
-            "gelesen; sie wurden nicht erneut gelesen."
-        ),
-        "en": (
-            "Document analysis: {count} documents found were already read in this "
-            "run and were not read again."
-        ),
-    },
-    "document_analysis_summary_already_read_part_one": {
-        "de": (
-            "{count} weiteres gefundenes Dokument hat dieser Lauf schon gelesen; "
-            "es wurde nicht erneut gelesen."
-        ),
-        "en": (
-            "{count} further document found was already read in this run and was "
-            "not read again."
-        ),
-    },
-    "document_analysis_summary_already_read_part_other": {
-        "de": (
-            "{count} weitere gefundene Dokumente hat dieser Lauf schon gelesen; "
-            "sie wurden nicht erneut gelesen."
-        ),
-        "en": (
-            "{count} further documents found were already read in this run and "
-            "were not read again."
-        ),
-    },
-    # The same for found documents no earlier reading could open: never
-    # read, so never "already read".
-    "document_analysis_summary_already_failed_one": {
-        "de": (
-            "Dokumentanalyse: {count} gefundenes Dokument ließ sich in einer "
-            "früheren Runde dieses Laufs nicht lesen; es wurde nicht erneut versucht."
-        ),
-        "en": (
-            "Document analysis: {count} document found could not be read in an "
-            "earlier round of this run and was not tried again."
-        ),
-    },
-    "document_analysis_summary_already_failed_other": {
-        "de": (
-            "Dokumentanalyse: {count} gefundene Dokumente ließen sich in einer "
-            "früheren Runde dieses Laufs nicht lesen; sie wurden nicht erneut versucht."
-        ),
-        "en": (
-            "Document analysis: {count} documents found could not be read in an "
-            "earlier round of this run and were not tried again."
-        ),
-    },
-    "document_analysis_summary_already_failed_part_one": {
-        "de": (
-            "{count} weiteres gefundenes Dokument ließ sich in einer früheren "
-            "Runde dieses Laufs nicht lesen; es wurde nicht erneut versucht."
-        ),
-        "en": (
-            "{count} further document found could not be read in an earlier "
-            "round of this run and was not tried again."
-        ),
-    },
-    "document_analysis_summary_already_failed_part_other": {
-        "de": (
-            "{count} weitere gefundene Dokumente ließen sich in einer früheren "
-            "Runde dieses Laufs nicht lesen; sie wurden nicht erneut versucht."
-        ),
-        "en": (
-            "{count} further documents found could not be read in an earlier "
-            "round of this run and were not tried again."
-        ),
-    },
     "document_analysis_untitled_document": {
         "de": "Dokument ohne Titel (Nr. {number})",
         "en": "Document without a title (no. {number})",
-    },
-    "document_analysis_read_completely": {
-        "de": "„{title}“ vollständig gelesen ({chars} Zeichen).",
-        "en": "“{title}” read completely ({chars} characters).",
-    },
-    "document_analysis_text_read_to_end": {
-        "de": "„{title}“: gespeicherter Text vollständig gelesen ({chars} Zeichen), aber nicht nachweislich der ganze Inhalt.",
-        "en": "“{title}”: stored text read to its end ({chars} characters), but not shown to hold the whole content.",
-    },
-    "document_analysis_no_text": {
-        "de": "„{title}“ enthält keinen gespeicherten Text.",
-        "en": "“{title}” holds no stored text.",
-    },
-    "document_analysis_not_analysed": {
-        "de": "„{title}“ nicht analysiert: {ranges}.",
-        "en": "“{title}” not analysed: {ranges}.",
-    },
-    "document_analysis_read_partly": {
-        "de": "„{title}“ nur teilweise analysiert; nicht analysiert: {ranges}.",
-        "en": "“{title}” analysed only in part; not analysed: {ranges}.",
-    },
-    "document_analysis_range": {
-        "de": "Zeichen {start}–{end} ({reason})",
-        "en": "characters {start}–{end} ({reason})",
-    },
-    "document_analysis_reason_window_limit": {"de": "Fenstergrenze erreicht", "en": "window limit reached"},
-    "document_analysis_reason_extraction_failed": {"de": "Auswertung gescheitert", "en": "extraction failed"},
-    "document_analysis_reason_not_read": {"de": "nicht gelesen", "en": "not read"},
-    "document_analysis_reason_cancelled": {"de": "abgebrochen", "en": "cancelled"},
-    "document_analysis_reason_provider_error": {
-        "de": "Modellaufruf gescheitert",
-        "en": "model call failed",
-    },
-    "document_analysis_reason_not_called_after_failure": {
-        "de": "nach einem gescheiterten Modellaufruf nicht mehr aufgerufen",
-        "en": "not called after a failed model call",
-    },
-    "document_analysis_reason_content_refused": {
-        "de": "Anfrage vom Inhaltsfilter des Modellanbieters abgelehnt",
-        "en": "request refused by the model provider's content filter",
-    },
-    "document_analysis_reason_knowledge_document_not_found": {
-        "de": "Dokument nicht gefunden oder nicht mehr sichtbar",
-        "en": "document not found or no longer visible",
-    },
-    "document_analysis_reason_technical": {
-        "de": "technischer Fehler ({code})",
-        "en": "technical error ({code})",
-    },
-    "document_analysis_failed": {
-        "de": "„{title}“ konnte nicht analysiert werden ({reason}).",
-        "en": "“{title}” could not be analysed ({reason}).",
-    },
-    "document_analysis_reason_document_changed": {
-        "de": "das Dokument änderte sich während der Analyse",
-        "en": "the document changed during the analysis",
-    },
-    "document_analysis_pages_without_text_one": {
-        "de": "„{title}“: Seite {list} von {pages} hat keine Textschicht; ihr Inhalt fehlt in der Analyse.",
-        "en": "“{title}”: page {list} of {pages} has no text layer; its content is missing from the analysis.",
-    },
-    "document_analysis_pages_without_text_other": {
-        "de": "„{title}“: {count} von {pages} Seiten haben keine Textschicht (Seiten {list}); ihr Inhalt fehlt in der Analyse.",
-        "en": "“{title}”: {count} of {pages} pages have no text layer (pages {list}); their content is missing from the analysis.",
-    },
-    "document_analysis_extraction_unrecorded": {
-        "de": "„{title}“: Die Extraktionsabdeckung wurde nicht erfasst; Seiten ohne Textschicht können fehlen und sind nicht benennbar.",
-        "en": "“{title}”: extraction coverage was not recorded; pages without a text layer may be missing and cannot be named.",
-    },
-    "document_analysis_not_selected_document_limit_one": {
-        "de": "Gefunden, aber nicht analysiert (höchstens {count} Dokument je Analyse): {titles}.",
-        "en": "Found but not analysed (at most {count} document per analysis): {titles}.",
-    },
-    "document_analysis_not_selected_document_limit_other": {
-        "de": "Gefunden, aber nicht analysiert (höchstens {count} Dokumente je Analyse): {titles}.",
-        "en": "Found but not analysed (at most {count} documents per analysis): {titles}.",
-    },
-    "document_analysis_not_selected_unknown_reason": {
-        "de": "Gefunden, aber nicht analysiert ({reason}): {titles}.",
-        "en": "Found but not analysed ({reason}): {titles}.",
-    },
-    # A re-read a later round left out because its windows no longer fitted
-    # the analysis's window budget; a later round can still read it.
-    "document_analysis_reread_not_fitted": {
-        "de": (
-            "In einer früheren Runde teilweise gelesen; ein erneutes Lesen passte "
-            "nicht mehr in das Fensterbudget dieser Analyse: {titles}."
-        ),
-        "en": (
-            "Partly read in an earlier round; reading it again no longer fitted "
-            "the window budget of this analysis: {titles}."
-        ),
-    },
-    # Found documents an earlier round of the run already read as far as a
-    # re-read reaches; {reason} is a research_code_* phrase.
-    "document_analysis_already_read_to_end": {
-        "de": (
-            "In einer früheren Runde dieses Laufs schon bis zum Ende des "
-            "gespeicherten Textes gelesen, hier nicht erneut gelesen: {titles}."
-        ),
-        "en": (
-            "Already read to the end of the stored text in an earlier round of "
-            "this run, not read again here: {titles}."
-        ),
-    },
-    "document_analysis_already_read_partly": {
-        "de": (
-            "In einer früheren Runde dieses Laufs schon gelesen, hier nicht "
-            "erneut gelesen ({reason}): {titles}."
-        ),
-        "en": (
-            "Already read in an earlier round of this run, not read again here "
-            "({reason}): {titles}."
-        ),
-    },
-    # Found documents no earlier reading could open; {reason} is the
-    # document_analysis_reason_* phrase of the stored failure code.
-    "document_analysis_already_failed": {
-        "de": (
-            "In einer früheren Runde dieses Laufs nicht lesbar ({reason}), hier "
-            "nicht erneut versucht: {titles}."
-        ),
-        "en": (
-            "Could not be read in an earlier round of this run ({reason}), not "
-            "tried again here: {titles}."
-        ),
-    },
-    # {count} is the number of documents left out; {scope} names the whole
-    # search scope from the document_analysis_scope_documents pair.
-    "document_analysis_scope_found_one": {
-        "de": "Die Suchen dieser Teilaufgabe trafen {found} von {scope} ihres Suchbereichs; das übrige wurde nicht betrachtet.",
-        "en": "The searches of this subtask found {found} of {scope} in their scope; the other one was not considered.",
-    },
-    "document_analysis_scope_found_other": {
-        "de": "Die Suchen dieser Teilaufgabe trafen {found} von {scope} ihres Suchbereichs; die {count} übrigen wurden nicht betrachtet.",
-        "en": "The searches of this subtask found {found} of {scope} in their scope; the {count} others were not considered.",
-    },
-    "document_analysis_scope_none_one": {
-        "de": "Die Suchen dieser Teilaufgabe trafen das eine Dokument ihres Suchbereichs nicht; es wurde nicht betrachtet.",
-        "en": "The searches of this subtask did not find the one document in their scope; it was not considered.",
-    },
-    "document_analysis_scope_none_other": {
-        "de": "Die Suchen dieser Teilaufgabe trafen keines der {count} Dokumente ihres Suchbereichs; sie wurden nicht betrachtet.",
-        "en": "The searches of this subtask found none of the {count} documents in their scope; they were not considered.",
-    },
-    "document_analysis_scope_documents_one": {
-        "de": "{count} Dokument", "en": "the {count} document",
-    },
-    "document_analysis_scope_documents_other": {
-        "de": "{count} Dokumenten", "en": "the {count} documents",
-    },
-    "document_analysis_complete_negative": {
-        "de": "Vollständig gelesen; keine Stelle beantwortet die Aufgabe.",
-        "en": "Read completely; no passage answers the task.",
-    },
-    "document_analysis_partial_negative_one": {
-        "de": "Keine Stelle ließ sich belegen; ob das Dokument die Aufgabe beantwortet, bleibt offen (siehe oben).",
-        "en": "No passage could be verified; whether the document answers the task remains open (see above).",
-    },
-    "document_analysis_partial_negative_other": {
-        "de": "Keine Stelle ließ sich belegen; ob die {count} Dokumente die Aufgabe beantworten, bleibt offen (siehe oben).",
-        "en": "No passage could be verified; whether the {count} documents answer the task remains open (see above).",
-    },
-    "document_analysis_not_verbatim_one": {
-        "de": "„{title}“: Eine als einschlägig gemeldete Stelle stand nicht wörtlich im gelesenen Abschnitt und wurde verworfen.",
-        "en": "“{title}”: one passage named as relevant was not verbatim in the section read and was discarded.",
-    },
-    "document_analysis_not_verbatim_other": {
-        "de": "„{title}“: {count} als einschlägig gemeldete Stellen standen nicht wörtlich im gelesenen Abschnitt und wurden verworfen.",
-        "en": "“{title}”: {count} passages named as relevant were not verbatim in the section read and were discarded.",
-    },
-    "document_analysis_unchecked_long_one": {
-        "de": "„{title}“: Eine gemeldete Stelle war länger als {limit} Zeichen und wurde nicht geprüft.",
-        "en": "“{title}”: one named passage was longer than {limit} characters and was not checked.",
-    },
-    "document_analysis_unchecked_long_other": {
-        "de": "„{title}“: {count} gemeldete Stellen waren länger als {limit} Zeichen und wurden nicht geprüft.",
-        "en": "“{title}”: {count} named passages were longer than {limit} characters and were not checked.",
-    },
-    "document_analysis_unchecked_short_one": {
-        "de": "„{title}“: Eine gemeldete Stelle hatte weniger als {min_words} Wörter und wurde nicht geprüft.",
-        "en": "“{title}”: one named passage had fewer than {min_words} words and was not checked.",
-    },
-    "document_analysis_unchecked_short_other": {
-        "de": "„{title}“: {count} gemeldete Stellen hatten weniger als {min_words} Wörter und wurden nicht geprüft.",
-        "en": "“{title}”: {count} named passages had fewer than {min_words} words and were not checked.",
-    },
-    "document_analysis_uncitable_one": {
-        "de": "„{title}“: Eine gemeldete Stelle steht wörtlich im gelesenen Text, ließ sich aber nicht als Beleg übernehmen.",
-        "en": "“{title}”: one named passage stands verbatim in the text read but could not be taken over as evidence.",
-    },
-    "document_analysis_uncitable_other": {
-        "de": "„{title}“: {count} gemeldete Stellen stehen wörtlich im gelesenen Text, ließen sich aber nicht als Beleg übernehmen.",
-        "en": "“{title}”: {count} named passages stand verbatim in the text read but could not be taken over as evidence.",
-    },
-    "document_analysis_unchecked_other_one": {
-        "de": "„{title}“: Eine gemeldete Stelle ließ sich nicht prüfen ({code}).",
-        "en": "“{title}”: one named passage could not be checked ({code}).",
-    },
-    "document_analysis_unchecked_other_other": {
-        "de": "„{title}“: {count} gemeldete Stellen ließen sich nicht prüfen ({code}).",
-        "en": "“{title}”: {count} named passages could not be checked ({code}).",
-    },
-    "document_analysis_more_one": {
-        "de": "„{title}“: In einem Abschnitt können weitere einschlägige Stellen stehen, als übernommen wurden (höchstens {limit} je Abschnitt).",
-        "en": "“{title}”: in one section further relevant passages may stand than were taken over (at most {limit} per section).",
-    },
-    "document_analysis_more_other": {
-        "de": "„{title}“: In {count} Abschnitten können weitere einschlägige Stellen stehen, als übernommen wurden (höchstens {limit} je Abschnitt).",
-        "en": "“{title}”: in {count} sections further relevant passages may stand than were taken over (at most {limit} per section).",
-    },
-    "document_analysis_retrieval_warnings": {
-        "de": "Suchhinweis zur Dokumentauswahl: {warnings}",
-        "en": "Search note on the document selection: {warnings}",
-    },
-    "document_analysis_quote": {"de": "„{quote}“", "en": "“{quote}”"},
-    "document_analysis_open_points_heading": {"de": "Offene Punkte", "en": "Open points"},
-    "document_analysis_passages_heading": {"de": "Wörtlich belegte Stellen", "en": "Passages verified verbatim"},
-    "document_analysis_page": {"de": "S. {page}", "en": "p. {page}"},
-    "document_analysis_summary_failed": {
-        "de": "Die Zusammenfassung scheiterte; die belegten Stellen bleiben erhalten.",
-        "en": "The summary failed; the verified passages remain.",
-    },
-    "document_analysis_criteria_heading": {"de": "Kriterien", "en": "Criteria"},
-    "document_analysis_verdict_answered": {"de": "beantwortet", "en": "answered"},
-    "document_analysis_verdict_partly_answered": {"de": "teilweise beantwortet", "en": "partly answered"},
-    "document_analysis_verdict_not_addressed_one": {"de": "im ganzen Dokument nicht behandelt", "en": "not addressed anywhere in the document"},
-    "document_analysis_verdict_not_addressed_other": {
-        "de": "in keinem der {count} Dokumente behandelt",
-        "en": "not addressed in any of the {count} documents",
-    },
-    "document_analysis_verdict_not_found_in_verified_passages": {
-        "de": "in den belegten Stellen nicht gefunden; was die Aussage offen lässt, steht unten",
-        "en": "not found in the verified passages; what leaves this open is named below",
-    },
-    "document_analysis_verdict_no_verified_passage": {
-        "de": "als beantwortet genannt, aber ohne belegte Stelle",
-        "en": "named as answered, but without a verified passage",
-    },
-    "document_analysis_verdict_not_found_in_analysed_part": {
-        "de": "in den analysierten Teilen nicht gefunden",
-        "en": "not found in the analysed parts",
-    },
-    "document_analysis_unreadable": {
-        "de": "Keines der ausgewählten Dokumente ließ sich lesen.",
-        "en": "None of the selected documents could be read.",
     },
     # ---- Sprache / Recency / Type-Labels (eingebettet in classify-Hints) ----
     "lang_name_de": {"de": "Deutsch", "en": "German"},
@@ -544,10 +154,13 @@ MESSAGES: dict[str, dict[str, str]] = {
     "lang_name_es": {"de": "Spanisch", "en": "Spanish"},
     "lang_name_it": {"de": "Italienisch", "en": "Italian"},
     "lang_name_pt": {"de": "Portugiesisch", "en": "Portuguese"},
-    "recency_hour": {"de": "letzte Stunde", "en": "last hour"},
-    "recency_day": {"de": "heute", "en": "today"},
-    "recency_week": {"de": "diese Woche", "en": "this week"},
-    "recency_month": {"de": "diesen Monat", "en": "this month"},
+    # A window counts back from now; the approval card of the agent names
+    # the same windows in the same words.
+    "recency_hour": {"de": "letzte Stunde", "en": "past hour"},
+    "recency_day": {"de": "letzte 24 Stunden", "en": "past 24 hours"},
+    "recency_week": {"de": "letzte 7 Tage", "en": "past 7 days"},
+    "recency_month": {"de": "letzte 30 Tage", "en": "past 30 days"},
+    "recency_year": {"de": "letzte 12 Monate", "en": "past 12 months"},
     "recency_label": {
         "de": "Aktualität: {label}",
         "en": "Recency: {label}",
@@ -562,27 +175,27 @@ MESSAGES: dict[str, dict[str, str]] = {
     # ---- compose_answer_sections (nodes.py) ----
     "compose_section_token_limit": {
         "de": (
-            "Warnung: Abschnitt '{heading}' hat Token-Limit erreicht "
-            "(finish_reason={finish_reason}, request_max_tokens={request_max}, "
-            "completion_tokens={completion})"
+            "Warnung: Abschnitt '{heading}' hat die Ausgabegrenze des Modells "
+            "erreicht (Stoppgrund: {finish_reason}; Tokens erlaubt: {request_max}, "
+            "erzeugt: {completion})"
         ),
         "en": (
-            "Warning: section '{heading}' hit token limit "
-            "(finish_reason={finish_reason}, request_max_tokens={request_max}, "
-            "completion_tokens={completion})"
+            "Warning: section '{heading}' reached the model's output limit "
+            "(stop reason: {finish_reason}; tokens allowed: {request_max}, "
+            "written: {completion})"
         ),
     },
     "compose_section_truncation": {
-        "de": "Warnung: Abschnitt '{heading}' zeigt Trunkierungsanzeichen: {reasons}",
-        "en": "Warning: section '{heading}' shows truncation signals: {reasons}",
+        "de": "Warnung: Abschnitt '{heading}' wirkt abgeschnitten: {reasons}",
+        "en": "Warning: section '{heading}' looks cut off: {reasons}",
     },
     "compose_aborted": {
         "de": (
-            "Antwort-Synthese abgebrochen: {n} aufeinanderfolgende leere "
-            "Sections (zuletzt '{heading}')"
+            "Schreiben des Berichts abgebrochen: {n} Abschnitte nacheinander "
+            "leer (zuletzt '{heading}')"
         ),
         "en": (
-            "Answer composition aborted: {n} consecutive empty sections "
+            "Report writing aborted: {n} sections in a row came back empty "
             "(last '{heading}')"
         ),
     },
@@ -598,12 +211,24 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "context_window_too_small": {
         "de": (
-            "ALGO-FAIL context_window: Modell {model} hat {window} Tokens "
-            "Kontextfenster, benötigt werden {required}"
+            "Kontextfenster zu klein: Modell {model} fasst {window} Tokens, "
+            "benötigt werden {required}"
         ),
         "en": (
-            "ALGO-FAIL context_window: model {model} has {window} context "
-            "tokens, but {required} are required"
+            "Context window too small: model {model} holds {window} tokens, "
+            "{required} are required"
+        ),
+    },
+    # A model resolution that found no model; the server log names the
+    # step and the provider.
+    "node_model_unresolved": {
+        "de": (
+            "Warnung: Für diesen Schritt ließ sich kein Modell bestimmen; es "
+            "gilt die Voreinstellung des Anbieters"
+        ),
+        "en": (
+            "Warning: no model could be determined for this step; the "
+            "provider's default applies"
         ),
     },
 
@@ -629,8 +254,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Analysis targets identified: {n} sub-questions: {subs}",
     },
     "classify_failed": {
-        "de": "Klassifikation fehlgeschlagen ({label}) — nutze konservative Defaults",
-        "en": "Classification failed ({label}) — using conservative defaults",
+        "de": "Klassifikation fehlgeschlagen ({label}); die Recherche läuft mit vorsichtigen Standardannahmen weiter",
+        "en": "Classification failed ({label}); the research continues with cautious standard assumptions",
     },
     "classify_contract_fallback": {
         "de": "Antwortform nicht erkannt ({reason}) — nutze 'allgemein'",
@@ -651,12 +276,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Planning search queries (round {round}/{max_rounds})...",
     },
     "plan_failed": {
-        "de": "ALGO-FAIL plan_query_generation: Planung fehlgeschlagen ({label}); verwende Fallback-Query",
-        "en": "ALGO-FAIL plan_query_generation: planning failed ({label}); using fallback query",
+        "de": "Suchplanung fehlgeschlagen ({label}); die Suche stützt sich auf die Frage selbst",
+        "en": "Search planning failed ({label}); the search rests on the question itself",
     },
     "plan_query_generation_failed": {
-        "de": "ALGO-FAIL plan_query_generation: {reason}; verwende Fallback-Query",
-        "en": "ALGO-FAIL plan_query_generation: {reason}; using fallback query",
+        "de": "Suchplanung: {reason}; die Suche stützt sich auf die Frage selbst",
+        "en": "Search planning: {reason}; the search rests on the question itself",
     },
     "plan_new_queries": {
         "de": "{added} neue Suchanfragen generiert{strategy_hint}",
@@ -681,13 +306,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "{empty} of {total} searches returned no results",
     },
     "provider_retry_observed": {
-        "de": "{provider}-Verbindung instabil — {count} Retrys bei {operation} ({model})",
+        "de": "Verbindung zu {provider} instabil: {count} Wiederholungen bei {operation} ({model})",
         "en": "{provider} connection unstable — {count} retries during {operation} ({model})",
     },
     "provider_retry_attempt": {
         "de": (
-            "{provider}-Retry {attempt}/{max_attempts} bei {operation} "
-            "({model}); nächster Versuch in {delay}s wegen {reason}"
+            "{provider}: Wiederholung {attempt}/{max_attempts} bei {operation} "
+            "({model}); nächster Versuch in {delay} s wegen {reason}"
         ),
         "en": (
             "{provider} retry {attempt}/{max_attempts} during {operation} "
@@ -707,16 +332,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "web search",
     },
     "retry_operation_claim_extraction": {
-        "de": "Claim-Extraktion",
-        "en": "claim extraction",
+        "de": "Aussagenerfassung",
+        "en": "statement extraction",
     },
     "retry_operation_evaluate": {
         "de": "Bewertung",
         "en": "evaluation",
     },
     "retry_operation_answer_synthesis": {
-        "de": "Antwort-Synthese",
-        "en": "answer synthesis",
+        "de": "Berichtsabschnitt",
+        "en": "report section",
     },
     "cancel_fanout_abandoned": {
         "de": (
@@ -729,51 +354,54 @@ MESSAGES: dict[str, dict[str, str]] = {
         ),
     },
     "claim_extract_failed": {
-        "de": "ALGO-FAIL claim_extraction: {failed} von {total} Claim-Extraktionen fehlgeschlagen",
-        "en": "ALGO-FAIL claim_extraction: {failed} of {total} claim extractions failed",
+        "de": "{failed} von {total} Aussagenerfassungen fehlgeschlagen",
+        "en": "{failed} of {total} statement extractions failed",
     },
     "claim_extract_empty": {
-        "de": "{empty} von {total} Claim-Extraktionen lieferten keine strukturierten Claims trotz Suchkontext",
-        "en": "{empty} of {total} claim extractions returned no structured claims despite search context",
+        "de": "{empty} von {total} Aussagenerfassungen ergaben trotz Suchkontext keine Aussage",
+        "en": "{empty} of {total} statement extractions found no statement despite search context",
     },
     "search_claim_binding_issues": {
-        "de": "{unbound} Aussagen ohne belegte Quelle, {unknown} unbekannte Quellen-Referenzen — Cross-Check eingeschränkt",
+        "de": "{unbound} Aussagen ohne belegte Quelle, {unknown} unbekannte Quellen-Referenzen — Gegenprüfung eingeschränkt",
         "en": "{unbound} statements without a bound source, {unknown} unknown source references — cross-check limited",
     },
     "search_sources_processed": {
         "de": (
             "{n} Suchantworten verarbeitet, {citations} Referenzen gesammelt, "
-            "{evidence} Evidenz-Records angelegt"
+            "{evidence} Belege angelegt"
         ),
         "en": (
             "{n} search answers processed, {citations} references collected, "
             "{evidence} evidence records created"
         ),
     },
+    # The cross-check count of this step is every statement whose basis is
+    # cross-checked, whatever its status; the footer counts verified ones
+    # only, and each says so.
     "search_quality_summary": {
         "de": (
             "Aussagenlage: verifiziert {verified_claims}, "
             "vom Anbieter zugeschrieben {attributed_claims}, "
-            "mehrfach belegt {cross_checked_claims}, "
-            "nicht belegt {unverified_claims}"
+            "nicht belegt {unverified_claims}; "
+            "gegengeprüft, unabhängig vom Stand: {cross_checked_claims}"
         ),
         "en": (
-            "Claim status: {verified_claims} verified, "
+            "Statement status: {verified_claims} verified, "
             "{attributed_claims} attributed by the search provider, "
-            "{cross_checked_claims} cross-checked, "
-            "{unverified_claims} unverified"
+            "{unverified_claims} unverified; "
+            "cross-checked regardless of status: {cross_checked_claims}"
         ),
     },
     "search_source_quality": {
         "de": (
-            "Quellenmix: {primary} primary, {mainstream} mainstream, "
-            "{stakeholder} stakeholder, {unknown} unknown, {low} low; "
-            "Qualität {quality}"
+            "Quellenmix: {primary} primär, {mainstream} etabliert, "
+            "{stakeholder} interessengeleitet, {unknown} nicht eingeordnet, "
+            "{low} minderwertig; Quellenqualität {quality}"
         ),
         "en": (
-            "Source mix: {primary} primary, {mainstream} mainstream, "
-            "{stakeholder} stakeholder, {unknown} unknown, {low} low; "
-            "quality {quality}"
+            "Source mix: {primary} primary, {mainstream} established media, "
+            "{stakeholder} interest groups, {unknown} unclassified, "
+            "{low} low quality; source quality {quality}"
         ),
     },
 
@@ -783,48 +411,64 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Evaluating information quality (after round {round}/{max_rounds})...",
     },
     "evaluate_confidence_missing": {
-        "de": "Bewertung unvollständig (CONFIDENCE-Feld fehlt) — nutze Default 5",
-        "en": "Evaluation incomplete (CONFIDENCE field missing) — using default 5",
+        "de": "Bewertung unvollständig (keine Konfidenz angegeben) — es gilt der Standardwert 5",
+        "en": "Evaluation incomplete (no confidence given) — using the default 5",
     },
     "evaluate_confidence_out_of_range": {
-        "de": "Bewertung außerhalb des Wertebereichs (CONFIDENCE={raw}) — auf {clamped} geklemmt",
-        "en": "Evaluation out of range (CONFIDENCE={raw}) — clamped to {clamped}",
+        "de": "Konfidenz der Bewertung außerhalb des Wertebereichs ({raw}) — auf {clamped} begrenzt",
+        "en": "Evaluation confidence out of range ({raw}) — clamped to {clamped}",
     },
     "evaluate_coverage_missing": {
-        "de": "Bewertung ohne Teilfragen-Abdeckung (COVERED_ASPECTS fehlt) — offene Teilfragen bleiben offen",
-        "en": "Evaluation without sub-question coverage (COVERED_ASPECTS missing) — open sub-questions stay open",
+        "de": "Bewertung ohne Teilfragen-Abdeckung — offene Teilfragen bleiben offen",
+        "en": "Evaluation without sub-question coverage — open sub-questions stay open",
     },
     "evaluate_evidence_scores_missing": {
-        "de": "Evidence-Scores unvollständig (CONSISTENCY/SUFFICIENCY-Feld fehlt) — nutze Default 5",
-        "en": "Evidence scores incomplete (CONSISTENCY/SUFFICIENCY field missing) — using default 5",
+        "de": (
+            "Bewertung der Beleglage unvollständig (Widerspruchsfreiheit oder "
+            "Tragfähigkeit nicht bewertet) — es gilt der Standardwert 5"
+        ),
+        "en": (
+            "Evidence assessment incomplete (consistency or sufficiency not "
+            "assessed) — using the default 5"
+        ),
     },
     "evaluate_failed": {
-        "de": "Qualitätsbewertung fehlgeschlagen ({label}) — konservative Confidence-Begrenzung",
+        "de": "Qualitätsbewertung fehlgeschlagen ({label}) — Konfidenz vorsichtig begrenzt",
         "en": "Quality evaluation failed ({label}) — using conservative confidence cap",
     },
     "research_finished": {
-        "de": "Recherche abgeschlossen (Confidence: {conf}/10, Runden: {round})",
+        "de": "Recherche abgeschlossen (Konfidenz: {conf}/10, Runden: {round})",
         "en": "Research finished (Confidence: {conf}/10, Rounds: {round})",
     },
     "confidence_continue": {
-        "de": "Confidence {conf}/10 — weitere Recherche nötig",
+        "de": "Konfidenz {conf}/10 — weitere Recherche nötig",
         "en": "Confidence {conf}/10 — further research needed",
     },
     "evaluate_quality_summary": {
         "de": (
             "Bewertungssignal: Quellenqualität {source_quality}, "
-            "Claim-Qualität {claim_quality}, {evidence_records} Evidenz-Records, "
-            "{open_aspects} offene Aspekte"
+            "Aussagenqualität {claim_quality}, {evidence_records} Belege, "
+            "{open_aspects} offene Teilfragen"
         ),
         "en": (
             "Evaluation signal: source quality {source_quality}, "
-            "claim quality {claim_quality}, {evidence_records} evidence records, "
-            "{open_aspects} open aspects"
+            "statement quality {claim_quality}, {evidence_records} evidence records, "
+            "{open_aspects} open sub-questions"
         ),
     },
     "min_rounds_continue": {
-        "de": "min_rounds={min_rounds} noch nicht erreicht (aktuell {round}); setze Recherche fort",
-        "en": "min_rounds={min_rounds} not yet reached (currently {round}); continuing research",
+        "de": "Mindestzahl der Runden ({min_rounds}) noch nicht erreicht (aktuell {round}); Recherche geht weiter",
+        "en": "Minimum number of rounds ({min_rounds}) not yet reached (currently {round}); continuing research",
+    },
+    "evaluate_evidence_too_thin": {
+        "de": (
+            "Beleglage noch zu dünn (berichtsfähige Belege: {count}, nötig sind "
+            "mindestens {minimum}); weitere Recherche."
+        ),
+        "en": (
+            "Evidence still too thin (report-ready evidence records: {count}, "
+            "at least {minimum} needed); continuing research."
+        ),
     },
 
     # ---- answer (nodes.py) ----
@@ -841,7 +485,7 @@ MESSAGES: dict[str, dict[str, str]] = {
     "answer_examined_heading": {"de": "## Weitere geprüfte Quellen", "en": "## Further examined sources"},
     "answer_examined_intro": {
         "de": "Im Text nicht zitiert; vom Recherchelauf gesichtet und unter den Belegen des Laufs geführt.",
-        "en": "Not cited in the text; examined by the research run and contained in the evidence ledger.",
+        "en": "Not cited in the text; examined by the research run and listed among its evidence.",
     },
     "answer_reference_label": {"de": "Quelle", "en": "Source"},
     "answer_evidence_label_unassigned": {
@@ -851,10 +495,33 @@ MESSAGES: dict[str, dict[str, str]] = {
     "answer_completeness_heading": {"de": "## Hinweis zur Vollständigkeit", "en": "## Note on completeness"},
     "answer_completeness_status": {"de": "- Status: unvollständig", "en": "- Status: incomplete"},
     "answer_completeness_provider_stop": {
-        "de": "- Provider-Stoppgrund: `{finish_reason}`",
-        "en": "- Provider stop reason: `{finish_reason}`",
+        "de": "- Stoppgrund des Modells: `{finish_reason}`",
+        "en": "- Model stop reason: `{finish_reason}`",
     },
     "answer_completeness_diagnosis": {"de": "- Diagnose: {reasons}", "en": "- Diagnosis: {reasons}"},
+    # Why a written report or section looks cut off, one text per signal:
+    # in the run's language for the reader, in English for the logs.
+    "answer_incomplete_reason_empty": {"de": "der Text ist leer", "en": "the text is empty"},
+    "answer_incomplete_reason_open_bold": {
+        "de": "Fettschrift am Ende nicht geschlossen",
+        "en": "bold text not closed at the end",
+    },
+    "answer_incomplete_reason_open_code": {
+        "de": "Codeblock am Ende nicht geschlossen",
+        "en": "code block not closed at the end",
+    },
+    "answer_incomplete_reason_fragment": {
+        "de": "endet mit einem kurzen Bruchstück ohne Satzende",
+        "en": "ends in a short fragment without a sentence ending",
+    },
+    "answer_incomplete_reason_stop": {
+        "de": "Stoppgrund des Modells: {detail}",
+        "en": "model stop reason: {detail}",
+    },
+    "answer_incomplete_reason_missing_sections": {
+        "de": "fehlende Abschlussabschnitte: {detail}",
+        "en": "missing closing sections: {detail}",
+    },
     "answer_completeness_hint": {
         "de": "- Hinweis: Bereits sauber abgeschlossene Abschnitte bleiben sichtbar; es wurde keine verdeckende Regeneration ausgeführt.",
         "en": "- Note: sections that finished cleanly stay visible; no masking regeneration was run.",
@@ -864,23 +531,53 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "- Sources not evaluated: {cut} did not fit into the evidence budget and were not evaluated in the report (search queries: {queries}).",
     },
     "answer_evidence_notice_heading": {"de": "## Evidenzhinweis", "en": "## Evidence notice"},
+    # What source_context_only counts: no cited sentence restates a statement
+    # recorded for the source it cites, whatever that statement's status.
     "answer_evidence_notice_source_context": {
-        "de": "Die Antwort stützt sich auf quellenbasierten Kontext aus den Belegen, aber keine der zitierten Quellen trägt eine verifizierte oder strittige Aussage. Sie ist daher eine quellenbasierte Zusammenfassung, kein geprüfter Faktenbericht.",
-        "en": "The answer rests on source-based evidence-ledger context, but none of the cited sources carries a verified or contested statement. It is therefore a source-based synthesis, not a verified hard-fact report.",
-    },
-    "answer_evidence_notice_single_source": {
-        "de": "Die Evidenzlage stützt sich überwiegend auf Einzelquellen: {single} von {supported} gestützten Aussagen ({ratio} %) ruhen auf einer einzigen Quelle, nur {cross} sind mehrfach belegt. Aussagen, die weder mehrfach belegt sind noch aus einer Primärquelle stammen, sind als Angaben einer einzelnen Quelle zu lesen; die in einem Satz genannte Quelle trägt die jeweilige Behauptung allein.",
-        "en": "The evidence is predominantly single-source: {single} of {supported} supported statements ({ratio} %) rest on a single source, only {cross} are cross-checked. Statements without a cross-checked or primary-source basis are single-source attributions; the source given in a sentence carries that claim alone.",
+        "de": "Kein Satz der Antwort, der eine Quelle zitiert, gibt eine zu dieser Quelle erfasste Aussage wieder. Ob ein Satz von seiner Quelle gestützt wird, ist daher nicht festgestellt.",
+        "en": "No sentence of the answer that cites a source restates a statement recorded for that source. Whether a sentence is supported by its source is therefore not established.",
     },
     "answer_evidence_notice_unbound": {
-        "de": "Einige zitierte Links ließen sich keinem Beleg zuordnen. Die betroffenen Punkte sind als nicht ausreichend belegt zu behandeln.",
-        "en": "Some cited links could not be traced back to an evidence record. Treat the affected points as insufficiently supported.",
+        "de": "Mindestens ein zitierter Link ließ sich keinem Beleg zuordnen. Die betroffenen Punkte sind als nicht ausreichend belegt zu behandeln.",
+        "en": "At least one cited link could not be traced back to an evidence record. Treat the affected points as insufficiently supported.",
     },
-    "answer_stats_sources": {"de": "{n} Quellen recherchiert", "en": "{n} sources researched"},
-    "answer_stats_evidence_prompt_one": {"de": "{count} Beleg für den Bericht bereitgestellt", "en": "{count} evidence record in the evidence prompt"},
-    "answer_stats_evidence_prompt_other": {"de": "{count} Belege für den Bericht bereitgestellt", "en": "{count} evidence records in the evidence prompt"},
-    "answer_stats_linked": {"de": "{n} Quellen im Report verlinkt", "en": "{n} sources linked in the report"},
-    "answer_stats_verified": {"de": "{n} verifizierte Aussagen", "en": "{n} verified statements"},
+    "answer_evidence_notice_citation_without_claim": {
+        "de": "Zu mindestens einer zitierten Quelle ist keine Aussage erfasst. Die Punkte, die sich auf sie stützen, sind als nicht ausreichend belegt zu behandeln.",
+        "en": "At least one cited source carries no recorded statement. Treat the points that rest on it as insufficiently supported.",
+    },
+    "answer_evidence_notice_algorithm_failure": {
+        "de": "Mindestens ein Schritt der Recherche ist fehlgeschlagen. Der Bericht entstand trotzdem, kann aber auf weniger Belegen beruhen als vorgesehen.",
+        "en": "At least one step of the research failed. The report was still written but may rest on less evidence than intended.",
+    },
+    # The basis line under every report that cites a source; its words mean
+    # what the research note to a parent run says (agents/kernel/evidence_read.py).
+    "answer_evidence_basis_provider_context": {
+        "de": "Grundlage: die Angaben des Suchanbieters zu den zitierten Quellen; die Seiten selbst wurden nicht gelesen.",
+        "en": "Basis: what the search provider returned for the cited sources; the pages themselves were not read.",
+    },
+    "answer_evidence_basis_evidence": {
+        "de": "Grundlage: das gespeicherte Material der zitierten Quellen, nicht allein die Angaben des Suchanbieters.",
+        "en": "Basis: the stored material of the cited sources, not the search provider's context alone.",
+    },
+    "answer_evidence_basis_provider_only": {
+        "de": "Zitierte Quellen nur mit den Angaben des Suchanbieters: {provider_only} von {cited}.",
+        "en": "Cited sources with only what the search provider returned: {provider_only} of {cited}.",
+    },
+    # The numbers of the evidence-depth gap: every supported statement the
+    # research collected, not only those the report cites.
+    "answer_evidence_depth_numbers": {
+        "de": "Gestützte Aussagen der Recherche mit mehr als einer Quelle: {multi} von {supported}.",
+        "en": "Supported statements of the research with more than one source: {multi} of {supported}.",
+    },
+    # The stats footer, one piece per count, joined with " · ".
+    "answer_stats_sources_one": {"de": "{count} Quelle recherchiert", "en": "{count} source researched"},
+    "answer_stats_sources_other": {"de": "{count} Quellen recherchiert", "en": "{count} sources researched"},
+    "answer_stats_evidence_prompt_one": {"de": "{count} Beleg für den Bericht bereitgestellt", "en": "{count} evidence record provided for the report"},
+    "answer_stats_evidence_prompt_other": {"de": "{count} Belege für den Bericht bereitgestellt", "en": "{count} evidence records provided for the report"},
+    "answer_stats_linked_one": {"de": "{count} Quelle im Bericht verlinkt", "en": "{count} source linked in the report"},
+    "answer_stats_linked_other": {"de": "{count} Quellen im Bericht verlinkt", "en": "{count} sources linked in the report"},
+    "answer_stats_verified_one": {"de": "{count} verifizierte Aussage", "en": "{count} verified statement"},
+    "answer_stats_verified_other": {"de": "{count} verifizierte Aussagen", "en": "{count} verified statements"},
     "answer_stats_attributed_one": {
         "de": "{count} vom Anbieter zugeschriebene Aussage",
         "en": "{count} statement attributed by the search provider",
@@ -889,51 +586,59 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "{count} vom Anbieter zugeschriebene Aussagen",
         "en": "{count} statements attributed by the search provider",
     },
-    "answer_stats_cross_checked": {"de": "{n} mehrfach belegte Aussagen", "en": "{n} cross-checked statements"},
+    # Verified statements whose basis is cross-checked; the search step
+    # counts that basis whatever the status, and says so.
+    "answer_stats_cross_checked_one": {
+        "de": "{count} verifizierte Aussage gegengeprüft",
+        "en": "{count} verified statement cross-checked",
+    },
+    "answer_stats_cross_checked_other": {
+        "de": "{count} verifizierte Aussagen gegengeprüft",
+        "en": "{count} verified statements cross-checked",
+    },
     "answer_stats_omitted_one": {"de": "{count} Evidenzbeleg wegen Budget ausgelassen", "en": "{count} evidence record omitted for budget"},
     "answer_stats_omitted_other": {"de": "{count} Evidenzbelege wegen Budget ausgelassen", "en": "{count} evidence records omitted for budget"},
-    "answer_stats_searches": {"de": "{n} Suchen", "en": "{n} searches"},
+    "answer_stats_failed_steps_one": {"de": "{count} fehlgeschlagener Schritt", "en": "{count} failed step"},
+    "answer_stats_failed_steps_other": {"de": "{count} fehlgeschlagene Schritte", "en": "{count} failed steps"},
+    "answer_stats_searches_one": {"de": "{count} Suche", "en": "{count} search"},
+    "answer_stats_searches_other": {"de": "{count} Suchen", "en": "{count} searches"},
     "answer_stats_round_one": {"de": "{count} Runde", "en": "{count} round"},
     "answer_stats_round_other": {"de": "{count} Runden", "en": "{count} rounds"},
+    "answer_stats_confidence": {"de": "Konfidenz {conf}/10", "en": "Confidence {conf}/10"},
     "answer_section_start": {
-        "de": "Schreibe Report-Abschnitt {index}/{total}: {heading}",
+        "de": "Schreibe Berichtsabschnitt {index}/{total}: {heading}",
         "en": "Writing report section {index}/{total}: {heading}",
     },
     "answer_round_singular": {"de": "Runde", "en": "round"},
     "answer_round_plural": {"de": "Runden", "en": "rounds"},
     "answer_fallback_model": {
-        "de": "Finale Antwort fehlgeschlagen — Fallback-Modell {model}",
-        "en": "Final answer failed — fallback model {model}",
+        "de": "Der Bericht ließ sich nicht schreiben; neuer Versuch mit dem Ersatzmodell {model}",
+        "en": "The report could not be written; trying again with the backup model {model}",
     },
+    # The steps of an answer without a written report end in {outcome}: one of
+    # the two texts below, depending on whether the research gathered material.
     "answer_timeout_fallback": {
-        "de": (
-            "Antwort-Synthese-Timeout — Antwort enthält nur die bisherigen "
-            "Recherche-Ergebnisse mit Warnhinweis"
-        ),
-        "en": (
-            "Answer synthesis timeout — answer contains only the existing "
-            "research results with a warning header"
-        ),
+        "de": "Das Schreiben des Berichts hat die Zeitgrenze überschritten; {outcome}",
+        "en": "Writing the report exceeded the time limit; {outcome}",
     },
     "answer_provider_failed_no_fallback": {
         "de": (
-            "Antwort-Synthese fehlgeschlagen ({error}) — kein Fallback-Modell "
-            "konfiguriert; Antwort enthält nur die Recherche-Ergebnisse mit Warnhinweis"
+            "Der Bericht ließ sich nicht schreiben ({error}); es ist kein "
+            "Ersatzmodell eingerichtet; {outcome}"
         ),
-        "en": (
-            "Answer synthesis failed ({error}) — no fallback model configured; "
-            "answer contains only the research results with a warning header"
-        ),
+        "en": "The report could not be written ({error}); no backup model is set up; {outcome}",
     },
     "answer_fallback_model_failed": {
-        "de": (
-            "Antwort-Synthese und Fallback-Modell fehlgeschlagen ({error}) — "
-            "Antwort enthält nur die Recherche-Ergebnisse mit Warnhinweis"
-        ),
-        "en": (
-            "Answer synthesis and fallback model failed ({error}) — "
-            "answer contains only the research results with a warning header"
-        ),
+        "de": "Auch das Ersatzmodell konnte den Bericht nicht schreiben ({error}); {outcome}",
+        "en": "The backup model could not write the report either ({error}); {outcome}",
+    },
+    "answer_fallback_outcome_material": {
+        "de": "die Antwort zeigt das bisher gesammelte Material mit einem Warnhinweis",
+        "en": "the answer shows the material gathered so far with a warning",
+    },
+    "answer_fallback_outcome_no_material": {
+        "de": "es liegt noch kein gesammeltes Material vor, die Antwort zeigt nur einen Warnhinweis",
+        "en": "no material has been gathered yet, so the answer shows only a warning",
     },
     "answer_incomplete_detected": {
         "de": "Finale Antwort als unvollständig erkannt",
@@ -944,16 +649,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "{n} non-allowed links removed",
     },
     "evidence_contract_needs_review": {
-        "de": "Antwort-Evidenz-Vertrag verletzt — Bericht wird konservativ markiert",
-        "en": "Answer evidence contract violated — marking report conservatively",
+        "de": "Belege des Berichts mit Einschränkung — der Evidenzhinweis unter dem Bericht nennt den Grund",
+        "en": "The report's evidence has a limitation — the evidence notice under the report names the reason",
     },
     "evidence_contract_source_context_only": {
-        "de": "ALGO-FAIL report_evidence: Quellenkontext ohne verifizierte Report-Evidence-Bundles",
-        "en": "ALGO-FAIL report_evidence: source context has no verified report evidence bundles",
+        "de": "Kein zitierter Satz gibt eine erfasste Aussage wieder — der Evidenzhinweis unter dem Bericht erklärt es",
+        "en": "No cited sentence restates a recorded statement — the evidence notice under the report explains it",
     },
     "algorithm_failure_report_blocked": {
-        "de": "ALGO-FAIL: normaler Report blockiert ({count} blockierende Kernfehler)",
-        "en": "ALGO-FAIL: normal report blocked ({count} blocking core failures)",
+        "de": "Der normale Bericht entfällt wegen blockierender Fehler (Anzahl: {count})",
+        "en": "The normal report is withheld because of blocking failures (count: {count})",
     },
 
     # ---- graph.py ----
@@ -976,7 +681,7 @@ MESSAGES: dict[str, dict[str, str]] = {
 
     # ---- stop_criteria.py ----
     "contradictions_severe": {
-        "de": "Schwere Widersprüche erkannt — Confidence stark begrenzt",
+        "de": "Schwere Widersprüche erkannt — Konfidenz stark begrenzt",
         "en": "Severe contradictions detected — confidence strongly capped",
     },
     "contradictions_light": {
@@ -988,22 +693,12 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Multiple possible explanations detected",
     },
     "falsification_released": {
-        "de": "Confidence wieder hoch — Falsifikations-Modus deaktiviert",
+        "de": "Konfidenz wieder hoch — Falsifikations-Modus deaktiviert",
         "en": "Confidence recovered — falsification mode deactivated",
     },
     "falsification_started": {
         "de": "Niedrige Evidenz — starte Falsifikations-Recherche",
         "en": "Low evidence — starting falsification research",
-    },
-    "stagnation_premise_false": {
-        "de": (
-            "Umfangreiche Recherche abgeschlossen — "
-            "Prämisse der Frage wahrscheinlich falsch"
-        ),
-        "en": (
-            "Extensive research complete — "
-            "question premise likely false"
-        ),
     },
     "stagnation_low_evidence_stop": {
         "de": (
@@ -1020,13 +715,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Information gain stagnating — ending research",
     },
     "plateau_stop": {
-        "de": "Confidence {conf}/10 stabil — Recherche abgeschlossen",
+        "de": "Konfidenz {conf}/10 stabil — Recherche abgeschlossen",
         "en": "Confidence {conf}/10 stable — research complete",
     },
 
     # ---- streaming.py SSE error chunks (user-facing) ----
     "sse_request_timeout": {
-        "de": "\n---\n\n⚠️ **Fehler bei der Recherche:** Request-Timeout erreicht",
+        "de": "\n---\n\n⚠️ **Fehler bei der Recherche:** Zeitgrenze der Anfrage erreicht",
         "en": "\n---\n\n⚠️ **Research error:** request timeout reached",
     },
     "sse_agent_error": {
@@ -1035,61 +730,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
 
     # ---- agents/narration.py transcript lines (Agent Desk) ----
-    # A counted phrase is a one/other pair; a sentence that counts two
-    # things takes each phrase whole into a fixed slot of its frame (the
-    # accusative object below), so the frame owns the word order.
-    "agent_narration_discovery_empty": {
-        "de": "Die Erkundung hat weder belegte Fakten noch offene Lücken ergeben.",
-        "en": "The exploration produced neither supported facts nor open gaps.",
-    },
-    "agent_narration_discovery_counts": {
-        "de": "Ich habe {facts} und {gaps} identifiziert.",
-        "en": "I identified {facts} and {gaps}.",
-    },
-    "agent_narration_discovery_facts_one": {
-        "de": "{count} belegten Fakt", "en": "{count} supported fact",
-    },
-    "agent_narration_discovery_facts_other": {
-        "de": "{count} belegte Fakten", "en": "{count} supported facts",
-    },
-    "agent_narration_discovery_gaps_one": {
-        "de": "{count} offene Lücke", "en": "{count} open gap",
-    },
-    "agent_narration_discovery_gaps_other": {
-        "de": "{count} offene Lücken", "en": "{count} open gaps",
-    },
-    "agent_narration_discovery_top_gap": {
-        "de": "Wichtigste Lücke: {gap}",
-        "en": "Most important gap: {gap}",
-    },
-    "agent_narration_plan_proposal_one": {
-        "de": "Ich schlage einen Plan mit {count} Aufgabe vor.",
-        "en": "I propose a plan with {count} task.",
-    },
-    "agent_narration_plan_proposal_other": {
-        "de": "Ich schlage einen Plan mit {count} Aufgaben vor.",
-        "en": "I propose a plan with {count} tasks.",
-    },
-    "agent_narration_plan_summary_one": {
-        "de": "Mein Plan ({count} Aufgabe): {summary}",
-        "en": "My plan ({count} task): {summary}",
-    },
-    "agent_narration_plan_summary_other": {
-        "de": "Mein Plan ({count} Aufgaben): {summary}",
-        "en": "My plan ({count} tasks): {summary}",
-    },
-    "agent_narration_synthesis_one": {
-        "de": "Ich schreibe jetzt das Memo '{title}' mit {count} Abschnitt.",
-        "en": "I am now writing the memo '{title}' with {count} section.",
-    },
-    "agent_narration_synthesis_other": {
-        "de": "Ich schreibe jetzt das Memo '{title}' mit {count} Abschnitten.",
-        "en": "I am now writing the memo '{title}' with {count} sections.",
-    },
-    "agent_narration_section_written": {
-        "de": "Abschnitt '{title}' geschrieben.",
-        "en": "Section '{title}' written.",
-    },
     # What stands in a transcript line in place of an internal identifier.
     # A narration line is assembled from finished artifacts, so there is
     # no writer left to ask for a repair - and dropping the line would
@@ -1099,10 +739,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "[internal identifier removed]",
     },
 
-    # ---- agents/algorithm.py transcript channel (narration + activity) ----
-    # Only the TRANSCRIPT lives here. A task row's persisted
-    # ``result_summary`` is state, not speech, and carries a reason code
-    # instead (rendered at the display boundary).
+    # ---- agent transcript channel (narration + activity) ----
     "agent_limit_tokens_narration": {
         "de": (
             "Das feste serverseitige Tokenlimit ist erreicht. Der Lauf wurde "
@@ -1114,45 +751,6 @@ MESSAGES: dict[str, dict[str, str]] = {
             "without an automatic partial answer; it cannot be extended."
         ),
     },
-    "agent_limit_tokens_detail": {
-        "de": "Serverseitiges Tokenbudget erreicht",
-        "en": "Server-side token budget reached",
-    },
-    # Task and synthesis outcome summaries. These are PERSISTED with the
-    # plan row and read back long after the run, so they follow the run's
-    # answer language like every other text the run produces.
-    "agent_task_summary_cancelled_by_user": {
-        "de": "Aufgabe auf Nutzerwunsch abgebrochen.",
-        "en": "Task cancelled at the user's request.",
-    },
-    "agent_task_summary_skipped_cancelled": {
-        "de": "Wegen Abbruch nicht ausgeführt.",
-        "en": "Not executed because the run was cancelled.",
-    },
-    "agent_task_summary_token_budget": {
-        "de": "Serverseitiges Tokenbudget erreicht.",
-        "en": "Server-side token budget reached.",
-    },
-    "agent_task_summary_no_document_content": {
-        "de": "Keine Dokumentinhalte gefunden.",
-        "en": "No document content found.",
-    },
-    "agent_synthesis_summary_not_restarted": {
-        "de": "Synthese nach einer Unterbrechung nicht erneut gestartet.",
-        "en": "Synthesis was not restarted after an interruption.",
-    },
-    "agent_synthesis_summary_invalid_labels": {
-        "de": "Synthese wegen ungültiger Belege-Labels verworfen.",
-        "en": "Synthesis discarded because of invalid evidence labels.",
-    },
-    "agent_synthesis_summary_failed": {
-        "de": "Synthese fehlgeschlagen.",
-        "en": "Synthesis failed.",
-    },
-    "agent_synthesis_summary_done": {
-        "de": "Synthese abgeschlossen.",
-        "en": "Synthesis completed.",
-    },
     "question_too_long": {
         "de": (
             "Die Frage ist zu lang (max. {limit} Zeichen). Bitte kürzer "
@@ -1163,27 +761,28 @@ MESSAGES: dict[str, dict[str, str]] = {
             "shorten it."
         ),
     },
+    # The reasons of the step plan_query_generation_failed.
     "research_query_plan_not_json": {
-        "de": "Suchquery-Planung lieferte keine valide JSON-Liste",
-        "en": "Query planning did not return a valid JSON list",
+        "de": "keine lesbare Liste von Suchanfragen erhalten",
+        "en": "no readable list of search queries returned",
     },
     "research_answer_failed_fallback_failed_body": {
         "de": (
-            "Antwort-Synthese fehlgeschlagen ({error}); das Fallback-Modell "
-            "`{model}` ist ebenfalls fehlgeschlagen ({fallback_error})."
+            "Der Bericht ließ sich nicht schreiben ({error}); auch das "
+            "Ersatzmodell `{model}` ist gescheitert ({fallback_error})."
         ),
         "en": (
-            "Answer synthesis failed ({error}); the fallback model `{model}` "
-            "failed as well ({fallback_error})."
+            "The report could not be written ({error}); the backup model "
+            "`{model}` failed as well ({fallback_error})."
         ),
     },
     "research_answer_failed_no_fallback_body": {
         "de": (
-            "Antwort-Synthese fehlgeschlagen ({error}); kein Fallback-Modell "
-            "konfiguriert."
+            "Der Bericht ließ sich nicht schreiben ({error}); ein Ersatzmodell "
+            "ist nicht eingerichtet."
         ),
         "en": (
-            "Answer synthesis failed ({error}); no fallback model configured."
+            "The report could not be written ({error}); no backup model is set up."
         ),
     },
     "kernel_recovery_context_window": {
@@ -1256,77 +855,8 @@ MESSAGES: dict[str, dict[str, str]] = {
             "archive."
         ),
     },
-    "agent_synthesis_summary_cancelled": {
-        "de": (
-            "Synthese abgebrochen; ein begonnenes Ergebnis wurde nicht "
-            "übernommen."
-        ),
-        "en": (
-            "Synthesis cancelled; work already begun was not adopted."
-        ),
-    },
-    "agent_task_summary_cancelled_midway": {
-        "de": (
-            "Ausführung abgebrochen; ein begonnenes Ergebnis wurde nicht "
-            "übernommen."
-        ),
-        "en": (
-            "Execution cancelled; work already begun was not adopted."
-        ),
-    },
-    "agent_task_summary_not_restarted": {
-        "de": "Ausführung nach einer Unterbrechung nicht erneut gestartet.",
-        "en": "Execution was not restarted after an interruption.",
-    },
-    "agent_task_summary_upstream_failed": {
-        "de": (
-            "Nicht ausgeführt, weil alle vorgelagerten Aufgaben "
-            "fehlgeschlagen sind."
-        ),
-        "en": (
-            "Not executed because every upstream task failed."
-        ),
-    },
-    # Settlement of a terminal run's unfinished plan rows. The graph knows
-    # the run language and passes it; the HTTP recovery boundary does not
-    # and falls back to English like every other unresolved language.
-    "agent_task_settled_skipped_cancelled": {
-        "de": "Wegen Abbruch nicht ausgeführt.",
-        "en": "Not executed because the run was cancelled.",
-    },
-    "agent_task_settled_skipped_failed": {
-        "de": "Nicht ausgeführt, weil der Lauf fehlgeschlagen ist.",
-        "en": "Not executed because the run failed.",
-    },
-    "agent_task_settled_running_cancelled": {
-        "de": (
-            "Ausführung abgebrochen; ein begonnenes Ergebnis wurde nicht "
-            "übernommen."
-        ),
-        "en": "Execution cancelled; work already begun was not adopted.",
-    },
-    "agent_task_settled_running_failed": {
-        "de": "Ausführung durch einen Lauf-Fehler unvollständig beendet.",
-        "en": "Execution ended incompletely because the run failed.",
-    },
-    "agent_task_settled_cancel_requested": {
-        "de": (
-            "Aufgabe auf Nutzerwunsch abgebrochen; ein begonnenes Ergebnis "
-            "wurde nicht übernommen."
-        ),
-        "en": (
-            "Task cancelled at the user's request; work already begun was "
-            "not adopted."
-        ),
-    },
-    "agent_memory_label_used": {"de": "Memory verwendet", "en": "Memory used"},
-    "agent_memory_label_empty": {"de": "Memory geprüft", "en": "Memory checked"},
     "agent_memory_label_unavailable": {
         "de": "Memory nicht verfügbar", "en": "Memory unavailable",
-    },
-    "agent_memory_detail_used": {
-        "de": "Langzeit-Memory liefert Kontext, aber keine Evidenz.",
-        "en": "Long-term memory provides context, but no evidence.",
     },
     "agent_memory_detail_unavailable": {
         "de": "Langzeit-Memory ist für diesen Lauf nicht nutzbar.",
@@ -1336,204 +866,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Memory-Kandidaten konnten nicht erzeugt werden.",
         "en": "Memory candidates could not be generated.",
     },
-    "agent_clarify_settled_one": {
-        "de": (
-            "Eine Rückfrage entfällt, weil die Einstellungen des Auftrags sie "
-            "beantworten: {items}."
-        ),
-        "en": (
-            "One clarifying question is dropped because the assignment's "
-            "settings answer it: {items}."
-        ),
-    },
-    "agent_clarify_settled_other": {
-        "de": (
-            "{count} Rückfragen entfallen, weil die Einstellungen des Auftrags "
-            "sie beantworten: {items}."
-        ),
-        "en": (
-            "{count} clarifying questions are dropped because the assignment's "
-            "settings answer them: {items}."
-        ),
-    },
-    "agent_clarify_settled_item": {
-        "de": "„{prompt}“ ({setting})",
-        "en": "“{prompt}” ({setting})",
-    },
-    "agent_clarify_not_asked_limit_one": {
-        "de": "Das Rückfrage-Limit dieses Laufs ist erreicht; nicht gestellt: {items}.",
-        "en": "This run's clarification limit is reached; not asked: {items}.",
-    },
-    "agent_clarify_not_asked_limit_other": {
-        "de": (
-            "Das Rückfrage-Limit dieses Laufs ist erreicht; {count} Rückfragen "
-            "nicht gestellt: {items}."
-        ),
-        "en": (
-            "This run's clarification limit is reached; {count} clarifying "
-            "questions not asked: {items}."
-        ),
-    },
-    "agent_clarify_not_asked_tier_one": {
-        "de": "In dieser Stufe stellt der Lauf keine Rückfragen. Offen war: {items}.",
-        "en": "At this tier the run asks no clarifying questions. Left open: {items}.",
-    },
-    "agent_clarify_not_asked_tier_other": {
-        "de": (
-            "In dieser Stufe stellt der Lauf keine Rückfragen. Offen waren "
-            "{count} Rückfragen: {items}."
-        ),
-        "en": (
-            "At this tier the run asks no clarifying questions. {count} "
-            "questions were left open: {items}."
-        ),
-    },
-    "agent_clarify_not_asked_overflow_one": {
-        "de": (
-            "Die Runde ist voll (Obergrenze: {limit}); eine weitere Rückfrage "
-            "nicht gestellt: {items}."
-        ),
-        "en": (
-            "The round is full (cap: {limit}); one more clarifying question "
-            "not asked: {items}."
-        ),
-    },
-    "agent_clarify_not_asked_overflow_other": {
-        "de": (
-            "Die Runde ist voll (Obergrenze: {limit}); {count} weitere "
-            "Rückfragen nicht gestellt: {items}."
-        ),
-        "en": (
-            "The round is full (cap: {limit}); {count} more clarifying "
-            "questions not asked: {items}."
-        ),
-    },
-    "agent_clarify_assumed_item": {
-        "de": "„{prompt}“ – angenommen: {assumption}",
-        "en": "“{prompt}” – assumed: {assumption}",
-    },
-    "agent_clarify_no_assumption": {
-        "de": "„{prompt}“ – ohne vorgeschlagene Annahme",
-        "en": "“{prompt}” – no assumption proposed",
-    },
-    "agent_clarify_skipped_one": {
-        "de": (
-            "{count} Rückfrage übersprungen, die dieser Lauf schon gestellt "
-            "oder mit einer Annahme belegt hat."
-        ),
-        "en": (
-            "{count} clarifying question skipped that this run already asked "
-            "or settled with an assumption."
-        ),
-    },
-    "agent_clarify_skipped_other": {
-        "de": (
-            "{count} Rückfragen übersprungen, die dieser Lauf schon gestellt "
-            "oder mit einer Annahme belegt hat."
-        ),
-        "en": (
-            "{count} clarifying questions skipped that this run already asked "
-            "or settled with an assumption."
-        ),
-    },
-    "agent_setting_scope_pinned_one": {
-        "de": "festgelegte Sammlung {names}",
-        "en": "selected collection {names}",
-    },
-    "agent_setting_scope_pinned_other": {
-        "de": "festgelegte Sammlungen {names}",
-        "en": "selected collections {names}",
-    },
-    "agent_setting_collection_name": {
-        "de": "„{name}“",
-        "en": "“{name}”",
-    },
-    "agent_setting_scope_count_one": {
-        "de": "{count} festgelegte Sammlung",
-        "en": "{count} selected collection",
-    },
-    "agent_setting_scope_count_other": {
-        "de": "{count} festgelegte Sammlungen",
-        "en": "{count} selected collections",
-    },
-    "agent_setting_scope_only": {
-        "de": "einzige für diesen Lauf freigegebene Sammlung {names}",
-        "en": "the only collection released for this run, {names}",
-    },
-    "agent_setting_scope_only_unnamed": {
-        "de": "eine einzige für diesen Lauf freigegebene Sammlung",
-        "en": "a single collection released for this run",
-    },
-    "agent_setting_scope_none": {
-        "de": "für diesen Lauf ist keine Wissenssammlung freigegeben",
-        "en": "no knowledge collection is released for this run",
-    },
-    "agent_setting_scope_all": {
-        "de": "alle für Sie sichtbaren Wissenssammlungen",
-        "en": "all knowledge collections visible to you",
-    },
-    "agent_setting_knowledge_off": {
-        "de": "Projektwissen ist ausgeschaltet",
-        "en": "project knowledge is off",
-    },
-    "agent_setting_web_off": {
-        "de": "Websuche ist ausgeschaltet",
-        "en": "web search is off",
-    },
-    "agent_setting_form_chat": {
-        "de": "festgelegte Ausgabeform Chat-Antwort",
-        "en": "fixed output form: chat answer",
-    },
-    "agent_setting_form_canvas": {
-        "de": "festgelegte Ausgabeform Canvas-Dokument",
-        "en": "fixed output form: canvas document",
-    },
-    "agent_plan_assumption_unproposed": {
-        "de": "Nicht gestellte Rückfrage ohne vorgeschlagene Annahme: „{prompt}“",
-        "en": "Question not asked, no assumption proposed: “{prompt}”",
-    },
-    "agent_plan_assumption_web_not_needed": {
-        "de": (
-            "Die Websuche ist nicht eingeplant: Der Auftrag braucht nach "
-            "seiner Einordnung keine öffentlichen Quellen. Soll das Web "
-            "mitgeprüft werden, verlange es ausdrücklich im Auftrag."
-        ),
-        "en": (
-            "Web search is not planned: as the assignment was read, it needs "
-            "no public sources. To include the web, ask for it explicitly in "
-            "the assignment."
-        ),
-    },
-    "agent_discovery_limit_narration_one": {
-        "de": (
-            "Die Erkundung hat ihr Abrufbudget ausgeschöpft (Obergrenze: "
-            "{limit}); {count} geplanter Abruf wurde ausgelassen."
-        ),
-        "en": (
-            "The exploration used up its lookup budget (cap: {limit}); "
-            "{count} planned lookup was left out."
-        ),
-    },
-    "agent_discovery_limit_narration_other": {
-        "de": (
-            "Die Erkundung hat ihr Abrufbudget ausgeschöpft (Obergrenze: "
-            "{limit}); {count} geplante Abrufe wurden ausgelassen."
-        ),
-        "en": (
-            "The exploration used up its lookup budget (cap: {limit}); "
-            "{count} planned lookups were left out."
-        ),
-    },
-    "agent_answer_written": {
-        "de": "Antwort verfasst.", "en": "Answer written.",
-    },
-    "agent_memory_candidate_label": {
-        "de": "Memory-Kandidat erzeugt", "en": "Memory candidate created",
-    },
-    "agent_memory_candidate_detail": {
-        "de": "Der Kandidat wartet auf Nutzerfreigabe.",
-        "en": "The candidate is waiting for your approval.",
-    },
     "agent_critic_revision_discarded_label": {
         "de": "Prüfung: Überarbeitung verworfen",
         "en": "Review: revision discarded",
@@ -1542,469 +874,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Prüfung: Überarbeitung teilweise verworfen",
         "en": "Review: revision partly discarded",
     },
-    "agent_replan_invalid_label": {
-        "de": "Replan verworfen, weiter mit dem letzten Plan",
-        "en": "Replan discarded, continuing with the last plan",
-    },
-    "agent_critic_no_gap_label": {
-        "de": "Keine belegte Rechercheaufgabe",
-        "en": "No evidenced research task",
-    },
-    "agent_critic_no_gap_detail": {
-        "de": (
-            "Die Prüfung benennt keine klassifizierte Sachlücke; keine "
-            "weitere Recherche."
-        ),
-        "en": (
-            "The review names no classified factual gap; no further research."
-        ),
-    },
-    "agent_critic_cap_label": {
-        "de": "Recherche-Limit erreicht", "en": "Research limit reached",
-    },
-    "agent_critic_no_new_evidence_label": {
-        "de": "Nachrecherche beendet", "en": "Follow-up research ended",
-    },
-    "agent_critic_no_new_evidence_detail": {
-        "de": "Die letzte Nachrecherche fügte keine neuen Belege hinzu; der Lauf recherchiert deshalb nicht weiter.",
-        "en": "The last follow-up research added no new evidence, so the run researches no further.",
-    },
-    "agent_critic_cap_replan_empty_detail": {
-        "de": (
-            "Die Prüfung sieht weiteren Recherchebedarf, aber der Replan ergab "
-            "keine neuen Aufgaben; das Memo bleibt mit der benannten Lücke."
-        ),
-        "en": (
-            "The review sees further research needed, but the replan produced "
-            "no new tasks; the memo keeps the named gap."
-        ),
-    },
-    "agent_critic_replan_all_dropped_detail": {
-        "de": (
-            "Die Prüfung sieht weiteren Recherchebedarf, aber jede neue "
-            "Dokumentanalyse des Replans fände kein Dokument, das dieser Lauf "
-            "noch lesen kann; das Memo bleibt mit der benannten Lücke."
-        ),
-        "en": (
-            "The review sees further research need, but every new document "
-            "analysis of the replan would find no document this run can still "
-            "read; the memo stands with the named gap."
-        ),
-    },
-    # The plan-time check of a replan's new document analysis: searched and
-    # selected as execution would, before the plan version is saved.
-    "agent_replan_analysis_rejected_label": {
-        "de": "Dokumentanalyse nicht eingeplant", "en": "Document analysis not planned",
-    },
-    "agent_replan_analysis_rejected_detail": {
-        "de": (
-            "Die neue Dokumentanalyse „{title}“ fände kein Dokument, das dieser "
-            "Lauf noch lesen kann; sie entfällt."
-        ),
-        "en": (
-            "The new document analysis “{title}” would find no document this run "
-            "can still read; it is dropped."
-        ),
-    },
-    "agent_replan_analysis_found_nothing_detail": {
-        "de": (
-            "Die Suchen der neuen Dokumentanalyse „{title}“ fanden kein Dokument; "
-            "sie entfällt."
-        ),
-        "en": (
-            "The searches of the new document analysis “{title}” found no "
-            "document; it is dropped."
-        ),
-    },
-    "agent_replan_analysis_unchecked_label": {
-        "de": "Dokumentanalyse ungeprüft eingeplant",
-        "en": "Document analysis planned unchecked",
-    },
-    "agent_replan_analysis_unchecked_detail": {
-        "de": (
-            "Vor dem Planen ließ sich nicht prüfen, ob die Dokumentanalyse "
-            "„{title}“ noch Ungelesenes findet; sie bleibt im Plan."
-        ),
-        "en": (
-            "Before planning it could not be checked whether the document "
-            "analysis “{title}” still finds anything unread; it stays in the plan."
-        ),
-    },
-    # Strict autonomy: the check would search before the replan approval.
-    "agent_replan_analysis_consent_detail": {
-        "de": (
-            "Im Modus „Strikt“ sucht die Neuplanung vor der Freigabe nichts; ob "
-            "die Dokumentanalyse „{title}“ noch Ungelesenes findet, zeigt erst "
-            "ihre Ausführung."
-        ),
-        "en": (
-            "In Strict mode the replan searches nothing before the approval; "
-            "whether the document analysis “{title}” still finds anything unread "
-            "shows only when it runs."
-        ),
-    },
-    "agent_document_version_unchecked_label": {
-        "de": "Lesestand nicht geprüft", "en": "Reading state not checked",
-    },
-    "agent_document_version_unchecked_detail_one": {
-        "de": (
-            "{count} gefundenes Dokument ließ sich nicht mit dem abgleichen, was "
-            "dieser Lauf schon gelesen hat; es zählt als ungelesen."
-        ),
-        "en": (
-            "{count} document found could not be compared with what this run has "
-            "already read; it counts as unread."
-        ),
-    },
-    "agent_document_version_unchecked_detail_other": {
-        "de": (
-            "{count} gefundene Dokumente ließen sich nicht mit dem abgleichen, was "
-            "dieser Lauf schon gelesen hat; sie zählen als ungelesen."
-        ),
-        "en": (
-            "{count} documents found could not be compared with what this run has "
-            "already read; they count as unread."
-        ),
-    },
-    # A part of the replan's context the server had to leave out.
-    "agent_replan_context_incomplete_label": {
-        "de": "Kontext der Neuplanung unvollständig", "en": "Replan context incomplete",
-    },
-    "agent_replan_context_incomplete_tasks_before_round_missing_detail": {
-        "de": (
-            "Der Lauf verzeichnet nicht, welche Aufgaben vor dieser Runde liefen; "
-            "die Dokumentanalysen dieser Runde überspringen deshalb nichts, was "
-            "frühere Runden schon gelesen haben."
-        ),
-        "en": (
-            "The run does not record which tasks ran before this round; this "
-            "round's document analyses therefore skip nothing earlier rounds "
-            "already read."
-        ),
-    },
-    "agent_replan_context_incomplete_criteria_changed_detail": {
-        "de": (
-            "Die letzte Prüfung beurteilte andere Erfolgskriterien, als der Plan "
-            "jetzt enthält; ihre offenen Kriterien gehen nicht in die Neuplanung ein."
-        ),
-        "en": (
-            "The last review judged other success criteria than the plan now "
-            "holds; its open criteria are left out of the replan."
-        ),
-    },
-    "agent_replan_context_incomplete_criterion_unclassified_detail": {
-        "de": (
-            "Die letzte Prüfung ließ offene Kriterien ohne gültige Einordnung "
-            "zurück; sie gehen nicht in die Neuplanung ein."
-        ),
-        "en": (
-            "The last review left open criteria without a valid classification; "
-            "they are left out of the replan."
-        ),
-    },
-    "agent_replan_context_incomplete_prospect_missing_detail": {
-        "de": (
-            "Für diese Runde liegt keine Rechercheaussicht vor; die Neuplanung "
-            "erfährt nicht, welches ungelesene Material erreichbar ist."
-        ),
-        "en": (
-            "No research prospect is recorded for this round; the replan is not "
-            "told which unread material is reachable."
-        ),
-    },
-    "agent_gate_subject_discovery": {"de": "Erkundung", "en": "Exploration"},
-    "agent_gate_subject_plan": {"de": "Plan", "en": "Plan"},
-    "agent_gate_rejected_draft_kept": {
-        "de": "{subject} abgelehnt; der bisherige Entwurf bleibt das Ergebnis.",
-        "en": "{subject} rejected; the existing draft remains the result.",
-    },
-    "agent_gate_rejected_receipt": {
-        "de": "{subject} abgelehnt. Es wurde keine Recherche ausgeführt.",
-        "en": "{subject} rejected. No research was carried out.",
-    },
-    "agent_gate_rejected_note_prefix": {"de": "> Notiz: ", "en": "> Note: "},
-    "agent_gate_rejected_resubmit": {
-        "de": (
-            "\n\nPasse den Auftrag an und sende ihn erneut, um einen neuen "
-            "Plan zu erhalten."
-        ),
-        "en": (
-            "\n\nAdjust the assignment and send it again to get a new plan."
-        ),
-    },
-    "agent_gate_rejected_title": {
-        "de": "{subject} abgelehnt", "en": "{subject} rejected",
-    },
-    "agent_gate_rejected_no_research": {
-        "de": "{subject} abgelehnt; der Lauf endet ohne Recherche.",
-        "en": "{subject} rejected; the run ends without research.",
-    },
-    "agent_sufficiency_skipped_label": {
-        "de": "Zusätzliche Abdeckungsbewertung nicht erforderlich",
-        "en": "Additional coverage assessment not required",
-    },
-    "agent_sufficiency_skipped_detail": {
-        "de": (
-            "Keine fehlgeschlagene oder unzureichende Teilaufgabe. Die "
-            "Inhaltsprüfung folgt am fertigen Ergebnis."
-        ),
-        "en": (
-            "No failed or insufficient subtask. The content review follows on "
-            "the finished result."
-        ),
-    },
-    "agent_critic_unavailable_label": {
-        "de": "Prüfung nicht auswertbar", "en": "Review not evaluable",
-    },
-    "agent_critic_unavailable_detail": {
-        "de": (
-            "Es liegt kein gültiges, widerspruchsfreies Prüfurteil vor. Das "
-            "vorhandene Ergebnis bleibt erhalten, ist dadurch aber nicht als "
-            "geprüft bestätigt."
-        ),
-        "en": (
-            "No valid, consistent review verdict is available. The existing "
-            "result is kept, but is not confirmed as reviewed."
-        ),
-    },
-    "agent_critic_quote_escalation_label": {
-        "de": "Web-Zitate nicht verifiziert", "en": "Web quotes not verified",
-    },
-    "agent_critic_quote_escalation_detail": {
-        "de": (
-            "Wörtliche Zitate mit Web-Beleg wurden nicht in den gespeicherten "
-            "Auszügen gefunden; sie gehen als Befunde in die Prüfung ein."
-        ),
-        "en": (
-            "Verbatim quotes with web evidence were not found in the stored "
-            "excerpts; they join the review's findings."
-        ),
-    },
-    "agent_critic_revise_label": {
-        "de": "Prüfung fordert Nachbesserung", "en": "Review requests a revision",
-    },
-    "agent_critic_revise_detail": {
-        "de": "Die benannten Stellen werden überarbeitet.",
-        "en": "The named passages are revised.",
-    },
-    "agent_critic_quote_unanchored": {
-        "de": (
-            "Wörtliches Zitat mit Web-Beleg ohne Treffer im gespeicherten "
-            "Auszug; es steht mehrfach im selben Wortlaut im Text und lässt "
-            "sich nicht gezielt ersetzen: „{quote}“"
-        ),
-        "en": (
-            "Verbatim quote with web evidence that matches no stored excerpt; "
-            "it occurs several times in identical wording and cannot be "
-            "replaced selectively: “{quote}”"
-        ),
-    },
-    "agent_critic_quote_finding": {
-        "de": (
-            "Dieses wörtliche Zitat steht in einem Absatz mit Web-Beleg, findet "
-            "sich aber in keinem gespeicherten Auszug. Durch eine gedeckte "
-            "Formulierung aus den Auszügen ersetzen oder ohne Anführungszeichen "
-            "als Paraphrase kennzeichnen."
-        ),
-        "en": (
-            "This verbatim quote stands in a paragraph with web evidence but "
-            "matches no stored excerpt. Replace it with supported wording from "
-            "the excerpts or mark it as a paraphrase without quotation marks."
-        ),
-    },
-    "agent_critic_research_label": {
-        "de": "Prüfung fordert Nachrecherche", "en": "Review requested more research",
-    },
-    "agent_critic_research_detail_items": {
-        "de": (
-            "Das Memo braucht weitere Evidenz zu: {items} — der Plan wird "
-            "additiv erweitert."
-        ),
-        "en": (
-            "The memo needs further evidence on: {items} — the plan is "
-            "extended additively."
-        ),
-    },
-    "agent_mission_time_budget_label": {
-        "de": "Zeitbudget erreicht", "en": "Time budget reached",
-    },
-    # {minutes} is the budget in the run's number format ("12", "1,5" /
-    # "1.5"); only a whole single minute takes the singular.
-    "agent_mission_time_budget_detail_one": {
-        "de": (
-            "Die Mission hat ihr Zeitbudget von {minutes} Minute Rechenzeit "
-            "ausgeschöpft; die Prüfung sieht weiteren Recherchebedarf, das Memo "
-            "nennt die Lücken als offene Punkte."
-        ),
-        "en": (
-            "The mission spent its time budget of {minutes} minute of compute; "
-            "the review sees further research needed, and the memo names the "
-            "gaps as open points."
-        ),
-    },
-    "agent_mission_time_budget_detail_other": {
-        "de": (
-            "Die Mission hat ihr Zeitbudget von {minutes} Minuten Rechenzeit "
-            "ausgeschöpft; die Prüfung sieht weiteren Recherchebedarf, das Memo "
-            "nennt die Lücken als offene Punkte."
-        ),
-        "en": (
-            "The mission spent its time budget of {minutes} minutes of compute; "
-            "the review sees further research needed, and the memo names the "
-            "gaps as open points."
-        ),
-    },
-    "agent_critic_cap_delegated_detail": {
-        "de": (
-            "Ein Unterauftrag recherchiert höchstens einmal nach; die zweite "
-            "Prüfung übernimmt der Elternlauf, das Memo nennt die Lücken als "
-            "offene Punkte."
-        ),
-        "en": (
-            "A subtask researches again at most once; the parent run takes the "
-            "second review, and the memo names the gaps as open points."
-        ),
-    },
-    "agent_critic_cap_replan_detail": {
-        "de": "Die Prüfung sieht weiteren Recherchebedarf, aber das Replan-Limit ist erreicht.",
-        "en": "The review sees further research needed, but the replan limit is reached.",
-    },
-    "agent_critic_plan_task_limit_label": {
-        "de": "Keine Aufgabe mehr planbar", "en": "No further task can be planned",
-    },
-    "agent_critic_plan_task_limit_detail": {
-        "de": (
-            "Der Plan hat die Höchstzahl an Aufgaben erreicht; eine Neuplanung "
-            "könnte keine Aufgabe mehr hinzufügen."
-        ),
-        "en": (
-            "The plan holds the maximum number of tasks; a replan could add no "
-            "further task."
-        ),
-    },
-    "agent_critic_replan_invalid_detail": {
-        "de": (
-            "Der Plan für die Nachrecherche ließ sich nicht gültig aufstellen; "
-            "das Memo bleibt mit den benannten Lücken."
-        ),
-        "en": (
-            "No valid plan for the follow-up research could be made; the memo "
-            "keeps the named gaps."
-        ),
-    },
-    "agent_critic_replan_rejected_label": {
-        "de": "Nachrecherche abgelehnt", "en": "Follow-up research declined",
-    },
-    "agent_critic_replan_rejected_detail": {
-        "de": (
-            "Die Freigabe der Nachrecherche wurde abgelehnt; das Memo bleibt mit "
-            "den benannten Lücken."
-        ),
-        "en": (
-            "The follow-up research was declined at its approval; the memo keeps "
-            "the named gaps."
-        ),
-    },
-    # A research prospect: whether another research round of the run can
-    # still reach unread material. {branches} and {codes} are "; "-joined
-    # research_branch_* and research_code_* phrases.
-    "agent_research_prospect_open_label": {
-        "de": "Nachrecherche möglich", "en": "Follow-up research possible",
-    },
-    "agent_research_prospect_open_detail": {
-        "de": "Recherche kann noch ungelesenes Material erreichen: {branches}.",
-        "en": "Research can still reach unread material: {branches}.",
-    },
-    "agent_research_prospect_closed_label": {
-        "de": "Nachrecherche ohne Aussicht", "en": "No prospect for follow-up research",
-    },
-    "agent_research_prospect_closed_detail": {
-        "de": (
-            "Recherche kann in diesem Lauf kein ungelesenes Material mehr "
-            "erreichen: {codes}."
-        ),
-        "en": "Research can reach no further unread material in this run: {codes}.",
-    },
-    "agent_research_prospect_gate_detail": {
-        "de": "Die Belege dieser Runde gehen ohne Neuplanung in die Synthese.",
-        "en": "The evidence of this round goes into the synthesis without a replan.",
-    },
-    "research_branch_coverage": {
-        "de": "ungelesene Teile schon gelesener Dokumente",
-        "en": "unread parts of documents already read",
-    },
-    "research_branch_not_selected": {
-        "de": "gefundene, noch nicht gelesene Dokumente",
-        "en": "documents found but not yet read",
-    },
-    "research_branch_collection": {
-        "de": "freigegebene Sammlungen, die noch keine Aufgabe durchsucht hat",
-        "en": "released collections no task has searched yet",
-    },
-    "research_branch_web": {"de": "das Web", "en": "the web"},
-    "research_code_read_budget_exhausted": {
-        "de": "das Lesebudget des Laufs ist aufgebraucht",
-        "en": "the run's reading budget is used up",
-    },
-    "research_code_source_bound_limit": {
-        "de": "was ungelesen blieb, erreicht ein erneutes Lesen nicht",
-        "en": "reading again cannot reach what stayed unread",
-    },
-    "research_code_collection_unavailable": {
-        "de": "eine noch nicht durchsuchte Sammlung ist nicht mehr verfügbar",
-        "en": "a collection not yet searched is no longer available",
-    },
-    "research_code_web_not_permitted": {
-        "de": "das Web ist in diesem Lauf nicht zugelassen",
-        "en": "the web is not permitted in this run",
-    },
-    "research_code_web_not_needed": {
-        "de": "der Auftrag braucht nach seiner Einordnung kein Web",
-        "en": "as the assignment was read, it needs no web",
-    },
-    # extraction_limit closes no branch: its own sentence, never one of the
-    # {codes} that say nothing unread is reachable.
-    "agent_research_prospect_extraction_detail": {
-        "de": (
-            "In zu Ende gelesenen Dokumenten sah die Auswertung mehr Stellen, als "
-            "sie übernehmen konnte."
-        ),
-        "en": (
-            "In documents read to the end, the analysis saw more passages than it "
-            "could take over."
-        ),
-    },
-    "agent_memo_manual_edit_hint": {
-        "de": (
-            "\n\n---\n\n> Hinweis: Das Memo wurde zwischenzeitlich manuell "
-            "bearbeitet. Die folgende Aktualisierung stammt aus diesem "
-            "Agent-Lauf.\n\n"
-        ),
-        "en": (
-            "\n\n---\n\n> Note: the memo was edited manually in the meantime. "
-            "The update below comes from this agent run.\n\n"
-        ),
-    },
-    "agent_collection_not_visible": {
-        "de": "Eine ausgewählte Wissenssammlung ist für diese Aufgabe nicht sichtbar oder unbekannt.",
-        "en": "A selected knowledge collection is not visible to this task or unknown.",
-    },
-    # ---- agents/kernel/algorithm.py — deep review, partial receipt ----
     # ---- server/editor_suggestions.py — suggestion validation warnings ----
-    "editor_warning_sentence_limit": {
-        "de": "Der Vorschlag enthält mehr Sätze als die Anweisung erlaubt.",
-        "en": "The suggestion has more sentences than the instruction allows.",
-    },
-    "editor_warning_not_shortened": {
-        "de": (
-            "Der Vorschlag ist nicht kürzer als der markierte Text, obwohl die "
-            "Anweisung eine Kürzung nahelegt."
-        ),
-        "en": (
-            "The suggestion is not shorter than the selected text, although the "
-            "instruction asks to shorten it."
-        ),
-    },
     "editor_warning_unchanged": {
         "de": "Der Vorschlag entspricht unverändert dem markierten Text.",
         "en": "The suggestion is unchanged from the selected text.",
@@ -2042,13 +912,13 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
 
     # ---- nodes.py — query-planning strategy hint ----
-    "research_strategy_deep_perspectives": {"de": "DEEP-Pflichtperspektiven", "en": "DEEP mandatory perspectives"},
-    "research_strategy_storm_perspectives": {"de": "STORM-Perspektiven", "en": "STORM perspectives"},
+    "research_strategy_deep_perspectives": {"de": "Pflichtperspektiven", "en": "Required perspectives"},
+    "research_strategy_storm_perspectives": {"de": "Perspektivenvielfalt", "en": "Perspective diversity"},
     "research_strategy_falsification": {"de": "Falsifikation", "en": "Falsification"},
     "research_strategy_alternative": {"de": "Alternative Hypothesen", "en": "Alternative hypotheses"},
     "research_strategy_competing": {"de": "Konkurrierende Erklärungen", "en": "Competing explanations"},
     "research_strategy_reformulation": {"de": "Reformulierung", "en": "Reformulation"},
-    "research_strategy_crosscheck": {"de": "Cross-Check", "en": "Cross-check"},
+    "research_strategy_crosscheck": {"de": "Gegenprüfung", "en": "Cross-checks"},
     "research_query_basis_one": {"de": "aus {count} Analyseziel", "en": "from {count} analysis target"},
     "research_query_basis_other": {"de": "aus {count} Analysezielen", "en": "from {count} analysis targets"},
     "research_query_basis_open": {"de": "{count} noch offen", "en": "{count} still open"},
@@ -2075,23 +945,26 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Sub-questions still open: {items}",
     },
     "research_plan_query_fallback_reason": {
-        "de": "Suchquery-Planung fiel auf die Originalfrage zurück",
-        "en": "Search-query planning fell back to the original question",
+        "de": "keine eigene Suchanfrage erhalten",
+        "en": "no search query of its own returned",
     },
+    # The report that stands in for a blocked one. Reader text up to the
+    # section for operators; the failure messages and the settings to look
+    # at stand there, verbatim and as code.
     "research_algofail_heading": {
-        "de": "## ALGO-FAIL: Kein auditierbarer Report erzeugt",
-        "en": "## ALGO-FAIL: no auditable report produced",
+        "de": "## Kein Bericht erstellt",
+        "en": "## No report written",
     },
     "research_algofail_intro": {
-        "de": "Der normale Abschlussbericht wurde blockiert, weil ein Kernschritt des Evidence-Pfads fehlgeschlagen ist. Ein quellenbasierter Hard-Fact-Report wäre in diesem Zustand nicht belastbar.",
-        "en": "The normal final report was blocked because a core step of the evidence path failed. A source-based hard-fact report would not be dependable in this state.",
+        "de": "Ein Schritt, den der Bericht braucht, ist fehlgeschlagen. Der Bericht wurde deshalb nicht geschrieben, damit ein Fehler nicht wie ein vollständiges Ergebnis aussieht.",
+        "en": "A step the report needs failed. The report was therefore not written, so that a failure cannot pass for a complete result.",
     },
     "research_algofail_diagnosis": {
         "de": "## Diagnose",
         "en": "## Diagnosis",
     },
     "research_algofail_run_id": {
-        "de": "- Run-ID: `{value}`",
+        "de": "- Laufkennung: `{value}`",
         "en": "- Run id: `{value}`",
     },
     "research_algofail_rounds": {
@@ -2103,48 +976,55 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "- References collected: `{value}`",
     },
     "research_algofail_evidence_records": {
-        "de": "- Evidenz-Records im Ledger: `{value}`",
-        "en": "- Evidence records in the ledger: `{value}`",
+        "de": "- Belege der Recherche: `{value}`",
+        "en": "- Evidence records of the research: `{value}`",
     },
     "research_algofail_claim_calls": {
-        "de": "- Claim-Extraction-Aufrufe: `{value}`",
-        "en": "- Claim-extraction calls: `{value}`",
+        "de": "- Aufrufe der Aussagenerfassung: `{value}`",
+        "en": "- Statement extraction calls: `{value}`",
     },
     "research_algofail_claim_failures": {
-        "de": "- Claim-Extraction-Fehler: `{value}`",
-        "en": "- Claim-extraction failures: `{value}`",
+        "de": "- Fehlgeschlagene Aussagenerfassungen: `{value}`",
+        "en": "- Failed statement extractions: `{value}`",
     },
     "research_algofail_blocking": {
-        "de": "## Blockierende Kernfehler",
-        "en": "## Blocking core failures",
+        "de": "## Für den Betrieb: blockierende Fehler",
+        "en": "## For operators: blocking failures",
     },
     "research_algofail_failure_line": {
         "de": "- `{phase}` in Runde `{round}`: `{reason}`",
         "en": "- `{phase}` in round `{round}`: `{reason}`",
     },
     "research_algofail_next_step": {
-        "de": "## Nächster Debug-Schritt",
-        "en": "## Next debugging step",
+        "de": "### Nächster Schritt",
+        "en": "### Next step",
     },
     "research_algofail_next_step_text": {
-        "de": "Bitte im Serverprotokoll die `ALGO-FAIL`-Zeilen dieses Laufs prüfen; mit `OBSERVABILITY_PROFILE=forensic` und einer Trace-Senke (`INQTRIX_TRACING=file` oder `otlp`) trägt der Trace des Laufs auch die `algorithm_failure`-Ereignisse mit ihren Einzelheiten. Der finale Bericht wurde absichtlich nicht formuliert, damit ein Algorithmusfehler nicht wie ein erfolgreicher degradierter Normalpfad wirkt.",
-        "en": "Look for this run's `ALGO-FAIL` lines in the server log; with `OBSERVABILITY_PROFILE=forensic` and a trace sink (`INQTRIX_TRACING=file` or `otlp`), the run's trace also carries the `algorithm_failure` events with their details. The final report was deliberately not written, so that an algorithm failure cannot look like a successful degraded normal path.",
+        "de": "Das Serverprotokoll nennt jeden dieser Fehler mit Phase und Grund; mit `OBSERVABILITY_PROFILE=forensic` und einer Trace-Senke (`INQTRIX_TRACING=file` oder `otlp`) trägt auch der Trace des Laufs die Ereignisse `algorithm_failure` mit ihren Einzelheiten.",
+        "en": "The server log names each of these failures with its phase and reason; with `OBSERVABILITY_PROFILE=forensic` and a trace sink (`INQTRIX_TRACING=file` or `otlp`), the run's trace also carries the `algorithm_failure` events with their details.",
     },
+    # The header of an answer without a written report, in two versions: with
+    # the material the research gathered beneath it, and without any.
     "research_answer_fallback_warning": {
-        "de": "> [!WARNING] Antwort-Synthese-Fallback aktiv\n> {reason}\n> Die folgende Antwort enthält **keine LLM-synthetisierte** Zusammenfassung, sondern den bisherigen Recherche-Kontext in Rohform. Iteration-Marker `_answer_fallback=true`.",
-        "en": "> [!WARNING] answer-synthesis fallback active\n> {reason}\n> The answer below contains **no LLM-synthesised** summary, only the research context gathered so far, raw. Iteration marker `_answer_fallback=true`.",
+        "de": "> [!WARNING] Kein geschriebener Bericht\n> {reason}\n> Darunter steht das bisher gesammelte Material der Recherche in Rohform, kein vom Modell geschriebener Bericht. Für den Betrieb: Das Iterationsprotokoll führt diese Antwort mit `_answer_fallback=true`.",
+        "en": "> [!WARNING] No written report\n> {reason}\n> Below is the material the research has gathered so far, in raw form, not a report written by the model. For operators: the iteration log marks this answer with `_answer_fallback=true`.",
+    },
+    "research_answer_fallback_warning_no_material": {
+        "de": "> [!WARNING] Kein geschriebener Bericht\n> {reason}\n> Es liegt noch kein gesammeltes Material vor. Für den Betrieb: Das Iterationsprotokoll führt diese Antwort mit `_answer_fallback=true`.",
+        "en": "> [!WARNING] No written report\n> {reason}\n> No material has been gathered yet. For operators: the iteration log marks this answer with `_answer_fallback=true`.",
     },
     "research_answer_timeout_reason": {
-        "de": "Die Antwort-Synthese hat das LLM-Timeout überschritten.",
-        "en": "The answer synthesis exceeded the LLM timeout.",
+        "de": "Das Schreiben des Berichts hat die Zeitgrenze des Modells überschritten.",
+        "en": "Writing the report exceeded the model's time limit.",
     },
+    # What follows the header without material.
     "research_no_context_timeout": {
-        "de": "Es liegen noch keine Kontextdaten vor. Bitte erneut versuchen, ggf. `REASONING_TIMEOUT` erhöhen oder `MAX_TOTAL_SECONDS` anpassen.",
-        "en": "No context data is available yet. Please try again, raising `REASONING_TIMEOUT` or adjusting `MAX_TOTAL_SECONDS` if needed.",
+        "de": "Bitte erneut versuchen; für den Betrieb: gegebenenfalls `REASONING_TIMEOUT` erhöhen oder `MAX_TOTAL_SECONDS` anpassen.",
+        "en": "Please try again; for operators: raise `REASONING_TIMEOUT` or adjust `MAX_TOTAL_SECONDS` if needed.",
     },
     "research_no_context_provider": {
-        "de": "Es liegen noch keine Kontextdaten vor. Bitte erneut versuchen und Provider-Verbindung prüfen.",
-        "en": "No context data is available yet. Please try again and check the provider connection.",
+        "de": "Bitte erneut versuchen und die Verbindung zum Modellanbieter prüfen.",
+        "en": "Please try again and check the connection to the model provider.",
     },
 
     "research_rate_limited_answer": {
@@ -2167,51 +1047,23 @@ MESSAGES: dict[str, dict[str, str]] = {
             "(daily token limit reached)."
         ),
     },
-    "agent_discovery_web_preview_purpose": {
-        "de": "Webvorschau in der Erkundung",
-        "en": "Web preview during exploration",
-    },
 
     # ---- agents/telemetry.py — retry activity, shown on a disruption ----
     "telemetry_retry_text": {
-        "de": "Provider-Versuch {failed}/{max} fehlgeschlagen ({code}); Versuch {next}/{max} startet nach {delay} s.",
+        "de": "Beim Anbieter ist Versuch {failed}/{max} fehlgeschlagen ({code}); Versuch {next}/{max} startet nach {delay} s.",
         "en": "Provider attempt {failed}/{max} failed ({code}); attempt {next}/{max} starts after {delay} s.",
-    },
-    "telemetry_intake": {
-        "de": "Auftrag wird eingeordnet",
-        "en": "The assignment is being classified",
-    },
-    "telemetry_discovery_analyst": {
-        "de": "Erkundung wird ausgewertet",
-        "en": "The exploration is being evaluated",
     },
     "telemetry_skill_point_check": {
         "de": "Skill-Eingaben werden geprüft",
         "en": "Skill inputs are being checked",
     },
-    "telemetry_plan": {
-        "de": "Ausführungsplan wird erstellt",
-        "en": "The execution plan is being created",
-    },
-    "telemetry_contradiction": {
-        "de": "Gegenbelege werden geprüft",
-        "en": "Counter-evidence is being checked",
-    },
     "telemetry_sufficiency": {
         "de": "Beleglage wird bewertet",
         "en": "The evidence base is being assessed",
     },
-    "telemetry_synthesis": {
-        "de": "Ergebnisse werden zusammengeführt",
-        "en": "Results are being merged",
-    },
     "telemetry_citation_repair": {
         "de": "Quellenverweise werden geprüft",
         "en": "Source references are being checked",
-    },
-    "telemetry_answer": {
-        "de": "Antwort wird ausgearbeitet",
-        "en": "The answer is being drafted",
     },
     "telemetry_memory_reflection": {
         "de": "Sitzungskontext wird aktualisiert",
@@ -2220,10 +1072,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     "telemetry_file_analysis": {
         "de": "Dateiinhalte werden ausgewertet",
         "en": "File contents are being evaluated",
-    },
-    "telemetry_patch": {
-        "de": "Dokumentänderung wird vorbereitet",
-        "en": "The document change is being prepared",
     },
     "telemetry_kernel": {
         "de": "Agent-Antwort wird fortgesetzt",
@@ -2234,8 +1082,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Earlier steps are being summarized",
     },
     "telemetry_deep_review": {
-        # One review for both agent engines: the wording names the step,
-        # not the depth the user chose.
+        # One review for every Stufe that reviews: the wording names the
+        # step, not the depth the user chose.
         "de": "Ergebnis wird geprüft",
         "en": "The result is being reviewed",
     },
@@ -2285,28 +1133,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Prüfmaterial passt in kein Modellfenster — bestehende Outputs bleiben unverändert.",
         "en": "The review material fits no model window — the existing outputs stay unchanged.",
     },
-    # Reader titles of the run diagnostics. The review judges from these
-    # records and addresses them by basis_id; a person reads the title.
-    "review_diagnostic_text_measurements": {
-        "de": "Textmaße der Ausgabe",
-        "en": "Text measurements of the output",
-    },
-    "review_diagnostic_quote_checks": {
-        "de": "Zitatprüfung der Ausgabe",
-        "en": "Quote check of the output",
-    },
-    "review_diagnostic_contradictions": {
-        "de": "Bekannte Widersprüche des Laufs",
-        "en": "Known contradictions of the run",
-    },
-    "review_diagnostic_execution": {
-        "de": "Plan- und Aufgabenstand des Laufs",
-        "en": "Plan and task state of the run",
-    },
-    "review_diagnostic_task_evidence_notes": {
-        "de": "Belegnotizen der Teilaufgaben",
-        "en": "Evidence notes of the subtasks",
-    },
     "review_diagnostic_document_analysis": {
         "de": "Lesedaten der Teilaufgabe ‚{title}‘",
         "en": "Reading record of the subtask ‘{title}’",
@@ -2318,6 +1144,10 @@ MESSAGES: dict[str, dict[str, str]] = {
     "review_diagnostic_mission_task": {
         "de": "Belegbilanz der Teilaufgabe ‚{title}‘",
         "en": "Evidence record of the subtask ‘{title}’",
+    },
+    "review_diagnostic_run_analysis": {
+        "de": "Dokumentanalyse dieses Laufs ‚{title}‘",
+        "en": "Document analysis of this run ‘{title}’",
     },
     "review_diagnostic_run_reading": {
         "de": "Lesestand dieses Laufs für ‚{title}‘",
@@ -2414,22 +1244,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     "review_finding_named": {
         "de": "Befund nicht angewendet ({reason}): {finding}",
         "en": "Finding not applied ({reason}): {finding}",
-    },
-    "review_quote_unverified": {
-        "de": "Wörtliches Zitat mit Web-Beleg ohne Treffer im gespeicherten Auszug: „{quote}“",
-        "en": "Verbatim quote with web evidence that matches no stored excerpt: “{quote}”",
-    },
-    # The research route rewrites the draft next: the line names the round
-    # instead of quoting a passage the next text may no longer hold.
-    "review_quote_unverified_draft": {
-        "de": (
-            "Ein wörtliches Zitat mit Web-Beleg im Entwurf der Runde {round} "
-            "hatte keinen Treffer im gespeicherten Auszug."
-        ),
-        "en": (
-            "A verbatim quote with web evidence in the round {round} draft "
-            "matched no stored excerpt."
-        ),
     },
     "review_finding_reason_finding_invalid": {
         "de": "Ziel oder Wortlaut des Befunds ungültig",
@@ -2578,10 +1392,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Speicherfehler",
         "en": "store error",
     },
-    "review_finding_reason_research_route": {
-        "de": "Prüfung schickte den Lauf in die Nachrecherche",
-        "en": "the review sent the run back to research",
-    },
     "review_finding_reason_cancelled": {
         "de": "Lauf abgebrochen",
         "en": "run cancelled",
@@ -2612,6 +1422,13 @@ MESSAGES: dict[str, dict[str, str]] = {
     "review_criterion_unsettled": {
         "de": "Kriterium von der Prüfung nicht abgerechnet: {criterion}",
         "en": "Criterion not settled by the review: {criterion}",
+    },
+    # A point the review could not check, when an edit of that review was
+    # applied afterwards: it describes the reviewed draft, and the delivered
+    # text may no longer hold what it names.
+    "review_point_before_revision": {
+        "de": "Vor der Überarbeitung festgestellt: {point}",
+        "en": "Noted before the revision: {point}",
     },
     # An unmet criterion whose findings' edits were all applied: worked on in the
     # reviewed draft, never shown met, and without the draft's gap, which the
@@ -2689,6 +1506,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Geprüft aus Modellwissen, ohne Quellen",
         "en": "Reviewed from general knowledge, without sources",
     },
+    # Every cited reference carries the search provider's context alone.
+    "outcome_reviewed_provider": {
+        "de": "Gegen Anbieterauswertungen geprüft, Originalseiten nicht gelesen",
+        "en": "Reviewed against the search provider's summaries, original pages not read",
+    },
     "outcome_no_findings": {"de": "ohne Befund", "en": "no findings"},
     "outcome_verified_one": {
         "de": "{count} Befund behoben und nachgeprüft",
@@ -2754,7 +1576,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     "outcome_criteria_open_other": {
         "de": "{count} Kriterien offen", "en": "{count} criteria open",
     },
-    "outcome_extraction_limit": {"de": "Lesegrenze", "en": "reading limit"},
     "outcome_reach": {
         "de": "{read} von {cited} nachgelesen", "en": "{read} of {cited} re-read",
     },
@@ -2796,6 +1617,22 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Prüfung nicht auswertbar, Ergebnis ungeprüft",
         "en": "Review unavailable, result unchecked",
     },
+    "outcome_review_failed": {
+        "de": "Prüfung gescheitert, Ergebnis ungeprüft",
+        "en": "Review failed, result unchecked",
+    },
+    "outcome_review_budget": {
+        "de": "Prüfung am Budget beendet, Ergebnis ungeprüft",
+        "en": "Review stopped at its budget, result unchecked",
+    },
+    # An inconsistent verdict: a negative flag without any reason, named.
+    "outcome_review_inconsistent": {
+        "de": "Prüfurteil widersprüchlich: {flags} ohne Begründung",
+        "en": "Review verdict contradictory: {flags} without a reason",
+    },
+    "review_flag_complete": {"de": "Vollständigkeit", "en": "completeness"},
+    "review_flag_grounded": {"de": "Belegtreue", "en": "grounding"},
+    "review_flag_contradictions_named": {"de": "Gegenpositionen", "en": "opposing views"},
     "outcome_not_run": {"de": "Ohne Prüfung beendet", "en": "Ended without a review"},
     "outcome_ended_before_review": {
         "de": "Vor der Prüfung beendet", "en": "Ended before the review",
@@ -2809,8 +1646,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Verification: only part of the deep mode",
     },
     "review_unavailable_label": {
-        "de": "Verifikation geschuldet, aber nicht gelaufen",
-        "en": "Verification was owed and did not run",
+        "de": "Verifikation geschuldet, ohne verwertbares Urteil beendet",
+        "en": "Verification was owed and ended without a usable verdict",
     },
     "review_coverage_cited_one": {
         "de": "{count} zitierten Beleg", "en": "{count} cited reference",
@@ -2831,12 +1668,6 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "agent_review_role_result_other": {
         "de": "{count} Befunde gemeldet", "en": "{count} findings reported",
-    },
-    "agent_section_role_result_one": {
-        "de": "{count} Beleg nachgelesen", "en": "{count} reference re-read",
-    },
-    "agent_section_role_result_other": {
-        "de": "{count} Belege nachgelesen", "en": "{count} references re-read",
     },
     "kernel_review_prefix": {
         "de": "Verifikations-Durchlauf: {text}",
@@ -3003,14 +1834,6 @@ MESSAGES: dict[str, dict[str, str]] = {
             "partial completion."
         ),
     },
-    "agent_subquestion_no_result": {
-        "de": "Die Teilfrage „{query}“ lieferte kein verwertbares Ergebnis: {reason}",
-        "en": 'The sub-question "{query}" yielded no usable result: {reason}',
-    },
-    # Search notices (knowledge.retrieval_warnings): the reader wording of
-    # every search code. Counts are hits or exclusions over searches, never
-    # documents; a code or an English API message never appears here.
-    "search_notice_heading": {"de": "Suchhinweis:", "en": "Search note:"},
     "search_notice_searches_one": {"de": "in einer Suche", "en": "in one search"},
     "search_notice_searches_other": {"de": "in {count} Suchen", "en": "in {count} searches"},
     "search_notice_reindex_one": {

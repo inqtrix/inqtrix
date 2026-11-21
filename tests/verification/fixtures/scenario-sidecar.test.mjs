@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { createScenarioBook, scenarioResultProblem, writeScenarioSidecar } from './scenario-sidecar.mjs'
+import {
+  SCENARIO_REASON_LIMIT,
+  createScenarioBook,
+  scenarioResultProblem,
+  writeScenarioSidecar,
+} from './scenario-sidecar.mjs'
 
 function withResultsPath(run) {
   const directory = mkdtempSync(join(tmpdir(), 'inqtrix-scenario-sidecar-'))
@@ -86,4 +91,42 @@ test('a skip needs its reason, does not hide a failure, and counts as covered on
   book.skip('matrix', 'too late')
   assert.equal(book.status('matrix'), 'failed')
   assert.throws(() => book.pass('unknown'), /Unknown scenario unknown/)
+})
+
+test('a pass may carry a note, which reaches the entries and never replaces a failure reason', () => {
+  const book = createScenarioBook(['band', 'plain', 'broken'])
+  book.pass('band', 'warning band: 1 of 9 reviews without a usable verdict (ceiling 2): R5 budget_exhausted')
+  book.pass('plain', '  ')
+  book.fail('broken', 'the first reason')
+  book.pass('broken', 'a note after the failure')
+  assert.deepEqual(book.entries(), [
+    {
+      id: 'band',
+      reason: 'warning band: 1 of 9 reviews without a usable verdict (ceiling 2): R5 budget_exhausted',
+      status: 'passed',
+    },
+    { id: 'plain', status: 'passed' },
+    { id: 'broken', reason: 'the first reason', status: 'failed' },
+  ])
+  assert.equal(book.allPassed(), false)
+  // A failure after a noted pass carries the failure's reason, not the note.
+  book.fail('band', 'R7 completed its review on an unknown basis')
+  assert.deepEqual(book.entries()[0], {
+    id: 'band', reason: 'R7 completed its review on an unknown basis', status: 'failed',
+  })
+})
+
+test('a reason longer than a report line is cut visibly, and a shorter one is not', () => {
+  const book = createScenarioBook(['a.red', 'a.noted', 'a.left-out', 'a.short'])
+  const long = `${'x'.repeat(SCENARIO_REASON_LIMIT)}TAIL-OF-THE-REASON`
+  book.fail('a.red', long)
+  book.pass('a.noted', `  ${long}  `)
+  book.skip('a.left-out', long)
+  book.fail('a.short', 'x'.repeat(SCENARIO_REASON_LIMIT))
+  const reasons = new Map(book.entries().map((entry) => [entry.id, entry.reason]))
+
+  for (const id of ['a.red', 'a.noted', 'a.left-out']) {
+    assert.equal(reasons.get(id), `${'x'.repeat(SCENARIO_REASON_LIMIT)} [... 18 more characters]`, id)
+  }
+  assert.equal(reasons.get('a.short'), 'x'.repeat(SCENARIO_REASON_LIMIT))
 })

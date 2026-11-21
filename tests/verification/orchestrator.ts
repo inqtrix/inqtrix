@@ -4,6 +4,7 @@ import { CleanupLedger } from './cleanup-ledger.ts'
 import {
   inspectRunLogs,
   logInspectionIsMandatory,
+  logInspectionPreflight,
   type LogSource,
 } from './log-inspection.ts'
 import type {
@@ -33,20 +34,28 @@ export async function runVerification(
   const selectedAdapters = selectAdapters(context.profile, adapters)
   const writer = new ReportWriter(context)
   const cleanupLedger = new CleanupLedger(context.reportDirectory, writer.redactor)
-  const preflight = (
-    await Promise.all(selectedAdapters.map(async (adapter) => {
-      try {
-        return await adapter.preflight(context)
-      } catch {
-        return [{
-          engine: adapter.engine,
-          id: 'adapter-preflight',
-          message: 'The adapter preflight failed unexpectedly.',
-          status: 'failed' as const,
-        }]
-      }
-    }))
-  ).flat()
+  const preflight = [
+    ...(
+      await Promise.all(selectedAdapters.map(async (adapter) => {
+        try {
+          return await adapter.preflight(context)
+        } catch {
+          return [{
+            engine: adapter.engine,
+            id: 'adapter-preflight',
+            message: 'The adapter preflight failed unexpectedly.',
+            status: 'failed' as const,
+          }]
+        }
+      }))
+    ).flat(),
+    // The run-wide condition of the verdict, asked while it still costs nothing.
+    ...(await logInspectionPreflight(
+      context,
+      selectedAdapters.map((adapter) => adapter.engine),
+      logSource,
+    )),
+  ]
   await writer.setPreflight(preflight)
   const blockedEngines = new Set(
     preflight

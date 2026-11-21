@@ -2,9 +2,9 @@
 
 The compiled kernel graph is SHARED across runs and users (the graph
 itself is stateless, the thread_id separates runs) — everything one
-segment needs travels through :data:`_KERNEL_DEPS` exactly like the
-phase machine's ``_DEPS``. Tools and the delegating chat provider read
-it at call time; the algorithm sets/resets it around each segment.
+segment needs travels through :data:`_KERNEL_DEPS`. Tools and the
+delegating chat provider read it at call time; the algorithm sets/resets
+it around each segment.
 """
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ import hashlib
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 from inqtrix import aio
 from inqtrix.agents.context_sources import SourceCoverageLedger
 from inqtrix.agents.tier_policy import blocked_kernel_tools, resolve_tier_policy
-from inqtrix.core.results import SourcePolicy
+from inqtrix.core.results import SourcePolicy, WebRecency
 
 if TYPE_CHECKING:
     from inqtrix.agents.control_ports import AgentControlStore
@@ -29,15 +29,19 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+RESEARCH_WINDOWS: tuple[str, ...] = get_args(WebRecency)
+"""The time windows a research run takes for its sources: what a kernel
+tool may name for a research child, read from the type of the run request
+so the two cannot drift apart."""
+
 
 BLOCKED_TOOL_HINTS: dict[str, str] = {
-    "run_deep_mission": (
-        "a mission exists only in the tier 'tief'; use run_web_research "
-        "or delegate_batch with research assignments"
-    ),
     "delegate_batch": "use the existing results",
     "run_web_research": "use the existing results",
     "ask_user": "make a visibly named assumption",
+    "analyze_document": (
+        "read the document window by window with read_project_document"
+    ),
 }
 """What the model is told to do instead of a tier-blocked tool. The
 blocked set itself is derived from the tier table
@@ -46,11 +50,14 @@ blocked set itself is derived from the tier table
 
 
 _TIER_SOURCE_BUDGETS: dict[str, tuple[str, str, str]] = {
-    # tool name -> (policy field, tool_use_counts key, label)
-    "web_instant": ("web_instant_budget", "web", "web search(es)"),
+    # tool name -> (policy field, KernelDeps counter of that tool's own
+    # successful calls, label). A cap on a search tool counts its searches:
+    # ``tool_use_counts`` counts every use of a source, a document read
+    # included, and is no measure of them.
+    "web_instant": ("web_instant_budget", "web_searches", "web search(es)"),
     "search_project_knowledge": (
         "knowledge_search_budget",
-        "knowledge",
+        "knowledge_searches",
         "project-knowledge search(es)",
     ),
 }
@@ -59,8 +66,8 @@ _TIER_SOURCE_BUDGETS: dict[str, tuple[str, str, str]] = {
 def _tier_source_budget(
     tier: str, tool_name: str
 ) -> tuple[int, str, str] | None:
-    """The (limit, counter key, label) a tier puts on one source tool, or
-    ``None`` when the tier does not cap it. Read from the frozen tier
+    """The (limit, counter attribute, label) a tier puts on one source tool,
+    or ``None`` when the tier does not cap it. Read from the frozen tier
     table so published (``/v1/capabilities`` ``agent.tiers``) equals
     enforced — no literal budget lives here."""
     if not tier or tool_name not in _TIER_SOURCE_BUDGETS:
@@ -104,8 +111,8 @@ class KernelDeps:
         depth: The run's thoroughness: ``normal`` or
             ``deep``. Deep forces the DEEP child research profile and
             gates the extra verification pass.
-        autonomy: The run's wire autonomy mode; child missions inherit
-            it.
+        autonomy: The run's wire autonomy mode; research and batch children
+            inherit it, a role run works in ``autonomous``.
         skill_service: Skill lookups for ``load_skill`` and the
             disclosure block (``None`` disables both visibly).
         skills: ACTIVATED skills of this segment (attached at submit +
@@ -176,8 +183,9 @@ class KernelDeps:
     """Selected model, model tier and effort before the Deep-mode fallback.
 
 Includes effective request settings and skill pins, but no model or effort
-inferred from the kernel's own role. Final review and mission children use
-this selection; research children keep their independent model routing.
+inferred from the kernel's own role. Final review, roles and knowledge
+children use this selection; research children keep their independent model
+routing.
 """
     session_id: str = ""
     clarified_answers: list[str] = field(default_factory=list)
@@ -231,19 +239,22 @@ this selection; research children keep their independent model routing.
     skipped rather than that the run verifies nothing."""
     skill_service: Any = None
     skills: list[Any] = field(default_factory=list)
+    attached_skills: tuple[Any, ...] = ()
+    """The skills the request attached, as the segment resolved them before
+    any ``load_skill``. The run's first message states the output-form rule
+    from these; every rebuild of that message (the review's assignment)
+    reads the same set, so a skill loaded mid-run never changes the rule."""
     skill_answers: dict[str, dict[str, str]] = field(default_factory=dict)
     report_requirement: str = ""
     """The composed result requirement this run is frozen under (free text
     plus attached rules, each with its origin marker). The kernel writes
-    under it through its first user message; a single mission child it
-    starts with ``run_deep_mission`` inherits it, because that mission's
-    memo is the deliverable."""
+    under it through its first user message."""
     report_rules: tuple[dict[str, Any], ...] = ()
     """The library rules this run is frozen under, as the router resolved
     them (``{template_id, label, title, revision}`` per distinct rule). The
     transcript descriptor binds their revisions, so another run reads
     this run's transcripts only while the rules are unchanged and still
-    visible to it; a single mission child inherits them with the text."""
+    visible to it."""
     session_history: str = ""
     artifact_registry: tuple[dict[str, Any], ...] = ()
     collection_catalog: tuple[Any, ...] | None = None
@@ -270,6 +281,11 @@ this selection; research children keep their independent model routing.
     provider ran each one. Rebuilt from the checkpointed tool messages at
     segment start (``_checkpointed_web_searches``). A delegated research
     spends web budget but is no search of this run."""
+    knowledge_searches: int = 0
+    """Searches of the knowledge base this run executed itself, success
+    only. Rebuilt from the checkpointed tool messages at segment start
+    (``_checkpointed_knowledge_searches``). Reading or citing a document
+    uses the knowledge source but is no search."""
     source_coverage: SourceCoverageLedger = field(default_factory=SourceCoverageLedger)
     """What this run actually read of every source version:
     rebuilt from checkpointed tool artifacts at segment start
@@ -295,12 +311,18 @@ this selection; research children keep their independent model routing.
     segment start (``effective_tool_grants``). Only the balanced-mode
     gate predicates consult this — strict stays per-call and
     ``ALWAYS_GATED_TOOLS`` are excluded by construction."""
+    knowledge_batch_granted: bool = False
+    """Whether the user granted, for the run, a batch with a knowledge
+    assignment at a card that named the collections; folded with the
+    grants above (``knowledge_batch_granted`` in ``limit_contract``). Such
+    a grant covers later batches over the same boundary; the agent's own
+    knowledge search still asks for itself. Only the balanced mode reads
+    it; unset means no grant."""
     target_document_id: str = ""
     """Editor document the run explicitly targets, mirrored from
-    ``RunRequest.document_id`` — the mission engine's
-    ``target_document_id`` precedent. When set, the editor tools refuse
-    every other document; empty means the model may work on any document
-    it has read."""
+    ``RunRequest.document_id``. When set, the editor tools refuse every
+    other document; empty means the model may work on any document it has
+    read."""
     work_profile: Any = None
     """The ``WorkProfile`` of an internal role run; ``None`` for the
     conversational kernel. A role has a bounded tool surface, enforced at
@@ -322,11 +344,22 @@ this selection; research children keep their independent model routing.
     """Durable read receipts: document_id -> revision the model
     actually READ in this run via ``read_editor_document``/
     ``search_editor_document``. ``propose_editor_patch`` refuses targets
-    without a receipt and pins the receipt revision as
-    ``expected_revision`` (server-side 409 on drift). Reconstructed at
-    segment start from checkpointed ToolMessages with a producing-tool
-    check — losing a receipt only forces a re-read (fail-closed), unlike
-    a lost skill RESTRICTION, which aborts the resume."""
+    without a receipt, refuses a target whose last read found it in
+    collaboration mode (:attr:`editor_read_modes`), and pins the receipt
+    revision as ``expected_revision`` (server-side 409 on drift).
+    Reconstructed at segment start from checkpointed ToolMessages with a
+    producing-tool check — losing a receipt only forces a re-read
+    (fail-closed), unlike a lost skill RESTRICTION, which aborts the
+    resume."""
+    editor_read_modes: dict[str, str] = field(default_factory=dict)
+    """document_id -> content mode (``markdown`` or ``collaboration``) the
+    run's LAST read of the document found, set by the two editor read tools
+    next to the receipt. Rebuilt with the receipts at segment start, and
+    only from the read tool's own record in its tool-message artifact
+    (:data:`~inqtrix.agents.kernel.tools.EDITOR_READ_RECORD`), never from
+    the result text. A document missing here is not known to be in
+    collaboration mode, and a proposal to it asks for approval as before.
+    Read through :func:`collaboration_document_read` only."""
     step_limit: int = 0
     step_ceiling: int = 0
     checkpointed_steps: int = 0
@@ -345,6 +378,13 @@ this selection; research children keep their independent model routing.
     Live only; a role never parks, and a resumed segment's earlier calls
     have settled already."""
     evidence_refs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    gathered_reference_ids: set[str] = field(default_factory=set)
+    """The ledger ids this run's own source tools registered or found again:
+    search hits, cited passages, web searches, the evidence of a delegated
+    research. The ledger also holds what the run was handed, the references
+    of earlier turns and of documents it read, so that their labels stay
+    citable; those are not this run's basis of work. Stored with the ledger
+    and restored with it (:meth:`hydrate_evidence`)."""
     web_search_ledger: dict[str, Any] = field(
         default_factory=lambda: {
             "schema_version": 1,
@@ -354,6 +394,21 @@ this selection; research children keep their independent model routing.
     )
     _evidence_lock: threading.RLock = field(
         default_factory=threading.RLock, repr=False
+    )
+    document_analyses: list[dict[str, Any]] = field(default_factory=list)
+    """The reading records of this run's document analyses
+    (``agents.document_table``): rebuilt from the checkpointed messages of
+    the analysis tool at every segment start, and extended by each analysis
+    of this segment as it ends."""
+    document_windows_used: int = 0
+    """Windows this run's document analyses claimed from the run's window
+    budget, read or not: the stored analyses' sum at segment start, then
+    every claim of this segment (:meth:`claim_document_windows`)."""
+    _analysis_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False
+    )
+    _usage_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False
     )
     cancel_token: threading.Event | None = None
     token_budget: int = 0
@@ -385,12 +440,9 @@ this selection; research children keep their independent model routing.
     """Provider stack of THIS run ("" = default) — threaded into child
     submissions so a parent on stack X never fans out on default."""
     memory_status: str = "disabled"
-    """disabled | used | empty | unavailable — mirrors the mission
-    engine's vocabulary so both engines report memory identically."""
-    post_mission_nudge_pending: bool = False
-    """Set when a mission child returned; the next model turn receives
-    one advisory to reuse its memo and retained evidence before addressing
-    a concrete remaining gap within the existing research permissions."""
+    """disabled | used | empty | unavailable: the vocabulary of
+    :meth:`~inqtrix.services.agent_memory_service.AgentMemoryService.recall_briefing`
+    plus ``disabled`` for a recall the gates skipped."""
     todo_in_progress_index: int | None = None
     """Index of the first ``in_progress`` item of the LAST emitted todo
     list; every following ``tool.started`` carries it as ``todo_index``
@@ -415,8 +467,31 @@ this selection; research children keep their independent model routing.
             self.event_sink(event_type, payload)
 
     def book_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
-        self.usage["prompt_tokens"] += max(0, int(prompt_tokens or 0))
-        self.usage["completion_tokens"] += max(0, int(completion_tokens or 0))
+        # Tool calls of one model turn run side by side and book here.
+        with self._usage_lock:
+            self.usage["prompt_tokens"] += max(0, int(prompt_tokens or 0))
+            self.usage["completion_tokens"] += max(0, int(completion_tokens or 0))
+
+    def claim_document_windows(self, wanted: int) -> int:
+        """Grant up to *wanted* windows from the run's document-analysis budget.
+
+        Thread-safe: the analyses of one model turn run side by side and
+        share the budget. What is granted stays booked, read or not.
+        """
+        with self._analysis_lock:
+            left = max(
+                0,
+                int(self.platform.document_analysis_max_windows_per_run)
+                - self.document_windows_used,
+            )
+            granted = max(0, min(int(wanted), left))
+            self.document_windows_used += granted
+            return granted
+
+    def remember_document_analysis(self, record: dict[str, Any]) -> None:
+        """Keep the reading record of an analysis this segment ran."""
+        with self._analysis_lock:
+            self.document_analyses.append(record)
 
     def run_usage(self) -> dict[str, int]:
         """Run-cumulative spend: earlier segments plus this one.
@@ -472,7 +547,7 @@ this selection; research children keep their independent model routing.
         source_budget = _tier_source_budget(self.tier, tool_name)
         if source_budget is not None:
             limit, counter, label = source_budget
-            used = self.tool_use_counts.get(counter, 0)
+            used = int(getattr(self, counter))
             if used >= limit:
                 # The published tier budget (tier table, `/v1/capabilities`)
                 # is enforced here; the checkpoint-derived counter survives
@@ -496,9 +571,9 @@ this selection; research children keep their independent model routing.
             resolve_tier_policy(self.tier)
         ):
             # The Stufen ladder is a deterministic budget, never
-            # prompt-only: schnell removes interrupts and children,
-            # gruendlich removes the mission — a run without a Stufe
-            # (legacy depth) keeps every tool.
+            # prompt-only: schnell removes interrupts, children and the
+            # document analysis — a run without a Stufe (legacy depth)
+            # keeps every tool.
             log.warning(
                 "Tool %s blocked by tier %s.",
                 tool_name,
@@ -513,13 +588,19 @@ this selection; research children keep their independent model routing.
                 + "."
             )
         union = self.allowed_tool_union
+        from inqtrix.agents.skills_runtime import SKILL_TOOL_IMPLIED_BY
+
         # ask_user is the interrupt PRIMITIVE, not a work tool: skill
         # allowed_tools never scoped it (routing it through this
         # chokepoint is new with the tier enforcement), and a skill must
-        # not silently remove the human gate.
+        # not silently remove the human gate. A tool a skill's list allows
+        # under another name (the document analysis reads documents) is
+        # allowed where that name is; tier, role and source policy still
+        # check it under its own name.
         if (
             union is not None
             and tool_name not in union
+            and SKILL_TOOL_IMPLIED_BY.get(tool_name) not in union
             and tool_name != "ask_user"
         ):
             log.warning(
@@ -560,20 +641,12 @@ this selection; research children keep their independent model routing.
             "the assigning run released; name the gap in your result instead."
         )
 
-    @property
-    def gathered_sources(self) -> bool:
-        """Whether THIS run searched or read sources itself.
-
-        References also enter the ledger by reading a document that
-        carries them; those are not this run's basis of work.
-        """
-        return any(count > 0 for count in self.tool_use_counts.values())
-
     def record_source_tool_use(self, source: str) -> None:
         """Increment one successful source-tool invocation."""
         if source not in ("web", "knowledge"):
             raise ValueError(f"Unknown source-tool counter: {source!r}")
-        self.tool_use_counts[source] = self.tool_use_counts.get(source, 0) + 1
+        with self._usage_lock:
+            self.tool_use_counts[source] = self.tool_use_counts.get(source, 0) + 1
 
     def user_text(self) -> str:
         """Every text of this run the user wrote, as one guard haystack.
@@ -708,6 +781,7 @@ this selection; research children keep their independent model routing.
                 self.web_search_ledger = merge_web_search_ledgers(
                     [self.web_search_ledger, raw_ledger]
                 )
+            stored_ids: list[str] = []
             for raw in record.refs:
                 ref = dict(raw)
                 ref_id = self.ledger_id(ref)
@@ -717,14 +791,38 @@ this selection; research children keep their independent model routing.
                         self._ensure_reference_label(ref_id, ref) or changed
                     )
                     self.evidence_refs[ref_id] = ref
+                    stored_ids.append(ref_id)
+            if source_run_id == self.run_id:
+                # What this run gathered before it parked. A ledger stored
+                # before the marker existed names none: such a run keeps the
+                # list it had, every reference of its ledger. A released
+                # ledger is another run's and adds nothing here.
+                marked = record.payload.get("gathered_reference_ids")
+                self.gathered_reference_ids.update(
+                    (str(item) for item in marked if str(item) in self.evidence_refs)
+                    if isinstance(marked, list)
+                    else stored_ids
+                )
             if changed and source_run_id == self.run_id:
                 # A released ledger is read, never written back.
                 self._persist_evidence_artifact(artifact_id=artifact_id)
 
     def register_references(
-        self, refs: list[dict[str, Any]] | tuple[dict[str, Any], ...]
+        self,
+        refs: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+        *,
+        gathered: bool = True,
     ) -> list[dict[str, Any]]:
-        """Merge trusted tool evidence and persist the canonical ledger."""
+        """Merge trusted tool evidence and persist the canonical ledger.
+
+        Args:
+            refs: The references to merge.
+            gathered: Whether a source tool of THIS run found them (the
+                default). ``False`` for references the run is handed so that
+                their labels stay citable: those of earlier turns and of a
+                document it reads. They join the ledger and are not its
+                basis of work (:attr:`gathered_reference_ids`).
+        """
         from inqtrix.agents.evidence import merge_missing_evidence_fields
         from inqtrix.urls import safe_public_url_identity
 
@@ -763,6 +861,9 @@ this selection; research children keep their independent model routing.
                         or changed
                     )
                 registered.append(dict(existing))
+                if gathered and ref_id not in self.gathered_reference_ids:
+                    self.gathered_reference_ids.add(ref_id)
+                    changed = True
             if changed:
                 self._persist_evidence_artifact()
         return registered
@@ -781,6 +882,7 @@ this selection; research children keep their independent model routing.
                 payload={
                     "schema_version": 1,
                     "web_search_ledger": dict(self.web_search_ledger),
+                    "gathered_reference_ids": sorted(self.gathered_reference_ids),
                 },
                 refs=list(self.evidence_refs.values()),
                 updated_by="agent",
@@ -793,8 +895,13 @@ this selection; research children keep their independent model routing.
         self,
         ledger: dict[str, Any],
         references: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+        *,
+        gathered: bool = True,
     ) -> list[dict[str, Any]]:
         """Persist provider search output and link its references to it.
+
+        *gathered* as in :meth:`register_references`: ``False`` where the
+        run re-reads a search an earlier run made.
 
         The ledger is a read-only projection for audit and Canvas display. It
         never fetches a source and never determines whether information may be
@@ -816,19 +923,20 @@ this selection; research children keep their independent model routing.
                 self._persist_evidence_artifact()
         if not references:
             return []
+        # The run's ledger also holds searches of other origin, a child's
+        # among them: the search handing these references in speaks for them.
+        registering = ledger.get("searches") if isinstance(ledger, dict) else None
         projected = attach_web_search_lineage(
             [dict(reference) for reference in references],
             self.web_search_ledger,
+            registering=tuple(registering) if isinstance(registering, dict) else (),
         )
-        return self.register_references(projected)
+        return self.register_references(projected, gathered=gathered)
 
     def register_instant_web_search(self, output: Any) -> list[dict[str, Any]]:
         """Register one ``web.search.instant`` result without re-fetching it."""
 
-        from inqtrix.agents.evidence import (
-            enrich_instant_evidence,
-            shorten_grounded_support,
-        )
+        from inqtrix.agents.evidence import shorten_grounded_support
         from inqtrix.evidence import build_instant_web_search_ledger
 
         query_id = str(output.query_id)
@@ -856,22 +964,21 @@ this selection; research children keep their independent model routing.
             prompt_tokens=int(output.prompt_tokens or 0),
             completion_tokens=int(output.completion_tokens or 0),
         )
-        references = enrich_instant_evidence(
-            provider_answer,
-            [
-                {
-                    "url": str(source.get("url") or ""),
-                    "title": str(source.get("title") or "") or None,
-                    "provider_snippet": (
-                        str(source.get("snippet") or "") or None
-                    ),
-                    "source_rank": int(source.get("rank") or index),
-                    "origin": str(source.get("origin") or "provider"),
-                }
-                for index, source in enumerate(sources, start=1)
-                if source.get("url")
-            ],
-        )
+        # The references carry no text of their own: the ledger built above
+        # decides what the search said where it cites each source.
+        references = [
+            {
+                "url": str(source.get("url") or ""),
+                "title": str(source.get("title") or "") or None,
+                "provider_snippet": (
+                    str(source.get("snippet") or "") or None
+                ),
+                "source_rank": int(source.get("rank") or index),
+                "origin": str(source.get("origin") or "provider"),
+            }
+            for index, source in enumerate(sources, start=1)
+            if source.get("url")
+        ]
         if not references and provider_answer.strip():
             # Azure may return one coherent grounded answer without exposing
             # individual URL rows. Preserve that search result as a citable
@@ -957,7 +1064,7 @@ this selection; research children keep their independent model routing.
         only sees anonymous rows (``created_by_user_id IS NULL``), so an
         authenticated parent projecting its child would be denied
         (``RunNotFound``). Resolved once per segment on the capability
-        context; mirrors the mission engine's ``deps.visible_to``.
+        context.
         """
         return getattr(self.capability_context, "visible_to", None)
 
@@ -1076,6 +1183,26 @@ this selection; research children keep their independent model routing.
 _KERNEL_DEPS: contextvars.ContextVar[KernelDeps | None] = (
     contextvars.ContextVar("inqtrix_kernel_deps", default=None)
 )
+
+
+def collaboration_document_read(deps: Any, document_id: Any) -> bool:
+    """Whether the run's last read of *document_id* found it in collaboration mode.
+
+    THE shared reading of "this proposal targets a document in collaboration
+    mode": such a document accepts no agent proposal. The patch gate's
+    ``when`` predicate keeps the approval card away from exactly these calls,
+    and ``propose_editor_patch`` refuses them in its body without calling the
+    capability — one authority per call, as for the child tools'
+    :func:`~inqtrix.agents.kernel.middleware.last_turn_child_calls`. No path
+    turns a collaboration document back into a Markdown one, so a recorded
+    collaboration mode stays true. Everything else is not known to be such a
+    proposal: an unread document, a read without a recorded mode, and an
+    argument that is no document id.
+    """
+    if not isinstance(document_id, str) or not document_id:
+        return False
+    modes = getattr(deps, "editor_read_modes", None) or {}
+    return modes.get(document_id) == "collaboration"
 
 
 def kernel_deps() -> KernelDeps:

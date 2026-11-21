@@ -31,6 +31,7 @@ async def _save(
     chat_model_tier="",
     agent_model_tier="",
     updated_at=1.0,
+    **last_choices,
 ):
     return await service.save_preferences(
         user_id=user_id,
@@ -42,6 +43,7 @@ async def _save(
         chat_model_tier=chat_model_tier,
         agent_model_tier=agent_model_tier,
         updated_at=updated_at,
+        **last_choices,
     )
 
 
@@ -213,3 +215,67 @@ async def test_model_tier_domain_follows_the_routing_table(service) -> None:
 async def test_all_theme_presets_roundtrip(service, preset) -> None:
     await _save(service, USER, preset=preset)
     assert (await service.get_preferences(user_id=USER)).theme_preset == preset
+
+
+@pytest.mark.asyncio
+async def test_last_choices_start_without_a_pick_and_round_trip(service) -> None:
+    """A save that names no last pick stores none; a named pick comes back."""
+    await _save(service, USER)
+    stored = await service.get_preferences(user_id=USER)
+    assert (stored.last_research_profile, stored.last_agent_tier) == ("", "")
+
+    await _save(
+        service, USER, last_research_profile="compact", last_agent_tier="tief", updated_at=2.0,
+    )
+    stored = await service.get_preferences(user_id=USER)
+    assert (stored.last_research_profile, stored.last_agent_tier) == ("compact", "tief")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("last_research_profile", "turbo", "unknown last report profile"),
+        # A Stufe is no report profile, and a report profile is no Stufe:
+        # the two fields keep their own vocabularies.
+        ("last_research_profile", "gruendlich", "unknown last report profile"),
+        ("last_agent_tier", "standard", "unknown last agent tier"),
+        ("last_agent_tier", "compact", "unknown last agent tier"),
+    ],
+)
+async def test_validation_rejects_a_last_choice_outside_its_domain(
+    service, field, value, message,
+) -> None:
+    with pytest.raises(AccountPreferencesValidationError, match=message):
+        await _save(service, USER, **{field: value})
+
+
+@pytest.mark.asyncio
+async def test_last_choice_domains_follow_the_profile_and_tier_tables(service) -> None:
+    """Every report profile and every Stufe the server knows is a valid pick.
+
+    The domains come from the profile enum and the tier table; a copied list
+    would refuse a save for a value the composer offers the day one of them
+    grows.
+    """
+    from inqtrix.agents.tier_policy import AGENT_TIERS
+    from inqtrix.report_profiles import ReportProfile
+
+    for profile in ReportProfile:
+        await _save(service, USER, last_research_profile=profile.value)
+        stored = await service.get_preferences(user_id=USER)
+        assert stored.last_research_profile == profile.value
+    for tier in AGENT_TIERS:
+        await _save(service, USER, last_agent_tier=tier)
+        stored = await service.get_preferences(user_id=USER)
+        assert stored.last_agent_tier == tier
+
+
+@pytest.mark.asyncio
+async def test_last_choices_stay_with_their_user(service) -> None:
+    await _save(service, USER_A, last_research_profile="schnell", last_agent_tier="tief")
+    await _save(service, USER_B, last_research_profile="deep", last_agent_tier="schnell")
+    first = await service.get_preferences(user_id=USER_A)
+    second = await service.get_preferences(user_id=USER_B)
+    assert (first.last_research_profile, first.last_agent_tier) == ("schnell", "tief")
+    assert (second.last_research_profile, second.last_agent_tier) == ("deep", "schnell")

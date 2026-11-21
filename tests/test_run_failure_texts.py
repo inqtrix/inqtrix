@@ -133,7 +133,7 @@ def test_the_scan_finds_the_codes_it_must_find() -> None:
     # Anchors from every source; a broken scan would lose them. The full set
     # is derived above.
     assert {
-        "rate_limited", "provider_timeout", "server_error", "model_capacity", "task_failed",
+        "rate_limited", "provider_timeout", "server_error", "model_capacity",
         "knowledge_scope_missing", "answer_publication_conflict", "token_budget_exceeded",
         "max_retries_exceeded", "execution_lost", "queued_timeout", "server_restarted",
     } <= codes

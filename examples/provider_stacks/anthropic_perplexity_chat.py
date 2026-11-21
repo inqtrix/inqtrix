@@ -177,12 +177,12 @@ CLEAR_COMMANDS = {"/clear"}
 # Patterns used to derive the post-run summary line from the captured
 # progress log. Both are intentionally narrow: they target the numeric
 # markers the agent emits in its terminal "Research finished" line —
-# ``Confidence: X/10`` (identical in DE and EN) and ``Rounds: N`` /
-# ``Runden: N`` (DE/EN variant). If a future inqtrix release changes
+# ``Confidence: X/10`` / ``Konfidenz: X/10`` and ``Rounds: N`` /
+# ``Runden: N`` (EN/DE variants). If a future inqtrix release changes
 # the wording, the regex falls through and the summary silently drops
 # the affected field instead of crashing.
 _RE_ROUNDS = re.compile(r"(?:Rounds?|Runden):\s*(\d+)", re.IGNORECASE)
-_RE_CONFIDENCE = re.compile(r"Confidence:?\s*(\d+)/10", re.IGNORECASE)
+_RE_CONFIDENCE = re.compile(r"(?:Confidence|Konfidenz):?\s*(\d+)/10", re.IGNORECASE)
 
 
 def _require_env(name: str) -> str:

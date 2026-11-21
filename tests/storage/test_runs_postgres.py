@@ -1194,6 +1194,110 @@ def _insert_run_share(store, run_id: str) -> None:
     store._call(_insert())
 
 
+def test_session_history_lists_only_the_owners_runs(store) -> None:
+    """An agent session is a per-owner surface; an accepted share adds nothing.
+
+    The port contract of ``list_session_runs`` excludes the share-grant union.
+    A foreign run under the same session id, shared with the owner and
+    accepted, must not enter the owner's session history.
+    """
+    session_id = f"as-owner-only-{uuid.uuid4().hex[:8]}"
+    owner = UserContext(
+        principal=Principal(
+            user_id=OWNER_2, kind="oidc_session", tenant_id="default", role="member"
+        )
+    )
+    stranger = UserContext(
+        principal=Principal(
+            user_id=OWNER_1, kind="oidc_session", tenant_id="default", role="member"
+        )
+    )
+    own_run = submit_noop(
+        store,
+        kind="agent",
+        session_id=session_id,
+        created_by_user_id=OWNER_2,
+        created_by_tenant_id="default",
+    )["run_id"]
+    wait_for_status(store, own_run, {"completed"}, visible_to=owner)
+    # What the knowledge claim did before the fix: a registry row for the
+    # stranger under the owner's agent session id.
+    seed_knowledge_session(store, session_id, created_by_user_id=OWNER_1)
+    foreign_run = submit_noop(
+        store,
+        mode="knowledge",
+        session_id=session_id,
+        created_by_user_id=OWNER_1,
+        created_by_tenant_id="default",
+    )["run_id"]
+    wait_for_status(store, foreign_run, {"completed"}, visible_to=stranger)
+    _insert_run_share(store, foreign_run)
+
+    listed = store.list_session_runs(session_id, visible_to=owner)
+
+    listed_ids = [row["run_id"] for row in listed]
+    assert listed_ids == [own_run], {"own": own_run, "foreign": foreign_run, "listed": listed_ids}
+
+
+def test_a_knowledge_session_is_not_saved_under_another_owners_runs(store) -> None:
+    """The save path over the real stores follows the rule of the claim.
+
+    A stranger's save under an agent session id that carries the owner's
+    runs is refused and leaves no registry row: such a row could not run and
+    could not be deleted again, because the deletion stops at the owner's
+    runs. The owner's own save under the same id passes.
+    """
+    from inqtrix.services.knowledge_sessions_service import KnowledgeSessionsService
+
+    session_id = f"as-save-rule-{uuid.uuid4().hex[:8]}"
+
+    def scoped(user_id: uuid.UUID) -> UserContext:
+        return UserContext(
+            principal=Principal(
+                user_id=user_id, kind="oidc_session", tenant_id="default", role="member"
+            )
+        )
+
+    own_run = submit_noop(
+        store,
+        kind="agent",
+        session_id=session_id,
+        created_by_user_id=OWNER_2,
+        created_by_tenant_id="default",
+    )["run_id"]
+    wait_for_status(store, own_run, {"completed"}, visible_to=scoped(OWNER_2))
+
+    async def _scenario() -> tuple[str, int, str]:
+        knowledge_store = PostgresKnowledgeSessionStore(
+            engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE
+        )
+        service = KnowledgeSessionsService(store=knowledge_store, run_store=store)
+
+        async def save(user_id: uuid.UUID, title: str):
+            now = time.time()
+            return await service.save_session(
+                id=session_id, title=title, items_json="[]", group_id=None,
+                created_at=now, updated_at=now, caller_user_id=user_id,
+                workspace_id=None, visible_to=scoped(user_id),
+            )
+
+        try:
+            await save(OWNER_1, "Occupy")
+            refused = "saved"
+        except KnowledgeSessionNotFound:
+            refused = "refused"
+        async with store._session("default") as session:
+            rows_after_refusal = int(await session.scalar(
+                select(func.count())
+                .select_from(knowledge_sessions)
+                .where(knowledge_sessions.c.id == session_id)
+            ) or 0)
+        owned = await save(OWNER_2, "Mine")
+        return refused, rows_after_refusal, owned.title
+
+    assert store._call(_scenario()) == ("refused", 0, "Mine")
+
+
 @pytest.mark.parametrize("kind", ("agent", "knowledge"))
 def test_session_deletion_finishes_for_a_run_that_was_shared(store, kind) -> None:
     """Deletion ends a share by revoking it, so the revoked row is no residue."""
@@ -4248,7 +4352,7 @@ def test_initial_retention_sweep_already_owns_checkpoint_cleanup(store):
     reopened = PostgresRunStore(engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE,
         queue=None, max_concurrent=2, max_queue_size=10, completed_ttl_seconds=300,
         worker_id="retention-reopen", recover_orphans=True,
-        checkpoint_cleanup=lambda rid, mode: calls.append(
+        checkpoint_cleanup=lambda rid, mode, *, never_claimed=False: calls.append(
             (rid, mode, threading.current_thread().name)
         ))
     try:
@@ -4274,7 +4378,9 @@ def test_cascading_run_delete_purges_descendant_checkpoints_under_terminal_fence
             await session.execute(pg_insert(runs).values(**row).on_conflict_do_update(index_elements=[runs.c.run_id], set_={"status": status}))
     store._call(child("running"))
     calls = []
-    store.bind_checkpoint_cleanup(lambda rid, mode: calls.append((rid, mode)))
+    store.bind_checkpoint_cleanup(
+        lambda rid, mode, *, never_claimed=False: calls.append((rid, mode, never_claimed))
+    )
     with pytest.raises(RunActive):
         store.delete(run_id)
     assert calls == []
@@ -4283,9 +4389,112 @@ def test_cascading_run_delete_purges_descendant_checkpoints_under_terminal_fence
             await session.execute(update(runs).where(runs.c.run_id == child_id).values(status="completed"))
     store._call(terminal_child())
     store.delete(run_id)
-    assert calls == [(run_id, "agent_kernel"), (child_id, "workspace_agent")]
+    assert calls == [(run_id, "agent_kernel", False), (child_id, "workspace_agent", False)]
     with pytest.raises(RunNotFound):
         store.get(child_id)
+
+
+def test_deleting_a_never_claimed_run_tells_the_cleanup_it_has_no_thread(store):
+    """An imported run (attempt 0) never ran, so it has no checkpoint thread."""
+    from sqlalchemy import update
+
+    root = submit_noop(store, mode="agent_kernel")
+    run_id = root["run_id"]
+    wait_for_status(store, run_id, {"completed"})
+
+    async def never_claimed():
+        async with store._session("default") as session:
+            await session.execute(
+                update(runs).where(runs.c.run_id == run_id).values(attempt=0)
+            )
+
+    store._call(never_claimed())
+    calls = []
+    store.bind_checkpoint_cleanup(
+        lambda rid, mode, *, never_claimed=False: calls.append((rid, mode, never_claimed))
+    )
+    store.delete(run_id)
+
+    assert calls == [(run_id, "agent_kernel", True)]
+
+
+def test_agent_session_deletion_names_the_thread_of_a_retired_mission_child(store):
+    """A session's deletion removes the thread of every run of the session.
+
+    The session executor deletes one checkpoint thread per run id of the
+    immutable deletion context; a mission child of a kernel run, whose mode
+    is retired, is one of them.
+    """
+    session_id = "agent-session-mission-child"
+    workspace_id = "ws-agent-owner"
+    root = submit_noop(
+        store,
+        mode="agent_kernel",
+        kind="agent",
+        session_id=session_id,
+        created_by_user_id=OWNER_1,
+        created_by_tenant_id="default",
+        workspace_id=workspace_id,
+    )
+    run_id = root["run_id"]
+    wait_for_status(
+        store, run_id, {"completed"}, workspace_id=workspace_id, visible_to=_scoped(OWNER_1)
+    )
+    child_id = "run_" + uuid.uuid4().hex
+
+    async def mission_child():
+        async with store._session("default") as session:
+            row = dict(
+                (await session.execute(select(runs).where(runs.c.run_id == run_id)))
+                .mappings()
+                .one()
+            )
+            row.update(
+                run_id=child_id,
+                parent_run_id=run_id,
+                root_run_id=run_id,
+                kind="agent_child",
+                mode="workspace_agent",
+                session_id=None,
+                status="completed",
+            )
+            await session.execute(runs.insert().values(**row))
+
+    store._call(mission_child())
+    deletion_store = PostgresDeletionOperationStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=_RecordingDeletionQueue(),
+        max_concurrent=1,
+        completed_ttl_seconds=3600,
+        worker_id="agent-session-context-test",
+        recover_orphans=False,
+    )
+    try:
+        summary = deletion_store.submit(
+            target_kind=DeletionTargetKind.AGENT_SESSION,
+            target_id=session_id,
+            manifest=(),
+            tenant_id="default",
+            created_by_user_id=OWNER_1,
+            workspace_id=workspace_id,
+            work=lambda _handle: None,
+            session_context=SessionDeletionContext(
+                target_kind=DeletionTargetKind.AGENT_SESSION,
+                session_id=session_id,
+            ),
+            total_items=2,
+        )
+        record = deletion_store.get_record(
+            str(summary["operation_id"]),
+            tenant_id="default",
+            created_by_user_id=OWNER_1,
+            workspace_id=workspace_id,
+        )
+    finally:
+        deletion_store.close()
+
+    assert set(record.session_context.run_ids) == {run_id, child_id}
 
 
 @pytest.fixture()

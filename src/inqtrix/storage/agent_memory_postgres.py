@@ -1,4 +1,4 @@
-"""Postgres-backed workspace-agent memory candidate store."""
+"""Postgres-backed agent memory candidate store."""
 
 from __future__ import annotations
 

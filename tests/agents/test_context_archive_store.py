@@ -26,7 +26,7 @@ from inqtrix.agents.control_ports import (
 
 
 async def _authorize(write):
-    return write(None, None)
+    return write(None)
 
 
 async def _legacy(store, *, run_id="run_a", artifact_id="legacy", text="old rendering"):

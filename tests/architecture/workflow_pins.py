@@ -186,8 +186,7 @@ def current_shapes() -> dict[str, dict[str, Any]]:
         )
         graphs[label] = graph_shape(graph)
         tools.update(graph_tools(graph))
-    mission = registry.get("workspace_agent")
-    # One checkpointer serves both workflows, so both carry its type list.
+    # The checkpointer's type list is part of what a stored run resumes into.
     from inqtrix.agents.checkpointing import CHECKPOINT_TYPES
 
     checkpoint_types = [list(entry) for entry in sorted(CHECKPOINT_TYPES)]
@@ -203,13 +202,6 @@ def current_shapes() -> dict[str, dict[str, Any]]:
             # A resumed segment restores active skills and read receipts from
             # these lines of the stored transcript.
             "transcript_markers": [SKILL_LOADED_MARKER, EDITOR_READ_MARKER],
-        },
-        "workspace_agent": {
-            "contract_version": mission.contract_version,
-            "graphs": {"mission": graph_shape(mission._compiled_graph())},
-            "tools": {},
-            "interrupts": {},
-            "checkpoint_types": checkpoint_types,
         },
     }
 

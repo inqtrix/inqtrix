@@ -1072,8 +1072,8 @@ def test_search_retry_progress_labels_parallel_query_position() -> None:
     while not progress_queue.empty():
         messages.append(progress_queue.get()[1])
 
-    assert any("RetryingSearch-Retry 1/5 bei Websuche 1/2" in message for message in messages)
-    assert any("RetryingSearch-Retry 1/5 bei Websuche 2/2" in message for message in messages)
+    assert any("RetryingSearch: Wiederholung 1/5 bei Websuche 1/2" in message for message in messages)
+    assert any("RetryingSearch: Wiederholung 1/5 bei Websuche 2/2" in message for message in messages)
     retry_operations = [
         entry.get("operation")
         for entry in state["iteration_logs"]

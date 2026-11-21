@@ -32,17 +32,6 @@ SUMMARY_FIELDS = {"summary", "result_summary"}
 SUMMARY_NAMES = ("_summary",)
 AGENTS = pathlib.Path("src/inqtrix/agents")
 
-# The one accepted exception, named by FUNCTION rather than by file.
-# ``requested_task_cancellation`` is the store's own pure state machine: it
-# is called from ``control_memory`` and ``agent_control_postgres``, which
-# hold neither a run nor its language, and pushing the answer language into
-# the storage layer would be a layering violation for cosmetics. Localizing
-# it would mean rendering from its ``failure_code`` in the UI.
-#
-# Exempting the whole FILE would be too coarse: it would hide the settlement
-# texts in the same module that a user reads after pressing Stop.
-ALLOWED_FUNCTIONS = {"requested_task_cancellation"}
-
 
 def _is_sentence(text: str) -> bool:
     """Prose, as opposed to a key, a field name or a separator.
@@ -62,23 +51,9 @@ def _is_sentence(text: str) -> bool:
 
 
 def _summary_literals(source: str) -> list[tuple[int, str]]:
-    """Call sites that hand a summary field a hardcoded string.
-
-    Functions in :data:`ALLOWED_FUNCTIONS` are skipped whole, so the
-    exemption is as narrow as its reason.
-    """
+    """Call sites that hand a summary field a hardcoded string."""
     tree = ast.parse(source)
-    skip: set[int] = set()
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name in ALLOWED_FUNCTIONS
-        ):
-            skip.update(
-                child.lineno
-                for child in ast.walk(node)
-                if hasattr(child, "lineno")
-            )
+
     def _literals(value: ast.AST) -> list[tuple[int, str]]:
         """Constants outside any ``t(...)`` call.
 
@@ -99,7 +74,6 @@ def _summary_literals(source: str) -> list[tuple[int, str]]:
             if (
                 isinstance(node, ast.Constant)
                 and isinstance(node.value, str)
-                and node.lineno not in skip
                 and _is_sentence(node.value)
             ):
                 out.append((node.lineno, node.value))
@@ -170,14 +144,3 @@ def test_the_gate_reads_call_sites_not_the_table():
     )
 
 
-def test_the_exemption_is_a_function_not_a_file():
-    """Only the named function is exempt; its neighbours are not."""
-    source = (
-        "def requested_task_cancellation(current):\n"
-        '    return transitioned(result_summary="Aufgabe abgebrochen.")\n'
-        "\n"
-        "async def settle_terminal_plan_tasks(store, run_id):\n"
-        '    await store.transition(result_summary="Wegen Abbruch nicht ausgef\u00fchrt.")\n'
-    )
-    found = _summary_literals(source)
-    assert [text for _, text in found] == ["Wegen Abbruch nicht ausgeführt."]

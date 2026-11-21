@@ -92,24 +92,24 @@ import type { Locale, TranslationDictionary } from '@/i18n/translations'
 import { countLabel } from '@/i18n/plural'
 import { autonomyModeLabel } from '../runSetupLabels'
 import { AgentActivityLine } from '../AgentPulseTrack'
-import { isMissionChild } from '../childMission'
-import { childProgressLine } from '../childProgress'
+import { childDelegationLine, childProgressLine } from '../childProgress'
 import { renderInlineMarkdown } from './inlineMarkdown'
 import {
   groupStepEntries,
   isEvidenceReadEntry,
+  retiredTaskRow,
   taskResultShownByRow,
-  taskRowResultPreview,
+  taskStartConcluded,
 } from './stepGroups'
 import { todoStepStats, todoStepText } from '../todoRetrospective'
 import { diffHunkPlan, type DiffHunkPlan } from './artifactDiffHunks'
 import { reviewChangedLines, reviewKeptDraft } from '../answerDraft'
-import { ChildMissionCard } from './ChildMissionCard'
 import {
   canEditAgentRun,
   isActiveAgentRun,
   isGateAgentRun,
   type AgentAnswerDraft,
+  type AgentApprovalRecord,
   type AgentArtifactRecord,
   type AgentChildProgressRecord,
   type AgentRunOutcome,
@@ -120,8 +120,6 @@ import type {
   AgentApprovalDecisionRequest,
   AgentClarificationAnswerRequest,
 } from '../types'
-import type { PlanSourceInfo } from '../plan/sourceLabel'
-import type { AgentPlanDraft } from '../plan/usePlanApproval'
 import { clarificationAnswerSummary } from '../clarificationAnswers'
 import {
   agentArtifactReferences,
@@ -137,15 +135,14 @@ import {
   activityDisplayText,
   activityStepDisplayText,
   evidenceReadSummary,
-  isRoleOperation,
 } from '../activityPresentation'
-import { effectiveAgentTaskStatus } from '../plan/taskPresentation'
 import {
   agentRunCompletionRecap,
   answerStatesOutcome,
   artifactClaimMarks,
   runClockParts,
   runSettingsSummary,
+  runTierBadge,
   agentTodoReportAge,
   documentOutcome,
   KERNEL_REVIEW_NARRATION_ID,
@@ -160,7 +157,6 @@ import {
 } from '@/features/knowledge/citations'
 import { runFailureText } from '@/lib/runFailure'
 import { runHeadline } from '../runHeadline'
-import { decidedReportGuidance } from '../plan/reportGuidance'
 import { WebEvidenceSourceRow } from '../WebEvidenceSourceRow'
 import { copyTextToClipboard } from '@/lib/clipboard'
 
@@ -207,25 +203,6 @@ export type AgentTimelineActions = {
     artifactId: string,
     revision: number,
   ) => Promise<{ content_markdown: string }>
-  applyPatch: (
-    runId: string,
-    patchId: string,
-    expectedRevision: number,
-  ) => Promise<
-    | { kind: 'applied'; revision: number; appliedEditIds: string[] }
-    | { kind: 'conflict'; currentRevision: number | null }
-  >
-  rejectPatch: (
-    runId: string,
-    patchId: string,
-    note: string,
-  ) => Promise<unknown>
-  /** Shared per-run plan drafts (reducer-owned — one draft, two surfaces). */
-  planDrafts: Record<string, AgentPlanDraft>
-  setPlanDraft: (runId: string, draft: AgentPlanDraft | null) => void
-  /** Collection titles + vector-backend label for the plan's per-task
-   * source line (same data plane as the canvas plan view). */
-  planSource: PlanSourceInfo
 }
 
 /**
@@ -322,23 +299,11 @@ export function AgentRunTurn({
   )
   const answer = answerId ? run.artifacts[answerId] : undefined
   const draft = run.answerDraft
-  const tasks = (run.plan?.tasks ?? []).filter(
-    (task) => task.toolKind !== 'synthesis',
-  )
-  const done = tasks.filter(
-    (task) => effectiveAgentTaskStatus(task, run.taskStates[task.taskId]) === 'completed',
-  ).length
-  const failed = tasks.filter((task) => {
-    const status = effectiveAgentTaskStatus(task, run.taskStates[task.taskId])
-    return status === 'failed' || status === 'insufficient_evidence'
-  })
-  const lastTaskError = [...failed]
-    .reverse()
-    .map((task) => run.taskStates[task.taskId]?.error)
-    .find(Boolean)
+  // The header names the Stufe in every status: the settings line appears
+  // only once the turn has ended.
+  const tierBadge = runTierBadge(run, t)
   const recapFacts = agentRunCompletionRecap(
     run,
-    tasks,
     memoId ? run.artifacts[memoId] : undefined,
   )
   // The review's sentence stands once: under the answer when it carries it.
@@ -411,9 +376,17 @@ export function AgentRunTurn({
                 {autonomyModeLabel(run.autonomy, t)}
               </span>
             )}
-            {run.depth === 'deep' && (
-              <span className="rounded-full border border-brand/30 bg-brand-subtle px-1.5 py-px t-hint font-semibold text-brand">
-                {t.agent.composer.deep}
+            {tierBadge && (
+              <span
+                className={cn(
+                  'rounded-full border px-1.5 py-px t-hint font-semibold',
+                  tierBadge.deep
+                    ? 'border-brand/30 bg-brand-subtle text-brand'
+                    : 'border-border bg-background',
+                )}
+                data-testid="agent-run-tier"
+              >
+                {tierBadge.label}
               </span>
             )}
           </div>
@@ -603,7 +576,6 @@ export function AgentRunTurn({
             />
           ) : (
             <StreamEntry
-              actions={actions}
               artifactNames={artifactNames}
               entry={item.entry}
               historicalRun={historical}
@@ -615,23 +587,6 @@ export function AgentRunTurn({
             />
           ))}
         </motion.div>
-      )}
-
-      {tasks.length > 0
-        && (run.phase === 'execution' || run.phase === 'evidence') && (
-        <button
-          className="flex items-center gap-1.5 px-1 t-meta tabular-nums text-muted-foreground transition-colors hover:text-foreground"
-          onClick={() =>
-            actions.onOpenCanvas({ runId: run.runId, view: 'plan' })}
-          type="button"
-        >
-          <ListChecks className="icon-xs" />
-          {countLabel(
-            tasks.length,
-            t.agent.timeline.stepsProgressOne,
-            t.agent.timeline.stepsProgress,
-          ).replace('{done}', String(done))}
-        </button>
       )}
 
       {answer || draft ? (
@@ -662,23 +617,6 @@ export function AgentRunTurn({
                   )
                   : t.agent.timeline.failure}
             </p>
-            {tasks.length > 0 && (
-              <p className="mt-0.5 t-hint tabular-nums text-muted-foreground">
-                {t.agent.timeline.terminalTaskSummary
-                  .replace('{done}', String(done))
-                  .replace('{total}', String(tasks.length))
-                  .replace('{failed}', () => countLabel(
-                    failed.length,
-                    t.agent.timeline.attentionCountOne,
-                    t.agent.timeline.attentionCount,
-                  ))}
-              </p>
-            )}
-            {!run.error && !run.errorCode && lastTaskError && (
-              <p className="mt-0.5 break-words t-meta-sm text-destructive/90">
-                {lastTaskError}
-              </p>
-            )}
             {bindingEndText(run, t) && (
               <>
                 <button
@@ -1000,13 +938,6 @@ function RunCompletionRecap({
   t: TranslationDictionary
 }) {
   const facts = [
-    recap.taskCount > 0
-      ? countLabel(
-        recap.taskCount,
-        t.agent.timeline.recapTasksOne,
-        t.agent.timeline.recapTasks,
-      ).replace('{done}', String(recap.tasksCompleted))
-      : '',
     recap.referenceCount > 0
       ? countLabel(
         recap.referenceCount,
@@ -1022,7 +953,6 @@ function RunCompletionRecap({
       : '',
   ].filter(Boolean)
   const process = [
-    recap.synthesized ? t.agent.timeline.recapSynthesized : '',
     recap.outcome === 'missing'
       ? t.agent.timeline.recapNoOutcome
       : recap.outcome === 'none'
@@ -1786,7 +1716,6 @@ function hostFromUrl(url: string): string | null {
 
 /** One transcript line, dispatched by step kind. */
 function StreamEntry({
-  actions,
   artifactNames,
   entry,
   historicalRun = false,
@@ -1795,7 +1724,6 @@ function StreamEntry({
   run,
   t,
 }: {
-  actions: AgentTimelineActions
   /** Session file names by artifact id: tool rows name the document. */
   artifactNames?: Record<string, string>
   entry: AgentStepEntry
@@ -1895,25 +1823,26 @@ function StreamEntry({
         )
       }
       const child = delegatedChild(run, entry)
-      if (child && !isRoleOperation(entry.activityOperationCode) && isMissionChild(child)) {
-        // A delegated MISSION gets the card: stages, one row per plan
-        // task with its result head, the latest decision, the sum. Once
-        // the tool row settled it stays as the folded retrospective.
+      if (child && (settled || failed)) {
+        // A stored kernel run's delegated MISSION keeps one line of how it
+        // ended: its status and its review's summary.
+        const ended = entry.activityOperationCode === RETIRED_DELEGATION_TOOL
+          ? childDelegationLine(child, t)
+          : null
+        if (!ended) return row
         return (
           <>
             {row}
-            <ChildMissionCard
-              child={child}
-              folded={settled || failed}
-              onOpenDetails={() => actions.onOpenCanvas({ runId: child.childRunId, view: 'run' })}
-              t={t}
-            />
+            <p
+              className="flex items-start gap-1.5 pl-5 t-meta text-muted-foreground/70"
+              data-testid="agent-child-delegation"
+            >
+              <span className="min-w-0 break-words">{ended}</span>
+            </p>
           </>
         )
       }
-      const childLine = settled || failed || !child
-        ? null
-        : childProgressLine(child, t, locale)
+      const childLine = child ? childProgressLine(child, t, locale) : null
       if (!childLine) return row
       // A delegation is ONE tool row that can own the run for tens of
       // minutes. Its child reports phase and task all along; this is
@@ -1931,6 +1860,8 @@ function StreamEntry({
       )
     }
     case 'plan': {
+      // A plan of a stored run of the retired mission engine: the line it
+      // showed, as text — no plan view stands behind it any more.
       const label = (
         entry.autoApproved
           ? t.agent.timeline.planRevisedAuto
@@ -1942,95 +1873,42 @@ function StreamEntry({
         <p className="flex items-center gap-1.5 t-meta text-foreground/85">
           <ListChecks className="icon-xs shrink-0 text-muted-foreground" />
           <span className="min-w-0 break-words">{label}</span>
-          <button
-            className="inline-flex shrink-0 items-center gap-1 text-brand transition-colors hover:text-brand/80"
-            onClick={() =>
-              actions.onOpenCanvas({ runId: run.runId, view: 'plan' })}
-            type="button"
-          >
-            <ExternalLink className="icon-xs" />
-            {t.agent.timeline.openInCanvas}
-          </button>
         </p>
       )
     }
     case 'task_started':
     case 'task_finished':
     case 'task_failed': {
-      const title =
-        run.plan?.tasks.find((task) => task.taskId === entry.taskId)?.title
-        ?? entry.taskId
-        ?? ''
-      const running =
-        entry.kind === 'task_started'
-        && run.taskStates[entry.taskId ?? '']?.status === 'running'
-      // Started lines collapse into their outcome line once the task is
-      // over — the transcript stays one line per finished step.
-      if (entry.kind === 'task_started' && !running) return null
-      const task = run.plan?.tasks.find((candidate) => candidate.taskId === entry.taskId)
-      const effectiveStatus = task
-        ? effectiveAgentTaskStatus(task, run.taskStates[task.taskId])
-        : entry.kind === 'task_failed'
-          ? 'failed'
-          : entry.kind === 'task_finished'
-            ? 'completed'
-            : 'running'
-      const insufficient = effectiveStatus === 'insufficient_evidence'
-      // The one source of the result line: the fold of the task's
-      // narration reads the same function, so the result stands once.
-      const preview = taskRowResultPreview(entry, run)
-      const terminal = entry.kind !== 'task_started'
-      const glyph =
-        insufficient ? (
-          <AlertTriangle className="icon-xs shrink-0 text-warning" />
-        ) : entry.kind === 'task_failed' ? (
-          <X className="icon-xs shrink-0 text-destructive" />
-        ) : entry.kind === 'task_finished' ? (
-          <Check className="icon-xs shrink-0 text-success" />
-        ) : (
-          <span
-            aria-hidden="true"
-            className="size-1.5 shrink-0 rounded-full bg-brand inqtrix-running-dot"
-          />
-        )
+      // A task of a stored mission run, as text: its start line until
+      // its outcome line follows, then the outcome alone.
+      if (entry.kind === 'task_started' && taskStartConcluded(entry, run.stepLog)) {
+        return null
+      }
+      const { title, result } = retiredTaskRow(entry, run.stepLog)
+      const outcome = retiredTaskOutcome(entry, result, t)
       return (
-        <button
-          className="group relative flex w-full items-center gap-1.5 rounded py-1 pl-0.5 pr-6 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          onClick={() =>
-            entry.taskId
-            && actions.onOpenCanvas({
-              runId: run.runId,
-              taskId: entry.taskId,
-              view: 'run',
-            })}
-          type="button"
-        >
-          {glyph}
-          <span
-            className={cn(
-              'min-w-0 flex-1 break-words t-meta',
-              insufficient
-                ? 'text-warning'
-                : entry.kind === 'task_failed'
-                ? 'text-destructive/90'
-                : 'text-foreground/85',
+        <div className="flex items-start gap-1.5 py-1 pl-0.5" data-testid="agent-task-row">
+          <RetiredTaskGlyph active={isActiveAgentRun(run.status)} entry={entry} />
+          <div className="min-w-0 flex-1 t-meta">
+            <p
+              className={cn(
+                'break-words font-medium',
+                outcome?.tone === 'warning'
+                  ? 'text-warning'
+                  : outcome?.tone === 'destructive'
+                    ? 'text-destructive/90'
+                    : 'text-foreground/85',
+              )}
+            >
+              {title}
+            </p>
+            {outcome && (
+              <p className="mt-0.5 line-clamp-2 break-words pr-1 text-muted-foreground">
+                {outcome.text}
+              </p>
             )}
-          >
-            <span className="block font-medium">{title}</span>
-            {terminal && (preview || entry.error || insufficient) && (
-              <span className="mt-0.5 block line-clamp-2 pr-1 font-normal text-muted-foreground">
-                {entry.error
-                  ?? (insufficient
-                    ? t.agent.task.statusInsufficientEvidence
-                    : preview)}
-              </span>
-            )}
-          </span>
-          <ChevronRight
-            aria-hidden="true"
-            className="absolute right-1.5 top-1/2 icon-xs -translate-y-1/2 text-muted-foreground/55 transition-[color,transform] group-hover:translate-x-0.5 group-hover:text-foreground"
-          />
-        </button>
+          </div>
+        </div>
       )
     }
     case 'clarification_answered': {
@@ -2058,8 +1936,10 @@ function StreamEntry({
       const approval = run.approvals.find(
         (item) => item.approvalId === entry.approvalId,
       )
+      // The kind from the row, else from the request line of the same
+      // gate; a gate whose kind is unknown gets the plain receipt.
       const label = decisionLabel(
-        approval?.kind ?? 'plan',
+        approval?.kind ?? requestedApprovalKind(run.stepLog, entry.approvalId),
         entry.detail ?? approval?.status ?? '',
         t,
       )
@@ -2157,6 +2037,41 @@ function StreamEntry({
   }
 }
 
+/**
+ * The result requirement in force after a decided plan gate of a stored
+ * run of the retired mission engine — the text the user typed, never the
+ * composed prompt text with its rule markers.
+ *
+ * Presence decides, in decision order: an approval that carried no
+ * requirement key leaves the earlier one standing, an explicitly emptied
+ * one clears it. Only plan and replan gates carried it.
+ */
+function decidedReportGuidance(
+  approvals: readonly AgentApprovalRecord[],
+): string {
+  let effective = ''
+  for (const approval of approvals) {
+    if (approval.kind !== 'plan' && approval.kind !== 'replan') continue
+    if (approval.status === 'pending') continue
+    const payload = approval.decisionPayload
+    // The parts, when the decision kept them; older decisions have only
+    // the composed value and fall back to it.
+    if (payload && 'report_requirement' in payload) {
+      const requirement = payload.report_requirement
+      const freeText =
+        requirement && typeof requirement === 'object'
+          ? (requirement as { free_text?: unknown }).free_text
+          : undefined
+      effective = typeof freeText === 'string' ? freeText.trim() : ''
+      continue
+    }
+    if (!payload || !('report_guidance' in payload)) continue
+    const value = payload.report_guidance
+    effective = typeof value === 'string' ? value.trim() : ''
+  }
+  return effective
+}
+
 /** The result requirement of a decided plan gate, collapsed by default.
  *
  * Collapsed because it can be 2000 characters and the transcript is a
@@ -2179,7 +2094,7 @@ function GateGuidanceLine({ guidance }: { guidance: string }) {
             expanded && 'rotate-90',
           )}
         />
-        {t.agent.plan.reportGuidanceEffective}
+        {t.agent.timeline.reportGuidanceEffective}
       </button>
       {expanded && (
         <p className="mt-0.5 whitespace-pre-line break-words t-meta text-foreground/85">
@@ -2361,7 +2276,18 @@ function NarrationText({ animate, text }: { animate: boolean; text: string }) {
   )
 }
 
-/** German decision line for the transcript (rows carry kind + status). */
+/** Which words a decided gate's receipt uses. The retired mission engine's
+ * kinds keep theirs — a `replan` decided a plan, too. */
+const DECISION_TEXTS: Readonly<Record<string, 'discovery' | 'patch' | 'plan' | 'tool'>> = {
+  discovery: 'discovery',
+  patch: 'patch',
+  plan: 'plan',
+  replan: 'plan',
+  tool: 'tool',
+}
+
+/** The decision line for the transcript (rows carry kind + status). A kind
+ * this desk does not know gets the plain receipt, never another kind's. */
 function decisionLabel(
   kind: string,
   status: string,
@@ -2369,11 +2295,92 @@ function decisionLabel(
 ): string | null {
   const map = t.agent.timeline.decisions as Record<
     string,
-    Record<string, string> | undefined
+    Record<string, string | undefined> | undefined
   >
-  const byKind = map[kind] ?? map.plan
+  const byKind = map[DECISION_TEXTS[kind] ?? 'generic']
   if (!byKind) return null
   return byKind[status] ?? byKind.approved ?? null
+}
+
+/** The kind the request line of a gate named (`approval.requested`). */
+function requestedApprovalKind(
+  stepLog: readonly AgentStepEntry[],
+  approvalId: string | undefined,
+): string {
+  if (!approvalId) return ''
+  return stepLog.find(
+    (item) => item.kind === 'gate_requested' && item.approvalId === approvalId,
+  )?.detail ?? ''
+}
+
+/** The delegation tool of a kernel run that handed its task to the retired
+ * mission engine; its stored rows keep one line of how the mission ended. */
+const RETIRED_DELEGATION_TOOL = 'run_deep_mission'
+
+/** The second line of a stored mission task: its outcome in words. The
+ * status says what happened — skipped, cancelled and insufficient evidence
+ * are not "done" — and a finished task shows its result head. */
+function retiredTaskOutcome(
+  entry: AgentStepEntry,
+  result: string,
+  t: TranslationDictionary,
+): { text: string; tone: 'destructive' | 'muted' | 'warning' } | null {
+  const words = t.agent.task
+  if (entry.kind === 'task_started') {
+    if (entry.status === 'cancel_requested') return { text: words.statusCancelRequested, tone: 'muted' }
+    if (entry.status === 'cancelled') return { text: words.statusCancelled, tone: 'muted' }
+    return null
+  }
+  if (entry.status === 'insufficient_evidence') {
+    return { text: words.statusInsufficientEvidence, tone: 'warning' }
+  }
+  if (entry.status === 'skipped') return { text: words.statusSkipped, tone: 'muted' }
+  if (entry.status === 'cancelled') return { text: words.statusCancelled, tone: 'muted' }
+  if (entry.kind === 'task_failed' || entry.status === 'failed') {
+    const reason = entry.error || result
+    return {
+      text: reason
+        ? t.agent.timeline.taskFailed.replace('{error}', () => reason)
+        : words.statusFailed,
+      tone: 'destructive',
+    }
+  }
+  return result ? { text: result, tone: 'muted' } : null
+}
+
+function RetiredTaskGlyph({
+  active,
+  entry,
+}: {
+  /** The run is still alive: a start line marks running work. */
+  active: boolean
+  entry: AgentStepEntry
+}) {
+  const className = 'mt-0.5 icon-xs shrink-0'
+  if (entry.kind === 'task_started') {
+    if (entry.status === 'cancel_requested' || entry.status === 'cancelled') {
+      return <X className={cn(className, 'text-muted-foreground')} />
+    }
+    return (
+      <span
+        aria-hidden="true"
+        className={cn(
+          'mt-1.5 size-1.5 shrink-0 rounded-full',
+          active ? 'bg-brand inqtrix-running-dot' : 'bg-muted-foreground/50',
+        )}
+      />
+    )
+  }
+  if (entry.status === 'insufficient_evidence') {
+    return <AlertTriangle className={cn(className, 'text-warning')} />
+  }
+  if (entry.kind === 'task_failed' || entry.status === 'failed') {
+    return <X className={cn(className, 'text-destructive')} />
+  }
+  if (entry.status === 'skipped' || entry.status === 'cancelled') {
+    return <X className={cn(className, 'text-muted-foreground')} />
+  }
+  return <Check className={cn(className, 'text-success')} />
 }
 
 function ActivityGlyph({
@@ -2469,17 +2476,6 @@ export function activityText(
       if (line) return line
     }
   }
-  // Parallel work is the point of the wave scheduler — the live line
-  // says so instead of pretending one operation runs at a time.
-  const runningTasks = run.plan
-    ? run.plan.tasks.filter((task) => {
-      const status = run.taskStates[task.taskId]?.status
-      return status === 'running' || status === 'cancel_requested'
-    }).length
-    : 0
-  const parallelPrefix = runningTasks > 1
-    ? t.agent.activity.parallelTasks.replace('{count}', String(runningTasks))
-    : ''
   if (run.activity?.operation === 'evidence_read' || run.activity?.label === 'read_evidence') {
     const currentReads: AgentStepEntry[] = []
     for (let index = run.stepLog.length - 1; index >= 0; index -= 1) {
@@ -2494,12 +2490,7 @@ export function activityText(
         : summary
     }
   }
-  if (run.activity?.operation) {
-    const operationText = activityDisplayText(run.activity, t)
-    return parallelPrefix
-      ? `${parallelPrefix} · ${operationText}`
-      : operationText
-  }
+  if (run.activity?.operation) return activityDisplayText(run.activity, t)
   if (run.activity?.kind === 'searching') {
     // A kernel tool row carries the tool id as its label (no normalized
     // operation): say the tool and its subject — "Tiefen-Recherche
@@ -2514,19 +2505,9 @@ export function activityText(
   // re-worded here. A local re-wording would contradict the transcript for
   // the same moment ("Recherche-Limit erreicht" against "Recherche-Cap
   // erreicht"), and an override for `critic_research_exhausted` would
-  // flatten THREE distinct server reasons (no classified gap / research
-  // cap / mission time budget) into one sentence, so the reader could not
-  // tell which one applied. The server label is the single source.
+  // flatten distinct server reasons into one sentence, so the reader could
+  // not tell which one applied. The server label is the single source.
   if (run.activity?.label) return run.activity.label
-  if (run.phase === 'execution' && run.plan) {
-    const tasks = run.plan.tasks.filter((task) => task.toolKind !== 'synthesis')
-    const done = tasks.filter(
-      (task) => run.taskStates[task.taskId]?.status === 'completed',
-    ).length
-    return t.agent.activity.taskProgress
-      .replace('{done}', String(done))
-      .replace('{total}', String(tasks.length))
-  }
   const key = run.phase as keyof TranslationDictionary['agent']['activity']
   const label = t.agent.activity[key]
   return typeof label === 'string' ? label : t.agent.activity.execution

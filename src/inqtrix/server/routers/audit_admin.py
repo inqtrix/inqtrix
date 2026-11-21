@@ -33,7 +33,7 @@ from inqtrix.auth.log_redaction import (
 )
 from inqtrix.auth.permissions import AuditEntry
 from inqtrix.server.routers._admin_guard import TENANT, require_instance_admin
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import error_response, read_json_object
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -319,13 +319,10 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "without it, pseudonyms are stable only within a process."),
                 "conflict",
             )
-        try:
-            body = await request.json()
-        except Exception:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
-        pseudonym = str((body or {}).get("pseudonym", "")).strip().lower()
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
+        pseudonym = str(body.get("pseudonym", "")).strip().lower()
         if not _PSEUDONYM_PATTERN.fullmatch(pseudonym):
             return error_response(
                 400,

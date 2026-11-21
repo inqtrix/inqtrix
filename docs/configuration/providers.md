@@ -153,7 +153,7 @@ Both plain JSON responses and SSE payloads encoded as a single string are accept
 - Hidden OpenAI SDK retries are disabled. `LiteLLM` retries rate limits (429), transient 408/409/500/502/503/504/529 and SDK timeout/connection errors itself, three attempts in total within the call's deadline, waiting as long as a `Retry-After` asks when that wait ends before the deadline, so attempts are logged and surfaced in live progress. A rate limit that outlasts the attempts escalates to `AgentRateLimited`.
 - Any other 4xx is never retried. One whose structured error code is `content_filter` (the Azure/OpenAI content filter refused the request) is classified as a content refusal of that request (`provider_failure_contract.CONTENT_REFUSAL_CODES`): the whole-document analysis then leaves only the refused window unanalysed and names it, instead of stopping the reading, and knowledge contextualization indexes the refused batch without retrieval context instead of pausing the revision.
 - Anthropic's `thinking` block is not part of this adapter. Reasoning effort is: `tier_high_effort` / `tier_mid_effort` / `tier_fast_effort` are resolved per call and forwarded as the OpenAI-compatible `reasoning_effort` request field. A gateway that cannot honour a graded value rejects the request visibly; one that accepts it and does not reason is reported as described in [Reasoning that never arrives](#reasoning-that-never-arrives). For an explicit thinking budget use `AnthropicLLM` or `BedrockLLM`.
-- Models with OpenAI rules on their card follow the same rules as on Azure: `none` goes out explicitly where the card lists it, a level the model's API cannot send runs at the strongest allowed level below it, and a model whose card says `api="responses"` is called through the gateway's Responses endpoint (`/responses`), see [Models on the Responses API](#models-on-the-responses-api). The gateway must offer that endpoint for those models.
+- Models with OpenAI rules on their card follow the same rules as on Azure: `none` goes out explicitly where the card lists it, a level the model's API cannot send runs at the strongest allowed level below it, and a model whose card says `api="responses"` is called through the gateway's Responses endpoint (`/responses`), see [Models on the Responses API](#models-on-the-responses-api). The gateway must offer that endpoint for those models. The sections of a research report and the turns of the agent kernel send the `verbosity` the card names, see [Verbosity of prose](#verbosity-of-prose).
 - Token-usage metadata is only as good as the upstream proxy: a proxy that strips `usage` from the response will report zeros.
 - An alias with a provider prefix (`azure/gpt-6.1-terra`, `anthropic/claude-opus-4-8`) finds the card of its model. For a model on the Responses API the adapter then calls the gateway's `/responses` endpoint, which the gateway must route. A Claude model behind the gateway shows its card's levels in the picker, `xhigh` and `max` included; the adapter passes the level on as `reasoning_effort`, and whether the gateway maps it for Anthropic is up to the gateway.
 
@@ -438,6 +438,32 @@ Completions a model reasons afresh in each turn.
 - An Azure deployment must be named after the model id (as for the model
   picker) for its card, and with it the Responses path, to apply. A deployment
   without a card stays on Chat Completions.
+
+### Verbosity of prose
+
+Newer OpenAI models take a `verbosity` for their visible answer (`low`, `medium`,
+`high`; the API's default is `medium`). A model card can name the level its prose
+is written with (`OpenAIRules.prose_verbosity`, see
+[Model cards](model-cards.md)). Two kinds of call ask for it: the sections of a
+research report and the turns of the agent kernel (`mode=agent_kernel`). The adapter
+puts the level into the
+request as `verbosity` over Chat Completions and as `text.verbosity` over the
+Responses API.
+
+- Classify, plan, evaluate, claim extraction, review, a compaction summary and
+  every structured call never ask for the card's level, also when they run on
+  the same model: a longer answer there costs more and helps nobody.
+- A `verbosity` in `request_params` applies to every call of the adapter; on the
+  calls that ask for the card's level, the card's level goes out.
+- A card without a level changes nothing about a request.
+- The resolution of a node shows the level it asks for (`verbosity` next to
+  `model` and `effort` on `/health`, on `/v1/stacks` and in the
+  `inqtrix.node.model_resolution` event). The trace of a call shows what its
+  request carried (`inqtrix.request.verbosity.sent`).
+- When a report falls back to another model after a provider error, its sections
+  ask for the level of that model's card. The resolution keeps naming the routed
+  model and its level; the trace of each call shows what went out.
+- `LiteLLM` follows the same rule for the models whose card names a level.
 
 ### Errors
 

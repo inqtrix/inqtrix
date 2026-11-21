@@ -4,7 +4,7 @@ The single-LLM-call cores extracted verbatim from
 :mod:`inqtrix.server.routers.editor` so that BOTH consumers share one
 implementation: the HTTP router (which keeps request parsing, quota,
 semaphore, and the exception -> error-envelope mapping) and the
-workspace-agent runtime (which calls the SYNC entry points from its
+agent runtime (which calls the SYNC entry points from its
 worker threads).
 
 Both entry points are synchronous by design: the router wraps them in

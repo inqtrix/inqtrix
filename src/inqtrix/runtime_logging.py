@@ -145,6 +145,7 @@ _CONSOLE_ENUM_FIELDS = frozenset({
     "run_mode",
     "status",
     "tier",
+    "verbosity",
     "verification",
     "verification_basis",
 })
@@ -342,10 +343,10 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "markdown",
         "reference_labels",
     }),
-    # An agent run's outcome record; only a delegated mission's crosses to
-    # its parent, as numbers and its closed summary sentence, so its fields
-    # are allowlisted: a label or detail smuggled into the payload must
-    # never become the parent's message.
+    # An agent run's outcome record: it stays in the run's own stream (no
+    # child projection carries it), and its fields are allowlisted, so a
+    # label or detail smuggled into the payload never reaches a reader as
+    # a field of the record.
     OUTCOME_EVENT: frozenset({
         "outcome_id",
         "final",
@@ -354,6 +355,10 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "revision",
         "accounting",
         "basis",
+        # Why a review left no usable verdict and, for an inconsistent one,
+        # the flags it gave no reason for: closed codes, never prose.
+        "unavailable_reason",
+        "unexplained",
         "applied",
         "verified",
         "unverified_reasons",
@@ -365,7 +370,7 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "summary",
         # The delivered statements by state and the passages marked as
         # insufficiently supported: the run's own reader sees them under its
-        # outputs; the parent's projection (runs/shared.py) takes none.
+        # outputs.
         "claims",
         "marks",
         "details",
@@ -424,6 +429,7 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "model",
         "tier",
         "effort",
+        "verbosity",
         "model_source",
         "effort_source",
         "requested_tier",
@@ -433,6 +439,7 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "model",
         "tier",
         "effort",
+        "verbosity",
         "model_source",
         "effort_source",
         "requested_tier",

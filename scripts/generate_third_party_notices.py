@@ -15,6 +15,10 @@ from typing import Any, Callable, Mapping
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MARKDOWN_PATH = REPO_ROOT / "THIRD_PARTY_NOTICES.md"
 DEFAULT_JSON_PATH = REPO_ROOT / "THIRD_PARTY_NOTICES.json"
+COPIED_CODE_FILE = "copied-code.json"
+"""Declared list of code copied into the repository, next to the lockfiles."""
+COPIED_CODE_SCHEMA = "inqtrix-copied-code-v1"
+_COPIED_CODE_TEXT_FIELDS = ("name", "source", "license", "license_file", "origin")
 SURFACE_ORDER = {
     "python": 0,
     "python-dev": 1,
@@ -420,6 +424,103 @@ def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
     return entries
 
 
+@dataclass(frozen=True)
+class CopiedCodeEntry:
+    """Code copied into the repository from another project."""
+
+    name: str
+    source: str
+    license: str
+    license_file: str
+    origin: str
+    paths: tuple[str, ...]
+
+
+def _copied_code_path(repo_root: Path, value: object, *, entry: str) -> Path:
+    """Resolve one path of the copied-code list inside the repository."""
+    if not isinstance(value, str) or not value.strip():
+        raise NoticeGenerationError(f"{COPIED_CODE_FILE}: {entry} names an empty path.")
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise NoticeGenerationError(
+            f"{COPIED_CODE_FILE}: {entry} names {value!r}; paths are relative to "
+            "the repository root and stay inside it."
+        )
+    path = repo_root / relative
+    if not path.exists():
+        raise NoticeGenerationError(
+            f"{COPIED_CODE_FILE}: {entry} names {value!r}, which does not exist; "
+            "update the list when copied code moves or goes."
+        )
+    return path
+
+
+def collect_copied_code(repo_root: Path) -> list[CopiedCodeEntry]:
+    """Read the declared list of code copied into the repository.
+
+    Copied code has no package-manager entry, so ``copied-code.json`` next to
+    the lockfiles declares it: where it comes from, under which license and
+    which files or folders hold it. The list is required, as an empty list
+    when nothing is copied. Every declared path and license file must exist,
+    and the license file stands next to the code it covers, in the folder of
+    each copied file or inside each copied folder: a copy that moved or went
+    fails the run instead of leaving a notice without code or code without a
+    notice.
+    """
+    list_path = repo_root / COPIED_CODE_FILE
+    if not list_path.exists():
+        raise NoticeGenerationError(
+            f"{COPIED_CODE_FILE} not found; it declares the code copied into "
+            "the repository (an empty list when there is none)."
+        )
+    document = _read_json(list_path)
+    if document.get("schema_version") != COPIED_CODE_SCHEMA:
+        raise NoticeGenerationError(
+            f"{COPIED_CODE_FILE} must declare schema_version {COPIED_CODE_SCHEMA!r}."
+        )
+    raw_entries = document.get("copied_code")
+    if not isinstance(raw_entries, list):
+        raise NoticeGenerationError(f"{COPIED_CODE_FILE}: copied_code must be a list.")
+    entries: list[CopiedCodeEntry] = []
+    for index, raw in enumerate(raw_entries):
+        if not isinstance(raw, Mapping):
+            raise NoticeGenerationError(f"{COPIED_CODE_FILE}: entry {index} must be an object.")
+        label = f"entry {raw.get('name') or index!r}"
+        missing = [
+            field
+            for field in _COPIED_CODE_TEXT_FIELDS
+            if not isinstance(raw.get(field), str) or not raw[field].strip()
+        ]
+        if missing:
+            raise NoticeGenerationError(
+                f"{COPIED_CODE_FILE}: {label} lacks {', '.join(missing)}."
+            )
+        paths = raw.get("paths")
+        if not isinstance(paths, list) or not paths:
+            raise NoticeGenerationError(f"{COPIED_CODE_FILE}: {label} lists no paths.")
+        license_file = _copied_code_path(repo_root, raw["license_file"], entry=label)
+        for value in paths:
+            path = _copied_code_path(repo_root, value, entry=label)
+            folder = path if path.is_dir() else path.parent
+            if license_file.parent != folder:
+                raise NoticeGenerationError(
+                    f"{COPIED_CODE_FILE}: the license file of {label} does not "
+                    f"stand next to {value!r}; it belongs in the folder of the "
+                    "copied code."
+                )
+        entries.append(
+            CopiedCodeEntry(
+                name=raw["name"].strip(),
+                source=raw["source"].strip(),
+                license=raw["license"].strip(),
+                license_file=raw["license_file"],
+                origin=raw["origin"].strip(),
+                paths=tuple(paths),
+            )
+        )
+    return sorted(entries, key=lambda item: canonical_name(item.name))
+
+
 def build_notice_entries(
     repo_root: Path = REPO_ROOT,
     *,
@@ -440,7 +541,7 @@ def build_notice_entries(
     )
 
 
-def build_json_document(entries: list[NoticeEntry]) -> str:
+def build_json_document(entries: list[NoticeEntry], copied: list[CopiedCodeEntry]) -> str:
     """Render the machine-readable notice inventory."""
     payload = {
         "schema_version": "inqtrix-third-party-notices-v1",
@@ -455,8 +556,10 @@ def build_json_document(entries: list[NoticeEntry]) -> str:
                 "apps/collaboration-server/package.json",
                 "packages/editor-schema/package.json",
             ],
+            "copied_code": COPIED_CODE_FILE,
         },
         "packages": [asdict(entry) for entry in entries],
+        "copied_code": [asdict(entry) for entry in copied],
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
@@ -483,7 +586,32 @@ def _markdown_table(entries: list[NoticeEntry]) -> list[str]:
     return lines
 
 
-def build_markdown_document(entries: list[NoticeEntry]) -> str:
+def _copied_code_section(copied: list[CopiedCodeEntry]) -> list[str]:
+    lines = [
+        "## Copied Code",
+        "",
+        "Code copied into this repository from other projects, as declared in "
+        f"`{COPIED_CODE_FILE}`. Its license text stands next to it.",
+    ]
+    if not copied:
+        lines.extend(["", "None."])
+    for entry in copied:
+        lines.extend(
+            [
+                "",
+                f"### {entry.name}",
+                "",
+                f"- Source: {entry.source}",
+                f"- License: {entry.license}, text in `{entry.license_file}`",
+                f"- Origin: {entry.origin}",
+                "- Paths:",
+            ]
+        )
+        lines.extend(f"  - `{path}`" for path in entry.paths)
+    return lines
+
+
+def build_markdown_document(entries: list[NoticeEntry], copied: list[CopiedCodeEntry]) -> str:
     """Render the human-readable notice inventory."""
     summary = {
         surface: sum(1 for entry in entries if entry.dependency_surface == surface)
@@ -513,6 +641,8 @@ def build_markdown_document(entries: list[NoticeEntry]) -> str:
     lines.extend(["", "## JavaScript Dependencies", ""])
     lines.extend(_markdown_table([entry for entry in entries if entry.ecosystem != "python"]))
     lines.append("")
+    lines.extend(_copied_code_section(copied))
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -523,7 +653,8 @@ def build_documents(
 ) -> tuple[str, str]:
     """Return ``(markdown, json)`` generated for ``repo_root``."""
     entries = build_notice_entries(repo_root, python_metadata_provider=python_metadata_provider)
-    return build_markdown_document(entries), build_json_document(entries)
+    copied = collect_copied_code(repo_root)
+    return build_markdown_document(entries, copied), build_json_document(entries, copied)
 
 
 def _write_if_needed(path: Path, content: str) -> None:

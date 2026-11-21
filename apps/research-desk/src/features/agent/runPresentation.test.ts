@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { AgentArtifactRecord, AgentPlanTaskRecord, AgentRunOutcome } from './model'
+import type { AgentArtifactRecord, AgentRunOutcome } from './model'
 import type { ResearchRunSnapshot } from '@/features/researchRuns/types'
 import { translations } from '@/i18n/translations'
 import {
@@ -11,25 +11,9 @@ import {
   retainHydratedAgentRunIds,
   runClockParts,
   runSettingsSummary,
+  runTierBadge,
   shouldAnimateAgentNarration,
 } from './runPresentation'
-
-const task = (taskId: string, status: string): AgentPlanTaskRecord => ({
-  budget: {},
-  childRunId: null,
-  dependsOn: [],
-  expectedOutput: '',
-  gapIds: [],
-  objective: '',
-  ordinal: 0,
-  params: {},
-  queries: ['q'],
-  resultSummary: '',
-  status,
-  taskId,
-  title: taskId,
-  toolKind: 'web_instant',
-})
 
 describe('agent run completion recap', () => {
   const outcome = (review: string, summary: string): AgentRunOutcome => ({
@@ -37,7 +21,7 @@ describe('agent run completion recap', () => {
   })
   const completed = {
     elapsedSeconds: 38, kind: 'agent' as const, lastSequence: 12,
-    status: 'completed' as const, stepLog: [], taskStates: {},
+    status: 'completed' as const,
   }
 
   it('the recap takes its words from the record', () => {
@@ -46,11 +30,7 @@ describe('agent run completion recap', () => {
     const recap = agentRunCompletionRecap({
       ...completed,
       outcome: outcome('completed', 'Geprüft · 2 Punkte nicht geprüft'),
-      stepLog: [
-        { kind: 'phase', phase: 'critic', seq: 1, at: 1 },
-        { kind: 'activity', activityKind: 'critic_revise', seq: 2, at: 2 },
-      ],
-    }, [], undefined)
+    }, undefined)
     expect(recap.outcome).toEqual({ summary: 'Geprüft · 2 Punkte nicht geprüft' })
   })
 
@@ -64,12 +44,12 @@ describe('agent run completion recap', () => {
     // owe the reader nothing; their records stay quiet.
     const recap = agentRunCompletionRecap({
       ...completed, outcome: outcome(review, 'Geprüft · ohne Befund'),
-    }, [], undefined)
+    }, undefined)
     expect(recap.outcome).toEqual(expected)
   })
 
   it('a completed agent run without a record reads ohne Ausgang', () => {
-    expect(agentRunCompletionRecap(completed, [], undefined).outcome).toBe('missing')
+    expect(agentRunCompletionRecap(completed, undefined).outcome).toBe('missing')
   })
 
   it.each([
@@ -79,23 +59,20 @@ describe('agent run completion recap', () => {
   ])('says nothing about %s without a record', (_case, overrides) => {
     // A run hydrated from its summary alone has read none of its events:
     // its record may still be on the way, so it claims no absence.
-    expect(agentRunCompletionRecap({ ...completed, ...overrides }, [], undefined).outcome)
+    expect(agentRunCompletionRecap({ ...completed, ...overrides }, undefined).outcome)
       .toBe('none')
   })
 
-  it('uses durable task rows and artifact metadata for a substantive return state', () => {
+  it('uses artifact metadata for a substantive return state', () => {
     const memo = { refsCount: 38 } as AgentArtifactRecord
     expect(agentRunCompletionRecap({
       ...completed,
       elapsedSeconds: 863,
       outcome: outcome('completed', 'Geprüft · ohne Befund'),
-    }, [task('t1', 'completed'), task('t2', 'completed')], memo)).toEqual({
+    }, memo)).toEqual({
       elapsedSeconds: 863,
       referenceCount: 38,
       outcome: { summary: 'Geprüft · ohne Befund' },
-      synthesized: true,
-      taskCount: 2,
-      tasksCompleted: 2,
     })
   })
 })
@@ -199,7 +176,24 @@ describe('run settings line', () => {
     expect(parts).toContain('Web 1 Suche')
   })
 
-  it('names the mission machine and the pinned chips with their count', () => {
+  it('counts the searches of the knowledge base, not every use of it', () => {
+    // The regression: "Wissen 3 Suchen" for one search and two document
+    // reads, in a tier that allows one search. The counter of source uses
+    // takes a read like a search; the run reports its searches beside it.
+    const searched = runSettingsSummary({
+      agentTier: 'schnell', autonomy: 'balanced',
+      snapshot: execution({ tool_use_counts: { web: 0, knowledge: 3 }, knowledge_searches: 1 }),
+    }, t)
+    expect(searched).toContain('Wissen 1 Suche (alle Sammlungen)')
+    // A run that only read documents searched nothing, and says so.
+    const read = runSettingsSummary({
+      agentTier: 'schnell', autonomy: 'balanced',
+      snapshot: execution({ tool_use_counts: { web: 0, knowledge: 2 }, knowledge_searches: 0 }),
+    }, t)
+    expect(read).toContain('Wissen 0 Suchen (alle Sammlungen)')
+  })
+
+  it('names no engine for a stored mission run, and the pinned chips with their count', () => {
     const parts = runSettingsSummary({
       agentTier: 'tief', autonomy: 'autonomous',
       snapshot: execution({
@@ -210,7 +204,8 @@ describe('run settings line', () => {
         source_policy: { web: 'available', knowledge: 'available' },
       }),
     }, t)
-    expect(parts[0]).toBe(t.agent.overview.brainMission)
+    expect(parts.slice(0, 2)).toEqual(['Auto', 'Tief'])
+    expect(parts).not.toContain(t.agent.composer.engineAuto)
     expect(parts).toContain('Web 3 Suchen')
     expect(parts).toContain('Wissen 1 Suche (2 Sammlungen)')
   })
@@ -243,6 +238,32 @@ describe('run settings line', () => {
     }, t)
     expect(parts).toContain('claude-opus-4-8')
     expect(parts).toContain('Aufwand High')
+  })
+
+  it('names a legacy deep run without a Stufe "Deep", as the header does', () => {
+    expect(runSettingsSummary({ autonomy: 'balanced', depth: 'deep' }, t))
+      .toEqual(['Standard', t.agent.composer.deep])
+    // A Stufe the desk does not know is no Stufe: the stored depth speaks.
+    expect(runSettingsSummary({ agentTier: 'standard', autonomy: 'balanced', depth: 'deep' }, t))
+      .toEqual(['Standard', t.agent.composer.deep])
+  })
+})
+
+describe('the Stufe a run names in its header and its settings line', () => {
+  const t = translations.de
+
+  it.each([
+    ['schnell', undefined, { deep: false, label: 'Schnell' }],
+    ['gruendlich', undefined, { deep: false, label: 'Gründlich' }],
+    // A Tief run records depth "deep" as well; its Stufe is the name.
+    ['tief', 'deep', { deep: true, label: 'Tief' }],
+    // The legacy depth without budgets of a Stufe keeps its own word.
+    [undefined, 'deep', { deep: true, label: 'Deep' }],
+    ['standard', 'deep', { deep: true, label: 'Deep' }],
+    [undefined, undefined, null],
+    ['standard', undefined, null],
+  ] as const)('names agentTier %s with depth %s as %o', (agentTier, depth, badge) => {
+    expect(runTierBadge({ agentTier, depth }, t)).toEqual(badge)
   })
 })
 

@@ -266,55 +266,6 @@ def test_capability_failure_text_marks_the_span(recording, monkeypatch):
 # ------------------------------------------------------------------ #
 
 
-def test_mission_task_gets_a_span_that_carries_the_purpose(
-    recording, monkeypatch
-):
-    """Every mission task opens ``agent.task``; the provider calls it makes
-    nest under it and are attributed to the task — the missing half of
-    the waterfall (research nodes already had this per node)."""
-    from types import SimpleNamespace
-
-    from inqtrix.agents import algorithm as mission
-    from inqtrix.agents.control_ports import PlanTaskRecord
-    from inqtrix.agents.scheduler import TaskOutcome
-    from inqtrix.observability.context import current_purpose
-
-    seen: dict = {}
-
-    def _fake_instant(deps, task):
-        purpose = current_purpose()
-        seen["purpose"] = purpose.purpose if purpose else None
-        seen["task_id"] = purpose.task_id if purpose else None
-        with operation_span("probe"):
-            pass
-        return TaskOutcome(status="completed", summary="ok")
-
-    monkeypatch.setattr(mission, "_run_web_instant", _fake_instant)
-    monkeypatch.setattr(mission, "require_task_allowed", lambda *a, **k: None)
-    monkeypatch.setattr(mission, "coerce_source_policy", lambda deps: None)
-    task = PlanTaskRecord(
-        task_id="t3",
-        plan_id="plan_x",
-        run_id="run_x",
-        ordinal=2,
-        title="Aktuellen Leitzins ermitteln",
-        tool_kind="web_instant",
-    )
-    deps = SimpleNamespace(emit=lambda *_args, **_kw: None)
-    outcome = mission._execute_task(deps, {}, task, attempt=1)
-    assert outcome.status == "completed"
-    assert seen == {"purpose": "web_instant", "task_id": "t3"}
-    spans = {span.name: span for span in recording.get_finished_spans()}
-    task_span = spans["agent.task"]
-    attrs = dict(task_span.attributes)
-    assert attrs["inqtrix.task_id"] == "t3"
-    assert attrs["inqtrix.task_kind"] == "web_instant"
-    assert attrs["inqtrix.attempt"] == 1
-    probe = spans["probe"]
-    assert probe.parent is not None
-    assert probe.parent.span_id == task_span.get_span_context().span_id
-
-
 def test_evidence_cut_is_visible_on_the_node_span(recording, monkeypatch):
     """A budget cut is an attribute, a WARNING level and a named event on
     the node span — the trace-side twin of the prompt footer. The
@@ -482,8 +433,8 @@ def test_claim_extraction_binds_its_own_purpose_inside_the_search_node(
     recording,
 ):
     """Claim extraction runs on the search node's pool threads with its own
-    model; it must be attributed as ``claim_extract`` while inheriting the
-    task the enclosing node was bound to."""
+    model; it must be attributed as ``claim_extract``, not as the enclosing
+    node."""
     from queue import Queue
     from types import SimpleNamespace
 
@@ -524,14 +475,12 @@ def test_claim_extraction_binds_its_own_purpose_inside_the_search_node(
         def is_available(self):
             return True
 
-    seen: list[tuple[str | None, str | None]] = []
+    seen: list[str | None] = []
 
     class _RecordingExtraction:
         def extract(self, *a, **kw):
             purpose = current_purpose()
-            seen.append(
-                (purpose.purpose, purpose.task_id) if purpose else (None, None)
-            )
+            seen.append(purpose.purpose if purpose else None)
             return ([], 0, 0)
 
         def consume_nonfatal_notice(self):
@@ -553,14 +502,14 @@ def test_claim_extraction_binds_its_own_purpose_inside_the_search_node(
         "Was ist passiert?", progress_queue=Queue(), max_total_seconds=30
     )
     state["queries"] = ["q1"]
-    with bind_purpose("search", task_id="t9"):
+    with bind_purpose("search"):
         search(
             state,
             providers=ProviderContext(llm=llm, search=_Search()),
             strategies=strategies,
             settings=settings,
         )
-    assert seen == [("claim_extract", "t9")]
+    assert seen == ["claim_extract"]
 
 
 def test_node_span_exports_the_contract_source_coverage_source_and_event_mode(recording):

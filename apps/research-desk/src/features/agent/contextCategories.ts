@@ -2,7 +2,6 @@ import type { CommandPillKind } from '@/features/composer/CommandPill'
 import type { ChatRuleOption } from '@/features/project/selectors'
 import type { InqtrixCapabilities } from '@/features/researchRuns/types'
 
-import type { AgentEngineMode } from './agentStatusOverview'
 import {
   ruleRequirementBudget,
   ruleRequirementTotalWith,
@@ -97,9 +96,6 @@ export type AgentContextSources = {
   rulesAttachable: boolean
   /** A clarification is pending: the send answers it. */
   answerMode: boolean
-  /** Reports and canvas documents feed the kernel only — the server
-   * refuses both on a mission run. */
-  engine: AgentEngineMode
   collections: readonly { id: string; title: string }[]
   selectedCollectionIds: readonly string[]
   documents: readonly { id: string; title: string }[]
@@ -278,8 +274,7 @@ function reportCategory(sources: AgentContextSources): AgentContextCategory {
     id: 'report',
     items,
   })
-  // Reports feed the kernel only: the server refuses them on a mission run.
-  if (sources.engine !== 'agent_kernel' || !sources.reportsAttachable) return category(null, [])
+  if (!sources.reportsAttachable) return category(null, [])
   const offered: AgentContextItem[] = sources.reports
     .filter((report) => !sources.reportIds.includes(report.runId))
     .map((report) => ({ id: report.runId, label: report.title, secondary: report.label }))
@@ -327,21 +322,17 @@ function singleSlotCategory(
 }
 
 export function agentContextCategories(sources: AgentContextSources): AgentContextCategory[] {
-  const kernel = sources.engine === 'agent_kernel'
   const byId: Record<AgentContextCategoryId, AgentContextCategory | null> = {
-    // Canvas documents feed the kernel only, like reports.
-    canvas: kernel
-      ? singleSlotCategory(
-        'canvas',
-        sources.canvasDocuments.map((document) => ({
-          id: document.artifactId,
-          label: document.name,
-          secondary: document.title,
-        })),
-        sources.pinnedCanvasDocumentId,
-        sources.answerMode,
-      )
-      : { blocked: null, id: 'canvas', items: [] },
+    canvas: singleSlotCategory(
+      'canvas',
+      sources.canvasDocuments.map((document) => ({
+        id: document.artifactId,
+        label: document.name,
+        secondary: document.title,
+      })),
+      sources.pinnedCanvasDocumentId,
+      sources.answerMode,
+    ),
     collection: {
       blocked: null,
       id: 'collection',
@@ -368,23 +359,6 @@ export function agentContextCategories(sources: AgentContextSources): AgentConte
  * sub-triggers and their headers show. */
 export function pickableCount(category: AgentContextCategory): number {
   return category.items.filter((item) => !item.blocked).length
-}
-
-/**
- * Whether the selected engine refuses what is attached: research reports
- * and canvas context feed the kernel only, and the server refuses both on
- * a mission run with 400. Flagged before the send, never found after it.
- */
-export function engineRefusesAttachments({
-  canvasAttached,
-  engine,
-  reportCount,
-}: {
-  canvasAttached: boolean
-  engine: AgentEngineMode
-  reportCount: number
-}): boolean {
-  return engine !== 'agent_kernel' && (reportCount > 0 || canvasAttached)
 }
 
 export type AgentMentionRow =
@@ -421,8 +395,7 @@ export function agentMentionRows(
 }
 
 /** The chat's category tokens, read as a scope by THIS composer only —
- * the shared `@` detector stays a plain query for the knowledge composer
- * and the plan-gate editor. */
+ * the shared `@` detector stays a plain query for the knowledge composer. */
 const AGENT_MENTION_ALIASES: Readonly<Record<string, AgentContextCategoryId>> = {
   research: 'report',
   rules: 'rule',
@@ -454,18 +427,15 @@ export type AgentMentionEmptyState =
   | { kind: 'noMatch'; query: string; scope: AgentContextCategoryId | null }
   | { kind: 'blocked'; reason: AgentContextCategoryBlock; scope: AgentContextCategoryId }
   | { kind: 'noRules' }
-  | { kind: 'kernelOnly'; scope: 'report' | 'canvas' }
   | { kind: 'emptyCategory'; scope: AgentContextCategoryId }
   | { kind: 'nothingAttachable' }
 
 export function agentMentionEmptyState({
   categories,
-  engine,
   filter,
   scope,
 }: {
   categories: readonly AgentContextCategory[]
-  engine: AgentEngineMode
   filter: string
   scope: AgentContextCategoryId | null
 }): AgentMentionEmptyState {
@@ -475,9 +445,6 @@ export function agentMentionEmptyState({
   const blocked = categories.find((category) => category.id === scope)?.blocked
   if (blocked) return { kind: 'blocked', reason: blocked, scope }
   if (scope === 'rule') return { kind: 'noRules' }
-  if ((scope === 'report' || scope === 'canvas') && engine !== 'agent_kernel') {
-    return { kind: 'kernelOnly', scope }
-  }
   return { kind: 'emptyCategory', scope }
 }
 

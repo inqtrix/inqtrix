@@ -37,7 +37,7 @@ a normalised one, so a card for a snapshot with its own price stays reachable.
 | `context_window_tokens`, `max_output_tokens` | Capacity. Drive the token meter (usable input ≈ window − reserved output − safety) and two server-side budgets: the Agent Desk kernel's compaction threshold is `context_window_tokens × INQTRIX_AGENT_KERNEL_CONTEXT_TRIGGER_FRACTION` (default `0.75`), floored at 128 000 tokens — a model with no card gets the bare floor — and never above the card's input budget (`context_window_tokens − max_output_tokens − max(1 024, window ÷ 50)`; a higher value is capped with a WARNING, see [settings](settings-and-env.md)), and knowledge contextualisation sizes its batches from the card's window and `max_output_tokens` before falling back to the provider values. |
 | `max_input_tokens` | Input limit the provider sets on its own, whatever output a call asks for: 922 000 for the 1 050 000-token GPT-6, GPT-5.6 and GPT-5.5 windows. Empty when only the window limits input plus output (Claude). The editor review and the kernel's input budget hold to it; never sent to the UI. |
 | `reasoning_levels` | Effort tokens the model accepts (incl. `none` only if reasoning can be disabled). Empty ⇒ no effort control (e.g. Haiku), so the picker hides the reasoning selector. |
-| `claude`, `openai` | Request rules of the vendor's models, read by the adapters and never sent to the UI. `openai.api` names the OpenAI API that carries the model: `chat_completions` (the proven path, no `max`) or `responses` for models that refuse function tools while they reason over Chat Completions or offer no Chat Completions at all (GPT-6, GPT-5.6, the Pro models); the Azure and LiteLLM adapters then send every call of the model through the Responses API with `store=false`. `none` goes out explicitly where the card lists it; a model that reasons but has no `none` runs "off" at its weakest level, with a warning. |
+| `claude`, `openai` | Request rules of the vendor's models, read by the adapters (`openai.prose_verbosity` by the model routing); the picker never shows them. `openai.api` names the OpenAI API that carries the model: `chat_completions` (the proven path, no `max`) or `responses` for models that refuse function tools while they reason over Chat Completions or offer no Chat Completions at all (GPT-6, GPT-5.6, the Pro models); the Azure and LiteLLM adapters then send every call of the model through the Responses API with `store=false`. `none` goes out explicitly where the card lists it; a model that reasons but has no `none` runs "off" at its weakest level, with a warning. `openai.prose_verbosity` names the `verbosity` (`low`, `medium`, `high`) that two kinds of call send for the model: the sections of a research report and the turns of the agent kernel. Empty adds no field, so the API applies its default; classifiers, judges, reviewers and structured calls never ask for the level. The resolution of a node shows the level it asks for (`/health`, `/v1/stacks`, the `inqtrix.node.model_resolution` event). |
 | `capabilities` | Chips in the hover-card (`reasoning`/`code`/`tool_use`/`vision`). |
 | `input_modalities` | Accepted input modalities (e.g. `text`, `image`). Defaults to `["text"]`. |
 | `pricing` | List $/MTok. The picker derives a `$`..`$$$$` tier + exact value, and the usage ledger prices every `chat`/`text_completion` call from it: `input_tokens/1e6 * input_per_mtok + output_tokens/1e6 * output_per_mtok`. |
@@ -119,23 +119,21 @@ accepts is the card's `reasoning_levels`; the corresponding library fields
 An explicit model short-circuits tier resolution in `describe_resolution` with
 `model_source="explicit_request"` (visible in the forensic log). The override is
 **scoped to the reasoning call sites**: the direct-chat answer, the
-editor-assist endpoints, the knowledge-mode answer, the kernel's conversation
-turn and final review, and a Mission's
-`agent_plan`/`agent_synthesis`/`agent_deep_review`/`agent_answer`/`agent_answer_light` nodes; every
+editor-assist endpoints, the knowledge-mode answer, and the kernel's
+conversation turn and final review (`agent_kernel`, `agent_deep_review`); every
 other call site keeps tier routing — the research graph's
 `classify`/`claim_extract`/`plan`/`evaluate`/`answer` nodes, the knowledge
 retrieval nodes (`knowledge_gate`, `knowledge_contextualize`,
-`knowledge_decompose`, `knowledge_rerank`) and the agent assembly-line calls
-(intake, discovery analyst, contradiction, sufficiency, file analysis,
-patch, skill-point check, memory reflection) — because one model
+`knowledge_decompose`, `knowledge_rerank`) and the agent's helper calls
+(sufficiency, file analysis, skill-point check, memory reflection) — because one model
 cannot stand in for the classify/plan/evaluate/answer split. `search` is not an
 LLM call site at all: `/health`'s `search_model` is reported by the search
 provider, not by tier resolution.
 
-Mission children inherit the parent's selected model/tier/effort, including
-effective skill pins, for their planning, writing and review. Research children
-keep their own routing. The kernel's automatic Deep effort increase is local
-to its loop and revision; neither its final review nor a mission child treats
+Knowledge children and role runs inherit the parent's selected
+model/tier/effort, including effective skill pins. Research children keep their
+own routing. The kernel's automatic Deep effort increase is local
+to its loop and revision; neither its final review nor a child run treats
 that increase as an explicit selection. Selecting a concrete model without an
 effort uses the provider default for review. Selecting `none` explicitly disables
 additional reasoning where the provider supports that setting.
@@ -197,7 +195,9 @@ request rules on the card: every OpenAI model `openai=OpenAIRules(...)` with the
 API it needs (`api="responses"` for a model that refuses function tools while it
 reasons over Chat Completions, otherwise the default), and every Claude model
 `claude=ClaudeRules(...)`; without them the adapters fall back to defaults that
-can fail on that model. Then add a one-line description for the card's `id` to
+can fail on that model. `OpenAIRules.prose_verbosity` is optional: name a level
+only after comparing the model's answers with and without it, because a longer
+answer costs more and is not better by itself. Then add a one-line description for the card's `id` to
 both language tables of the desk (`chat.modelDescriptions` in
 `apps/research-desk/src/i18n/translations.ts`); otherwise English readers see the
 German server text. Tests check both: every OpenAI card names its API, and the

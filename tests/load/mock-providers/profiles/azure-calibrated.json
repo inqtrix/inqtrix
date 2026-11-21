@@ -251,90 +251,6 @@
       ],
       "prompt_tokens_median": 8621,
       "samples": 126
-    },
-    "workspace_agent.agent_deep_review.RevisionCheckVerdict.llm": {
-      "calls_per_run_median": 1,
-      "completion_tokens_median": 2308,
-      "latency_seconds": {
-        "max": 21.104,
-        "p50": 21.104,
-        "p95": 21.104
-      },
-      "models": [
-        "gpt-5.4"
-      ],
-      "prompt_tokens_median": 9089,
-      "samples": 1
-    },
-    "workspace_agent.agent_intake.AssignmentProfile.llm": {
-      "calls_per_run_median": 1,
-      "completion_tokens_median": 364,
-      "latency_seconds": {
-        "max": 3.776,
-        "p50": 3.776,
-        "p95": 3.776
-      },
-      "models": [
-        "gpt-5.4-mini"
-      ],
-      "prompt_tokens_median": 1968,
-      "samples": 1
-    },
-    "workspace_agent.agent_plan.ExecutionPlanModel.llm": {
-      "calls_per_run_median": 1,
-      "completion_tokens_median": 3828,
-      "latency_seconds": {
-        "max": 28.26,
-        "p50": 28.26,
-        "p95": 28.26
-      },
-      "models": [
-        "gpt-5.4"
-      ],
-      "prompt_tokens_median": 1821,
-      "samples": 1
-    },
-    "workspace_agent.agent_synthesis.DeepRevisionBundle.llm": {
-      "calls_per_run_median": 1,
-      "completion_tokens_median": 473,
-      "latency_seconds": {
-        "max": 4.644,
-        "p50": 4.644,
-        "p95": 4.644
-      },
-      "models": [
-        "gpt-5.4"
-      ],
-      "prompt_tokens_median": 5075,
-      "samples": 1
-    },
-    "workspace_agent.agent_synthesis.ReportOutline.llm": {
-      "calls_per_run_median": 1,
-      "completion_tokens_median": 3234,
-      "latency_seconds": {
-        "max": 36.791,
-        "p50": 36.791,
-        "p95": 36.791
-      },
-      "models": [
-        "gpt-5.4"
-      ],
-      "prompt_tokens_median": 31971,
-      "samples": 1
-    },
-    "workspace_agent.agent_synthesis.SectionText.llm": {
-      "calls_per_run_median": 3,
-      "completion_tokens_median": 2380,
-      "latency_seconds": {
-        "max": 46.254,
-        "p50": 23.555,
-        "p95": 46.254
-      },
-      "models": [
-        "gpt-5.4"
-      ],
-      "prompt_tokens_median": 14951,
-      "samples": 3
     }
   },
   "provenance": {
@@ -344,8 +260,8 @@
     ],
     "derived_from": "run trace exports (GET /v1/admin/runs/{run_id}/trace/export) and, because direct chats have no run, their traces in the same form",
     "merged_signatures": 3,
-    "operations": 24,
-    "provider_call_samples": 593,
+    "operations": 18,
+    "provider_call_samples": 585,
     "traces_read": 41
   }
 }

@@ -19,6 +19,8 @@ import type {
   ResearchMetrics,
   ReportReference,
   ChatModelTier,
+  LastAgentTier,
+  LastResearchProfile,
   ModelTierPreference,
   KnowledgeRetrievalDegradation,
   KnowledgeSearchWarning,
@@ -56,7 +58,6 @@ import type {
   AgentSessionRecord,
 } from '@/features/agent/model'
 import type { CanvasState } from '@/features/canvas/types'
-import type { AgentPlanDraft } from '@/features/agent/plan/usePlanApproval'
 
 export type PinnedExplorerState = {
   chatThreadIds: string[]
@@ -335,6 +336,14 @@ export type EditorDocumentRecord = {
   /** Independent compare-and-swap revision for title/folder changes. */
   metadataRevision?: number
   /**
+   * The editor's text when it overlapped a version that reached the record
+   * after the editor last showed it. The record keeps that version; the sync
+   * hook turns this text into a conflict copy at once and clears the field.
+   * Session state only: the project file and the save request never carry
+   * it.
+   */
+  pendingConflictMarkdown?: string
+  /**
    * Marks a local-only recovery copy created from work that had not reached
    * the server: the authoritative document disappeared (`remote_deleted`), or
    * it was rebuilt as a new collaboration generation while the service could
@@ -356,6 +365,14 @@ export type EditorDocumentRecord = {
   serverSynced?: boolean
   source: EditorDocumentSource
   sourceRunId?: string
+  /**
+   * The server's state (text and revision) the local text was last
+   * reconciled with: opened, saved, or merged with a version another writer
+   * saved. It holds only while its revision equals `revision`; otherwise
+   * the text the local one was built on is unknown. Session state only: the
+   * project file and the save request never carry it.
+   */
+  syncBase?: { contentMarkdown: string; revision: number }
   title: string
   updatedAt: string
 }
@@ -393,6 +410,12 @@ export type ProjectPreferences = {
   /** Tier a new chat starts on. */
   chatModelTier: ModelTierPreference
   contrastMode: ContrastMode
+  /** The Stufe the Agent Desk composer starts on while the server publishes
+   * it; `''` until the user picks one. */
+  lastAgentTier: LastAgentTier
+  /** The report profile the research composer starts on; `''` until the
+   * user picks one. */
+  lastResearchProfile: LastResearchProfile
   locale: Locale
   theme: ThemeMode
   themePreset: ThemePreset
@@ -503,7 +526,7 @@ export type ChatRole = 'assistant' | 'user'
 export type ChatRuleCategory = 'context' | 'function' | 'instruction'
 
 export type ChatRuleVisibility = {
-  /** Agent Desk: a rule can be attached to a mission's plan gate as a
+  /** Agent Desk: a rule can be attached to an agent task as its
    * result requirement. Off by default — an existing rule was written
    * for chat or the editor and should not start steering reports
    * without its owner saying so. */
@@ -1216,9 +1239,6 @@ export type ProjectState = {
   /** Polymorphic canvas state (base view + overlay stack). Ephemeral:
    * never serialized, never marks the project dirty. */
   agentCanvas: CanvasState
-  /** Per-run plan edit drafts — ONE draft shared by the timeline card and
-   * the canvas plan view. Ephemeral like the canvas. */
-  agentPlanDrafts: Record<string, AgentPlanDraft>
   localRunCounter: number
   preferences: ProjectPreferences
   project: ProjectMetadata
@@ -1443,7 +1463,7 @@ export function attachRunResult(
     durationSeconds: result.metrics.elapsed_seconds,
     finishedAt: new Date().toISOString(),
     metrics: {
-      // "Claims found" = total consolidated claims, summed across the status
+      // "Statements recorded" = total consolidated claims, summed across the status
       // buckets so a completed card matches the live snapshot's
       // consolidated_claim_count semantics.
       claims: Object.values(result.metrics.claims.status_counts).reduce((sum, count) => sum + count, 0),
@@ -1652,16 +1672,17 @@ function eventKindFromRunEvent(event: ResearchRunEvent): ResearchRunEventKind {
 }
 
 function eventSeverityFromRunEvent(event: ResearchRunEvent): ResearchRunEventSeverity {
+  // A severity the server sent is the step's own, `info` included. An event
+  // without one takes the default of its type, else `info`; its words never
+  // decide.
   const severity = event.data.severity
-  if (severity === 'warning' || severity === 'error' || severity === 'success') {
+  if (severity === 'info' || severity === 'warning' || severity === 'error' || severity === 'success') {
     return severity
   }
   if (event.type === 'inqtrix.run.completed') return 'success'
   if (event.type === 'inqtrix.run.failed' || event.type === 'inqtrix.node.failed') return 'error'
   if (event.type === 'inqtrix.run.cancel_requested' || event.type === 'inqtrix.run.cancelled') return 'warning'
-
-  const message = asNonEmptyString(event.data.message) ?? titleFromRunEvent(event)
-  return warningLikeMessage(message) ? 'warning' : 'info'
+  return 'info'
 }
 
 function titleFromRunEvent(event: ResearchRunEvent) {
@@ -1690,10 +1711,6 @@ function titleFromRunEvent(event: ResearchRunEvent) {
   if (event.type === 'inqtrix.run.cancelled') return 'Run cancelled'
   if (event.type === 'inqtrix.run.failed') return errorFromEvent(event) ?? 'Run failed'
   return event.type.replace(/^inqtrix\./, '').replace(/\./g, ' ')
-}
-
-function warningLikeMessage(message: string) {
-  return /\b(ALGO-FAIL|Warnung|Warning|failed|fehlgeschlagen|violated|verletzt|unvollstaendig|unvollständig|Fallback|fallback|Kontextfenster|context window)\b/i.test(message)
 }
 
 function errorFromEvent(event: ResearchRunEvent) {

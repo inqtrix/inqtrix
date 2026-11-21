@@ -33,19 +33,11 @@ PHASE_CHANGED_EVENT = "inqtrix.agent.phase.changed"
 TODO_UPDATED_EVENT = "inqtrix.agent.todo.updated"
 ACTIVITY_EVENT = "inqtrix.agent.activity"
 NARRATION_EVENT = "inqtrix.agent.narration"
-PATCH_PROPOSED_EVENT = "inqtrix.agent.patch.proposed"
-PLAN_PROPOSED_EVENT = "inqtrix.agent.plan.proposed"
-PLAN_REVISED_EVENT = "inqtrix.agent.plan.revised"
-TASK_STARTED_EVENT = "inqtrix.agent.task.started"
-TASK_FINISHED_EVENT = "inqtrix.agent.task.finished"
-TASK_FAILED_EVENT = "inqtrix.agent.task.failed"
-TASK_CANCEL_REQUESTED_EVENT = "inqtrix.agent.task.cancel_requested"
 CHILD_PROGRESS_EVENT = "inqtrix.agent.child.progress"
 CHILD_BATCH_GUARDED_EVENT = "inqtrix.agent.child_batch.guarded"
 OUTCOME_EVENT = "inqtrix.agent.outcome"
-"""An agent run's outcome record: how its review ended and what stayed open;
-only a delegated mission's crosses to its parent, as numbers and its bounded
-summary sentence."""
+"""An agent run's outcome record: how its review ended and what stayed open.
+It stays in the run's own stream; a kernel role run sends none."""
 
 # Tools
 TOOL_STARTED_EVENT = "inqtrix.agent.tool.started"
@@ -76,7 +68,6 @@ cannot guarantee.
 # Artifacts
 ARTIFACT_CREATED_EVENT = "inqtrix.agent.artifact.created"
 ARTIFACT_UPDATED_EVENT = "inqtrix.agent.artifact.updated"
-ARTIFACT_EDIT_CONFLICT_EVENT = "inqtrix.agent.artifact.edit_conflict"
 
 # Context
 CANVAS_CONTEXT_ATTACHED_EVENT = "inqtrix.agent.canvas_context.attached"
@@ -86,8 +77,7 @@ this replayable event."""
 REQUIREMENT_ATTACHED_EVENT = "inqtrix.agent.requirement.attached"
 """The durable record of the result requirement a run starts under: which library
 rules at which frozen revision, how long the typed half is and whether a review
-pass checks the result. Emitted once, when the first segment seeds the run (kernel
-and mission alike)."""
+pass checks the result. Emitted once, when the first segment seeds the run."""
 CONTEXT_COMPACTED_EVENT = "inqtrix.agent.context.compacted"
 
 # Model and judgement

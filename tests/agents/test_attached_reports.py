@@ -169,3 +169,20 @@ def test_no_attachment_adds_no_section():
     from inqtrix.agents.prompts import build_kernel_user_message
 
     assert "Attached research reports" not in build_kernel_user_message("Auftrag.")
+
+
+def test_a_clipped_question_is_reported_as_clipped_and_only_then():
+    """The list row cuts a long question with a bare "…". The resolver
+    passes the summary's own verdict on, so the prompt can say the cut is
+    one, and an ellipsis the user typed is never mistaken for it."""
+    store = _Store()
+    store.rows["run_long"] = {
+        "status": "completed", "question": "Q" * 500 + "…", "question_clipped": True,
+    }
+    store.rows["run_typed"] = {"status": "completed", "question": "Und dann…"}
+    store.results["run_long"] = store.results["run_typed"] = {"answer": "x", "references": []}
+    resolved = asyncio.run(resolve_attached_reports(
+        ["run_long", "run_typed"], run_store=store, visible_to=None
+    ))
+    assert resolved[0]["title_clipped"] is True
+    assert "title_clipped" not in resolved[1]

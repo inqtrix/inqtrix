@@ -380,7 +380,7 @@ def test_deep_review_uses_selected_settings_without_kernel_effort_fallback(
     ({"model": "chosen-model", "effort": "none"}, "chosen-model", "none"),
 ])
 def test_deep_review_respects_skill_pins_and_explicit_request_priority(overrides, model, effort):
-    from tests.agents.test_workspace_agent_skills import _create_skill
+    from tests.agents._agent_helpers import _create_skill
 
     llm = StructuredScriptedLLM([_text_turn("Kurze Antwort.")], [{
         "complete": True, "grounded": True,
@@ -759,8 +759,9 @@ def test_deep_negative_verdict_without_findings_is_fail_closed():
             and item["data"].get("final")
         ]
         # The fixture question carries no resolvable language, so the review
-        # line reads in the neutral fallback rather than silently in German.
-        assert "Verification pass: Review unavailable, result unchecked" in terminal
+        # line reads in the neutral fallback rather than silently in German;
+        # it names the flag the verdict gave no reason for.
+        assert "Verification pass: Review verdict contradictory: completeness without a reason" in terminal
 
 
 def test_deep_chat_finding_with_unchanged_revision_is_rejected():
@@ -1436,23 +1437,25 @@ def test_normal_run_never_touches_the_review_path():
 def test_deep_prompt_line_and_user_message_composition():
     deep = build_kernel_user_message("Auftrag.", depth="deep")
     assert "Deep mode" in deep
-    assert "run_deep_mission" in deep
+    assert "run_web_research (thorough)" in deep
+    assert not MISSION_WORD.search(deep)
     normal = build_kernel_user_message("Auftrag.")
     assert "Deep mode" not in normal
-    assert "clarify doubtful statements with read_evidence" in deep
+    assert "Clarify doubtful statements with read_evidence" in deep
     assert "A word-count or format requirement is no research need" in deep
-    assert "After a mission" not in normal
+    assert "The final deep check itself starts no new research" in deep
+    assert "Clarify doubtful statements" not in normal
 
 
-def test_tool_discipline_names_the_mission_memo_as_the_deliverable():
-    """The doctrine names a finished mission's memo the deliverable, so
-    the kernel does not re-synthesize it into its own canvas or verify it
-    with a second research child."""
+def test_tool_discipline_extends_an_existing_memo_instead_of_a_second_copy():
+    """A follow-up in a session continues its memo: the doctrine names the
+    memo the document to extend, so the kernel writes no second copy."""
     from inqtrix.agents.prompts import build_agent_kernel_system_prompt
 
     prompt = build_agent_kernel_system_prompt()
-    assert "The memo of a completed mission is the deliverable" in prompt
+    assert "An existing memo of this session is extended, not duplicated" in prompt
     assert "Read existing evidence with read_evidence" in prompt
+    assert not MISSION_WORD.search(prompt.split("Tool discipline", 1)[1].split("\n\n", 1)[0])
 
 
 def _deps_without_children(run_id: str = "run_deep") -> SimpleNamespace:
@@ -1464,18 +1467,16 @@ def _deps_without_children(run_id: str = "run_deep") -> SimpleNamespace:
     )
 
 
-def test_deep_verify_reviews_the_memo_of_a_completed_mission_child():
-    """The mission's memo is the deliverable of a delegated run: the
-    verification bundle carries the run's own canvases first, then the
-    run's memo and the memo of every COMPLETED mission child — never a
-    research child's or a failed mission's — each document once."""
+def test_deep_verify_reviews_the_documents_of_its_own_run_only():
+    """The verification bundle carries the run's own canvases first, then
+    the memos the run wrote or continued, each document once; a child's
+    documents are never part of it."""
     listed: list[tuple[str, str]] = []
     catalog = {
         ("run_deep", "deliverable"): ["art_canvas"],
-        ("run_deep", "memo"): ["art_canvas"],  # same id → listed once
-        ("run_child_mission", "memo"): ["art_sess_memo"],
+        ("run_deep", "memo"): ["art_canvas", "art_sess_memo"],  # same id → listed once
+        ("run_child_mission", "memo"): ["art_never_mission"],
         ("run_child_research", "memo"): ["art_never"],
-        ("run_child_failed", "memo"): ["art_never_failed"],
     }
 
     class CatalogControl:
@@ -1490,7 +1491,6 @@ def test_deep_verify_reviews_the_memo_of_a_completed_mission_child():
     children = [
         {"run_id": "run_child_mission", "mode": "workspace_agent", "status": "completed"},
         {"run_id": "run_child_research", "mode": "research", "status": "completed"},
-        {"run_id": "run_child_failed", "mode": "workspace_agent", "status": "failed"},
     ]
     deps = SimpleNamespace(
         run_id="run_deep",
@@ -1505,7 +1505,7 @@ def test_deep_verify_reviews_the_memo_of_a_completed_mission_child():
 
     assert [c.artifact_id for c in canvases] == ["art_canvas", "art_sess_memo"]
     assert ("run_child_research", "memo") not in listed
-    assert ("run_child_failed", "memo") not in listed
+    assert ("run_child_mission", "memo") not in listed
 
 
 def test_deep_canvas_bundle_paginates_beyond_fifty_outputs():
@@ -1583,15 +1583,16 @@ def test_deep_child_research_uses_the_deep_wire_profile(monkeypatch):
         assert children[0]["agent_overrides"]["report_profile"] == "deep"
 
 
+MISSION_WORD = re.compile(r"\bmission|_mission", re.IGNORECASE)
+"""The mission as a word or a tool name; \"permission\" is no mention."""
+
+
 def test_tier_prompt_sections_spell_out_the_ladder():
-    """Gruendlich names its rungs and the missing mission; schnell keeps
-    the chat answer but allows a document on explicit request."""
+    """Gruendlich names its rungs; schnell keeps the chat answer but allows
+    a document on explicit request."""
     gruendlich = build_kernel_user_message("Auftrag.", tier="gruendlich")
     assert "Tier: gruendlich (thorough) — the middle of the ladder" in gruendlich
-    assert (
-        "There is no mission (run_deep_mission) in this tier"
-        in gruendlich
-    )
+    assert not MISSION_WORD.search(gruendlich)
     schnell = build_kernel_user_message("Auftrag.", tier="schnell")
     assert "when the user explicitly asks for a file" in schnell
     assert "middle of the ladder" not in schnell
@@ -1600,6 +1601,30 @@ def test_tier_prompt_sections_spell_out_the_ladder():
     assert "at most ONE knowledge search" in schnell
     assert "read it at most once" not in gruendlich
     assert "middle of the ladder" not in build_kernel_user_message("Auftrag.")
+
+
+TIEF_CANVAS_DEFAULT = "the default output form of this tier is a canvas document"
+
+
+def test_tief_writes_a_canvas_unless_the_user_chose_a_form():
+    """The tier table publishes ``canvas`` as the output form of ``tief``,
+    and the kernel's message is where that default takes effect: a run
+    without a chosen form writes its result as a canvas document, a chosen
+    form wins, and the other tiers keep their own defaults."""
+    tief = build_kernel_user_message("Auftrag.", tier="tief", depth="deep")
+    assert TIEF_CANVAS_DEFAULT in tief
+    assert not MISSION_WORD.search(tief)
+    chosen_chat = build_kernel_user_message(
+        "Auftrag.", tier="tief", depth="deep", response_form="chat"
+    )
+    assert TIEF_CANVAS_DEFAULT not in chosen_chat
+    assert "The user demands the output form chat answer" in chosen_chat
+    chosen_canvas = build_kernel_user_message(
+        "Auftrag.", tier="tief", depth="deep", response_form="canvas"
+    )
+    assert TIEF_CANVAS_DEFAULT not in chosen_canvas
+    for tier in ("schnell", "gruendlich", ""):
+        assert TIEF_CANVAS_DEFAULT not in build_kernel_user_message("Auftrag.", tier=tier)
 
 
 def test_todo_doctrine_puts_write_todos_in_the_same_turn_as_the_work_tool():
@@ -1666,6 +1691,144 @@ def test_an_explicit_output_form_is_the_only_form_rule_the_kernel_states():
         assert "You write a canvas document when the user asks" in (
             build_kernel_user_message("Auftrag.", tier="gruendlich", response_form=form)
         )
+
+
+SKILL_CHAT = "an attached skill sets the output form chat answer"
+SKILL_CANVAS = "an attached skill sets the output form canvas document"
+
+
+def test_a_skill_pins_the_output_form_after_the_request_and_before_the_tier():
+    """The one output-form rule has three levels: the user's explicit
+    choice, then the surface an attached skill pins, then the tier's
+    default. Each level states only its own line."""
+    # The skill's surface replaces the tier's default ...
+    tief_chat = build_kernel_user_message("Auftrag.", tier="tief", depth="deep", skill_form="chat")
+    assert SKILL_CHAT in tief_chat and TIEF_CANVAS_DEFAULT not in tief_chat
+    schnell_canvas = build_kernel_user_message("Auftrag.", tier="schnell", skill_form="canvas")
+    assert SKILL_CANVAS in schnell_canvas
+    assert "answer in the chat; write a canvas document only when" not in schnell_canvas
+    gruendlich_chat = build_kernel_user_message("Auftrag.", tier="gruendlich", skill_form="chat")
+    assert SKILL_CHAT in gruendlich_chat
+    assert "You write a canvas document when the user asks" not in gruendlich_chat
+    assert SKILL_CANVAS in build_kernel_user_message("Auftrag.", skill_form="canvas")
+    # ... the user's explicit choice replaces the skill's surface ...
+    for form in ("chat", "canvas"):
+        chosen = build_kernel_user_message(
+            "Auftrag.", tier="tief", depth="deep", response_form=form, skill_form="chat"
+        )
+        assert "The user demands the output form" in chosen
+        assert SKILL_CHAT not in chosen and TIEF_CANVAS_DEFAULT not in chosen
+    # ... and a form of the text names no surface: the tier's default stands.
+    for value in ("", "email", "talking_points"):
+        message = build_kernel_user_message("Auftrag.", tier="tief", depth="deep", skill_form=value)
+        assert TIEF_CANVAS_DEFAULT in message
+        assert SKILL_CHAT not in message and SKILL_CANVAS not in message
+
+
+def test_the_kernel_hands_the_attached_skills_surface_to_its_first_message(monkeypatch):
+    from types import SimpleNamespace
+
+    from inqtrix.agents import prompts
+    from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
+
+    seen: list[str] = []
+
+    def capture(question, **kwargs):
+        seen.append(kwargs["skill_form"])
+        return "message"
+
+    monkeypatch.setattr(prompts, "build_kernel_user_message", capture)
+    algorithm = KernelAgentAlgorithm.__new__(KernelAgentAlgorithm)
+    algorithm._hydrate_session_context = lambda request, deps: None
+    algorithm._hydrate_collection_catalog = lambda deps: None
+    algorithm._skills_context = lambda deps: ""
+    request = SimpleNamespace(
+        response_form="", tool_directives=(), canvas_context=None, document_id="",
+        report_requirement="", attached_reports=(),
+    )
+    for skills, expected in (
+        ([SimpleNamespace(deliverable="email"), SimpleNamespace(deliverable="chat")], "chat"),
+        ([SimpleNamespace(deliverable="canvas")], "canvas"),
+        ([], ""),
+    ):
+        deps = SimpleNamespace(
+            question="Auftrag.", session_history="", artifact_registry=(), last_response_form="",
+            prior_evidence_count=0, memory_briefing="", autonomy="", depth="", tier="tief",
+            collection_catalog=None, context_sources_available=False, skills=list(skills),
+            attached_skills=tuple(skills),
+        )
+        assert algorithm._user_message(request, deps) == "message"
+        assert seen[-1] == expected
+
+
+def test_a_skill_loaded_mid_run_leaves_the_form_rule_the_review_judges_against(monkeypatch):
+    """The review rebuilds the run's first message after the loop, when the
+    activated skills also hold what the model loaded. The form rule of that
+    rebuild is the one the writer read: from the attached skills only."""
+    from types import SimpleNamespace
+
+    from inqtrix.agents import prompts
+    from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
+
+    seen: list[str] = []
+
+    def capture(question, **kwargs):
+        seen.append(kwargs["skill_form"])
+        return "message"
+
+    monkeypatch.setattr(prompts, "build_kernel_user_message", capture)
+    algorithm = KernelAgentAlgorithm.__new__(KernelAgentAlgorithm)
+    algorithm._hydrate_session_context = lambda request, deps: None
+    algorithm._hydrate_collection_catalog = lambda deps: None
+    algorithm._skills_context = lambda deps: ""
+    request = SimpleNamespace(
+        response_form="", tool_directives=(), canvas_context=None, document_id="",
+        report_requirement="", attached_reports=(),
+    )
+    attached = SimpleNamespace(deliverable="email")
+    deps = SimpleNamespace(
+        question="Auftrag.", session_history="", artifact_registry=(), last_response_form="",
+        prior_evidence_count=0, memory_briefing="", autonomy="", depth="", tier="tief",
+        collection_catalog=None, context_sources_available=False,
+        skills=[attached], attached_skills=(attached,),
+    )
+    algorithm._user_message(request, deps)
+    # load_skill activates a skill that pins the canvas during the loop.
+    deps.skills.append(SimpleNamespace(deliverable="canvas"))
+    algorithm._user_message(request, deps)
+    assert seen == ["", ""]
+
+
+def test_an_attached_skill_states_its_surface_to_the_writer_and_to_the_review():
+    """A run with an attached skill that pins the chat: the segment start
+    records the attached skills, the run's first message states the skill's
+    surface, and the review, which rebuilds that message after the loop,
+    judges against the same line."""
+    from tests.agents._agent_helpers import _create_skill
+
+    llm = StructuredScriptedLLM([_text_turn("Kurze Antwort.")], [{
+        "complete": True, "grounded": True,
+        "contradictions_named": True, "findings": [],
+    }])
+    client = make_client(llm)
+    with client:
+        skill_id = _create_skill(
+            client, clarification_points=[], instructions_markdown="Antworte im Chat.",
+            deliverable="chat", requires_plan="never",
+        )
+        response = client.post("/v1/runs", json={
+            "question": "Antworte kurz.", "mode": "agent_kernel", "skill_ids": [skill_id],
+            "agent_overrides": {"depth": "deep"},
+        })
+        assert response.status_code == 202, response.text
+        summary = wait_status(client, response.json()["run_id"], {"completed", "failed"})
+        assert summary["status"] == "completed", summary
+    first_user = next(
+        message["content"] for message in llm.chat_calls[0]["messages"] if message["role"] == "user"
+    )
+    assert SKILL_CHAT in first_user
+    assert len(llm.structured_calls) == 1
+    assert SKILL_CHAT in llm.structured_calls[0]["prompt"]
 
 
 # -- the reader reads the answer while the review runs ------------------------ #

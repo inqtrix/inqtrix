@@ -198,6 +198,12 @@ class AuthorizationGuardedLLM(_GuardedProvider, LLMProvider):
         """Forward the efforts the wrapped provider can send for *model*."""
         return reported_reasoning_levels(self._provider, model=model or "")
 
+    def supports_verbosity(self, *, model: str | None = None) -> bool:
+        """Forward whether the wrapped provider sends a ``verbosity`` for *model*."""
+        return reported_capability(
+            self._provider, "supports_verbosity", model=model
+        )
+
     def is_available(self) -> bool:
         """Forward local provider readiness without consuming authority."""
         return self._provider.is_available()

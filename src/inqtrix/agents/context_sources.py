@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictInt, field_validator
@@ -321,8 +321,34 @@ class SourceCoverageLedger:
             })
         return projected
 
-    def open_entries(self) -> list[dict[str, Any]]:
-        return [entry for entry in self.entries() if entry["continuation_open"]]
+    def open_entries(
+        self,
+        *,
+        also_read: Mapping[tuple[str, str, str], Iterable[tuple[int, int]]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """The entries with an open continuation.
+
+        *also_read* maps ``(kind, source_id, version)`` to ranges the run read
+        another way (a document analysis on the server): they close a
+        remainder here, and the entry's ``unread_ranges`` leave them out.
+        They never count as read in :meth:`entries`, which states what the
+        readers transferred to the model.
+        """
+        open_entries: list[dict[str, Any]] = []
+        for entry in self.entries():
+            extra = list((also_read or {}).get((entry["kind"], entry["source_id"], entry["version"])) or [])
+            if extra and entry["unread_ranges"]:
+                read = [*entry["read_ranges"], *extra]
+                gaps = [[start, end] for start, end in unread_ranges(read, entry["total"])]
+                internal = self._entries[(entry["kind"], entry["source_id"], entry["version"])]
+                entry = {
+                    **entry,
+                    "unread_ranges": gaps,
+                    "continuation_open": bool(gaps or internal["search_open"] or internal["pages_open"]),
+                }
+            if entry["continuation_open"]:
+                open_entries.append(entry)
+        return open_entries
 
     def digest(self, *, max_sources: int = SOURCE_COVERAGE_DIGEST_MAX_SOURCES) -> str:
         """Compact prompt lines for the sufficiency judge; empty when nothing was read."""
@@ -348,10 +374,16 @@ class SourceCoverageLedger:
             lines.append(f"- {remaining} further sources not listed")
         return "\n".join(lines)
 
-    def remainder_summary(self, *, max_sources: int = 5) -> str:
-        """Names the open sources with their unread remainders, for the advisory nudge."""
+    def remainder_summary(
+        self,
+        *,
+        max_sources: int = 5,
+        also_read: Mapping[tuple[str, str, str], Iterable[tuple[int, int]]] | None = None,
+    ) -> str:
+        """Names the open sources with their unread remainders, for the advisory nudge
+        (*also_read* as in :meth:`open_entries`)."""
         parts: list[str] = []
-        for entry in self.open_entries()[:max_sources]:
+        for entry in self.open_entries(also_read=also_read)[:max_sources]:
             gaps = ", ".join(f"[{start}, {end})" for start, end in entry["unread_ranges"]) or "a further page"
             parts.append(f"{entry['kind']} {entry['source_id']}: unread {gaps} of {entry['total']} {entry['unit']}")
         return "; ".join(parts)

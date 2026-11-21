@@ -7,30 +7,12 @@ export type ReportRequirementCapability = NonNullable<
   NonNullable<InqtrixCapabilities['agent']>['report_requirement']
 >
 
-/**
- * The result requirement a user attaches to a run: free text plus
- * prompt-library rules.
- *
- * It has three entry points: the Agent Desk composer attaches rules as
- * inline pills (sent as `report_rule_ids` on `POST /v1/runs`), the plan
- * gate edits the rules and sets the typed text, and API clients send
- * either directly. Every entry point is bounded by the SAME server limits.
- * The numbers come from the capability manifest (published == enforced).
- * The typed-text fallback below applies only to a server too old to
- * publish it and matches that server's own hardcoded value; the rule cap
- * and the composed ceiling have none — without a published number the
- * surfaces skip the pre-check and say so.
+/*
+ * The result requirement a user attaches to a run: prompt-library rules,
+ * attached in the Agent Desk composer as inline pills (sent as
+ * `report_rule_ids` on `POST /v1/runs`). Its limits come from the
+ * capability manifest (published == enforced).
  */
-export const REPORT_GUIDANCE_MAX_CHARS_FALLBACK = 2000
-
-export function reportGuidanceMaxChars(
-  requirement: ReportRequirementCapability | null | undefined,
-): number {
-  const published = requirement?.max_chars
-  return typeof published === 'number' && published > 0
-    ? published
-    : REPORT_GUIDANCE_MAX_CHARS_FALLBACK
-}
 
 /**
  * The server's cap on distinct rules, or `null`.
@@ -101,27 +83,4 @@ export function ruleRequirementTotalWith(
 ): number {
   if (size <= 0) return budget.used
   return budget.used + size + (budget.used > 0 ? RULE_BLOCK_SEPARATOR_CHARS : 0)
-}
-
-/**
- * Toggle one rule, honoring the server's cap.
- *
- * At the cap, selecting a further rule is a NO-OP rather than a silent
- * eviction of an earlier one: dropping a rule the user attached — to
- * make room for one they just picked — is exactly the kind of quiet
- * substitution that makes a requirement untrustworthy. The surface
- * disables the remaining entries so the cap is visible before the click.
- * Without a published cap (`max` null) nothing is pre-checked here; the
- * server checks the count on sending.
- */
-export function toggleReportRule(
-  ruleIds: readonly string[],
-  ruleId: string,
-  max: number | null,
-): string[] {
-  if (ruleIds.includes(ruleId)) {
-    return ruleIds.filter((id) => id !== ruleId)
-  }
-  if (max !== null && ruleIds.length >= max) return [...ruleIds]
-  return [...ruleIds, ruleId]
 }

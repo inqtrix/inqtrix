@@ -45,8 +45,10 @@ _UMLAUT_CANDIDATE = re.compile(r"\b[A-Za-zÄÖÜäöüß]*(?:ae|oe|ue|ss)[A-Za-z
 
 _LEGITIMATE_SPELLINGS = frozenset({
     # German words that genuinely carry these letter pairs
-    "Abschlussbericht", "Arbeitsschritten", "Aussage", "Aussagen", "Aussagenlage",
+    "Abschlussabschnitte", "Abschlussbericht", "Arbeitsschritten", "Aussage", "Aussagen", "Aussagenlage",
+    "Aussagenerfassung", "Aussagenerfassungen", "Aussagenqualität", "Belegtreue",
     "Ausschnitt", "Bewertungssignal", "Einzelquellen", "Einzelquellenangaben", "Ereignisse", "Ergebnisse",
+    "aussieht", "erfasste", "fasst", "geschlossen", "interessengeleitet",
     "Klassifikation", "Kontextquellen", "Mission", "Nachbesserung", "Passe",
     "Primärquelle", "Prämisse", "Quelle", "Quellen", "Quellenkontext",
     "Quellenmix", "Quellenqualität", "Quellenverweise", "Suchergebnissen",
@@ -203,7 +205,8 @@ class TestTranslator:
         assert "1 verified" in msg
         assert "2 attributed by the search provider" in msg
         assert "5 unverified" in msg
-        assert "1 cross-checked" in msg
+        # The cross-check count spans every status and says so.
+        assert "cross-checked regardless of status: 1" in msg
         # Coverage is the evaluator's judgement now; the search summary does not guess it.
         assert "%" not in msg
 
@@ -294,6 +297,9 @@ _COUNTED_NOUN_DE = re.compile(
 # by hand: an entry is a claim about the value or the grammar, never a way
 # to silence a line that can read "1 Quellen".
 _NOUN_NEUTRAL = {
+    ("outcome_review_inconsistent", "flags"): (
+        "no counted noun: {flags} is the list of flag names a verdict gave no reason for"
+    ),
     **{
         (f"outcome_reason_{reason}", "count"): (
             "no counted noun: the count is of the revised findings named before it; "
@@ -303,26 +309,11 @@ _NOUN_NEUTRAL = {
             "no_source_text", "format_only", "check_unavailable", "inconclusive", "knowledge_only",
         )
     },
-    ("document_analysis_read_completely", "chars"): "'Zeichen' is the same word for one",
-    ("document_analysis_text_read_to_end", "chars"): "'Zeichen' is the same word for one",
-    ("document_analysis_pages_without_text_one", "pages"): "no counted noun: 'Textschicht' is the object",
-    ("document_analysis_pages_without_text_other", "pages"): "the form states at least two pages without text",
-    ("document_analysis_scope_found_one", "scope"): "{scope} is itself a counted pair phrase",
-    ("document_analysis_scope_found_other", "scope"): "{scope} is itself a counted pair phrase",
-    ("document_analysis_unchecked_long_one", "limit"): "filled with CITE_QUOTE_CHARS_MAX = 1200",
-    ("document_analysis_unchecked_long_other", "limit"): "filled with CITE_QUOTE_CHARS_MAX = 1200",
-    ("document_analysis_unchecked_short_one", "min_words"): "filled with CITE_QUOTE_MIN_WORDS = 3",
-    ("document_analysis_unchecked_short_other", "min_words"): "filled with CITE_QUOTE_MIN_WORDS = 3",
-    ("document_analysis_more_one", "limit"): "no counted noun: 'je Abschnitt' distributes the limit",
-    ("document_analysis_more_other", "limit"): "no counted noun: 'je Abschnitt' distributes the limit",
     ("compose_aborted", "n"): "filled with _MAX_CONSECUTIVE_EMPTY = 2",
     ("context_window_unknown_warning", "estimated"): "a prompt's token estimate, never one",
     ("context_window_too_small", "window"): "a model's context window in tokens, never one",
     ("question_too_long", "limit"): "'Zeichen' is the same word for one",
-    ("agent_mission_time_budget_detail_one", "minutes"): "the pair is chosen by the minutes themselves",
-    ("agent_mission_time_budget_detail_other", "minutes"): "the pair is chosen by the minutes themselves",
     ("agent_limit_ceiling_extendable", "proposed"): "no counted noun: a clause follows the number",
-    ("review_quote_unverified_draft", "round"): "no counted noun: an ordinal, a clause follows",
 }
 
 # Counted German nouns that DO read wrong for a count of one, named as debt
@@ -341,11 +332,7 @@ _NOUN_DEBT = {
             ("search_sources_processed", "citations"), ("search_sources_processed", "evidence"),
             ("evaluate_quality_summary", "evidence_records"),
             ("evaluate_quality_summary", "open_aspects"),
-            ("answer_evidence_notice_single_source", "supported"),
-            ("answer_stats_sources", "n"), ("answer_stats_linked", "n"),
-            ("answer_stats_verified", "n"), ("answer_stats_cross_checked", "n"),
-            ("answer_stats_searches", "n"), ("answer_links_removed", "n"),
-            ("algorithm_failure_report_blocked", "count"),
+            ("answer_links_removed", "n"),
         )
     },
 }
@@ -404,6 +391,6 @@ class TestPluralForms:
         from inqtrix.i18n import t_count
 
         state = {"language": "de"}
-        assert t_count(state, "document_analysis_summary_cited", 1) == "1 Stelle wörtlich belegt."
-        assert t_count(state, "document_analysis_summary_cited", 0) == "0 Stellen wörtlich belegt."
-        assert t_count(state, "document_analysis_summary_cited", 2) == "2 Stellen wörtlich belegt."
+        assert t_count(state, "outcome_claims", 1) == "1 Aussage"
+        assert t_count(state, "outcome_claims", 0) == "0 Aussagen"
+        assert t_count(state, "outcome_claims", 2) == "2 Aussagen"

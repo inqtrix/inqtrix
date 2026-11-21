@@ -43,12 +43,14 @@ from inqtrix.providers.base import (
     INCOMPLETE_FINISH_REASONS,
     LLMProvider,
     SearchProvider,
+    _set_verbosity,
     async_call,
     redact_thinking,
     reported_capability,
     reported_reasoning_levels,
 )
 from inqtrix.providers.embeddings import EmbeddingProvider
+from inqtrix.search_form import answer_form_brief
 from inqtrix.text import estimate_tokens
 
 log = logging.getLogger(__name__)
@@ -228,7 +230,7 @@ class _TracingBase:
 
     @staticmethod
     def _context_attributes() -> dict[str, Any]:
-        """Attribution of the call to its run, task and call site.
+        """Attribution of the call to its run and call site.
 
         Read from the bound purpose (:func:`bind_purpose`) and the log
         context: the wrapper is the one wrap point and cannot know its
@@ -254,12 +256,6 @@ class _TracingBase:
             attributes[semconv.observation_metadata_key("purpose")] = (
                 purpose.purpose
             )
-        if purpose.task_id:
-            attributes[semconv.INQTRIX_TASK_ID] = purpose.task_id
-        if purpose.task_kind:
-            attributes[semconv.INQTRIX_TASK_KIND] = purpose.task_kind
-        if purpose.step:
-            attributes[semconv.INQTRIX_STEP] = purpose.step
         return attributes
 
     @contextmanager
@@ -305,6 +301,12 @@ class _TracingBase:
                     if attempts.reasoning_effort:
                         recording.set_attribute(
                             semconv.INQTRIX_REASONING_EFFORT_SENT, attempts.reasoning_effort
+                        )
+                    # The verbosity the request carried; a prose-writing call site
+                    # asks for one, and only an adapter that sends it says so here.
+                    if attempts.verbosity:
+                        recording.set_attribute(
+                            semconv.INQTRIX_VERBOSITY_SENT, attempts.verbosity
                         )
 
 
@@ -565,6 +567,11 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
     def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
         return reported_reasoning_levels(self._provider, model=model or "")
 
+    def supports_verbosity(self, *, model: str | None = None) -> bool:
+        return reported_capability(
+            self._provider, "supports_verbosity", model=model
+        )
+
     def is_available(self) -> bool:
         return self._provider.is_available()
 
@@ -696,7 +703,9 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
         state: dict | None,
         deadline: float | None,
         reasoning_effort: str | None,
+        verbosity: str | None = None,
     ) -> _TracedCall:
+        # A structured call builds on this one and has no verbosity.
         return _TracedCall(
             (prompt,),
             {
@@ -707,6 +716,9 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
                 "state": state,
                 "deadline": deadline,
                 "reasoning_effort": reasoning_effort,
+                # Only when set: a wrapped provider that never learned the
+                # parameter still serves the call.
+                **_set_verbosity(verbosity),
             },
         )
 
@@ -842,11 +854,12 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> str:
         call = self._completion_call(
             prompt, system=system, model=model, max_output_tokens=max_output_tokens,
             timeout=timeout, state=state, deadline=deadline,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=reasoning_effort, verbosity=verbosity,
         )
         # The metadata method is the native providers' canonical call. Keep
         # that receipt before projecting to text; no second model invocation.
@@ -868,12 +881,13 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> str:
         """Async twin of :meth:`complete`, instrumented the same way."""
         call = self._completion_call(
             prompt, system=system, model=model, max_output_tokens=max_output_tokens,
             timeout=timeout, state=state, deadline=deadline,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=reasoning_effort, verbosity=verbosity,
         )
         if self.complete_uses_metadata:
             return (await self.acomplete_with_metadata(*call.args, **call.kwargs)).content
@@ -894,11 +908,12 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> "LLMResponse":
         call = self._completion_call(
             prompt, system=system, model=model, max_output_tokens=max_output_tokens,
             timeout=timeout, state=state, deadline=deadline,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=reasoning_effort, verbosity=verbosity,
         )
         with self._traced_response(call):
             call.result = self._provider.complete_with_metadata(
@@ -917,12 +932,13 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> "LLMResponse":
         """Async twin of :meth:`complete_with_metadata`, instrumented the same way."""
         call = self._completion_call(
             prompt, system=system, model=model, max_output_tokens=max_output_tokens,
             timeout=timeout, state=state, deadline=deadline,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=reasoning_effort, verbosity=verbosity,
         )
         with self._traced_response(call):
             call.result = await async_call(self._provider, "complete_with_metadata")(
@@ -1052,6 +1068,7 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
         deadline: float | None,
         reasoning_effort: str | None,
         tool_choice: str | None,
+        verbosity: str | None,
     ) -> _TracedCall:
         return _TracedCall(
             (messages,),
@@ -1065,6 +1082,7 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
                 # Only when set: a wrapped provider that never learned the
                 # parameter still serves plain turns.
                 **({"tool_choice": tool_choice} if tool_choice is not None else {}),
+                **_set_verbosity(verbosity),
             },
         )
 
@@ -1142,11 +1160,12 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | None = None,
+        verbosity: str | None = None,
     ) -> "ChatTurn":
         call = self._chat_call(
             messages, tools=tools, model=model, max_output_tokens=max_output_tokens,
             timeout=timeout, deadline=deadline, reasoning_effort=reasoning_effort,
-            tool_choice=tool_choice,
+            tool_choice=tool_choice, verbosity=verbosity,
         )
         with self._traced_chat(call):
             call.result = self._provider.chat(*call.args, **call.kwargs)
@@ -1163,12 +1182,13 @@ class TracingLLMProvider(_TracingBase, LLMProvider):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | None = None,
+        verbosity: str | None = None,
     ) -> "ChatTurn":
         """Async twin of :meth:`chat`, instrumented the same way."""
         call = self._chat_call(
             messages, tools=tools, model=model, max_output_tokens=max_output_tokens,
             timeout=timeout, deadline=deadline, reasoning_effort=reasoning_effort,
-            tool_choice=tool_choice,
+            tool_choice=tool_choice, verbosity=verbosity,
         )
         with self._traced_chat(call):
             call.result = await async_call(self._provider, "chat")(
@@ -1209,7 +1229,12 @@ class TracingSearchProvider(_TracingBase, SearchProvider):
         search_mode: str | None,
         return_related: bool,
         deadline: float | None,
+        answer_form: str | None,
     ) -> _TracedCall:
+        # The general hints always go on. The answer form goes on only when
+        # it was given: it is handed only to a provider that names it, and a
+        # provider written against the signature without it must be called
+        # as before.
         return _TracedCall(
             (query,),
             {
@@ -1220,6 +1245,7 @@ class TracingSearchProvider(_TracingBase, SearchProvider):
                 "search_mode": search_mode,
                 "return_related": return_related,
                 "deadline": deadline,
+                **({"answer_form": answer_form} if answer_form else {}),
             },
         )
 
@@ -1257,6 +1283,10 @@ class TracingSearchProvider(_TracingBase, SearchProvider):
             attributes[semconv.INQTRIX_SEARCH_MODE] = search_mode
         if recency_filter:
             attributes[semconv.INQTRIX_SEARCH_RECENCY] = recency_filter
+        # Named only where a brief goes out: the default form and a name
+        # that is no form send none.
+        if answer_form_brief(call.kwargs.get("answer_form")):
+            attributes[semconv.INQTRIX_SEARCH_ANSWER_FORM] = call.kwargs["answer_form"]
         if domain_filter:
             attributes[semconv.INQTRIX_SEARCH_DOMAIN_FILTER_COUNT] = len(
                 domain_filter
@@ -1362,12 +1392,14 @@ class TracingSearchProvider(_TracingBase, SearchProvider):
         search_mode: str | None = None,
         return_related: bool = False,
         deadline: float | None = None,
+        answer_form: str | None = None,
     ) -> "GroundedSearchResult":
         call = self._search_call(
             query, search_context_size=search_context_size,
             recency_filter=recency_filter, language_filter=language_filter,
             domain_filter=domain_filter, search_mode=search_mode,
             return_related=return_related, deadline=deadline,
+            answer_form=answer_form,
         )
         with self._traced_search(call):
             call.result = self._provider.search(*call.args, **call.kwargs)
@@ -1384,6 +1416,7 @@ class TracingSearchProvider(_TracingBase, SearchProvider):
         search_mode: str | None = None,
         return_related: bool = False,
         deadline: float | None = None,
+        answer_form: str | None = None,
     ) -> "GroundedSearchResult":
         """Async twin of :meth:`search`, instrumented the same way."""
         call = self._search_call(
@@ -1391,6 +1424,7 @@ class TracingSearchProvider(_TracingBase, SearchProvider):
             recency_filter=recency_filter, language_filter=language_filter,
             domain_filter=domain_filter, search_mode=search_mode,
             return_related=return_related, deadline=deadline,
+            answer_form=answer_form,
         )
         with self._traced_search(call):
             call.result = await async_call(self._provider, "search")(

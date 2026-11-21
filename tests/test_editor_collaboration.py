@@ -3692,12 +3692,7 @@ def _capabilities_client(
         ),
         agent_platform=AgentPlatformSettings(
             default_autonomy="balanced",
-            default_agent_mode="workspace_agent",
-            max_clarification_rounds=2,
             advanced_autonomy=False,
-            max_parallel_children=2,
-            discovery_max_tool_calls=4,
-            max_plan_tasks=12,
             skills_max_attached=5,
             skills_disclosure_budget_chars=20_000,
         ),

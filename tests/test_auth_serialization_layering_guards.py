@@ -236,7 +236,7 @@ def test_modeless_request_on_custom_registry_returns_400_envelope():
 def test_streaming_rejects_algorithm_without_chat_completions_capability():
     """Streaming dispatches through the registry, so the gate is
     ``supports_chat_completions``. An algorithm that is not a chat peer (e.g.
-    workspace_agent, which needs run_id + park) is rejected with a loud 400
+    agent_kernel, which needs run_id + park) is rejected with a loud 400
     rather than dispatched into a context it will fail in."""
     class _NonChatAlgorithm:
         id = "research"

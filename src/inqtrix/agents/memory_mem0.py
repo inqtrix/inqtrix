@@ -1,4 +1,4 @@
-"""Mem0-backed implementation of the workspace-agent memory provider.
+"""Mem0-backed implementation of the agent memory provider.
 
 The adapter only translates between Inqtrix records and Mem0 HTTP
 endpoints. Authorization, tenant isolation, and namespace derivation stay

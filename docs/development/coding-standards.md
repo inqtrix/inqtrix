@@ -16,7 +16,7 @@ The binding coding conventions for the Inqtrix repository. Deviations are called
   instruction in `src/inqtrix/**` is English. Prompts never hard-code an answer language.
 - **The answer language is the language of the question.** Each writing path receives its language directive from
   `inqtrix.prompt_language` (one source of truth), phrased in the target language itself. The Research report writer
-  opens its system message with the directive; mission and kernel writers open their user message with it.
+  opens its system message with the directive; the kernel's writers open their user message with it.
   Providers preserve the placement chosen by the caller. Contractual headings (summary, open points, sources) come
   from the same module per language; code never searches for a German heading literal.
 - **Real umlauts in German text.** User-visible German (UI strings, demo content, seed templates, fixtures, and the

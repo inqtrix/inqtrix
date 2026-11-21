@@ -184,3 +184,87 @@ def test_the_mode_in_the_env_file_decides_too(monkeypatch: pytest.MonkeyPatch, t
 
     assert SECRET_VALUE not in str(stop.value)
 
+
+
+_KERNEL_LIMITS = "the agent kernel's limits (INQTRIX_AGENT_KERNEL_*)"
+_MISSION_LIMITS = {
+    "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN": (
+        "RUN_MAX_CONCURRENT_PER_USER (child runs of a kernel batch count against it)"
+    ),
+    "INQTRIX_AGENT_DISCOVERY_MAX_TOOL_CALLS": _KERNEL_LIMITS,
+    "INQTRIX_AGENT_MAX_PLAN_TASKS": _KERNEL_LIMITS,
+    "INQTRIX_AGENT_MAX_REPLAN_ROUNDS": _KERNEL_LIMITS,
+    "INQTRIX_AGENT_SYNTHESIS_MAX_PARALLEL_SECTIONS": _KERNEL_LIMITS,
+    "INQTRIX_AGENT_SYNTHESIS_EVIDENCE_BUDGET": _KERNEL_LIMITS,
+    "INQTRIX_AGENT_SYNTHESIS_SECTION_REGISTER_BUDGET": _KERNEL_LIMITS,
+    "INQTRIX_AGENT_MISSION_TIME_BUDGET_SECONDS": _KERNEL_LIMITS,
+    "INQTRIX_AGENT_ALLOW_WEB_DISCOVERY_PREVIEW": (
+        "the run's Stufe (agent_tier) and permission mode, which decide its web research"
+    ),
+}
+"""Limits of the retired mission engine with the replacement each names. No
+engine reads them any more, so ignoring one undoes no choice."""
+
+_MISSION_CHOICES = {
+    "INQTRIX_AGENT_MAX_CLARIFICATION_ROUNDS": (
+        "the run's Stufe (agent_tier), which decides its clarification rounds"
+    ),
+    "INQTRIX_AGENT_DEFAULT_MODE": "no setting (agent_kernel is the only agent mode)",
+}
+"""Mission settings that recorded a deliberate choice: a number of
+clarification rounds narrows what a run may ask, and a default mode chose the
+mission. Ignoring either would undo that choice, so the start stops."""
+
+
+def _status_line(found: list[settings_module.RetiredSetting]) -> None:
+    from inqtrix.logging_config import ResolvedLogging, log_status_line
+
+    log_status_line(
+        ResolvedLogging(
+            service="api",
+            target="console",
+            level="INFO",
+            format="text",
+            file_path=None,
+            web_level="WARNING",
+        ),
+        retired=found,
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_MISSION_LIMITS))
+def test_a_mission_limit_warns_and_stands_in_the_status_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    monkeypatch.setenv(name, SECRET_VALUE)
+
+    with caplog.at_level(logging.INFO, logger="inqtrix"):
+        found = settings_module.check_retired_settings()
+        _status_line(found)
+
+    assert [entry.name for entry in found] == [name]
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert warnings == [
+        f"Retired setting {name} is set and has no effect; use {_MISSION_LIMITS[name]} instead."
+    ]
+    assert f"retired_settings={name}" in caplog.text
+    assert SECRET_VALUE not in caplog.text
+
+
+@pytest.mark.parametrize("value", [SECRET_VALUE, "agent_kernel", "0"])
+@pytest.mark.parametrize("name", sorted(_MISSION_CHOICES))
+def test_a_deliberate_mission_choice_stops_the_start_with_its_replacement(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    # The check reads names only: a harmless value stops the start as well.
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(RuntimeError) as stop:
+        settings_module.check_retired_settings()
+
+    message = str(stop.value)
+    assert message == (
+        f"Retired setting {name} is set; use {_MISSION_CHOICES[name]} instead. "
+        "The service does not start until it is removed."
+    )
+    assert SECRET_VALUE not in message

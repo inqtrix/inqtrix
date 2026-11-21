@@ -3,41 +3,26 @@ import type { Dispatch } from 'react'
 
 import {
   answerAgentRunClarification,
-  applyEditorPatch,
-  cancelAgentRunTask,
   decideAgentRunApproval,
   fetchResearchRunSummary,
   exportAgentRunArtifact,
   getAgentRunArtifact,
-  getAgentRunPlan,
-  getAgentRunTaskResult,
-  getEditorDocument,
-  getEditorPatch,
   hasHttpStatus,
   listAgentRunApprovals,
   listAgentRunArtifacts,
   listAgentRunClarifications,
   listAgentSessionArtifacts,
   renameAgentRunArtifact,
-  rejectEditorPatch,
   updateAgentRunArtifact,
   type ClientOptions,
   type InqtrixRequestError,
 } from '@/api/inqtrixClient'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
-import {
-  isParkedRunStatus,
-  noteParkedTransition,
-  subscribeRunEvents,
-  type RunEventTransport,
-} from '@/features/researchRuns/runEventChannel'
 import type {
   AgentApprovalDecisionRequest,
   AgentClarificationAnswerRequest,
-  AgentTaskResultWire,
 } from './types'
 import {
-  TERMINAL_AGENT_TASK_STATUSES,
   canEditAgentRun,
   type AgentRunRecord,
   type AgentSessionArtifactIndex,
@@ -53,8 +38,6 @@ export type ArtifactSaveResult =
 export type ArtifactRenameResult =
   | { kind: 'renamed' }
   | { kind: 'locked' }
-
-const TASK_RESULT_CACHE_MAX = 50
 
 /**
  * Control-surface data layer of the Agent Desk. Rows are the truth: SSE
@@ -80,8 +63,8 @@ export function useAgentControlApi({
   enabled: boolean
   onEditorDocumentsChanged: () => void
   runs: Record<string, AgentRunRecord>
-  /** The open session: only its runs (and inspected child missions) and its
-   * artifact index load their rows. Every other session loads when opened. */
+  /** The open session: only its runs and its artifact index load their
+   * rows. Every other session loads when opened. */
   selectedSessionId: string | null
   /** Anchor-independent per-session artifact index. */
   sessionArtifacts?: Record<string, AgentSessionArtifactIndex>
@@ -108,18 +91,6 @@ export function useAgentControlApi({
       throw readerError('agentRunReadOnly')
     }
   }, [])
-  // Cache entries remember the live attempt they were fetched under so a
-  // re-run of the SAME terminal status still invalidates (see loadTaskResult).
-  const taskResultCacheRef = useRef(
-    new Map<string, { result: AgentTaskResultWire; attempt?: number }>(),
-  )
-  const taskResultInFlightRef = useRef(
-    new Map<string, Promise<AgentTaskResultWire>>(),
-  )
-  // Keys whose PREFETCH failed once: hover/idle must not hammer a
-  // failing endpoint on every event; the on-open fetch stays untouched
-  // and re-tries loudly.
-  const taskResultPrefetchFailedRef = useRef(new Set<string>())
   // Artifact bodies on their way, and pinned revisions already loaded (a
   // revision never changes): a re-render or a run event asks no second time.
   const artifactLoadsRef = useRef(
@@ -145,25 +116,6 @@ export function useAgentControlApi({
     const scope = agentControlScope(runs, selectedSessionId)
     for (const run of Object.values(runs)) {
       if (!hasAgentControlRows(run) || !scope.has(run.runId)) continue
-      if (run.planStale) {
-        void refetch(`${run.runId}:plan`, async (options) => {
-          try {
-            const plan = await getAgentRunPlan(
-              run.runId,
-              undefined,
-              options,
-            )
-            dispatch({ plan, runId: run.runId, type: 'setAgentRunPlan' })
-          } catch (error) {
-            if (hasHttpStatus(error, 404)) {
-              // No plan yet (pre-planning) — clear the flag, keep nothing.
-              dispatch({ plan: null, runId: run.runId, type: 'setAgentRunPlan' })
-              return
-            }
-            throw error
-          }
-        })
-      }
       if (run.approvalsStale) {
         void refetch(`${run.runId}:approvals`, async (options) => {
           const approvals = await listAgentRunApprovals(
@@ -213,13 +165,6 @@ export function useAgentControlApi({
             runId: run.runId,
             type: 'setAgentChildGates',
           })
-        })
-      }
-      if (run.patchStale && run.patchId) {
-        const patchId = run.patchId
-        void refetch(`${run.runId}:patch`, async (options) => {
-          const patch = await getEditorPatch(patchId, options)
-          dispatch({ patch, runId: run.runId, type: 'setAgentRunPatch' })
         })
       }
       if (run.artifactsStale) {
@@ -339,12 +284,10 @@ export function useAgentControlApi({
             message: error instanceof Error ? error.message : String(error),
             runId,
             surface: surface as
-              | 'plan'
               | 'approvals'
               | 'clarifications'
               | 'artifacts'
               | 'answer'
-              | 'patch'
               | 'child_gates',
             type: 'markAgentRunError',
           })
@@ -371,25 +314,6 @@ export function useAgentControlApi({
       const { run, ...approval } = result
       dispatch({ summary: run, type: 'upsertAgentRunSummary' })
       dispatch({ approvals: [approval], runId, type: 'setAgentRunApprovals' })
-      await refreshPlanAfterApprovalDecision({
-        kind: approval.kind,
-        load: () => getAgentRunPlan(
-          runId,
-          undefined,
-          optionsRef.current,
-        ),
-        onLoaded: (plan) => {
-          dispatch({ plan, runId, type: 'setAgentRunPlan' })
-        },
-        onError: (message) => {
-          dispatch({
-            message,
-            runId,
-            surface: 'plan',
-            type: 'markAgentRunError',
-          })
-        },
-      })
       // The full list (older approvals) refreshes via the decided event;
       // seeding the fresh row keeps the card responsive meanwhile.
       return approval
@@ -510,112 +434,6 @@ export function useAgentControlApi({
     [dispatch],
   )
 
-  const loadTaskResult = useCallback(
-    (runId: string, taskId: string): Promise<AgentTaskResultWire> => {
-      const key = `${runId}:${taskId}`
-      const cached = taskResultCacheRef.current.get(key)
-      const liveTask = runsRef.current[runId]?.taskStates[taskId]
-      // Serve the cache only while the live task still carries the status
-      // AND attempt the result was fetched under — a retried task drops
-      // its entry even when it lands on the same terminal status again.
-      const cacheValid =
-        cached !== undefined
-        && (liveTask === undefined
-          || (liveTask.status === cached.result.status
-            && liveTask.attempt === cached.attempt))
-      if (cached && cacheValid) {
-        return Promise.resolve(cached.result)
-      }
-      if (cached) taskResultCacheRef.current.delete(key)
-      const inFlight = taskResultInFlightRef.current.get(key)
-      if (inFlight) return inFlight
-      // Attempt at REQUEST time: a retry racing this fetch must not tag
-      // the previous attempt's result with the new attempt number.
-      const requestAttempt = liveTask?.attempt
-      const request = getAgentRunTaskResult(runId, taskId, optionsRef.current)
-        .then((result) => {
-          // Success re-arms hover/idle prefetch for this task (the flag
-          // cannot clear inside prefetchTaskResult — it early-returns).
-          taskResultPrefetchFailedRef.current.delete(key)
-          if (TERMINAL_AGENT_TASK_STATUSES.has(result.status)) {
-            const cache = taskResultCacheRef.current
-            cache.set(key, {
-              attempt: requestAttempt,
-              result,
-            })
-            if (cache.size > TASK_RESULT_CACHE_MAX) {
-              const oldest = cache.keys().next().value
-              if (oldest !== undefined) cache.delete(oldest)
-            }
-          }
-          return result
-        })
-        .finally(() => {
-          taskResultInFlightRef.current.delete(key)
-        })
-      taskResultInFlightRef.current.set(key, request)
-      return request
-    },
-    [],
-  )
-
-  const prefetchTaskResult = useCallback(
-    (runId: string, taskId: string) => {
-      // Demo/offline: the canvas renders demo runs, but there is no
-      // server to prefetch from (the detail view guards the same way
-      // via clientOptions).
-      if (!enabledRef.current) return
-      const key = `${runId}:${taskId}`
-      if (taskResultPrefetchFailedRef.current.has(key)) return
-      void loadTaskResult(runId, taskId)
-        .catch((error: unknown) => {
-          // Visible, but not load-bearing: the on-open fetch in the task
-          // detail view stays the loud error path and still retries.
-          taskResultPrefetchFailedRef.current.add(key)
-          console.warn(
-            `Task result prefetch failed (${key}):`,
-            error instanceof Error ? error.message : error,
-          )
-        })
-    },
-    [loadTaskResult],
-  )
-
-  const cancelTask = useCallback(
-    async (runId: string, taskId: string) => {
-      requireEditableRun(runId)
-      const result = await cancelAgentRunTask(
-        runId,
-        taskId,
-        optionsRef.current,
-      )
-      dispatch({
-        childRunId: result.child_run_id,
-        runId,
-        status: result.status,
-        taskId,
-        type: 'ackAgentTaskCancel',
-      })
-      try {
-        const plan = await getAgentRunPlan(
-          runId,
-          undefined,
-          optionsRef.current,
-        )
-        dispatch({ plan, runId, type: 'setAgentRunPlan' })
-      } catch (error) {
-        dispatch({
-          message: error instanceof Error ? error.message : String(error),
-          runId,
-          surface: 'plan',
-          type: 'markAgentRunError',
-        })
-      }
-      return result
-    },
-    [dispatch, requireEditableRun],
-  )
-
   const saveArtifact = useCallback(
     async (
       runId: string,
@@ -708,88 +526,6 @@ export function useAgentControlApi({
     [onEditorDocumentsChanged],
   )
 
-  const applyPatch = useCallback(
-    async (
-      runId: string,
-      patchId: string,
-      expectedRevision: number,
-    ): Promise<
-      | { kind: 'applied'; revision: number; appliedEditIds: string[] }
-      | { kind: 'conflict'; currentRevision: number | null }
-    > => {
-      requireEditableRun(runId)
-      const refreshAfterApply = async () => {
-        const patch = await getEditorPatch(patchId, optionsRef.current)
-        dispatch({ patch, runId, type: 'setAgentRunPatch' })
-        // The SERVER document just changed under the local editor copy —
-        // pull the fresh body in (never dirties, never bumps updatedAt),
-        // or the applied patch stays invisible until reload and the next
-        // autosave of the stale copy would silently undo it.
-        const document = await getEditorDocument(
-          patch.document_id,
-          optionsRef.current,
-        )
-        dispatch({
-          contentMarkdown: document.content_markdown ?? '',
-          documentId: patch.document_id,
-          type: 'setServerEditorDocumentBody',
-        })
-        return patch
-      }
-      try {
-        const result = await applyEditorPatch(
-          patchId,
-          expectedRevision,
-          optionsRef.current,
-        )
-        await refreshAfterApply()
-        return {
-          kind: 'applied',
-          revision: result.revision,
-          appliedEditIds: result.applied_edit_ids,
-        }
-      } catch (error) {
-        if (hasHttpStatus(error, 409)) {
-          const detail = (error as InqtrixRequestError).detail ?? {}
-          if (detail.status === 'accepted') {
-            // Already applied (other tab / replayed decide) — the stored
-            // outcome IS the success, not a conflict.
-            const patch = await refreshAfterApply()
-            return {
-              kind: 'applied',
-              revision: patch.applied_revision ?? patch.document_revision,
-              appliedEditIds: patch.applied_edit_ids ?? [],
-            }
-          }
-          const patch = await getEditorPatch(patchId, optionsRef.current)
-          dispatch({ patch, runId, type: 'setAgentRunPatch' })
-          const current = detail.current_revision
-          return {
-            kind: 'conflict',
-            currentRevision:
-              typeof current === 'number' ? current : null,
-          }
-        }
-        throw error
-      }
-    },
-    [dispatch, requireEditableRun],
-  )
-
-  const rejectPatch = useCallback(
-    async (runId: string, patchId: string, note: string) => {
-      requireEditableRun(runId)
-      const patch = await rejectEditorPatch(
-        patchId,
-        note,
-        optionsRef.current,
-      )
-      dispatch({ patch, runId, type: 'setAgentRunPatch' })
-      return patch
-    },
-    [dispatch, requireEditableRun],
-  )
-
   const isTranscriptHydrated = useCallback((runId: string): boolean => {
     // Demo/local runs carry their rows in reducer actions; there is no control
     // API whose initial stale defaults could ever settle.
@@ -799,45 +535,27 @@ export function useAgentControlApi({
     return agentTranscriptHydrated(run, failedRef.current)
   }, [])
 
-  const inspectChildRun = useCallback(
-    (runId: string, signal: AbortSignal, onTransport: (value: RunEventTransport) => void) =>
-      inspectAgentChild(runId, { ...optionsRef.current, signal }, dispatch, onTransport),
-    [dispatch],
-  )
-
   // One object per set of callbacks: a new object on every render made each
   // consumer (canvas context, timeline actions, open canvas views) treat a
   // re-render as a change and fetch artifact bodies again.
   return useMemo(() => ({
     answerChildClarification,
     answerClarification,
-    applyPatch,
-    cancelTask,
     decideApproval,
     decideChildApproval,
     exportArtifact,
     loadArtifact,
-    loadTaskResult,
     isTranscriptHydrated,
-    inspectChildRun,
-    prefetchTaskResult,
-    rejectPatch,
     renameArtifact,
     saveArtifact,
   }), [
     answerChildClarification,
     answerClarification,
-    applyPatch,
-    cancelTask,
     decideApproval,
     decideChildApproval,
     exportArtifact,
     loadArtifact,
-    loadTaskResult,
     isTranscriptHydrated,
-    inspectChildRun,
-    prefetchTaskResult,
-    rejectPatch,
     renameArtifact,
     saveArtifact,
   ])
@@ -863,38 +581,6 @@ export function shareArtifactLoad<T>(
     () => { if (loads.get(key) === load) loads.delete(key) },
   )
   return load
-}
-
-/** A child channel exists only for the user-opened detail, under caller scope. */
-export async function inspectAgentChild(
-  runId: string,
-  options: ClientOptions & { signal: AbortSignal },
-  dispatch: Dispatch<ResearchDeskAction>,
-  onTransport: (value: RunEventTransport) => void,
-): Promise<void> {
-  const summary = await fetchResearchRunSummary(runId, options)
-  if (options.signal.aborted) return
-  if (summary.kind !== 'agent_child') throw readerError('agentRunNotDelegated')
-  dispatch({ type: 'upsertInspectedAgentChild', summary })
-  let unavailable = false
-  const parked = new Set(isParkedRunStatus(summary.status) ? [runId] : [])
-  await subscribeRunEvents({
-    eventsUrl: summary.events_url,
-    options,
-    signal: options.signal,
-    preferPolling: () => parked.has(runId),
-    onEvent: (event) => {
-      noteParkedTransition(parked, event)
-      dispatch({ type: 'appendApiRunEvent', event })
-    },
-    onHistory: (events) => {
-      for (const event of events) noteParkedTransition(parked, event)
-      dispatch({ type: 'appendApiRunEvents', events })
-    },
-    onTransportChange: onTransport,
-    onUnavailable: () => { unavailable = true },
-  })
-  if (unavailable) throw readerError('agentRunUnavailable')
 }
 
 function answerFetchKey(
@@ -947,8 +633,7 @@ export function withControlFetchDeadline<T>(
   })
 }
 
-/** The runs whose control rows load now: those of the open session, and every
- * child mission (a child is in the store only once someone inspects it). The
+/** The runs whose control rows load now: those of the open session. The
  * rows of other sessions load when the user opens them; loading them all at
  * once queued the open session behind every run of every session. */
 export function agentControlScope(
@@ -957,16 +642,17 @@ export function agentControlScope(
 ): Set<string> {
   const scope = new Set<string>()
   for (const run of Object.values(runs)) {
-    if (run.kind === 'agent_child' || (selectedSessionId !== null && run.sessionId === selectedSessionId)) {
+    if (selectedSessionId !== null && run.sessionId === selectedSessionId) {
       scope.add(run.runId)
     }
   }
   return scope
 }
 
-/** Inspected child missions use the same durable control rows as root missions. */
+/** Root agent runs hold control rows; a delegated child's gate rows are
+ * fetched on behalf of its parent (`childGates`). */
 function hasAgentControlRows(run: AgentRunRecord): boolean {
-  return run.kind === 'agent' || run.kind === 'agent_child'
+  return run.kind === 'agent'
 }
 
 function agentControlFetchKeys(
@@ -975,10 +661,8 @@ function agentControlFetchKeys(
   const keys = new Set<string>()
   for (const run of Object.values(runs)) {
     if (!hasAgentControlRows(run)) continue
-    if (run.planStale) keys.add(`${run.runId}:plan`)
     if (run.approvalsStale) keys.add(`${run.runId}:approvals`)
     if (run.clarificationsStale) keys.add(`${run.runId}:clarifications`)
-    if (run.patchStale && run.patchId) keys.add(`${run.runId}:patch`)
     for (const [childRunId, gates] of Object.entries(run.childGates)) {
       if (gates.stale) keys.add(childGateFetchKey(run.runId, childRunId))
     }
@@ -1021,7 +705,6 @@ export function agentTranscriptHydrated(
   terminalFetches: ReadonlySet<string> = new Set(),
 ): boolean {
   const runId = run.runId
-  if (run.planStale && !terminalFetches.has(`${runId}:plan`)) return false
   if (
     run.approvalsStale
     && !terminalFetches.has(`${runId}:approvals`)
@@ -1048,23 +731,4 @@ export function agentTranscriptHydrated(
     && !terminalFetches.has(answerFetchKey(run, answer))
   ) return false
   return true
-}
-
-export async function refreshPlanAfterApprovalDecision<Plan>({
-  kind,
-  load,
-  onError,
-  onLoaded,
-}: {
-  kind: string
-  load: () => Promise<Plan>
-  onError: (message: string) => void
-  onLoaded: (plan: Plan) => void
-}): Promise<void> {
-  if (kind !== 'plan' && kind !== 'replan') return
-  try {
-    onLoaded(await load())
-  } catch (error) {
-    onError(error instanceof Error ? error.message : String(error))
-  }
 }

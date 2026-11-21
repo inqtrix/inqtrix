@@ -83,6 +83,22 @@ def test_deep_scores_preserve_the_submitted_judgement(monkeypatch):
                          "inqtrix.score.deep_review_contradictions_named": False}]
 
 
+def test_the_servers_reading_of_a_review_stands_beside_the_judgement(monkeypatch):
+    """The basis and the flags a verdict left unexplained are the server's,
+    decided by the assessment; a verdict that explains itself names none."""
+    from inqtrix.observability.trace_scores import record_review_reading
+
+    recorded = []
+    monkeypatch.setattr("inqtrix.observability.otel.enrich_current_span", recorded.append)
+    record_review_reading(SimpleNamespace(basis="provider_context", unexplained=[]))
+    record_review_reading(SimpleNamespace(basis="evidence", unexplained=["complete", "grounded"]))
+    assert recorded == [
+        {"inqtrix.score.deep_review_basis": "provider_context"},
+        {"inqtrix.score.deep_review_basis": "evidence",
+         "inqtrix.score.deep_review_unexplained": "complete,grounded"},
+    ]
+
+
 @pytest.mark.parametrize("mode", ["workspace_agent", "agent_kernel", "knowledge"])
 def test_nonresearch_modes_never_export_unmeasured_research_defaults(mode):
     attrs = run_score_attributes(
@@ -93,9 +109,7 @@ def test_nonresearch_modes_never_export_unmeasured_research_defaults(mode):
             "critic_report": {"verdict": "revise"},
         },
     )
-    assert attrs == (
-        {"inqtrix.score.critic_verdict": "revise"} if mode == "workspace_agent" else {}
-    )
+    assert attrs == {}
 
 
 def test_scores_use_native_types_and_stable_trace_attribution():
@@ -104,6 +118,8 @@ def test_scores_use_native_types_and_stable_trace_attribution():
             **{
                 "inqtrix.score.stop_reason": "plateau",
                 "inqtrix.score.deep_review_grounded": False,
+                "inqtrix.score.deep_review_basis": "provider_context",
+                "inqtrix.score.deep_review_unexplained": "complete,grounded",
             }
         )
     )
@@ -116,8 +132,10 @@ def test_scores_use_native_types_and_stable_trace_attribution():
         "final_confidence": ("NUMERIC", 7.0),
         "stop_reason": ("CATEGORICAL", "plateau"),
         "deep_review_grounded": ("BOOLEAN", 0.0),
+        "deep_review_basis": ("CATEGORICAL", "provider_context"),
+        "deep_review_unexplained": ("CATEGORICAL", "complete,grounded"),
     }
-    assert len({body["id"] for body in bodies}) == 3
+    assert len({body["id"] for body in bodies}) == 5
     assert all(
         body["traceId"] == format(spans[0].context.trace_id, "032x") for body in bodies
     )
@@ -132,7 +150,7 @@ def test_child_score_is_attached_to_its_execution_observation():
     assert score_bodies(other)[0]["id"] != body["id"]
 
 
-@pytest.mark.parametrize("mode", ["run", "deep"])
+@pytest.mark.parametrize("mode", ["run", "deep", "reading"])
 def test_score_recording_failure_does_not_escape(monkeypatch, caplog, mode):
     from inqtrix.observability import trace_scores
 
@@ -143,8 +161,10 @@ def test_score_recording_failure_does_not_escape(monkeypatch, caplog, mode):
     monkeypatch.setattr("inqtrix.observability.otel.enrich_current_span", broken)
     if mode == "run":
         trace_scores.record_run_scores("research", {"final_confidence": 7}, trace_root=True)
-    else:
+    elif mode == "deep":
         trace_scores.record_deep_review_scores(SimpleNamespace(findings=[], complete=True, grounded=True, contradictions_named=True))
+    else:
+        trace_scores.record_review_reading(SimpleNamespace(basis="evidence", unexplained=[]))
     assert "could not be recorded" in caplog.text
 
 

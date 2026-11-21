@@ -11,8 +11,8 @@ written to be understood in one pass, not looked up.
 
 It does **not** cover which model each stage calls
 ([LLM calls](nodes.md)), the knowledge/RAG engine that answers from your own
-documents ([Knowledge engine](../knowledge-engine.md)), the workspace agent
-that orchestrates whole missions ([Agent platform](../agent-platform.md)), or the
+documents ([Knowledge engine](../knowledge-engine.md)), the agent kernel
+that delegates research to it ([Agent platform](../agent-platform.md)), or the
 per-field reference for individual values ([Nodes](nodes.md),
 [Evidence pipeline](evidence.md), and the detail pages beside it
 ([Stopping](stopping.md), [Answer composition](answer.md))).
@@ -336,16 +336,18 @@ Both lose to the round limit — each is conditioned on the run being below
 
 One diagnostic touches planning, stopping and writing at once, which is why it
 is named here rather than buried. It looks at the consolidated claims and fires
-when any of three things is true: at least three verified claims and none
-cross-checked; at least three verified claims with a majority resting on a
-single source; or a single central claim — one carrying a number or a
-load-bearing term — verified by only one quality source.
+when any of three things is true: at least three supported claims (verified or
+attributed) and none cross-checked; at least three supported claims with a
+majority resting on a single source; or a single central claim, one that states
+a number, resting on only one quality source.
 
-Its three effects: `plan` adds a primary-source slot — aimed at the strongest
-cross-check candidate, or at the question when there is none, and only while
-the batch still has room — the plateau stop is suppressed while it is active
-and rounds remain, and the answer prompt is told to write with the
-corresponding reservation.
+Its effects: `plan` adds a primary-source slot, aimed at the strongest
+cross-check candidate or at the question when there is none, and only while
+the batch still has room; the plateau stop is suppressed while it is active
+and rounds remain; the evaluator and the answer prompt are told about it; and
+the answer node caps the confidence of a claim-bound answer at 6 without
+changing its evidence-contract status, while the basis line under the report
+gives the counts.
 
 ## From ledger to answer
 

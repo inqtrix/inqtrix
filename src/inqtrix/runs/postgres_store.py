@@ -31,7 +31,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from queue import Empty, Queue, SimpleQueue
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sqlalchemy import (
     Text,
@@ -74,7 +74,7 @@ from inqtrix.runs.durable_store import (
     _LocalJob,
 )
 from inqtrix.pagination import encode_cursor
-from inqtrix.runs.ports import RunStoreMetrics
+from inqtrix.runs.ports import CheckpointCleanup, RunStoreMetrics
 from inqtrix.runs.shared import (
     ADMIN_CANCEL_REASON,
     BINDING_ASKED_STATUS,
@@ -309,6 +309,11 @@ class ClaimedRun:
     execution_scopes: tuple[str, ...] = ()
 
 
+
+def _never_claimed(row: Mapping[str, Any]) -> bool:
+    """Whether a locked run row never ran: no claim, so no checkpoint thread."""
+    return int(row.get("attempt") or 0) == 0
+
 class PostgresRunStore(DurableJobStoreBase):
     """Durable run registry with the in-memory store's public surface.
 
@@ -374,7 +379,7 @@ class PostgresRunStore(DurableJobStoreBase):
         sharing_enabled: bool = True,
         recover_orphans: bool | None = None,
         audit_service_starts: bool = True,
-        checkpoint_cleanup: Callable[[str, str], None] | None = None,
+        checkpoint_cleanup: CheckpointCleanup | None = None,
         incognito_ttl_seconds: int = RUN_INCOGNITO_RETENTION_SECONDS,
     ) -> None:
         # Validate BEFORE super().__init__ adopts the engine — a config
@@ -1277,34 +1282,34 @@ class PostgresRunStore(DurableJobStoreBase):
         session_id: str,
         visible_to: "UserContext | None",
     ) -> list[dict[str, Any]]:
+        # Owner-only by the port contract: an agent session is a per-owner
+        # surface, so an accepted share never adds a foreign run to it.
         async with self._session(DEFAULT_TENANT) as session:
-            query = self._apply_run_visibility(
+            query = (
                 _summary_select()
                 .where(runs.c.session_id == session_id)
-                .order_by(runs.c.created_at.asc(), runs.c.run_id.asc()),
-                None,
-                visible_to,
+                .where(
+                    and_(
+                        runs.c.created_by_user_id == visible_to.principal.user_id,
+                        runs.c.created_by_tenant_id
+                        == visible_to.principal.tenant_id,
+                    )
+                    if visible_to is not None
+                    else runs.c.created_by_user_id.is_(None)
+                )
+                .order_by(runs.c.created_at.asc(), runs.c.run_id.asc())
             )
             rows = (await session.execute(query)).mappings().all()
-            summaries: list[dict[str, Any]] = []
-            for row in rows:
-                shared = (
-                    SharePermission(row["_share_permission"])
-                    if row.get("_share_permission") is not None
-                    and not _visible_row(row, visible_to)
-                    else None
+            return [
+                build_run_summary(
+                    _summary_view(row),
+                    queue_position=None,
+                    access=_access_annotation(
+                        None, owner_user_id=row["created_by_user_id"]
+                    ),
                 )
-                summaries.append(
-                    build_run_summary(
-                        _summary_view(row),
-                        queue_position=None,
-                        access=_access_annotation(
-                            shared,
-                            owner_user_id=row["created_by_user_id"],
-                        ),
-                    )
-                )
-            return summaries
+                for row in rows
+            ]
 
     async def alist_page(
         self,
@@ -1854,7 +1859,12 @@ class PostgresRunStore(DurableJobStoreBase):
                 raise RunActive(run_id)
             if self._checkpoint_cleanup is not None:
                 for child in subtree:
-                    await aio.run_blocking(self._checkpoint_cleanup, child["run_id"], child["mode"])
+                    await aio.run_blocking(
+                        self._checkpoint_cleanup,
+                        child["run_id"],
+                        child["mode"],
+                        never_claimed=_never_claimed(child),
+                    )
             recipients = await revoke_resource_shares(
                 session,
                 tenant_id=row["tenant_id"],
@@ -1941,7 +1951,7 @@ class PostgresRunStore(DurableJobStoreBase):
         control_write: Any,
     ) -> Any:
         """Apply one control-table write under live root authorization."""
-        result, cancellations = await self._authorized_control_write_db(
+        result = await self._authorized_control_write_db(
             run_id,
             workspace_id,
             visible_to,
@@ -1949,12 +1959,6 @@ class PostgresRunStore(DurableJobStoreBase):
         )
         await self._release_swept_locals()
         await self._dispatch_woken_parents()
-        for child_run_id, child_status, affected_ids in cancellations:
-            self._apply_cancelled_locals(
-                child_run_id,
-                child_status,
-                affected_ids,
-            )
         return result
 
     authorized_control_write = bridge_to_loop(aauthorized_control_write)
@@ -2005,7 +2009,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     # the retained closure, so do it here.
                     self._local.pop(cancelled_id, None)
 
-    def bind_checkpoint_cleanup(self, cleanup: Callable[[str, str], None]) -> None:
+    def bind_checkpoint_cleanup(self, cleanup: CheckpointCleanup) -> None:
         """The bound cleanup owns the external cache, never run authorization."""
         self._checkpoint_cleanup = cleanup
 
@@ -2417,8 +2421,10 @@ class PostgresRunStore(DurableJobStoreBase):
             How many runs ended.
         """
         ended = await self._end_outdated_waits_db(workflow_contracts)
-        for run_id, mode in ended:
-            await self._delete_checkpoint_of_ended_run(run_id, mode)
+        for run_id, mode, never_claimed in ended:
+            await self._delete_checkpoint_of_ended_run(
+                run_id, mode, never_claimed=never_claimed
+            )
         await self._release_swept_locals()
         return len(ended)
 
@@ -3501,16 +3507,14 @@ class PostgresRunStore(DurableJobStoreBase):
         workspace_id: str | None,
         visible_to: "UserContext | None",
         control_write: Any,
-    ) -> tuple[Any, list[tuple[str, str, tuple[str, ...]]]]:
-        """Run a control callback and optional child cancel in one transaction."""
-        cancellations: list[tuple[str, str, tuple[str, ...]]] = []
-        woken_parents: set[str] = set()
+    ) -> Any:
+        """Run a control callback in the transaction that locks the run root."""
         async with self._session(DEFAULT_TENANT) as session:
             await self._cleanup_db(session)
             actor_user_id = (
                 visible_to.principal.user_id if visible_to is not None else None
             )
-            row, root, access = await self._lock_execution_path_db(
+            row, _root, access = await self._lock_execution_path_db(
                 session,
                 run_id,
                 actor_user_id=actor_user_id,
@@ -3518,53 +3522,7 @@ class PostgresRunStore(DurableJobStoreBase):
             )
             if access is None or not _workspace_matches_row(row, workspace_id):
                 raise RunNotFound(run_id)
-
-            async def _cancel_child(child_run_id: str) -> str:
-                child, child_root, child_access = await self._lock_execution_path_db(
-                    session,
-                    child_run_id,
-                    actor_user_id=actor_user_id,
-                    use_execution_actor=False,
-                )
-                if (
-                    child_access is None
-                    or child["parent_run_id"] != run_id
-                    or child_root["run_id"] != root["run_id"]
-                ):
-                    raise RunNotFound(child_run_id)
-                if str(child["status"]) not in _TERMINAL_VALUES:
-                    woken = await self._cancel_row_db(
-                        session,
-                        child_run_id,
-                        str(child["tenant_id"]),
-                        str(child["status"]),
-                    )
-                    if woken is not None:
-                        woken_parents.add(woken)
-                subtree = await self._cancel_live_subtree_db(
-                    session, child_run_id, reason=None
-                )
-                woken_parents.update(subtree.woken_parents)
-                affected_ids = subtree.run_ids
-                await append_resource_effects(
-                    session,
-                    tenant_id=str(root["tenant_id"]),
-                    actor_user_id=actor_user_id,
-                    owner_user_id=access.owner_user_id,
-                    action="run.cancel_requested",
-                    resource_type="run",
-                    resource_id=child_run_id,
-                    scope="runs",
-                )
-                fresh = await self._row_db(session, child_run_id)
-                child_status = str(fresh.status)
-                cancellations.append((child_run_id, child_status, affected_ids))
-                return child_status
-
-            result = await control_write(session, _cancel_child)
-        for parent_run_id in sorted(woken_parents):
-            self._parents_to_wake.put(parent_run_id)
-        return result, cancellations
+            return await control_write(session)
 
     async def _cancel_db(
         self,
@@ -4981,6 +4939,7 @@ class PostgresRunStore(DurableJobStoreBase):
         claimed: ClaimedRun | None = None
         verdict: BindingVerdict | None = None
         ended_mode: str | None = None
+        ended_never_claimed = False
         claimable = (
             (RunStatus.QUEUED.value, RunStatus.RUNNING.value)
             if allow_takeover
@@ -5083,6 +5042,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 )
                 if ended:
                     ended_mode = str(_locked["mode"])
+                    ended_never_claimed = _never_claimed(_locked)
                 row = None
             else:
                 previous_status = str(_locked["status"])
@@ -5219,7 +5179,9 @@ class PostgresRunStore(DurableJobStoreBase):
                     execution_scopes=tuple(row["execution_scopes"] or ()),
                 )
         if ended_mode is not None:
-            await self._delete_checkpoint_of_ended_run(run_id, ended_mode)
+            await self._delete_checkpoint_of_ended_run(
+                run_id, ended_mode, never_claimed=ended_never_claimed
+            )
         if woken_parent:
             self._parents_to_wake.put(woken_parent)
         return claimed
@@ -5339,8 +5301,12 @@ class PostgresRunStore(DurableJobStoreBase):
 
     async def _end_outdated_waits_db(
         self, workflow_contracts: Mapping[str, int]
-    ) -> list[tuple[str, str]]:
-        """End the outdated parked runs; returns each ended run with its mode."""
+    ) -> list[tuple[str, str, bool]]:
+        """End the outdated parked runs.
+
+        Returns:
+            Each ended run with its mode and whether it was never claimed.
+        """
         outdated = [
             and_(runs.c.mode == mode, runs.c.workflow_contract < contract)
             for mode, contract in workflow_contracts.items()
@@ -5364,7 +5330,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 .scalars()
                 .all()
             )
-        ended: list[tuple[str, str]] = []
+        ended: list[tuple[str, str, bool]] = []
         for candidate_id in candidate_ids:
             # One lineage per transaction, locked root to leaf and judged again
             # under the lock: no end holds the locks of another, and claims of
@@ -5393,7 +5359,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     statuses=_WAITING_VALUES,
                 )
                 if landed:
-                    ended.append((candidate_id, binding.mode))
+                    ended.append((candidate_id, binding.mode, not stored))
                 self._register_post_commit_handoffs(
                     session,
                     swept_run_ids=[candidate_id] if landed else [],
@@ -5496,7 +5462,9 @@ class PostgresRunStore(DurableJobStoreBase):
                 )
         return outcome, trees
 
-    async def _delete_checkpoint_of_ended_run(self, run_id: str, mode: str) -> None:
+    async def _delete_checkpoint_of_ended_run(
+        self, run_id: str, mode: str, *, never_claimed: bool
+    ) -> None:
         """Delete the checkpoint of a run its binding ended, after the commit.
 
         A failed deletion leaves the checkpoint until the run is removed,
@@ -5507,7 +5475,9 @@ class PostgresRunStore(DurableJobStoreBase):
         from inqtrix.exceptions import RunCleanupFailed
 
         try:
-            await aio.run_blocking(self._checkpoint_cleanup, run_id, mode)
+            await aio.run_blocking(
+                self._checkpoint_cleanup, run_id, mode, never_claimed=never_claimed
+            )
         except RunCleanupFailed:
             log.warning(
                 "Run %s ended for its workflow binding; its checkpoint could not "
@@ -5878,7 +5848,12 @@ class PostgresRunStore(DurableJobStoreBase):
 
                 try:
                     for child in subtree:
-                        await aio.run_blocking(self._checkpoint_cleanup, child["run_id"], child["mode"])
+                        await aio.run_blocking(
+                            self._checkpoint_cleanup,
+                            child["run_id"],
+                            child["mode"],
+                            never_claimed=_never_claimed(child),
+                        )
                 except RunCleanupFailed:
                     # The cleanup callback reports its failure. Keep the
                     # terminal anchors so a later sweep can retry safely.

@@ -28,7 +28,7 @@ import {
 } from '@/features/agent/agentSessionSync'
 import { DERIVED_AGENT_SESSION_UPDATED_AT } from '@/features/agent/model'
 import type { AutoResumePlan } from '@/features/fileLibrary/indexingTypes'
-import { researchDeskReducer, visibleResearchJobs } from './state'
+import { researchDeskReducer, visibleResearchJobs, type ResearchDeskAction } from './state'
 import { projectResearchJobs, researchRunToJob } from '@/features/project/selectors'
 import { runFailureText } from '@/lib/runFailure'
 import { translations } from '@/i18n/translations'
@@ -82,6 +82,64 @@ describe('applyRunEvent startedAt', () => {
     expect(hydrated.startedAt).toBe('2026-01-01T00:00:01.000Z')
     const next = applyRunEvent(hydrated, makeRunEvent({ created_at: Date.parse('2026-01-01T00:00:09.000Z') / 1000 }))
     expect(next.startedAt).toBe('2026-01-01T00:00:01.000Z')
+  })
+})
+
+describe('applyRunEvent step severity', () => {
+  // The step under test, as the run's protocol shows it.
+  function step(data: Record<string, unknown>) {
+    const running = applyRunEvent(fromRunSummary(makeRunSummary(), 'test-stack'), makeRunEvent())
+    const next = applyRunEvent(running, makeRunEvent({ data, sequence: 2, type: 'inqtrix.progress.message' }))
+    return next.events[next.events.length - 1]
+  }
+  const warningWords = 'Antwort-Evidenz-Vertrag verletzt — Bericht wird konservativ markiert'
+  const neutralWords = 'Hinweis zur Belegbindung des Berichts'
+
+  it('keeps the severity the server sent, info included, whatever the words say', () => {
+    expect(step({ message: warningWords, severity: 'info' }).severity).toBe('info')
+    // A reworded step keeps the warning it carries.
+    expect(step({ message: neutralWords, severity: 'warning' }).severity).toBe('warning')
+  })
+
+  it('shows a step without a severity as info, whatever its words say', () => {
+    // Warning words of both languages: a severity read from the words turns
+    // this red.
+    const messages = [
+      warningWords,
+      'Warnung: Kontextfenster für Modell unbekannt',
+      'Recherche fehlgeschlagen: ALGO-FAIL, Fallback aktiv',
+      'Bericht unvollständig',
+      'Warning: context window unknown; search failed, fallback active',
+      'Evidence contract violated',
+    ]
+    expect(messages.map((message) => step({ message }).severity)).toEqual(messages.map(() => 'info'))
+    // An unknown value is no severity, as on the server.
+    expect(messages.map((message) => step({ message, severity: 'limit' }).severity))
+      .toEqual(messages.map(() => 'info'))
+  })
+
+  it('gives a lifecycle event without a severity the default of its type', () => {
+    // Lifecycle events carry no severity; their type is the only thing that
+    // keeps a failed or cancelled run from looking like an ordinary step.
+    function lifecycle(type: string) {
+      const running = applyRunEvent(fromRunSummary(makeRunSummary(), 'test-stack'), makeRunEvent())
+      const next = applyRunEvent(running, makeRunEvent({ data: {}, sequence: 2, type }))
+      return next.events[next.events.length - 1]
+    }
+    const types = [
+      'inqtrix.run.completed',
+      'inqtrix.run.failed',
+      'inqtrix.node.failed',
+      'inqtrix.run.cancel_requested',
+      'inqtrix.run.cancelled',
+    ]
+    expect(types.map((type) => [type, lifecycle(type)?.severity])).toEqual([
+      ['inqtrix.run.completed', 'success'],
+      ['inqtrix.run.failed', 'error'],
+      ['inqtrix.node.failed', 'error'],
+      ['inqtrix.run.cancel_requested', 'warning'],
+      ['inqtrix.run.cancelled', 'warning'],
+    ])
   })
 })
 
@@ -237,7 +295,6 @@ function makeRunSummary(overrides: Partial<ResearchRunSummary> = {}): ResearchRu
     mode: 'research',
     question: 'Research question',
     queue_position: null,
-    result_url: '/v1/runs/run-1/result',
     run_id: 'run-1',
     snapshot: {},
     stack: 'test-stack',
@@ -355,48 +412,6 @@ describe('authoritative run replacement', () => {
     expect(replaced.researchRuns['run-live'].events).toHaveLength(1)
     expect(replaced.agentRuns['run-agent-revoked']).toBeUndefined()
     expect(replaced.agentSessions['run-agent-revoked']).toBeUndefined()
-  })
-
-  it('retains loaded agent children for a visible root and prunes the full removed tree', () => {
-    const root = makeRunSummary({
-      kind: 'agent',
-      mode: 'workspace_agent',
-      run_id: 'run-agent-root',
-      session_id: 'session-agent',
-    })
-    const child = makeRunSummary({
-      kind: 'agent_child',
-      mode: 'workspace_agent',
-      parent_run_id: root.run_id,
-      root_run_id: root.run_id,
-      run_id: 'run-agent-child',
-      session_id: 'session-agent',
-    })
-    let state = researchDeskReducer(createEmptyProjectState(), {
-      summary: root,
-      type: 'upsertAgentRunSummary',
-    })
-    state = researchDeskReducer(state, {
-      summary: child,
-      type: 'upsertAgentRunSummary',
-    })
-
-    const retained = researchDeskReducer(state, {
-      summaries: [root],
-      type: 'replaceApiRunSummaries',
-    })
-    expect(retained.agentRuns[root.run_id]).toBeDefined()
-    expect(retained.agentRuns[child.run_id]).toMatchObject({
-      parentRunId: root.run_id,
-      rootRunId: root.run_id,
-    })
-
-    const pruned = researchDeskReducer(retained, {
-      summaries: [],
-      type: 'replaceApiRunSummaries',
-    })
-    expect(pruned.agentRuns[root.run_id]).toBeUndefined()
-    expect(pruned.agentRuns[child.run_id]).toBeUndefined()
   })
 
   it('keeps shared agent runs in a non-persistable view session and prunes it on revoke', () => {
@@ -3711,8 +3726,10 @@ describe('editor document revision = server base (CAS contract)', () => {
       editorDocumentOrder: ['doc-1'],
       editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc') },
     }
-    // A save based on base 1 advanced the server to 2; adopt it, revision-only.
+    // A save based on base 1 advanced the server to 2; adopt it together
+    // with the text the save sent.
     const adopted = researchDeskReducer(base, {
+      contentMarkdown: '# Doc',
       documentId: 'doc-1',
       revision: 2,
       type: 'adoptEditorDocumentRevision',
@@ -3724,60 +3741,575 @@ describe('editor document revision = server base (CAS contract)', () => {
     expect(adopted.dirty).toBe(base.dirty)
     // A late/duplicate adopt must never rewind a fresher base.
     const noop = researchDeskReducer(adopted, {
+      contentMarkdown: '# Doc',
       documentId: 'doc-1',
       revision: 1,
       type: 'adoptEditorDocumentRevision',
     })
     expect(noop).toBe(adopted)
   })
+})
 
-  it('rebase (no live edit) adopts the server base, keeps updatedAt', () => {
-    const base = {
+/** Paragraphs as the editor writes them: one line each, a blank line between. */
+function editorParagraphs(...lines: string[]): string {
+  return `${lines.join('\n\n')}\n`
+}
+
+describe('merging the server version of a Markdown document into its record', () => {
+  const SAVED = editorParagraphs('# Plan', 'Absatz eins.', 'Absatz zwei.', 'Absatz drei.')
+  const LOCAL_EDIT_AT = '2026-03-04T09:00:00.000Z'
+  const MERGE_AT = '2026-03-04T10:00:00.000Z'
+  const SERVER_UPDATED_AT = '2026-03-04T09:30:00.000Z'
+
+  function stateWith(...documents: EditorDocumentRecord[]): ProjectState {
+    return {
       ...createEmptyProjectState(),
-      editorDocumentOrder: ['doc-1'],
-      editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc') },
+      dirty: false,
+      editorDocumentOrder: documents.map((document) => document.id),
+      editorDocuments: Object.fromEntries(documents.map((document) => [document.id, document])),
     }
-    const rebased = researchDeskReducer(base, {
-      contentMarkdown: 'server body',
-      documentId: 'doc-1',
-      pushedContentMarkdown: base.editorDocuments['doc-1'].contentMarkdown,
-      revision: 7,
-      type: 'rebaseServerEditorDocument',
+  }
+
+  /** The record as this tab saved it at revision 3, with the base that save left. */
+  function savedDocument(overrides: Partial<EditorDocumentRecord> = {}): EditorDocumentRecord {
+    return makeEditorDocument('doc-1', 'Plan.md', {
+      contentMarkdown: SAVED,
+      folderId: 'edf_1',
+      revision: 3,
+      serverSynced: true,
+      syncBase: { contentMarkdown: SAVED, revision: 3 },
+      updatedAt: LOCAL_EDIT_AT,
+      ...overrides,
     })
-    expect(rebased.editorDocuments['doc-1'].revision).toBe(7)
-    expect(rebased.editorDocuments['doc-1'].contentMarkdown).toBe('server body')
-    expect(rebased.editorDocuments['doc-1'].updatedAt).toBe(
-      base.editorDocuments['doc-1'].updatedAt,
-    )
+  }
+
+  type MergeAction = Extract<ResearchDeskAction, { type: 'mergeServerEditorDocument' }>
+
+  function mergeServer(
+    contentMarkdown: string,
+    overrides: Partial<MergeAction> = {},
+  ): MergeAction {
+    return {
+      at: MERGE_AT,
+      conflictCopy: { id: 'doc-copy', title: 'Plan (Konfliktkopie).md' },
+      documentId: 'doc-1',
+      observed: { folderId: 'edf_1', title: 'Plan.md' },
+      server: { contentMarkdown, folderId: 'edf_1', revision: 4, title: 'Plan.md' },
+      type: 'mergeServerEditorDocument',
+      ...overrides,
+    }
+  }
+
+  /** A row of the document list: metadata only, no text. */
+  function listRow(overrides: Partial<EditorDocumentRecord> = {}): EditorDocumentRecord {
+    return makeEditorDocument('doc-1', 'Plan.md', {
+      access: { mode: 'owner', permission: 'edit' },
+      contentMarkdown: '',
+      contentMode: 'markdown',
+      folderId: 'edf_1',
+      metadataRevision: 2,
+      revision: 4,
+      serverSynced: true,
+      updatedAt: SERVER_UPDATED_AT,
+      ...overrides,
+    })
+  }
+
+  it('adopts the server version when there are no own changes, and marks nothing to save', () => {
+    const server = SAVED.replace('Absatz zwei.', 'Absatz zwei, fremd.')
+    const next = researchDeskReducer(stateWith(savedDocument()), mergeServer(server))
+
+    expect(next.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: server,
+      revision: 4,
+      syncBase: { contentMarkdown: server, revision: 4 },
+      updatedAt: LOCAL_EDIT_AT,
+    })
+    expect(next.dirty).toBe(false)
+    expect(next.editorDocumentOrder).toEqual(['doc-1'])
   })
 
-  it('rebase keeps a live keystroke and adopts the server base (no silent loss)', () => {
-    const base = {
-      ...createEmptyProjectState(),
-      editorDocumentOrder: ['doc-1'],
-      editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc') },
-    }
-    // The flush PUT "# Doc"; during the PUT->GET window the user typed.
-    const typed = researchDeskReducer(base, {
-      documentId: 'doc-1',
-      contentMarkdown: '# Doc + live edit',
-      type: 'updateEditorDocumentMarkdown',
-    })
-    const rebased = researchDeskReducer(typed, {
-      contentMarkdown: 'server body from agent patch',
-      documentId: 'doc-1',
-      pushedContentMarkdown: '# Doc', // what the failed PUT carried
-      revision: 7,
-      type: 'rebaseServerEditorDocument',
-    })
-    // The live keystroke is NOT overwritten by the server body…
-    expect(rebased.editorDocuments['doc-1'].contentMarkdown).toBe(
-      '# Doc + live edit',
+  it('merges own changes with a change in another paragraph and marks the result to save', () => {
+    const local = SAVED.replace('Absatz eins.', 'Absatz eins, lokal.')
+    const server = SAVED.replace('Absatz drei.', 'Absatz drei, fremd.')
+    const next = researchDeskReducer(
+      stateWith(savedDocument({ contentMarkdown: local })),
+      mergeServer(server),
     )
-    // …and revision rebases onto the server BASE (7); the next flush re-pushes
-    // the live edit as base+1 (8), staying dirty. No silent loss.
-    expect(rebased.editorDocuments['doc-1'].revision).toBe(7)
-    expect(rebased.dirty).toBe(true)
+
+    expect(next.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: editorParagraphs('# Plan', 'Absatz eins, lokal.', 'Absatz zwei.', 'Absatz drei, fremd.'),
+      revision: 4,
+      syncBase: { contentMarkdown: server, revision: 4 },
+      updatedAt: MERGE_AT,
+    })
+    expect(next.dirty).toBe(true)
+    expect(next.editorDocumentOrder).toEqual(['doc-1'])
+  })
+
+  it('keeps a conflicting own version in a copy right before the original, which takes the server version', () => {
+    const local = SAVED.replace('Absatz zwei.', 'Absatz zwei, lokal.')
+    const server = SAVED.replace('Absatz zwei.', 'Absatz zwei, fremd.')
+    const state = stateWith(
+      makeEditorDocument('doc-0', 'Anderes.md'),
+      savedDocument({ contentMarkdown: local, source: 'agent-artifact', sourceRunId: 'run-1' }),
+    )
+    const next = researchDeskReducer(state, mergeServer(server))
+
+    expect(next.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: server,
+      revision: 4,
+      syncBase: { contentMarkdown: server, revision: 4 },
+      updatedAt: LOCAL_EDIT_AT,
+    })
+    expect(next.editorDocumentOrder).toEqual(['doc-0', 'doc-copy', 'doc-1'])
+    expect(next.editorDocuments['doc-copy']).toEqual({
+      contentMarkdown: local,
+      createdAt: MERGE_AT,
+      folderId: 'edf_1',
+      id: 'doc-copy',
+      revision: 0,
+      source: 'agent-artifact',
+      sourceRunId: 'run-1',
+      title: 'Plan (Konfliktkopie).md',
+      updatedAt: MERGE_AT,
+    })
+    expect(next.editorDocuments['doc-copy']).not.toHaveProperty('recovery')
+    expect(next.dirty).toBe(true)
+    // The copy is a document of its own; nothing opens it.
+    expect(next.editorUi).toEqual(state.editorUi)
+  })
+
+  it('ignores the version the record stands on, reported again', () => {
+    const state = stateWith(savedDocument({ contentMarkdown: SAVED.replace('eins.', 'eins, lokal.') }))
+
+    expect(researchDeskReducer(state, mergeServer(SAVED, {
+      server: { contentMarkdown: SAVED, folderId: 'edf_1', revision: 3, title: 'Plan.md' },
+    }))).toBe(state)
+  })
+
+  it('keeps the local text in a copy against a server version at or behind its revision', () => {
+    // A restored database: the server stands on revision 2 or holds another
+    // text under revision 3. Its version is no newer version of the base, so
+    // nothing merges into it and nothing is dropped.
+    const local = SAVED.replace('eins.', 'eins, lokal.')
+    for (const revision of [3, 2]) {
+      const next = researchDeskReducer(stateWith(savedDocument({ contentMarkdown: local })), mergeServer('Anderer Text.\n', {
+        server: { contentMarkdown: 'Anderer Text.\n', folderId: 'edf_1', revision, title: 'Plan.md' },
+      }))
+      expect([
+        next.editorDocuments['doc-1']?.revision,
+        next.editorDocuments['doc-1']?.contentMarkdown,
+        next.editorDocuments['doc-copy']?.contentMarkdown,
+      ]).toEqual([revision, 'Anderer Text.\n', local])
+    }
+  })
+
+  it('leaves a document that is in collaboration mode by now to the collaboration', () => {
+    const converted = stateWith(savedDocument({
+      collaboration: { generation: 1, persistedSequence: 0, projectionSequence: 0, schemaVersion: 1 },
+      contentMarkdown: SAVED.replace('Absatz eins.', 'Absatz eins, lokal.'),
+      contentMode: 'collaboration',
+    }))
+
+    expect(researchDeskReducer(converted, mergeServer(SAVED.replace('Absatz zwei.', 'Absatz zwei, fremd.'))))
+      .toBe(converted)
+  })
+
+  it('applies a server version once, however many ways report it', () => {
+    const local = SAVED.replace('Absatz eins.', 'Absatz eins, lokal.')
+    const action = mergeServer(SAVED.replace('Absatz drei.', 'Absatz drei, fremd.'))
+    const once = researchDeskReducer(stateWith(savedDocument({ contentMarkdown: local })), action)
+
+    expect(researchDeskReducer(once, {
+      ...action,
+      at: '2026-03-04T11:00:00.000Z',
+      conflictCopy: { id: 'doc-copy-2', title: 'Plan (Konfliktkopie 2).md' },
+    })).toBe(once)
+  })
+
+  it('merges a later server version on top of a merged one', () => {
+    const local = SAVED.replace('Absatz eins.', 'Absatz eins, lokal.')
+    const fourth = SAVED.replace('Absatz drei.', 'Absatz drei, fremd.')
+    const fifth = fourth.replace('Absatz zwei.', 'Absatz zwei, fremd.')
+    const merged = researchDeskReducer(stateWith(savedDocument({ contentMarkdown: local })), mergeServer(fourth))
+    const next = researchDeskReducer(merged, mergeServer(fifth, {
+      server: { contentMarkdown: fifth, folderId: 'edf_1', revision: 5, title: 'Plan.md' },
+    }))
+
+    expect(next.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: editorParagraphs('# Plan', 'Absatz eins, lokal.', 'Absatz zwei, fremd.', 'Absatz drei, fremd.'),
+      revision: 5,
+      syncBase: { contentMarkdown: fifth, revision: 5 },
+    })
+    expect(next.editorDocumentOrder).toEqual(['doc-1'])
+  })
+
+  it('merges against an unknown base only when the texts are equal, and otherwise keeps a copy', () => {
+    const server = SAVED.replace('Absatz zwei.', 'Absatz zwei, fremd.')
+    const equal = researchDeskReducer(
+      stateWith(savedDocument({ contentMarkdown: server, syncBase: undefined })),
+      mergeServer(server),
+    )
+    expect(equal.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: server,
+      revision: 4,
+      syncBase: { contentMarkdown: server, revision: 4 },
+    })
+    expect(equal.editorDocumentOrder).toEqual(['doc-1'])
+
+    // A base of another revision says nothing about this text.
+    const stale = researchDeskReducer(
+      stateWith(savedDocument({ syncBase: { contentMarkdown: SAVED, revision: 2 } })),
+      mergeServer(server),
+    )
+    expect(stale.editorDocuments['doc-1'].contentMarkdown).toBe(server)
+    expect(stale.editorDocuments['doc-copy']).toMatchObject({ contentMarkdown: SAVED })
+  })
+
+  it('never reads an unknown base as an empty text', () => {
+    // An emptied document is the user's text. Read as the base, it would let
+    // the server version replace the emptying without a trace.
+    const server = SAVED.replace('Absatz zwei.', 'Absatz zwei, fremd.')
+    const next = researchDeskReducer(
+      stateWith(savedDocument({ contentMarkdown: '', syncBase: undefined })),
+      mergeServer(server),
+    )
+
+    expect(next.editorDocuments['doc-1'].contentMarkdown).toBe(server)
+    expect(next.editorDocuments['doc-copy']).toMatchObject({ contentMarkdown: '' })
+  })
+
+  it('takes a rename or move made elsewhere only while the local title and folder are unchanged', () => {
+    const server = { contentMarkdown: SAVED, folderId: 'edf_2', revision: 4, title: 'Plan neu.md' }
+    const adopted = researchDeskReducer(stateWith(savedDocument()), mergeServer(SAVED, { server }))
+    expect(adopted.editorDocuments['doc-1']).toMatchObject({
+      folderId: 'edf_2',
+      title: 'Plan neu.md',
+      updatedAt: LOCAL_EDIT_AT,
+    })
+
+    // An open local rename and move stay, and the record is marked to save
+    // them although its text needs nothing.
+    const renamed = researchDeskReducer(
+      stateWith(savedDocument({ folderId: 'edf_3', title: 'Mein Plan.md' })),
+      mergeServer(SAVED, { server }),
+    )
+    expect(renamed.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: SAVED,
+      folderId: 'edf_3',
+      revision: 4,
+      title: 'Mein Plan.md',
+      updatedAt: MERGE_AT,
+    })
+
+    // Without an earlier observation of the server the local values stay.
+    const unobserved = researchDeskReducer(
+      stateWith(savedDocument()),
+      mergeServer(SAVED, { observed: null, server }),
+    )
+    expect(unobserved.editorDocuments['doc-1']).toMatchObject({ folderId: 'edf_1', title: 'Plan.md' })
+  })
+
+  it('sets text, revision and base together when a document is opened', () => {
+    const listed = listRow({ revision: 3, updatedAt: LOCAL_EDIT_AT })
+    const opened = researchDeskReducer(stateWith(listed), {
+      contentMarkdown: SAVED,
+      documentId: 'doc-1',
+      revision: 5,
+      type: 'setServerEditorDocumentBody',
+    })
+
+    expect(opened.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: SAVED,
+      revision: 5,
+      syncBase: { contentMarkdown: SAVED, revision: 5 },
+      updatedAt: LOCAL_EDIT_AT,
+    })
+    expect(opened.dirty).toBe(false)
+  })
+
+  it('sets the base from an exact Markdown detail, as for a shared document opened from a link', () => {
+    const detail = listRow({
+      access: { mode: 'shared', permission: 'view' },
+      contentMarkdown: SAVED,
+      revision: 6,
+    })
+    const next = researchDeskReducer(stateWith(listRow({ access: detail.access })), {
+      document: detail,
+      type: 'setServerEditorDocumentDetail',
+    })
+
+    expect(next.editorDocuments['doc-1']).toEqual({
+      ...detail,
+      syncBase: { contentMarkdown: SAVED, revision: 6 },
+    })
+  })
+
+  it('takes the text a save sent as the base, not keystrokes typed while it ran', () => {
+    const sent = SAVED.replace('Absatz eins.', 'Absatz eins, gesendet.')
+    const typed = sent.replace('gesendet.', 'gesendet und weiter.')
+    const next = researchDeskReducer(stateWith(savedDocument({ contentMarkdown: typed })), {
+      contentMarkdown: sent,
+      documentId: 'doc-1',
+      revision: 4,
+      type: 'adoptEditorDocumentRevision',
+    })
+
+    expect(next.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: typed,
+      revision: 4,
+      syncBase: { contentMarkdown: sent, revision: 4 },
+      updatedAt: LOCAL_EDIT_AT,
+    })
+  })
+
+  it('keeps text, revision, base and edit time of a document with local text when the lists refresh', () => {
+    const local = savedDocument({ contentMarkdown: SAVED.replace('eins.', 'eins, lokal.') })
+    const neverOpened = makeEditorDocument('doc-2', 'Zweites.md', {
+      contentMarkdown: '',
+      revision: 1,
+      serverSynced: true,
+      updatedAt: LOCAL_EDIT_AT,
+    })
+    const next = researchDeskReducer(stateWith(local, neverOpened), {
+      documents: [listRow(), listRow({ id: 'doc-2', revision: 2, title: 'Zweites.md' })],
+      localTextDocumentIds: ['doc-1'],
+      observedMetadata: { 'doc-1': { folderId: 'edf_1', title: 'Plan.md' } },
+      type: 'reconcileServerEditorDocuments',
+    })
+
+    expect(next.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: local.contentMarkdown,
+      metadataRevision: 2,
+      revision: 3,
+      syncBase: local.syncBase,
+      updatedAt: LOCAL_EDIT_AT,
+    })
+    // A document whose text this tab never loaded takes the list row as before.
+    expect(next.editorDocuments['doc-2']).toMatchObject({
+      contentMarkdown: '',
+      revision: 2,
+      updatedAt: SERVER_UPDATED_AT,
+    })
+  })
+
+  it('takes a rename made elsewhere on refresh only while no local rename is open', () => {
+    const renamedElsewhere = listRow({ title: 'Plan neu.md' })
+    const refresh = {
+      documents: [renamedElsewhere],
+      localTextDocumentIds: ['doc-1'],
+      observedMetadata: { 'doc-1': { folderId: 'edf_1', title: 'Plan.md' } },
+      type: 'reconcileServerEditorDocuments' as const,
+    }
+
+    expect(researchDeskReducer(stateWith(savedDocument()), refresh).editorDocuments['doc-1'].title)
+      .toBe('Plan neu.md')
+    expect(researchDeskReducer(stateWith(savedDocument({ title: 'Mein Plan.md' })), refresh)
+      .editorDocuments['doc-1'].title).toBe('Mein Plan.md')
+  })
+
+  it('lets a document converted elsewhere take the server metadata on refresh as before', () => {
+    const converted = listRow({
+      collaboration: { generation: 1, persistedSequence: 0, projectionSequence: 0, schemaVersion: 1 },
+      contentMode: 'collaboration',
+    })
+    const next = researchDeskReducer(stateWith(savedDocument()), {
+      documents: [converted],
+      localTextDocumentIds: ['doc-1'],
+      type: 'reconcileServerEditorDocuments',
+    })
+
+    expect(next.editorDocuments['doc-1']).toMatchObject({
+      contentMode: 'collaboration',
+      revision: 4,
+      updatedAt: SERVER_UPDATED_AT,
+    })
+  })
+
+  it('keeps own text in a copy before a conversion elsewhere takes the document', () => {
+    const local = SAVED.replace('Absatz eins.', 'Absatz eins, lokal.')
+    const capture = {
+      at: MERGE_AT,
+      conflictCopy: { id: 'doc-copy', title: 'Plan (Konfliktkopie).md' },
+      documentId: 'doc-1',
+      projectionMarkdown: SAVED,
+      type: 'copyEditorDocumentBeforeConversion' as const,
+    }
+
+    const withChanges = researchDeskReducer(stateWith(savedDocument({ contentMarkdown: local })), capture)
+    expect(withChanges.editorDocumentOrder).toEqual(['doc-copy', 'doc-1'])
+    expect(withChanges.editorDocuments['doc-copy']).toMatchObject({
+      contentMarkdown: local,
+      folderId: 'edf_1',
+      revision: 0,
+      title: 'Plan (Konfliktkopie).md',
+      updatedAt: MERGE_AT,
+    })
+
+    const unchanged = stateWith(savedDocument())
+    expect(researchDeskReducer(unchanged, capture)).toBe(unchanged)
+
+    // Without a base, the converted text decides what counts as own.
+    expect(researchDeskReducer(
+      stateWith(savedDocument({ contentMarkdown: local, syncBase: undefined })),
+      capture,
+    ).editorDocuments['doc-copy']).toBeDefined()
+    const asConverted = stateWith(savedDocument({ syncBase: undefined }))
+    expect(researchDeskReducer(asConverted, capture)).toBe(asConverted)
+  })
+})
+
+describe('the editor text on a record that changed under the editor', () => {
+  // The editor sends its whole text together with the record text it was
+  // built on. A merge can change the record before the editor shows it.
+  const SAVED = editorParagraphs('# Plan', 'Absatz eins.', 'Absatz zwei.', 'Absatz drei.')
+  const LOCAL_EDIT_AT = '2026-03-04T09:00:00.000Z'
+  const COPY_AT = '2026-03-04T10:00:00.000Z'
+
+  function stateWith(document: EditorDocumentRecord): ProjectState {
+    return {
+      ...createEmptyProjectState(),
+      dirty: false,
+      editorDocumentOrder: [document.id],
+      editorDocuments: { [document.id]: document },
+    }
+  }
+
+  function savedDocument(overrides: Partial<EditorDocumentRecord> = {}): EditorDocumentRecord {
+    return makeEditorDocument('doc-1', 'Plan.md', {
+      contentMarkdown: SAVED,
+      folderId: 'edf_1',
+      revision: 3,
+      serverSynced: true,
+      syncBase: { contentMarkdown: SAVED, revision: 3 },
+      updatedAt: LOCAL_EDIT_AT,
+      ...overrides,
+    })
+  }
+
+  function typed(contentMarkdown: string, baseContentMarkdown: string): ResearchDeskAction {
+    return {
+      baseContentMarkdown,
+      contentMarkdown,
+      documentId: 'doc-1',
+      type: 'updateEditorDocumentMarkdown',
+    } as ResearchDeskAction
+  }
+
+  const copyPending = {
+    at: COPY_AT,
+    conflictCopy: { id: 'doc-copy', title: 'Plan (Konfliktkopie).md' },
+    documentId: 'doc-1',
+    type: 'copyPendingEditorConflictVersion',
+  } as unknown as ResearchDeskAction
+
+  it('replaces the text while the record still holds the text the editor built on', () => {
+    const own = SAVED.replace('Absatz eins.', 'Absatz eins, lokal.')
+    const next = researchDeskReducer(stateWith(savedDocument()), typed(own, SAVED))
+
+    expect(next.editorDocuments['doc-1'].contentMarkdown).toBe(own)
+    expect(next.editorDocuments['doc-1'].updatedAt).not.toBe(LOCAL_EDIT_AT)
+    expect(next.editorDocuments['doc-1'].pendingConflictMarkdown).toBeUndefined()
+    expect(next.dirty).toBe(true)
+  })
+
+  it('merges the editor text with a version that reached the record meanwhile, in another paragraph', () => {
+    const merged = SAVED.replace('Absatz drei.', 'Absatz drei, fremd.')
+    const editor = SAVED.replace('Absatz eins.', 'Absatz eins, lokal.')
+    const next = researchDeskReducer(stateWith(savedDocument({ contentMarkdown: merged })), typed(editor, SAVED))
+
+    expect(next.editorDocuments['doc-1'].contentMarkdown)
+      .toBe(editorParagraphs('# Plan', 'Absatz eins, lokal.', 'Absatz zwei.', 'Absatz drei, fremd.'))
+    expect(next.editorDocuments['doc-1'].updatedAt).not.toBe(LOCAL_EDIT_AT)
+    expect(next.editorDocuments['doc-1'].pendingConflictMarkdown).toBeUndefined()
+    expect(next.dirty).toBe(true)
+  })
+
+  it('keeps the record text and holds the editor text as pending when both changed the same paragraph', () => {
+    const merged = SAVED.replace('Absatz zwei.', 'Absatz zwei, fremd.')
+    const editor = SAVED.replace('Absatz zwei.', 'Absatz zwei, lokal.')
+    const next = researchDeskReducer(stateWith(savedDocument({ contentMarkdown: merged })), typed(editor, SAVED))
+
+    expect(next.editorDocuments['doc-1']).toMatchObject({
+      contentMarkdown: merged,
+      pendingConflictMarkdown: editor,
+      updatedAt: LOCAL_EDIT_AT,
+    })
+    expect(next.editorDocumentOrder).toEqual(['doc-1'])
+  })
+
+  it('turns a pending editor text into a conflict copy right before the original, once', () => {
+    const merged = SAVED.replace('Absatz zwei.', 'Absatz zwei, fremd.')
+    const editor = SAVED.replace('Absatz zwei.', 'Absatz zwei, lokal.')
+    const next = researchDeskReducer(
+      stateWith(savedDocument({ contentMarkdown: merged, pendingConflictMarkdown: editor })),
+      copyPending,
+    )
+
+    expect(next.editorDocumentOrder).toEqual(['doc-copy', 'doc-1'])
+    expect(next.editorDocuments['doc-copy']).toMatchObject({
+      contentMarkdown: editor,
+      createdAt: COPY_AT,
+      folderId: 'edf_1',
+      revision: 0,
+      title: 'Plan (Konfliktkopie).md',
+      updatedAt: COPY_AT,
+    })
+    expect(next.editorDocuments['doc-copy'].recovery).toBeUndefined()
+    expect(next.editorDocuments['doc-1'].contentMarkdown).toBe(merged)
+    expect(next.editorDocuments['doc-1'].pendingConflictMarkdown).toBeUndefined()
+    expect(next.dirty).toBe(true)
+    // A second request finds nothing pending.
+    expect(researchDeskReducer(next, copyPending)).toBe(next)
+  })
+
+  it('keeps a pending editor text when the lists refresh and when a server detail arrives', () => {
+    const editor = SAVED.replace('Absatz zwei.', 'Absatz zwei, lokal.')
+    const pending = savedDocument({ pendingConflictMarkdown: editor })
+    const row = makeEditorDocument('doc-1', 'Plan.md', {
+      access: { mode: 'owner', permission: 'edit' },
+      contentMarkdown: '',
+      contentMode: 'markdown',
+      folderId: 'edf_1',
+      metadataRevision: 2,
+      revision: 3,
+      serverSynced: true,
+      updatedAt: '2026-03-04T09:30:00.000Z',
+    })
+
+    for (const localTextDocumentIds of [['doc-1'], []]) {
+      const refreshed = researchDeskReducer(stateWith(pending), {
+        documents: [row],
+        localTextDocumentIds,
+        type: 'reconcileServerEditorDocuments',
+      })
+      expect(refreshed.editorDocuments['doc-1'].pendingConflictMarkdown).toBe(editor)
+    }
+    const detailed = researchDeskReducer(stateWith(pending), {
+      document: { ...row, contentMarkdown: SAVED },
+      type: 'setServerEditorDocumentDetail',
+    })
+    expect(detailed.editorDocuments['doc-1'].pendingConflictMarkdown).toBe(editor)
+  })
+})
+
+describe('the agent canvas of a session without a run', () => {
+  it('opens the panel on its empty state, with no tab', () => {
+    const base = createEmptyProjectState()
+    const opened = researchDeskReducer(base, { type: 'openAgentCanvas' })
+    expect(opened.agentCanvas.open).toBe(true)
+    expect(opened.agentCanvas.tabs).toEqual([])
+    expect(opened.agentCanvas.activeTabId).toBeNull()
+  })
+
+  it('leaves an open panel and its tabs as they are', () => {
+    const withTab = researchDeskReducer(createEmptyProjectState(), {
+      descriptor: { runId: 'r1', view: 'run' },
+      source: 'user',
+      type: 'openAgentCanvasView',
+    })
+    expect(researchDeskReducer(withTab, { type: 'openAgentCanvas' })).toBe(withTab)
   })
 })
 
@@ -3798,9 +4330,9 @@ describe('agent canvas is reconciled on session switch', () => {
       },
       selectedAgentSessionId: 's1',
     }
-    // Open a pinned plan tab in session s1.
+    // Open a pinned run tab in session s1.
     const withTab = researchDeskReducer(withSessions, {
-      descriptor: { runId: 'r1', view: 'plan' },
+      descriptor: { runId: 'r1', view: 'run' },
       source: 'user',
       type: 'openAgentCanvasView',
     })
@@ -3833,7 +4365,7 @@ describe('agent canvas is reconciled on session switch', () => {
   it('clears canvas when creating (auto-selecting) a new session', () => {
     const base = { ...createEmptyProjectState(), selectedAgentSessionId: 's1' }
     const withTab = researchDeskReducer(base, {
-      descriptor: { runId: 'r1', view: 'plan' },
+      descriptor: { runId: 'r1', view: 'run' },
       source: 'user',
       type: 'openAgentCanvasView',
     })
@@ -3857,7 +4389,7 @@ describe('agent canvas is reconciled on session switch', () => {
   it('clears canvas when a select=true run summary switches sessions', () => {
     const base = { ...createEmptyProjectState(), selectedAgentSessionId: 's1' }
     const withTab = researchDeskReducer(base, {
-      descriptor: { runId: 'r1', view: 'plan' },
+      descriptor: { runId: 'r1', view: 'run' },
       source: 'user',
       type: 'openAgentCanvasView',
     })
@@ -3879,7 +4411,6 @@ describe('agent canvas is reconciled on session switch', () => {
       snapshot: {},
       error: null,
       events_url: '/v1/runs/r-new/events',
-      result_url: '/v1/runs/r-new/result',
     }
     const upserted = researchDeskReducer(withTab, {
       select: true,
@@ -3888,63 +4419,6 @@ describe('agent canvas is reconciled on session switch', () => {
     })
     expect(upserted.selectedAgentSessionId).toBe('s-other')
     expect(upserted.agentCanvas.tabs).toEqual([])
-  })
-})
-
-describe('agent plan stale re-flag (plan tab on-open fetch)', () => {
-  const summary: ResearchRunSummary = {
-    access: { mode: 'owner' },
-    run_id: 'r-plan',
-    status: 'waiting_for_approval',
-    queue_position: null,
-    question: 'Planlauf',
-    stack: 'default',
-    mode: 'workspace_agent',
-    kind: 'agent',
-    session_id: 's-plan',
-    agent_overrides: {},
-    created_at: 1_700_000_000,
-    started_at: 1_700_000_000,
-    finished_at: null,
-    elapsed_seconds: null,
-    snapshot: {},
-    error: null,
-    events_url: '/v1/runs/r-plan/events',
-    result_url: '/v1/runs/r-plan/result',
-  }
-
-  it('re-flags a cleared plan as stale without dirtying the project', () => {
-    const base = researchDeskReducer(createEmptyProjectState(), {
-      summary,
-      type: 'upsertAgentRunSummary',
-    })
-    // The 404 path clears the flag with no content (pre-planning).
-    const cleared = researchDeskReducer(base, {
-      plan: null,
-      runId: 'r-plan',
-      type: 'setAgentRunPlan',
-    })
-    expect(cleared.agentRuns['r-plan'].planStale).toBe(false)
-    expect(cleared.agentRuns['r-plan'].plan).toBeUndefined()
-    const reflagged = researchDeskReducer(cleared, {
-      runId: 'r-plan',
-      type: 'markAgentRunPlanStale',
-    })
-    expect(reflagged.agentRuns['r-plan'].planStale).toBe(true)
-    expect(reflagged.dirty).toBe(false)
-  })
-
-  it('is an identity no-op while the flag is already set', () => {
-    const base = researchDeskReducer(createEmptyProjectState(), {
-      summary,
-      type: 'upsertAgentRunSummary',
-    })
-    expect(base.agentRuns['r-plan'].planStale).toBe(true)
-    const again = researchDeskReducer(base, {
-      runId: 'r-plan',
-      type: 'markAgentRunPlanStale',
-    })
-    expect(again).toBe(base)
   })
 })
 
@@ -3969,7 +4443,6 @@ describe('gate-tray approvals reconcile with exclusive membership', () => {
     snapshot: {},
     error: null,
     events_url: '/v1/runs/r-gate/events',
-    result_url: '/v1/runs/r-gate/result',
     ...overrides,
   })
   const approvalWire = (status: 'pending' | 'approved') => ({
@@ -4679,50 +5152,51 @@ describe('durable session deletion projection', () => {
     expect(projected.selectedKnowledgeSessionId).not.toBe('ks-delete')
   })
 
-  it('rejects late Agent run hydration after terminal aggregate deletion', () => {
+  it.each([
+    ['in a session', 's-gate', 's-gate'],
+    ['without a session (keyed by its run)', undefined, 'r-gate'],
+  ])('rejects late Agent run hydration after terminal aggregate deletion, %s', (
+    _case,
+    sessionId,
+    deletedSessionId,
+  ) => {
     const root = makeRunSummary({
       kind: 'agent',
-      mode: 'workspace_agent',
+      mode: 'agent_kernel',
       run_id: 'r-gate',
-      session_id: 's-gate',
-    })
-    const child = makeRunSummary({
-      kind: 'agent_child',
-      mode: 'workspace_agent',
-      parent_run_id: root.run_id,
-      root_run_id: root.run_id,
-      run_id: 'r-gate-child',
-      session_id: undefined,
+      session_id: sessionId,
     })
     let state = researchDeskReducer(createEmptyProjectState(), {
       summary: root,
       type: 'upsertAgentRunSummary',
     })
-    state = researchDeskReducer(state, {
-      summary: child,
-      type: 'upsertAgentRunSummary',
-    })
-    expect(state.agentSessions['r-gate-child']).toBeDefined()
+    expect(state.agentSessions[deletedSessionId]).toBeDefined()
 
     state = researchDeskReducer(state, {
       operationId: 'del_agent_terminal',
-      sessionId: 's-gate',
+      sessionId: deletedSessionId,
       type: 'deleteAgentSession',
     })
     expect(state.agentRuns['r-gate']).toBeUndefined()
-    expect(state.agentRuns['r-gate-child']).toBeUndefined()
-    expect(state.agentSessions['r-gate-child']).toBeUndefined()
 
-    const afterRootReplay = researchDeskReducer(state, {
-      summary: root,
-      type: 'upsertAgentRunSummary',
+    for (const type of ['upsertAgentRunSummary', 'upsertApiRunSummary'] as const) {
+      expect(researchDeskReducer(state, { summary: root, type })).toBe(state)
+    }
+  })
+
+  it('keeps a child run off the desk on both summary paths', () => {
+    const child = makeRunSummary({
+      kind: 'agent_child',
+      mode: 'agent_kernel',
+      parent_run_id: 'r-parent',
+      root_run_id: 'r-parent',
+      run_id: 'r-child',
+      session_id: 's-parent',
     })
-    const afterChildReplay = researchDeskReducer(afterRootReplay, {
-      summary: child,
-      type: 'upsertAgentRunSummary',
-    })
-    expect(afterChildReplay).toBe(afterRootReplay)
-    expect(afterChildReplay.agentSessions['s-gate']).toBeUndefined()
+    const state = createEmptyProjectState()
+    for (const type of ['upsertAgentRunSummary', 'upsertApiRunSummary'] as const) {
+      expect(researchDeskReducer(state, { summary: child, type })).toBe(state)
+    }
   })
 
   it('rejects stale Knowledge session and item hydration after completion', () => {
@@ -5318,7 +5792,6 @@ describe('agent session artifact index', () => {
     snapshot: {},
     error: null,
     events_url: '/v1/runs/r-idx/events',
-    result_url: '/v1/runs/r-idx/result',
   }
   const metaWire = {
     artifact_id: 'a-memo',
@@ -5512,7 +5985,6 @@ describe('derived session titles never gain authority', () => {
     snapshot: {},
     error: null,
     events_url: `/v1/runs/${runId}/events`,
-    result_url: `/v1/runs/${runId}/result`,
   })
 
   it('hydration order cannot retitle: server row beats the fabrication', () => {

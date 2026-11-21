@@ -14,6 +14,16 @@ export const SCENARIO_RESULT_STATUSES = Object.freeze([
   'skipped',
 ])
 
+// A reason is one line of a report. A longer one is cut, and the cut says how
+// much it left out, so a reader never takes a part for the whole.
+export const SCENARIO_REASON_LIMIT = 240
+
+function boundedReason(text) {
+  if (text.length <= SCENARIO_REASON_LIMIT) return text
+  const left = text.length - SCENARIO_REASON_LIMIT
+  return `${text.slice(0, SCENARIO_REASON_LIMIT)} [... ${left} more characters]`
+}
+
 export function scenarioResultProblem(entry) {
   if (!entry || typeof entry !== 'object') return 'an entry is not an object'
   if (typeof entry.id !== 'string' || entry.id.length === 0) return 'an entry has no id'
@@ -63,8 +73,10 @@ export async function writeScenarioSidecar(scenarios, environment = process.env)
 
 // The verdicts of one engine run, kept in the order of its scenarios. Every
 // scenario starts not measured; a failed step fails it with the first
-// reason given, and a later pass never replaces a failure. The entries are
-// what writeScenarioSidecar takes.
+// reason given, and a later pass never replaces a failure. A pass may carry
+// a note (a warning band it stayed inside, with target and measured value),
+// which the report shows as the scenario's reason. The entries are what
+// writeScenarioSidecar takes.
 export function createScenarioBook(ids) {
   const statuses = new Map(ids.map((id) => [id, 'not_run']))
   const reasons = new Map()
@@ -74,16 +86,20 @@ export function createScenarioBook(ids) {
   const note = (id, reason) => {
     if (reason !== undefined && reason !== null && !reasons.has(id)) {
       const text = String(reason).trim()
-      if (text) reasons.set(id, text.slice(0, 240))
+      if (text) reasons.set(id, boundedReason(text))
     }
   }
   return {
-    pass(id) {
+    pass(id, noteText) {
       known(id)
-      if (statuses.get(id) !== 'failed') statuses.set(id, 'passed')
+      if (statuses.get(id) === 'failed') return
+      statuses.set(id, 'passed')
+      note(id, noteText)
     },
     fail(id, reason) {
       known(id)
+      // The first failure's reason stands; the note of an earlier pass does not.
+      if (statuses.get(id) !== 'failed') reasons.delete(id)
       statuses.set(id, 'failed')
       note(id, reason)
     },
@@ -92,7 +108,7 @@ export function createScenarioBook(ids) {
       if (statuses.get(id) === 'failed') return
       if (!String(reason ?? '').trim()) throw new Error(`Skipping ${id} needs a reason.`)
       statuses.set(id, 'skipped')
-      reasons.set(id, String(reason).trim().slice(0, 240))
+      reasons.set(id, boundedReason(String(reason).trim()))
     },
     status(id) {
       known(id)

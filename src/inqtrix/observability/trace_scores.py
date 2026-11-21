@@ -28,11 +28,12 @@ RESEARCH_SCORE_FIELDS = {
 }
 SCORE_TYPES = {
     **{name: kind for name, (_, kind) in RESEARCH_SCORE_FIELDS.items()},
-    "critic_verdict": "CATEGORICAL",
     "deep_review_findings": "NUMERIC",
     "deep_review_complete": "BOOLEAN",
     "deep_review_grounded": "BOOLEAN",
     "deep_review_contradictions_named": "BOOLEAN",
+    "deep_review_basis": "CATEGORICAL",
+    "deep_review_unexplained": "CATEGORICAL",
 }
 _COMMENT = "Algorithm-produced signal; not independent semantic verification."
 
@@ -58,10 +59,6 @@ def run_score_attributes(mode: str, state: Mapping[str, Any]) -> dict[str, Any]:
             for name, (field, _) in RESEARCH_SCORE_FIELDS.items()
             if field in state
         }
-    elif mode == "workspace_agent":
-        critic = state.get("critic_report")
-        if isinstance(critic, dict) and "verdict" in critic:
-            values["critic_verdict"] = critic["verdict"]
     return {
         semconv.score_key(name): value
         for name, value in values.items()
@@ -113,6 +110,39 @@ def record_deep_review_scores(verdict: Any) -> None:
                 semconv.score_key(
                     "deep_review_contradictions_named"
                 ): verdict.contradictions_named,
+            }
+        )
+    except Exception:  # noqa: BLE001 — preserve the reviewed answer
+        if not _record_warning:
+            _record_warning = True
+            log.warning(
+                "Deep-review scores could not be recorded; score telemetry is incomplete."
+            )
+
+
+def record_review_reading(assessment: Any) -> None:
+    """Keep the server's reading of a review beside the model's judgement.
+
+    ``deep_review_basis`` is what the review could check against, decided by
+    the server: ``evidence``, ``knowledge`` or ``provider_context``.
+    ``deep_review_unexplained`` names the negative flags of a verdict that
+    nothing explains, joined by a comma in the order ``complete``,
+    ``grounded``, ``contradictions_named``; a verdict whose negative flags
+    are all explained carries none. Both exist only once the verdict is
+    assessed, so they are recorded there and not with the judgement.
+    """
+    global _record_warning
+    try:
+        from inqtrix.observability.otel import enrich_current_span
+
+        unexplained = ",".join(str(flag) for flag in assessment.unexplained)
+        enrich_current_span(
+            {
+                semconv.score_key("deep_review_basis"): assessment.basis,
+                **(
+                    {semconv.score_key("deep_review_unexplained"): unexplained}
+                    if unexplained else {}
+                ),
             }
         )
     except Exception:  # noqa: BLE001 — preserve the reviewed answer

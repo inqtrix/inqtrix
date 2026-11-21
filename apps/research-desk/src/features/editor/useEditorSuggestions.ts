@@ -110,7 +110,14 @@ import {
   type CollaborationAuthorityRequirement,
 } from './collaborationAuthority'
 import type { CollaborationDocumentHandle } from './useCollaborationDocument'
+import type {
+  EditorDocumentMergeOutcome,
+  EditorDocumentPushOutcome,
+} from './useEditorHistoryApi'
+import { collaborationActivationConflictError } from './inspector/CollaborationActivationDialog'
+import { editorCopy } from './editorCopy'
 import {
+  documentRecordFromServer,
   privateSuggestionDraftRecordFromServer,
   serverCommentPayload,
 } from './editorSync'
@@ -134,11 +141,24 @@ export type UseEditorSuggestionsArgs = {
    * Absent offline / when assets are not server-synced — bodies are local
    * then and resolveRunContext is a no-op pass-through. */
   ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
+  /** The workspace's immediate save: pushes one document's current body to
+   * the server now, serialized against the autosave. Accepting an agent
+   * patch saves first and applies the patch on the revision it returns.
+   * Absent without project sync. */
+  flushDocument?: (documentId: string) => Promise<EditorDocumentPushOutcome>
   /** Team threads handed to the assistant. Every AI run attaches them after
    * the composer's own references, and a run whose handed-over thread is
    * gone fails visibly instead of going out without it. */
   handedOverDiscussions: readonly HandedOverDiscussion[]
   locale: 'de' | 'en'
+  /** The workspace's merge of a version the server holds into a document's
+   * record, with the record's own base, as for any other writer; it saves a
+   * conflict copy at once while project sync runs. Accepting an agent patch
+   * hands the server's text after `:apply` to it. */
+  mergeServerDocument: (
+    documentId: string,
+    server: EditorDocumentRecord,
+  ) => Promise<EditorDocumentMergeOutcome>
   onCollaborationPublication?: (
     documentId: string,
     publication: CollaborationSuggestionPublication,
@@ -384,8 +404,10 @@ export function useEditorSuggestions({
   comments,
   dispatch,
   ensureAssetBodiesLoaded,
+  flushDocument,
   handedOverDiscussions,
   locale,
+  mergeServerDocument,
   onCollaborationPublication,
   onGlobalSuccess,
   selectedModelTier,
@@ -999,6 +1021,41 @@ export function useEditorSuggestions({
     acceptLegacySuggestion(suggestion)
   }
 
+  /** The revision an agent patch is applied on at the server.
+   *
+   * The server applies the patch to the body it holds, so text typed but
+   * not yet saved must reach the server first. With the immediate save, the
+   * document is saved now and the patch applied on the revision that save
+   * returns. A save that lost against another writer has merged that
+   * writer's version and saved once more inside the immediate save; only
+   * when that save lost as well (`merged`, `conflict`) does the accept end
+   * here, as when the document was converted to collaboration elsewhere
+   * (`converted`: the document holds no agent patches any more, so its
+   * cards are gone and the document says why), nothing was pushed, or the
+   * save failed. Without the
+   * immediate save (no project sync), the patch is applied on the last saved
+   * revision and, as for sharing, only while the project has nothing
+   * unsaved. */
+  async function serverPatchBase(
+    document: EditorDocumentRecord,
+  ): Promise<{ revision: number }> {
+    if (!flushDocument) {
+      if (state.dirty) throw new Error(editorCopy[locale].suggestionSaveBeforeAccept)
+      return { revision: document.revision }
+    }
+    const saved = await flushDocument(document.id)
+    if (saved.kind === 'merged' || saved.kind === 'conflict') {
+      throw new Error(collaborationActivationConflictError(locale))
+    }
+    if (saved.kind === 'converted') {
+      throw new DocumentConvertedError(editorCopy[locale].suggestionDocumentConverted)
+    }
+    if (saved.kind !== 'saved' || saved.contentMarkdown === null) {
+      throw new Error(editorCopy[locale].suggestionDocumentNotSaved)
+    }
+    return { revision: saved.revision }
+  }
+
   async function decideServerPatch(
     suggestion: EditorSuggestionRecord,
     decision: 'accept' | 'reject',
@@ -1006,10 +1063,18 @@ export function useEditorSuggestions({
     const patchId = suggestion.serverPatch?.patchId
     const document = activeDocument
     if (!patchId || !document) return
-    const siblings = documentSuggestions.filter(
+    // The patch's parts still undecided: the open ones and the ones whose
+    // passage changed, which can no longer be accepted on their own.
+    const undecided = documentSuggestions.filter(
       (item) =>
-        item.serverPatch?.patchId === patchId && item.status === 'pending',
+        item.serverPatch?.patchId === patchId
+        && (item.status === 'pending' || item.status === 'stale'),
     )
+    // Accepting is asked through the open parts. Rejecting also ends the
+    // changed ones: they belong to the patch the server rejects.
+    const siblings = decision === 'accept'
+      ? undecided.filter((item) => item.status === 'pending')
+      : undecided
     const siblingIds = siblings.map((item) => item.id)
     if (siblingIds.length === 0) return
     setSuggestionRuns((map) => {
@@ -1019,8 +1084,8 @@ export function useEditorSuggestions({
     })
     try {
       if (decision === 'accept') {
-        const contentBefore = document.contentMarkdown
-        await applyEditorPatch(patchId, document.revision, {
+        const base = await serverPatchBase(document)
+        const applied = await applyEditorPatch(patchId, base.revision, {
           apiKey,
           workspaceId: state.workspaceId,
         })
@@ -1028,18 +1093,22 @@ export function useEditorSuggestions({
           apiKey,
           workspaceId: state.workspaceId,
         })
-        // Adopt the server-applied body via the SAME rebase the autosave
-        // 409 path uses: keystrokes typed during the window win locally
-        // and re-push as base+1 — nothing is silently discarded.
-        dispatch({
-          contentMarkdown: server.content_markdown ?? '',
-          documentId: document.id,
-          pushedContentMarkdown: contentBefore,
-          revision: server.revision,
-          type: 'rebaseServerEditorDocument',
-        })
-        for (const id of siblingIds) {
-          dispatch({ suggestionId: id, type: 'acceptEditorSuggestion' })
+        // The server's text with the patch is merged into the record as any
+        // other writer's version is, with the record's own base, never with
+        // a text this decision kept: text typed in another paragraph while
+        // the patch was applied stays next to it and is saved on top; text
+        // typed in the same paragraph goes to a conflict copy, and the
+        // record carries the accepted patch. Either way the parts below are
+        // right to say "accepted".
+        await mergeServerDocument(document.id, documentRecordFromServer(server))
+        // The server decided the patch as a whole: a part it applied is in
+        // the body now, a part it could not place ends with the patch. No
+        // part stays open, so none can be decided a second time.
+        const appliedEditIds = new Set(applied.applied_edit_ids)
+        for (const item of undecided) {
+          dispatch(appliedEditIds.has(item.serverPatch?.editId ?? '')
+            ? { suggestionId: item.id, type: 'acceptEditorSuggestion' }
+            : { suggestionId: item.id, type: 'rejectEditorSuggestion' })
         }
       } else {
         await rejectEditorPatch(patchId, '', {
@@ -1051,9 +1120,15 @@ export function useEditorSuggestions({
         }
       }
     } catch (error) {
-      // Visible on every card of the patch (revision conflict, network):
-      // the rows stay pending server-side, the user can retry.
+      // Visible on every card of the patch (the save before it, a revision
+      // conflict, the network). A failure before the server applied the
+      // patch leaves its rows pending server-side, and the user can retry.
+      // A document converted elsewhere has no cards left to show it: the
+      // document itself says so, above the assistant.
       const message = messageFromError(error)
+      if (error instanceof DocumentConvertedError) {
+        setInstructionFeedbackEntry({ documentId: document.id, feedback: { message, state: 'error' } })
+      }
       setSuggestionRuns((map) => {
         let next = map
         for (const id of siblingIds) next = markError(next, id, message)
@@ -1081,8 +1156,13 @@ export function useEditorSuggestions({
       }
       return
     }
+    // An agent patch is applied by the server as a whole, once, as accepting
+    // one of its parts applies it; no part of it is applied here.
+    for (const suggestion of oneSuggestionPerServerPatch(groupSuggestions)) {
+      await decideServerPatch(suggestion, 'accept')
+    }
     for (const suggestion of groupSuggestions) {
-      acceptLegacySuggestion(suggestion)
+      if (!suggestion.serverPatch) acceptLegacySuggestion(suggestion)
     }
   }
 
@@ -1249,8 +1329,11 @@ export function useEditorSuggestions({
     const suggestion = documentSuggestions.find((item) => item.id === suggestionId)
     if (!suggestion) return
     if (suggestion.serverPatch) {
-      // A server patch is decided as a whole, by its open parts.
-      if (suggestion.status === 'pending') await decideServerPatch(suggestion, 'reject')
+      // A server patch is rejected as a whole, also through a part whose
+      // passage changed.
+      if (suggestion.status === 'pending' || suggestion.status === 'stale') {
+        await decideServerPatch(suggestion, 'reject')
+      }
       return
     }
     // A stale suggestion keeps its card and the card's reject button, and
@@ -1312,7 +1395,23 @@ export function useEditorSuggestions({
       }
       return
     }
-    dispatch({ groupId, type: 'rejectEditorSuggestionGroup' })
+    const serverPatchSuggestions = oneSuggestionPerServerPatch(groupSuggestions)
+    if (serverPatchSuggestions.length === 0) {
+      dispatch({ groupId, type: 'rejectEditorSuggestionGroup' })
+      return
+    }
+    // An agent patch is rejected by the server, once for all of its open or
+    // changed parts. Where that fails, its parts stay open with the error.
+    for (const suggestion of serverPatchSuggestions) {
+      await decideServerPatch(suggestion, 'reject')
+    }
+    // A suggestion of the group that never reached the server ends here, as
+    // its own reject button ends it.
+    for (const suggestion of groupSuggestions) {
+      if (!suggestion.serverPatch) {
+        dispatch({ suggestionId: suggestion.id, type: 'rejectEditorSuggestion' })
+      }
+    }
   }
 
   async function handleEditSuggestionProposal(suggestionId: string, proposedText: string) {
@@ -1771,6 +1870,9 @@ export function useEditorSuggestions({
             id: groupId,
             origin: { kind: 'global_run' },
           },
+          // An instruction sent with notes replaces the open suggestions of
+          // the instruction run before it, as one sent without notes does.
+          replacesPreviousInstructionRun: true,
           suggestions,
           type: 'createEditorSuggestionGroup',
         })
@@ -1914,6 +2016,8 @@ export function useEditorSuggestions({
             origin: { kind: 'global_run' },
             warnings: proposal.warnings,
           },
+          // The run's suggestions replace the open ones of the run before it.
+          replacesPreviousInstructionRun: true,
           suggestions: authorized,
           type: 'createEditorSuggestionGroup',
         })
@@ -2081,6 +2185,10 @@ type MaterializedPrivateSuggestionComment = {
   comment: EditorCommentThreadRecord | null
 }
 
+/** An agent patch met a document converted to collaboration elsewhere:
+ * nothing was applied, and its suggestions left the document. */
+class DocumentConvertedError extends Error {}
+
 function createSuggestionRecord({
   comment,
   documentId = comment.documentId,
@@ -2176,6 +2284,21 @@ export function createAgentPatchSuggestionRecords({
     }
   }
   return records
+}
+
+/** The first suggestion of each server patch among `suggestions`, in their
+ * order. A server patch is decided as a whole, so a decision over several
+ * suggestions sends each patch once. */
+function oneSuggestionPerServerPatch(
+  suggestions: readonly EditorSuggestionRecord[],
+): EditorSuggestionRecord[] {
+  const patchIds = new Set<string>()
+  return suggestions.filter((suggestion) => {
+    const patchId = suggestion.serverPatch?.patchId
+    if (!patchId || patchIds.has(patchId)) return false
+    patchIds.add(patchId)
+    return true
+  })
 }
 
 

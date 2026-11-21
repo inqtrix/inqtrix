@@ -81,7 +81,7 @@ The markers below are the canonical hook points for operators. Every marker is a
 
 | Marker | Meaning |
 |--------|---------|
-| `_answer_fallback` | `True` when any answer-synthesis fallback path was taken (timeout, primary-model API error without configured fallback model, or fallback model also failed). The answer body itself begins with a visible `> [!WARNING] Antwort-Synthese-Fallback aktiv` block in this case. |
+| `_answer_fallback` | `True` when any answer-synthesis fallback path was taken (timeout, primary-model API error without configured fallback model, or fallback model also failed). The answer body itself begins with a visible warning block in the answer language in this case (`> [!WARNING] Kein geschriebener Bericht` / `> [!WARNING] No written report`), which names this marker for operators. |
 | `_answer_fallback_kind` | Discriminator for the fallback path: `""` (success), `timeout`, `no_fallback_model`, `fallback_model_failed`. |
 | `_answer_fallback_reason` | Human-readable explanation including provider error class, error message, and which fallback model (if any) was attempted. |
 | `allowed_citation_count` / `allowed_citations` | How many URLs the citation selector kept, plus the first ten of them. |

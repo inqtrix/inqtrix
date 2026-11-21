@@ -22,7 +22,6 @@ function summary(overrides: Partial<ResearchRunSummary> = {}): ResearchRunSummar
     snapshot: { current_node: 'agent_kernel', last_message: '' },
     error: null,
     events_url: '/v1/runs/run_agent_1/events',
-    result_url: '/v1/runs/run_agent_1/result',
     ...overrides,
   }
 }

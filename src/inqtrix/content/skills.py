@@ -2,9 +2,10 @@
 
 Skills are not a fourth prompt-template category:
 templates are client-interpreted text, while a skill's fields are
-ENFORCED server-side — ``clarification_points`` drive the intake gate,
-``requires_plan`` the plan gate, ``allowed_tools`` the tool dispatch,
-``invocation`` the model-disclosure block. The persistence machinery
+ENFORCED server-side — ``clarification_points`` drive the clarification
+check before the skill's instructions activate, ``requires_plan`` the
+approval gates, ``allowed_tools`` the tool dispatch, ``invocation`` the
+model-disclosure block. The persistence machinery
 mirrors prompt templates one-for-one (ownership, optimistic
 concurrency, memory + Postgres backends); only the table is new.
 """
@@ -29,17 +30,20 @@ SKILL_DELIVERABLES = ("", "chat", "canvas", "email", "talking_points")
 """Output form the skill pins ('' = the agent decides).
 
 Two dimensions in one field: ``chat`` and ``canvas`` name the SURFACE the
-result lands on and are enforced by routing; ``email`` and
-``talking_points`` name the FORM the text takes on the canvas and are
-enforced through the prompt
-(:data:`~inqtrix.agents.skills_runtime.SKILL_DELIVERABLE_FORMAT_LINES`).
+result lands on, the second level of the kernel's one output-form rule (the
+user's choice on the request first, the tier's default last;
+:func:`~inqtrix.agents.skills_runtime.skill_output_form`); ``email`` and
+``talking_points`` name the FORM the text takes and are enforced through the
+prompt (:data:`~inqtrix.agents.skills_runtime.SKILL_DELIVERABLE_FORMAT_LINES`).
 ``email`` shapes the text only — there is no sending integration."""
 
 SKILL_REQUIRES_PLAN = ("always", "auto", "never")
-"""Plan-gate policy: ``always`` forces the gate even in
-Auto, ``auto`` (default) follows the permission mode, ``never`` skips it
-(a mission still shows its plan informatively). The STRICTEST value
-across activated skills wins; the patch gate is never affected."""
+"""Approval policy: ``always`` keeps a run under the approval gates even
+in Auto (an attached skill runs an autonomous run under the balanced gates;
+loading such a skill mid-run in Auto is refused), ``auto`` (default)
+follows the permission mode, and ``never`` changes nothing in the kernel.
+The STRICTEST value across activated skills wins; ``propose_editor_patch``
+gates in every mode regardless."""
 
 SKILL_INVOCATIONS = ("user_only", "model_allowed")
 """Who may activate the skill: only the user (``/``-mention) or also the
@@ -54,7 +58,6 @@ SKILL_ALLOWED_TOOLS = (
     "read_project_document",
     "web_instant",
     "run_web_research",
-    "run_deep_mission",
     "write_canvas",
     "read_editor_document",
     "search_editor_document",
@@ -156,8 +159,10 @@ class SkillRecord:
 def model_may_activate(record: SkillRecord, access: ResourceAccess) -> bool:
     """Whether the MODEL may activate *record* on its own.
 
-    The kernel's skill catalog, ``load_skill`` and the resume re-arming
-    of a loaded skill all ask this one rule. Only a ``model_allowed``
+    The kernel's skill catalog and ``load_skill`` ask this one rule.
+    Re-arming a loaded skill on resume does not: it restores what the run
+    already activated, as far as the segment's actor may still see the
+    skill, and adds no activation rule of its own. Only a ``model_allowed``
     skill the caller owns qualifies, or an ownerless one in the modes
     without user accounts. A shared-in skill carries another user's
     instructions: the recipient may attach it, the recipient's model may

@@ -151,6 +151,9 @@ result.metrics.aspect_coverage        # float, 0.0-1.0
 result.metrics.sources.quality_score  # float, 0.0-1.0
 result.metrics.claims.quality_score   # float, 0.0-1.0
 result.metrics.evidence_contract_status  # "clean" | "needs_review" | "source_context_only" | "algorithm_failed" | "unknown"
+result.metrics.evidence_contract_causes  # list[str], why the status is "needs_review"
+result.metrics.evidence_basis        # "provider_context" | "evidence" | "none" | "unknown"
+result.metrics.confidence_cap        # int | None, with confidence_cap_reasons
 result.top_sources                    # list[Source]
 result.references                     # list[ReportReference]
 result.top_claims                     # list[Claim]
@@ -166,14 +169,17 @@ applications and HTTP clients, but it is not a full evidence ledger export.
 
 | Public field | Internal source | Projection rule |
 |---|---|---|
-| `answer` | `raw["answer"]` / `AgentState.answer` | Markdown string after link sanitation, evidence audit, and footer assembly. |
+| `answer` | `raw["answer"]` / `AgentState.answer` | Markdown string after link sanitation, evidence audit, the evidence notice and basis line (see [Evidence notice and basis line](websearch/evidence.md#evidence-notice-and-basis-line)), and footer assembly. The headings, notes and footer the server adds read in the answer language; the footer names counts, time and confidence and no status code, so read `metrics.evidence_contract_status` for the contract. |
 | `metrics.rounds` | `AgentState.round` | Number of completed search rounds. |
 | `metrics.total_queries` | `AgentState.queries` | Length of the deduplicated query list. |
 | `metrics.total_citations` | `AgentState.all_citations` | Count of known citation URLs, not count of verified evidence units. |
 | `metrics.confidence` | `AgentState.final_confidence` | Evaluator confidence after guardrails and stop heuristics. |
 | `metrics.sources` | `source_tier_counts`, `source_quality_score` | Aggregate source inventory quality. |
-| `metrics.claims` | `claim_status_counts`, `claim_quality_score` | Quality of the complete computed claim assessment, independently of top-claims selection limits. `status_counts` holds `verified` (a source's own text was checked), `attributed` (only the search provider's answer ties the claim to its sources), `contested` and `unverified`; results stored before 0.2.0.10 have no `attributed` key and call provider attribution `verified`. |
-| `metrics.evidence_contract_status` | `answer_claim_bindings`, `answer_evidence_bindings` | `clean` (a cited sentence carries a consolidated claim, nothing cited is unsubstantiated), `needs_review` (claim carried but some citation unsubstantiated), `source_context_only` (sources cited, no claim carried), `algorithm_failed` (synthesis blocked), `unknown` (no audit). |
+| `metrics.claims` | `claim_status_counts`, `claim_quality_score` | Quality of the complete computed claim assessment, independently of top-claims selection limits. `status_counts` holds `verified` (the search provider's excerpts that state the claim carry its support on their own), `attributed` (the support needs the search provider's answer, which ties the claim to its sources), `contested` and `unverified`; results stored before 0.2.0.10 have no `attributed` key and call provider attribution `verified`. |
+| `metrics.evidence_contract_status` | `evidence_contract_status` (from `answer_claim_bindings`, `answer_evidence_bindings`, `algorithm_failures`) | `clean` (a cited sentence carries a consolidated claim and no cause listed in `evidence_contract_causes` holds), `needs_review` (claim carried, but such a cause holds), `source_context_only` (sources cited, no claim carried), `algorithm_failed` (synthesis blocked), `unknown` (no audit ran, or no citable evidence to audit). The evidence-depth gap does not decide the status. |
+| `metrics.evidence_contract_causes`, `metrics.confidence_cap`, `metrics.confidence_cap_reasons` | `evidence_contract_causes`, `confidence_cap`, `confidence_cap_reasons` (the ceiling also from `evidence_depth_gap`) | What holds the contract at `needs_review`, the ceiling put on the confidence (the status ceiling, or 6 for a claim-bound answer with an active evidence-depth gap), and why. Decided once in the answer node together with the status. |
+| `metrics.evidence_depth_gap_reasons` | `evidence_depth_gap.reason` | The reasons of an active evidence-depth gap; empty while the gap is inactive. |
+| `metrics.evidence_basis`, `metrics.cited_reference_count`, `metrics.provider_only_reference_count` | `report_references`, web-search ledger | The material behind the references flagged as cited, derived by `research_references()` when the result is built; the answer node derives the basis line under the report with the same function. |
 | `top_sources` | `answer`, `EvidenceOverview.allowed_urls`, `evidence_ledger`, `all_citations`, `source_records` | Capped source URLs ordered by actual answer use first, then visible EvidenceOverview URLs, then remaining report-eligible/discovered citations. Tiers prefer normalized `source_records` and fall back to default tiering. |
 | `references` | `AgentState.report_references` | Exact structured counterpart of the rendered `## Referenzen` and `## Weitere geprüfte Quellen` appendix sections (`cited` tells them apart). It is not capped by `from_raw()` and should be used when a UI must match the report reference list. |
 | `top_claims` | `AgentState.consolidated_claims` | First capped claims converted through `Claim.from_consolidated()`. |
@@ -208,9 +214,16 @@ public result.
 | `claims` | `ClaimMetrics` | Nested Pydantic model with `status_counts` and `quality_score`. See [Claims](websearch/evidence.md). |
 | `answer_bound_claims_count` | `int` | Claim-level answer bindings that matched a consolidated claim (a cited sentence that plausibly carries it). URL-level matches are tracked separately and do not count here. |
 | `unbound_answer_citations_count` | `int` | Answer citations that resolved to no EvidenceRecord (`unknown_citation`). |
-| `verified_claims_used_count` | `int` | Verified consolidated claims (a source's own text was checked) marked as used in the final answer; attributed claims are not counted. |
-| `evidence_contract_status` | `str` | `clean`, `needs_review`, `source_context_only`, `algorithm_failed`, or `unknown`, decided by the claim-level binding of cited answer sentences. |
+| `verified_claims_used_count` | `int` | Verified consolidated claims (checked against the search provider's excerpt) marked as used in the final answer; attributed claims are not counted. |
+| `evidence_contract_status` | `str` | `clean`, `needs_review`, `source_context_only`, `algorithm_failed`, or `unknown`. `clean` says that the cited sources carry recorded claims and a cited sentence restates one, not that a claim was checked against its source; it can still carry the ceiling of 6 of an active evidence-depth gap (see `confidence_cap`). A `needs_review` result without `evidence_contract_causes` was stored before that field existed and can also stand for an active evidence-depth gap alone. |
+| `evidence_contract_causes` | `list[str]` | What holds the contract at `needs_review`, each entry sufficient on its own: `unknown_citation` (a cited link has no evidence record), `citation_without_claim` (a cited record carries no claim), `algorithm_failure` (a non-blocking step failed). The evidence-depth gap is no cause; it caps the confidence instead. Empty for every other status and on results stored before the field existed. |
 | `single_source_ratio` | `float` | Share of supported claims (verified or attributed) resting on a single source while the evidence-depth gap was active; `0.0` otherwise. |
+| `evidence_depth_gap_reasons` | `list[str]` | Why the evidence-depth gap was active: `no_cross_checked_claims`, `majority_single_source_claims`, `central_claim_single_quality_source` (see [Evidence-depth gap](websearch/stopping.md#evidence-depth-gap)). Empty while the gap was inactive. |
+| `confidence_cap` | `int \| None` | The ceiling the evidence contract put on `confidence`: `3` (`algorithm_failed`), `4` (`source_context_only`), `6` (`needs_review`, and any claim-bound answer with an active evidence-depth gap, `clean` included), or `None`. `confidence` can lie below it. |
+| `confidence_cap_reasons` | `list[str]` | Why the ceiling applied: the status for the two lower ceilings; for the ceiling of 6 the entries of `evidence_contract_causes`, then the reasons of an active evidence-depth gap, so a `clean` answer the gap capped names only the gap's reasons. Four claims with two primary sources each are capped for `no_cross_checked_claims`, not for a single-source majority. |
+| `evidence_basis` | `str` | The material behind the references flagged as cited. `provider_context`: every one carries only what the search provider returned about the source and no stored text of a document; this is what a web search yields, and the search provider's excerpt does not change it. `evidence`: any other mix, in practice a cited reference that carries the stored text of a document (a cited reference without any stored material also falls here). `none`: no reference is flagged as cited. `unknown`: a result stored before the field existed. An agent run names the basis of its review verdict by the same rule. The basis describes the references, not the claims: a claim can be `verified` against the search provider's excerpt while the basis reads `provider_context`. |
+| `cited_reference_count` | `int` | References flagged as cited: for a research report the sources its body cites. A run mode that does not set the flag counts every reference. |
+| `provider_only_reference_count` | `int` | Cited references that carry only what the search provider returned. |
 
 ### `Source`
 
@@ -229,7 +242,7 @@ public result.
 | `tier_reason` | `str` | How the tier came about: `structural:<role>` (registry-class suffix), `model:<role>` (the claim-extraction call judged the source), a custom strategy's reason such as `strategy_default`, `unjudged`, or empty on payloads without provenance. A strategy placement takes precedence over model judgement. |
 | `role_reason` | `str` | The extractor's evidence for a judged role in a few words; empty for structural and unjudged sources. |
 | `cited` | `bool` | `true` when the answer body cites the source (`## Referenzen`); `false` when the writer only saw it in the evidence overview (`## Weitere geprüfte Quellen`). The report never lists an uncited source as a reference, so the reference list cannot overstate the evidence base; older payloads without the field validate as cited. |
-| `statements` | `list[ReportReferenceStatement]` | Every statement the claim ledger ties to the source, from every search that cited it, once each: `text`, `status` (the claim's status) and `checked` (`true` when this source's own text was checked and states it; a claim verified through another page is only attributed here). The report panel lists them under the source's details, so whatever the report could rest on is readable at the source it is attributed to. Agent evidence prompts leave the list out: an agent reads the stored texts themselves. Empty on payloads without claims and on older payloads. |
+| `statements` | `list[ReportReferenceStatement]` | Every statement the claim ledger ties to the source, from every search that cited it, once each: `text`, `status` (the claim's status) and `checked` (`true` when the search provider's excerpt of this source was checked and states it; a claim verified through the excerpt of another source is only attributed here). The report panel lists them under the source's details, so whatever the report could rest on is readable at the source it is attributed to. Agent evidence prompts leave the list out: an agent reads the stored texts themselves. Empty on payloads without claims and on older payloads. |
 
 Use `references` for exact report/evidence views. `top_sources` remains a ranked
 overview capped at 60 sources and may intentionally differ from the complete
@@ -239,14 +252,23 @@ report appendix.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `effective_mode` | `str` | Algorithm that actually executed, currently `agent_kernel` or `workspace_agent`. |
+| `effective_mode` | `str` | Algorithm that actually executed: `agent_kernel`; `workspace_agent` on runs of the retired mission engine. |
 | `response_form` | `str` | Effective `auto`, `chat`, or `canvas` delivery form. |
 | `depth` | `str` | Effective `normal` or `deep` depth. |
 | `model` | `str` | Resolved model id; empty when the provider default remains unresolved. |
 | `reasoning_effort` | `str` | Resolved effort token; empty when the provider default applies. |
 | `source_policy` | `dict[str, str]` | Effective `web` and `knowledge` availability after a one-shot directive. |
+| `knowledge_scope` | `str \| None` | Whose knowledge boundary the run searched: `all` (the session switch), `pinned` (attached collections) or `inherited`; `None` when the payload did not record it. |
+| `knowledge_collection_count` | `int` | Collections inside that boundary; `0` when not recorded. |
 | `consent_reason` | `str` | Stable machine reason for permission/approval state. |
-| `tool_use_counts` | `dict[str, int]` | Successful source operations keyed by `web` and `knowledge`; zero is explicit. |
+| `tool_use_counts` | `dict[str, int]` | Successful source operations keyed by `web` and `knowledge`; zero is explicit. A use is not a search: a delegated research is one web use, a document read one knowledge use, and a batch of subtasks one web use when it carries a research assignment and one knowledge use when it carries a knowledge assignment. |
+| `web_searches` | `int \| None` | Web searches the run's own provider calls executed; a delegated research reports its own in its snapshot. `None` when the payload did not record it. |
+| `knowledge_searches` | `int \| None` | Searches of the knowledge base the run executed itself; a document read is no search. `None` when the payload did not record it (a stored mission run, an older payload). |
+| `limits` | `dict[str, AgentExecutionLimit]` | Server-authored execution boundaries keyed by stable limit id; empty on older payloads. |
+| `tool_grants` | `list[str]` | Tools the user approved for the whole run; empty when nothing is granted. |
+| `source_coverage` | `list[AgentSourceCoverage]` | Per source version: the ranges the run read or searched, its size, and whether a continuation is still open. Empty for algorithms without windowed readers. |
+| `document_analyses` | `list[AgentDocumentAnalysis]` | Per document a document analysis of the run read on the server: the ranges it analysed, those it did not with their reason, and whether it read the whole document. Empty when the run analysed none. |
+| `work_profile` | `str` | Internal work profile the run executed under; empty for every ordinary run. |
 
 Availability and use are intentionally separate: a source can be
 `available` while its count remains zero. The complete block is also copied
@@ -258,12 +280,12 @@ events](../extending/runs-api.md#run-summary).
 | Field | Type | Description |
 |-------|------|-------------|
 | `text` | `str` | Atomic claim statement (post-consolidation). |
-| `status` | `str` | `verified` (a source's own text was checked and states the claim), `attributed` (only the search provider's answer ties the claim to its sources), `contested`, or `unverified`. Before 0.2.0.10 `verified` also covered provider attribution. See [Claims](websearch/evidence.md). |
+| `status` | `str` | `verified` (supported, and the search provider's excerpts that state the claim carry that support on their own), `attributed` (supported only together with the search provider's answer, which ties the claim to its sources: no excerpt states the claim, or the stating excerpts alone carry no support), `contested`, or `unverified`. Before 0.2.0.10 `verified` also covered provider attribution. See [Claims](websearch/evidence.md). |
 | `claim_type` | `str` | `fact`, `actor_claim`, or `forecast`. |
 | `support_count` | `int` | Number of claim-ledger entries that affirm the claim. Entries are counted, not sources or domains: two extractions of the same statement from two pages of one domain count as `2`. |
 | `contradict_count` | `int` | Number of claim-ledger entries that negate the claim, plus the supporting entries of a claim of the same signature whose value conflicts with this one, counted the same way as `support_count` — entries, not sources. |
 | `needs_primary` | `bool` | Whether the claim needs stronger evidence, usually primary-tier support or independent non-low cross-checking. |
-| `status_reason` | `str` | Short reason for the verification status. |
+| `status_reason` | `str` | Short reason for the verification status: the support structure, then what was checked, for example `primary evidence present; checked against the search provider's excerpt` or `primary evidence present; attributed by the search provider`. Results stored before 0.2.0.13 say `checked against source text` for the first case. |
 | `source_tier_counts` | `dict[str, int]` | Breakdown by source tier (primary/mainstream/stakeholder/unknown/low). |
 | `primary_basis` | `str` | Why the claim counts as primary-backed: `role` (a primary role on an affirmed, non-syndicated witness), `issuer:<label>` (the fact claim names the issuer of an unjudged witness), or empty. An explicitly placed `unknown` source is not unjudged. For an issuer basis, `status_reason` names the matched issuer. |
 | `syndicated_count` | `int` | Supporting entries whose evidence snippet near-duplicated an already counted one (a reprint is one witness). |
@@ -278,7 +300,12 @@ for claim in result.top_claims:
     print(claim.status, claim.support_count, claim.text)
 
 if result.metrics.evidence_contract_status != "clean":
-    print("Answer evidence audit needs review")
+    print("Answer evidence audit needs review:", result.metrics.evidence_contract_causes)
+if result.metrics.confidence_cap is not None:
+    # Also a clean answer: an active evidence-depth gap caps it at 6.
+    print("Confidence capped at", result.metrics.confidence_cap, result.metrics.confidence_cap_reasons)
+if result.metrics.evidence_basis == "provider_context":
+    print("The cited sources carry only what the search provider returned")
 ```
 
 ## Export helper

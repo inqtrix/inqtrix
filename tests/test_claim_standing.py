@@ -1,9 +1,10 @@
-"""What a claim's status may say: a source's own text checked (``verified``)
-or only the search provider's attribution (``attributed``).
+"""What a claim's status may say: checked against the search provider's
+excerpt of a source (``verified``) or only the search provider's attribution
+(``attributed``).
 
 A tier says who speaks, never what a page says; provider prose is
 attribution, not verification. The research loop reads support (verified
-and attributed alike), so a provider that returns no source text runs the
+and attributed alike), so a provider that returns no excerpts runs the
 same loop as one that does.
 """
 
@@ -105,7 +106,9 @@ class TestStatus:
         assert claim["status"] == "verified"
         assert claim["verification_basis"] == "primary_source"
         assert claim["checked_urls"] == ["https://eur-lex.europa.eu/a"]
-        assert claim["status_reason"] == "primary evidence present; checked against source text"
+        assert claim["status_reason"] == (
+            "primary evidence present; checked against the search provider's excerpt"
+        )
 
     def test_a_page_text_without_the_value_leaves_it_attributed(self, consolidator):
         claim = consolidator.consolidate([
@@ -159,7 +162,7 @@ class TestStatus:
 
 
 def _mixed_ledger(*, with_pages: bool) -> list[dict]:
-    """G4: a primary source with no text, a mainstream and an unknown
+    """A primary source with no text, a mainstream and an unknown
     source whose pages state the claim; plus a single-source quality claim,
     a contested pair and enough claims to exceed a small selection."""
     page = PAGE if with_pages else ""
@@ -191,7 +194,7 @@ def _mixed_ledger(*, with_pages: bool) -> list[dict]:
 
 
 class TestLoopReadsSupportNotChecking:
-    """I5: the same witnesses with or without page text give the research
+    """The same witnesses with or without page text give the research
     loop the same structure, order, selection, counts and guardrails; only
     the status says what was checked."""
 
@@ -228,7 +231,7 @@ class TestLoopReadsSupportNotChecking:
         assert changed  # the pages verified something...
         assert {statuses_with[claim_id] for claim_id in changed} == {"verified"}
         assert {statuses_without[claim_id] for claim_id in changed} == {"attributed"}
-        # ...and the mixed claim keeps its primary structure either way (G4).
+        # ...and the mixed claim keeps its primary structure either way.
         mixed = next(
             claim_id for claim_id, basis in without["basis"].items()
             if basis == "primary_source"
@@ -237,7 +240,7 @@ class TestLoopReadsSupportNotChecking:
         assert statuses_without[mixed] == "attributed"
 
     def test_an_attributed_ledger_is_a_report_basis(self, consolidator):
-        """G1: a provider without source text attributes every claim; the
+        """A provider without source text attributes every claim; the
         confidence guardrail must not read that as "no report evidence"."""
         consolidated = consolidator.consolidate([
             entry for entry in _mixed_ledger(with_pages=False)
@@ -266,8 +269,9 @@ def _record(claims: list[dict], *, url: str = "https://www.a-news.de/x", snippet
 
 
 class TestEvidenceBlock:
-    """G8/RC5: the writer sees per statement whether this source's text was
-    checked, and provider text is never labelled as evidence."""
+    """The writer sees per statement whether the search provider's excerpt
+    of this source was checked, and provider text is never labelled as
+    evidence."""
 
     def _block(self, record: dict) -> str:
         return _render_source_record_block([record], "E1", max_chars=4000, seen_texts=set())
@@ -292,12 +296,12 @@ class TestEvidenceBlock:
         block = self._block(record)
 
         assert f"Standing: {STANDING_TEXT['single-source verified']}" in block
-        assert f"Statements checked against this source's text:\n  - {CLAIM}" in block
+        assert f"Statements checked against the search provider's excerpt of this source:\n  - {CLAIM}" in block
         assert (
             "Statements the search provider attributes to this source:\n"
             "  - Die Behörde prüft 120 Anträge pro Woche."
         ) in block
-        assert f"Text the search provider returned from this source:\n  - {PAGE}" in block
+        assert f"The search provider's excerpt of this source:\n  - {PAGE}" in block
         assert "Search-provider text these statements were taken from:" in block
         assert "Evidence excerpts" not in block
         assert "Statements from this source" not in block
@@ -348,7 +352,7 @@ def test_both_supported_statuses_count_for_needs_primary(consolidator, status):
 
 
 class TestReferenceStatements:
-    """F4/I3: whatever the evidence layer ties to a source is readable at
+    """Whatever the evidence layer ties to a source is readable at
     that source's reference, from every search that cited it."""
 
     URL = "https://eur-lex.europa.eu/a"
@@ -382,6 +386,7 @@ class TestReferenceStatements:
         records = _format_report_reference_records(
             [("E1", self.URL), ("E2", "https://www.b-news.de/y")],
             SimpleNamespace(source_tiering=DefaultSourceTiering()),
+            language="de",
             tier_by_url=facts.tier_by_url,
             statements_by_url=facts.statements_by_url,
         )

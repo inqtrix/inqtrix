@@ -322,7 +322,7 @@ async def test_stream_response_returns_timeout_chunk(monkeypatch):
         )
     )
 
-    assert any("Request-Timeout erreicht" in chunk for chunk in chunks)
+    assert any("Zeitgrenze der Anfrage erreicht" in chunk for chunk in chunks)
     assert chunks[-1] == "data: [DONE]\n\n"
 
 

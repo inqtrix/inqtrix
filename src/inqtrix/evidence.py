@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 from inqtrix.runtime_logging import make_record_id
@@ -41,6 +41,27 @@ _ADJACENT_CITATION_MARKER_RE = re.compile(
     r"(\[(?:E\d+|unmapped:[^\]]+|unrendered:[^\]]+)\])"
     r"(?=\[(?:E\d+|unmapped:|unrendered:))"
 )
+
+# The places of a provider answer that cite a source. A citation marker is
+# one pair of parentheses holding nothing but links or addresses: the pair
+# belongs to the marker and leaves a text together with it. A link outside
+# such a pair is part of its sentence and keeps its label there. An address
+# may hold one level of parentheses of its own.
+_LINKED_ADDRESS = r"https?://(?:[^\s()]|\([^\s()]*\))+"
+_BARE_ADDRESS = r"https?://(?:[^\s()\]}>,\"']|\([^\s()]*\))+"
+_PLACE_ITEM = rf"(?:\[[^\]\n]+\]\({_LINKED_ADDRESS}\)|{_BARE_ADDRESS})"
+_CITATION_PLACE_RE = re.compile(
+    rf"(?P<marker>\([ \t]*{_PLACE_ITEM}(?:[ \t,;]*{_PLACE_ITEM})*[ \t]*\))"
+    rf"|\[(?P<label>[^\]\n]+)\]\({_LINKED_ADDRESS}\)"
+    rf"|{_BARE_ADDRESS}"
+)
+_PLACE_ADDRESS_RE = re.compile(rf"\]\(({_LINKED_ADDRESS})\)|({_BARE_ADDRESS})")
+_LINE_OPENING_RE = re.compile(r"^[ \t]*(?:[-*+] |#+ |>|\d+[.)] )")
+_STATEMENT_RE = re.compile(r"[^\W_]")
+_WORD_RE = re.compile(r"[^\W_]+")
+_SENTENCE_MARKS = ".,;:!?"
+_DASHES = "-–—"
+_ROW_EDGES = " |"
 
 
 def evidence_id_for_citation(query_id: str, citation_record: dict[str, Any]) -> str:
@@ -338,16 +359,71 @@ def project_web_search_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def reference_material_kind(
+    reference: Mapping[str, Any],
+    *,
+    search_context: bool = False,
+) -> str:
+    """What one reference holds for a statement to be checked against.
+
+    ``retained_source_excerpt``: the reference carries the stored text of a
+    document (``excerpt`` or ``source_text``). ``provider_context``: it
+    carries only what the search provider wrote about the source, either
+    recorded on the reference (``grounded_support``) or found in a retained
+    search that cites it (*search_context*). ``source_metadata_only``:
+    neither. The search provider's excerpt is not consulted here.
+    """
+    if reference.get("excerpt") or reference.get("source_text"):
+        return "retained_source_excerpt"
+    if search_context or reference.get("grounded_support"):
+        return "provider_context"
+    return "source_metadata_only"
+
+
+def cited_material_basis(material_kinds: Iterable[str]) -> str:
+    """The basis cited references give, from the material kind of each.
+
+    ``provider_context`` when at least one reference is cited and every
+    cited one is of that kind; ``evidence`` for any other mix, which is a
+    cited reference with the stored text of a document and also one without
+    any stored material; ``""`` when nothing is cited. The one rule behind the
+    basis of a review verdict and the basis a result reports: both pass
+    the kinds from :func:`reference_material_kind`.
+    """
+    kinds = list(material_kinds)
+    if not kinds:
+        return ""
+    if all(kind == "provider_context" for kind in kinds):
+        return "provider_context"
+    return "evidence"
+
+
 def attach_web_search_lineage(
     references: list[dict[str, Any]],
     ledger: dict[str, Any],
+    *,
+    registering: Iterable[str] = (),
 ) -> list[dict[str, Any]]:
-    """Attach stable search/citation pointers to final web references."""
+    """Attach stable search/citation pointers to final web references.
+
+    A reference without a text of its own takes the text of the first
+    citation of its source that carries one: of the first search with such
+    a citation, the one that stands first in the provider answer. A
+    reference that already carries a text keeps it.
+
+    *registering* names the searches that hand *references* in, where
+    *ledger* also holds searches of other origin. They lead the pointers
+    this call attaches, and only their citations give a text here: what
+    another search of the ledger said about the source is not handed over.
+    """
 
     by_url: dict[str, list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
     searches = ledger.get("searches", {}) if isinstance(ledger, dict) else {}
+    leading = list(dict.fromkeys(str(query_id) for query_id in registering))
     if isinstance(searches, dict):
-        for query_id, search in searches.items():
+        first = [query_id for query_id in leading if query_id in searches]
+        for query_id in (*first, *(key for key in searches if key not in first)):
+            search = searches[query_id]
             if not isinstance(search, dict):
                 continue
             for citation in search.get("citations", []) or []:
@@ -395,7 +471,9 @@ def attach_web_search_lineage(
             source_id = str(primary_citation.get("source_id") or "")
             if source_id:
                 ref["source_id"] = source_id
-            support = str(primary_citation.get("grounded_support") or "")
+            support = _first_support(
+                [item for item in matches if not leading or item[0] in leading]
+            )
             if support and not ref.get("grounded_support"):
                 ref["grounded_support"] = support
             if not ref.get("provider_snippet") and primary_citation.get("snippet"):
@@ -404,53 +482,84 @@ def attach_web_search_lineage(
     return projected
 
 
+def _first_support(
+    matches: list[tuple[str, dict[str, Any], dict[str, Any]]],
+) -> str:
+    """The text of the first citation among *matches* that carries one.
+
+    Searches count in the order of *matches*; within the first search that
+    has a citation with a text, the citation standing first in the provider
+    answer gives it, and one without a position stands behind every placed
+    one.
+    """
+    by_search: dict[str, list[dict[str, Any]]] = {}
+    for query_id, _search, citation in matches:
+        if str(citation.get("grounded_support") or ""):
+            by_search.setdefault(query_id, []).append(citation)
+    for citations in by_search.values():
+        first = min(
+            citations,
+            key=lambda citation: (
+                (start := _optional_nonnegative_int(citation.get("annotation_start"))) is None,
+                start or 0,
+            ),
+        )
+        return str(first["grounded_support"])
+    return ""
+
+
+class _Place(NamedTuple):
+    """One place of a provider answer that cites a source.
+
+    ``marker`` tells a citation marker from a link inside a sentence, and
+    ``label`` is what the sentence keeps of such a link.
+    """
+
+    start: int
+    end: int
+    addresses: frozenset[str]
+    marker: bool
+    label: str
+
+
 def _with_provider_answer_context(
     provider_answer: str,
     citations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Add honest provider-answer context without inventing URL attribution."""
+    """Give each citation the text of the provider answer it stands for.
+
+    The search ledger decides the text of a citation, and a reference takes
+    it from there (:func:`attach_web_search_lineage`). The text is what the
+    provider wrote where it cites the source, never a passage of the linked
+    page. A citation with no statement at its place gets no text, and its
+    status then says what else the provider supplied for the source.
+    """
 
     if not citations:
         return []
-    # Reuse the established deterministic URL-to-answer-context helper. It
-    # removes the URL from the displayed passage and never claims that the
-    # passage is a verbatim excerpt from the linked webpage.
-    from inqtrix.agents.evidence import enrich_instant_evidence
-
-    enriched = enrich_instant_evidence(
-        provider_answer,
-        [
-            {
-                "url": citation.get("url"),
-                "title": citation.get("title"),
-            }
-            for citation in citations
-        ],
+    cited = {
+        address
+        for citation in citations
+        if (address := _address_key(str(citation.get("url") or "")))
+    }
+    places = _citation_places(provider_answer, cited)
+    # An answer with a span on a link of the address it cites marks links.
+    # A span of such an answer that lies on prose has slipped; where no span
+    # lies on such a link, the provider annotates statements, and a span on
+    # prose is one.
+    marks_links = any(
+        _own_place(provider_answer, places, citation) is not None
+        for citation in citations
     )
     projected: list[dict[str, Any]] = []
-    for citation, support in zip(citations, enriched, strict=True):
+    for citation in citations:
         row = dict(citation)
-        annotation_support = _annotation_support(provider_answer, citation)
-        nearby_support = str(support.get("grounded_support") or "")
-        if annotation_support and _is_citation_marker(
-            annotation_support,
-            str(citation.get("url") or ""),
-        ):
-            # Azure commonly annotates only the rendered Markdown link, not
-            # the proposition before it. Preserve useful nearby context while
-            # recording that the provider did not expose a 1:1 claim mapping.
-            row["grounded_support"] = (
-                _citation_marker_context(provider_answer, citation)
-                or nearby_support
-                or annotation_support
-            )
-            row["mapping_status"] = "provider_citation_marker"
-        elif annotation_support:
-            row["grounded_support"] = annotation_support
-            row["mapping_status"] = "provider_answer_context"
-        elif nearby_support:
-            row["grounded_support"] = nearby_support
-            row["mapping_status"] = "provider_citation_marker"
+        support, status = _citation_support(
+            provider_answer, places, citation, marks_links=marks_links
+        )
+        if support:
+            row["grounded_support"] = support
+            row["mapping_status"] = status
         elif row.get("snippet"):
             row["mapping_status"] = "provider_snippet"
         else:
@@ -459,11 +568,134 @@ def _with_provider_answer_context(
     return projected
 
 
-def _annotation_support(
+def _address_key(url: str) -> str:
+    """*url* normalized until another pass no longer changes it.
+
+    One pass of :func:`~inqtrix.urls.normalize_url` can leave a form that a
+    second pass still shortens (a slash before a tracking parameter), and
+    the address of a citation has passed it more often than the address of
+    a link in the answer.
+    """
+    key = normalize_url(url)
+    for _ in range(4):
+        again = normalize_url(key)
+        if again == key:
+            break
+        key = again
+    return key
+
+
+def _citation_places(provider_answer: str, cited: set[str]) -> list[_Place]:
+    """Every place of *provider_answer* that cites a source, in reading order.
+
+    A citation marker is one, and so is a link inside a sentence. A bare
+    address is one when the search cites it; any other address in the prose
+    is part of a statement.
+    """
+    places: list[_Place] = []
+    for match in _CITATION_PLACE_RE.finditer(provider_answer):
+        found = _PLACE_ADDRESS_RE.findall(match.group(0))
+        addresses = frozenset(_address_key(linked or bare) for linked, bare in found)
+        if not any(linked for linked, _bare in found) and not addresses & cited:
+            continue
+        places.append(
+            _Place(
+                match.start(),
+                match.end(),
+                addresses,
+                match.group("marker") is not None,
+                match.group("label") or "",
+            )
+        )
+    return places
+
+
+def _own_place(
+    provider_answer: str,
+    places: list[_Place],
+    citation: Mapping[str, Any],
+) -> int | None:
+    """The place of the cited address that the provider's span lies on."""
+    span = _annotation_span(provider_answer, citation)
+    target = _address_key(str(citation.get("url") or ""))
+    if span is None or not target:
+        return None
+    for index, place in enumerate(places):
+        if target in place.addresses and place.start < span[1] and span[0] < place.end:
+            return index
+    return None
+
+
+def _citation_support(
+    provider_answer: str,
+    places: list[_Place],
+    citation: Mapping[str, Any],
+    *,
+    marks_links: bool,
+) -> tuple[str, str]:
+    """The text one citation stands for, with its mapping status.
+
+    A span on a place of the cited address stands for that place. A span
+    on prose is the statement the provider annotated, unless the answer
+    marks links (*marks_links*) and holds a place of the address: then the
+    span has slipped, and the first place of the address with a statement
+    decides. A span that cuts through a link, or holds fewer than three
+    words, marks a place: again the first place of its address with a
+    statement, and where the answer holds no place of the address, the link
+    it lies on, or else its whole line. Without a span the first place of
+    the address with a statement decides.
+    """
+    from inqtrix.agents.evidence import shorten_grounded_support
+
+    url = str(citation.get("url") or "")
+    target = _address_key(url)
+    own = [
+        index
+        for index, place in enumerate(places)
+        if target and target in place.addresses
+    ]
+    span = _annotation_span(provider_answer, citation)
+    if span is not None:
+        on_own = _own_place(provider_answer, places, citation)
+        if on_own is not None:
+            return _place_statement(provider_answer, places, on_own), "provider_citation_marker"
+        covered = next(
+            (
+                index
+                for index, place in enumerate(places)
+                if place.start < span[1] and span[0] < place.end
+            ),
+            None,
+        )
+        cuts = covered is not None and (
+            places[covered].start < span[0] or span[1] < places[covered].end
+        )
+        annotated = provider_answer[span[0]:span[1]]
+        marks = cuts or _is_citation_marker(annotated, url)
+        if not marks and not (marks_links and own):
+            return shorten_grounded_support(annotated), "provider_answer_context"
+        if not own:
+            if covered is not None:
+                return (
+                    _place_statement(provider_answer, places, covered),
+                    "provider_citation_marker",
+                )
+            return (
+                shorten_grounded_support(_line_statement(provider_answer, places, span)),
+                "provider_citation_marker",
+            )
+    for index in own:
+        statement = _place_statement(provider_answer, places, index)
+        if statement:
+            return statement, "provider_citation_marker"
+    return "", ""
+
+
+def _annotation_span(
     provider_answer: str,
     citation: Mapping[str, Any],
-) -> str:
-    """Return the exact provider-answer span attached to one citation."""
+) -> tuple[int, int] | None:
+    """The provider's span of one citation, when it lies inside the answer."""
 
     start = _optional_nonnegative_int(citation.get("annotation_start"))
     end = _optional_nonnegative_int(citation.get("annotation_end"))
@@ -473,10 +705,153 @@ def _annotation_support(
         or end <= start
         or end > len(provider_answer)
     ):
-        return ""
+        return None
+    return start, end
+
+
+def _line_bounds(provider_answer: str, start: int, end: int) -> tuple[int, int]:
+    """Where the line around the stretch from *start* to *end* begins and ends."""
+    line_start = provider_answer.rfind("\n", 0, start) + 1
+    line_end = provider_answer.find("\n", end)
+    return line_start, len(provider_answer) if line_end < 0 else line_end
+
+
+def _line_statement(
+    provider_answer: str,
+    places: list[_Place],
+    span: tuple[int, int],
+) -> str:
+    """The whole line a *span* lies in, as a statement."""
+    line_start, line_end = _line_bounds(provider_answer, *span)
+    return _statement_text(
+        _rendered(provider_answer, line_start, line_end, places), opens_line=True
+    )
+
+
+def _place_statement(
+    provider_answer: str,
+    places: list[_Place],
+    index: int,
+) -> str:
+    """What the answer says in the line of the place at *index*.
+
+    A line with at most one citation marker is the text of every place in
+    it. Where a line holds several markers, a marker takes the part that
+    ends at it. That part begins behind the marker before, unless too
+    little stands between the two to be a statement of its own (fewer than
+    three words and, in a table row, no cell): then it reaches back to the
+    statement the markers share. A link inside a sentence takes the part
+    between the markers around it. In a table row a part that does not
+    open the row is led by the row's first cell, which labels the row.
+    Empty when the part holds no statement: a marker alone in its line
+    names a source, not something the source is cited for.
+    """
     from inqtrix.agents.evidence import shorten_grounded_support
 
-    return shorten_grounded_support(provider_answer[start:end])
+    place = places[index]
+    line_start, line_end = _line_bounds(provider_answer, place.start, place.end)
+    in_line = [item for item in places if line_start <= item.start < line_end]
+    markers = [item for item in in_line if item.marker]
+    if len(markers) < 2:
+        return shorten_grounded_support(
+            _statement_text(
+                _rendered(provider_answer, line_start, line_end, in_line), opens_line=True
+            )
+        )
+    table = provider_answer[line_start:line_end].lstrip().startswith("|")
+    if place.marker:
+        first = markers.index(place)
+        while first and not _separates(
+            _rendered(provider_answer, markers[first - 1].end, markers[first].start, in_line),
+            table=table,
+        ):
+            first -= 1
+        begin = markers[first - 1].end if first else line_start
+        end = place.start
+    else:
+        before = [item.end for item in markers if item.end <= place.start]
+        after = [item.start for item in markers if item.start >= place.end]
+        begin = before[-1] if before else line_start
+        end = after[0] if after else line_end
+    part = _statement_text(
+        _rendered(provider_answer, begin, end, in_line),
+        opens_line=begin == line_start,
+    )
+    if part and table and begin != line_start:
+        line = provider_answer[line_start:line_end]
+        opening = len(line) - len(line.lstrip().lstrip("|"))
+        closing = line.find("|", opening)
+        label = _statement_text(
+            _rendered(
+                provider_answer,
+                line_start + opening,
+                line_start + (closing if closing >= 0 else len(line)),
+                in_line,
+            )
+        )
+        if label:
+            part = f"{label} | {part}"
+    return shorten_grounded_support(part)
+
+
+def _separates(between: str, *, table: bool) -> bool:
+    """Whether the text *between* two markers of a line is a statement of
+    its own: a cell of a table row, or at least three words of prose."""
+    if table and "|" in between and _STATEMENT_RE.search(between):
+        return True
+    return len(_WORD_RE.findall(between)) >= 3
+
+
+def _rendered(
+    provider_answer: str,
+    begin: int,
+    end: int,
+    places: list[_Place],
+) -> str:
+    """The answer from *begin* to *end* without what cites its sources.
+
+    A citation marker and a cited bare address are cut out; a link inside
+    a sentence stays by its label. What is cut before a sentence mark takes
+    the blank before it along, so the mark closes the sentence it belongs
+    to.
+    """
+    pieces: list[str] = []
+    position = begin
+    for place in places:
+        if place.end <= position or place.start >= end:
+            continue
+        piece = provider_answer[position:place.start]
+        following = provider_answer[place.end:place.end + 1]
+        if not place.label and following and following in _SENTENCE_MARKS:
+            piece = piece.rstrip(" \t")
+        pieces.extend((piece, place.label))
+        position = place.end
+    pieces.append(provider_answer[position:end])
+    return "".join(pieces)
+
+
+def _statement_text(text: str, *, opens_line: bool = False) -> str:
+    """*text* on one line as a statement, or empty when it holds none.
+
+    The opening of a line (list, heading or quote marker) falls away where
+    *text* opens one, and so do blanks and the edges of a table row at both
+    ends. A dash at either end, and a sentence mark at the front (what a
+    marker before the part left behind), fall away only where they stand
+    alone: a minus before a figure is part of the figure.
+    """
+    if opens_line:
+        text = _LINE_OPENING_RE.sub("", text)
+    text = " ".join(text.split())
+    leading = _DASHES + _SENTENCE_MARKS
+    while True:
+        text = text.strip(_ROW_EDGES)
+        if text[:1] and text[0] in leading and text[1:2] in ("", *_ROW_EDGES):
+            text = text[1:]
+        elif text[-1:] and text[-1] in _DASHES and text[-2:-1] in ("", *_ROW_EDGES):
+            text = text[:-1]
+        else:
+            break
+    return text if _STATEMENT_RE.search(text) else ""
 
 
 def _is_citation_marker(annotation: str, url: str) -> bool:
@@ -495,39 +870,6 @@ def _is_citation_marker(annotation: str, url: str) -> bool:
     )
     words = re.findall(r"[A-Za-zÄÖÜäöüß0-9$€£%]+", cleaned)
     return len(words) < 3
-
-
-def _citation_marker_context(
-    provider_answer: str,
-    citation: Mapping[str, Any],
-) -> str:
-    """Return the answer line surrounding an Azure citation marker."""
-
-    start = _optional_nonnegative_int(citation.get("annotation_start"))
-    end = _optional_nonnegative_int(citation.get("annotation_end"))
-    if start is None or end is None or end <= start:
-        return ""
-    line_start = provider_answer.rfind("\n", 0, start) + 1
-    line_end = provider_answer.find("\n", end)
-    if line_end < 0:
-        line_end = len(provider_answer)
-    context = provider_answer[line_start:line_end].strip()
-    context = _MARKDOWN_LINK_RE.sub("", context)
-    target = normalize_url(str(citation.get("url") or ""))
-    context = re.sub(
-        r"https?://[^\s)\]}>,\"']+",
-        lambda match: (
-            ""
-            if normalize_url(match.group(0)) == target
-            else match.group(0)
-        ),
-        context,
-    )
-    context = re.sub(r"^[ \t]*(?:[-*+] |#+ |>|\d+[.)] )", "", context)
-    context = " ".join(context.split()).strip(" ()-–—")
-    from inqtrix.agents.evidence import shorten_grounded_support
-
-    return shorten_grounded_support(context)
 
 
 def _optional_nonnegative_int(value: Any) -> int | None:
@@ -901,9 +1243,9 @@ def derive_claim_ledger_from_evidence(
             claim_citations = claim.get("citation_set", []) or []
             # The record's pinned tier travels with every URL it vouches for:
             # the consolidator judges a primary basis from the ledger. So does
-            # the source's own text when the provider returned it (a page
-            # snippet, never the provider's answer): the only text a claim
-            # can be checked against.
+            # the search provider's excerpt of the source when it returned one
+            # (never the provider's answer): the only text a claim can be
+            # checked against.
             record_tier = str(record.get("tier", "unknown") or "unknown")
             record_tier_reason = str(record.get("tier_reason", "") or "")
             record_text = str(record.get("source_snippet", "") or "")
@@ -946,9 +1288,10 @@ def project_claim_verification_to_evidence(
 ) -> list[dict[str, Any]]:
     """Project consolidated claim verification back onto EvidenceRecords.
 
-    ``checked_here`` says whether THIS record's own source text was checked
-    and states the claim: a claim verified through another page is still
-    only attributed to this one.
+    ``checked_here`` says whether the search provider's excerpt of THIS
+    record's source was checked and states the claim: a claim verified
+    through the excerpt of another source is still only attributed to this
+    one.
     """
     by_raw_id: dict[str, dict[str, Any]] = {}
     for claim in consolidated_claims:
@@ -1132,7 +1475,7 @@ def _record_support_standing(record: dict[str, Any]) -> str:
     :func:`project_claim_verification_to_evidence`, as if every supported
     claim had been checked: ranking, section selection and the URL audit
     read this structure, so they treat every search provider alike whether
-    or not it returns source text. Claimless records are
+    or not it returns excerpts. Claimless records are
     ``source-context``: usable, single-source-attributed background.
     """
     claims = record.get("claims", []) or []
@@ -1154,8 +1497,9 @@ def _record_support_standing(record: dict[str, Any]) -> str:
 def _record_verification_label(record: dict[str, Any]) -> str:
     """Return the standing a reader sees for one record.
 
-    The support standing when this record's own source text was checked for
-    one of its claims (``checked_here``); ``provider-attributed`` when its
+    The support standing when the search provider's excerpt of this record's
+    source was checked for one of its claims (``checked_here``);
+    ``provider-attributed`` when its
     supported claims rest only on the search provider's answer attributing
     them to this source. ``contested``, ``unverified`` and
     ``source-context`` claim no check and stay as they are.
@@ -1172,9 +1516,9 @@ def _record_verification_label(record: dict[str, Any]) -> str:
 # the vocabulary of ranking, the URL audit, the API and forensics; a model
 # quotes a short label it reads into the report, so prompts get plain words.
 STANDING_TEXT = {
-    "cross-checked": "its own text checked; independently confirmed",
-    "primary-source": "its own text checked; primary source",
-    "single-source verified": "its own text checked; one source",
+    "cross-checked": "checked against the search provider's excerpt; independently confirmed",
+    "primary-source": "checked against the search provider's excerpt; primary source",
+    "single-source verified": "checked against the search provider's excerpt; one source",
     "provider-attributed": "attributed by the search provider; page not read",
     "contested": "sources disagree",
     "unverified": "insufficiently supported",
@@ -1185,7 +1529,7 @@ STANDING_TEXT = {
 def _is_extraction_passage(origin: Any) -> bool:
     """Whether a passage is the provider text a statement was extracted from.
 
-    Every other passage is text the search provider returned from the page.
+    Every other passage is the search provider's excerpt of the source.
     The full and the compact view file passages by this one rule.
     """
     return origin == "claim_evidence_snippet"
@@ -1218,8 +1562,8 @@ context."""
 
 def evidence_cut_words(lost: int, searches: int, *, language: str | None) -> str:
     """The one reader phrase for an evidence-budget cut, shared by the
-    report note, the mission's task note, the kernel's child report and
-    the evaluator's overview note: ``"21 belegfähige Quellen aus 3 Suchen"``
+    report note, the kernel's child report and the evaluator's overview
+    note: ``"21 belegfähige Quellen aus 3 Suchen"``
     / ``"21 citable sources from 3 searches"`` (German for ``"de"``,
     English otherwise)."""
     if (language or "").lower() == "de":
@@ -1314,11 +1658,11 @@ def _render_source_record_block(
         f"  Date: {date} | Tier: {_tier_with_role(record, tier)} | Standing: {STANDING_TEXT[verification]}"
     )
 
-    # A statement is listed as checked only when THIS source's own text was
-    # checked and states it; every other statement is what the search
-    # provider attributes to the source. Text the provider returned from the
-    # page and the excerpts the statements were extracted from (the
-    # provider's answer, for most providers) stay apart for the same reason.
+    # A statement is listed as checked only when the search provider's
+    # excerpt of THIS source was checked and states it; every other statement
+    # is what the search provider attributes to the source. The excerpt and
+    # the provider text the statements were extracted from (the provider's
+    # answer, for most providers) stay apart for the same reason.
     checked_lines: list[str] = []
     attributed_lines: list[str] = []
     page_lines: list[str] = []
@@ -1367,9 +1711,9 @@ def _render_source_record_block(
 
     content_lines: list[str] = []
     for heading, lines in (
-        ("  Statements checked against this source's text:", checked_lines),
+        ("  Statements checked against the search provider's excerpt of this source:", checked_lines),
         ("  Statements the search provider attributes to this source:", attributed_lines),
-        ("  Text the search provider returned from this source:", page_lines),
+        ("  The search provider's excerpt of this source:", page_lines),
         ("  Search-provider text these statements were taken from:", extraction_lines),
     ):
         if lines:

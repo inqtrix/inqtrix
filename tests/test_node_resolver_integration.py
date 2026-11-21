@@ -17,6 +17,7 @@ from inqtrix.nodes import (
     _resolve_answer_fallback_model,
     _resolve_node_llm,
 )
+from inqtrix.observability.otel import operation_span
 from inqtrix.providers.base import ProviderContext
 from inqtrix.providers.litellm import LiteLLM
 from inqtrix.server.overrides import AgentOverridesRequest, apply_overrides
@@ -49,6 +50,7 @@ def test_resolve_node_llm_routes_tiers_per_node() -> None:
         "model": "M",
         "tier": "mid",
         "effort": "",
+        "verbosity": "",
         "model_source": "tier:mid",
         "effort_source": "provider_default",
         "requested_tier": "",
@@ -67,6 +69,49 @@ def test_resolve_node_llm_emits_forensic_event() -> None:
     assert event["model"] == "H"
     assert event["tier"] == "high"
     assert event["effort"] == "medium"
+
+
+def test_the_span_event_of_a_resolution_carries_the_prose_verbosity(recording) -> None:
+    """Outside testing mode the span event is the only place a resolution entry reaches."""
+    providers = _providers(default_model="R", tier_high_model="openai/gpt-6.1-terra")
+    settings = AgentSettings(observability_profile="forensic")
+    s = initial_state("q")
+
+    with operation_span("answer"):
+        _resolve_node_llm(s, settings, providers, "answer")
+        _resolve_node_llm(s, settings, providers, "plan")
+
+    (span,) = recording.get_finished_spans()
+    by_node = {
+        event.attributes["node"]: event.attributes.get("verbosity")
+        for event in span.events if event.name == "node_model_resolution"
+    }
+    # An empty level is left out like an empty effort; a named one is there.
+    assert by_node == {"answer": "high", "plan": None}
+    assert s["iteration_logs"] == []
+
+
+def test_the_resolution_of_a_writing_node_shows_its_prose_verbosity_in_entry_event_and_state() -> None:
+    """The audit entry keeps only the fields it knows; the new one must be among them."""
+    providers = _providers(default_model="R", tier_high_model="openai/gpt-6.1-terra")
+    settings = _forensic_settings()
+    s = initial_state("q")
+    captured: list[tuple[str, dict]] = []
+    s["_run_event_sink"] = lambda event_type, payload: captured.append((event_type, payload))
+
+    _resolve_node_llm(s, settings, providers, "answer")
+    _resolve_node_llm(s, settings, providers, "plan")
+
+    logged = {
+        event["node"]: event["verbosity"]
+        for event in s["iteration_logs"] if event.get("event") == "node_model_resolution"
+    }
+    emitted = {
+        payload["node"]: payload["verbosity"]
+        for event_type, payload in captured if event_type == "inqtrix.node.model_resolution"
+    }
+    kept = {node: desc["verbosity"] for node, desc in s["node_model_resolutions"].items()}
+    assert logged == emitted == kept == {"answer": "high", "plan": ""}
 
 
 def test_resolve_node_llm_emits_run_event_with_provenance() -> None:
@@ -140,6 +185,7 @@ def test_no_models_attribute_warns_loudly() -> None:
             "model": "",
             "tier": "high",
             "effort": "",
+            "verbosity": "",
             "model_source": "provider_models_missing",
             "effort_source": "provider_default_unseen",
             "requested_tier": "",
@@ -152,6 +198,38 @@ def test_no_models_attribute_warns_loudly() -> None:
         if e.get("event") == "node_model_resolution_warning"
     ]
     assert warnings and warnings[0]["reason"] == "provider_models_missing"
+    # The warning carries the whole descriptor, the verbosity it asks for included.
+    assert warnings[0]["verbosity"] == ""
+
+
+@pytest.mark.parametrize(("question", "step"), [
+    (
+        "Wie funktioniert die Wärmepumpe?",
+        "Warnung: Für diesen Schritt ließ sich kein Modell bestimmen; es gilt die "
+        "Voreinstellung des Anbieters",
+    ),
+    (
+        "How does the heat pump work?",
+        "Warning: no model could be determined for this step; the provider's default applies",
+    ),
+])
+def test_an_unresolved_model_is_a_warning_step_in_the_run_language(question, step) -> None:
+    """The log line names node and provider in English for operators; the
+    step a reader follows says the same in the run's language, without the
+    internal names."""
+
+    class _Bare:
+        def complete(self, *a, **k):  # pragma: no cover - not called
+            return ""
+
+    s = initial_state(question)
+    captured: list[tuple[str, dict]] = []
+    s["_run_event_sink"] = lambda event_type, payload: captured.append((event_type, payload))
+
+    _resolve_node_llm(s, _forensic_settings(), ProviderContext(llm=_Bare(), search=None), "answer")
+
+    progress = [p for t, p in captured if t == "inqtrix.progress.message"]
+    assert [(p["message"], p["severity"]) for p in progress] == [(step, "warning")]
 
 
 def test_empty_resolved_model_warns_loudly() -> None:

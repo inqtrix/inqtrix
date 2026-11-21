@@ -8,7 +8,6 @@ a slash, a prose join) is repaired, handed back or marked, never lost.
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,7 +18,6 @@ from inqtrix.agents.markdown import normalize_agent_markdown, normalize_writer_m
 from inqtrix.agents.phase_models import DeepRevisionBundle
 from inqtrix.agents.report_quality import (
     CitationValidationFailed,
-    citation_coverage,
     cited_references,
     malformed_citation_brackets,
     unknown_citation_labels,
@@ -35,6 +33,10 @@ LEDGER = [
     {"label": "K1", "reference_id": "ref_k1"},
 ]
 """Distinct identities: a revision maps a finding's basis by identity."""
+
+EVERY_REFERENCE = frozenset(str(reference["reference_id"]) for reference in LEDGER)
+"""The run gathered the whole ledger itself: an answer without a citation
+would list all of it, so a list that stays empty is the rule under test."""
 
 
 # -- the boundaries ---------------------------------------------------------- #
@@ -73,14 +75,9 @@ def test_the_knowledge_boundary_leaves_its_quote_protocol_alone():
 # -- the readers ------------------------------------------------------------- #
 
 
-def test_a_grouped_citation_is_cited_and_counted():
+def test_a_grouped_citation_is_cited():
     text = "Marktteilnehmer wäre.[K2, W7]"
     assert [ref["label"] for ref in cited_references(text, LEDGER)] == ["K2", "W7"]
-    assert citation_coverage(text) == {
-        "paragraphs": 1,
-        "cited_paragraphs": 1,
-        "labels_used": 2,
-    }
 
 
 def test_an_invented_label_in_a_group_is_unknown():
@@ -92,7 +89,7 @@ def test_a_bracket_no_reader_can_parse_is_named():
     assert malformed_citation_brackets("Satz [K3–K5]. Marker [unbelegt: K2].") == ["[K3–K5]"]
 
 
-# -- the mission's bounded repair -------------------------------------------- #
+# -- the bounded citation repair --------------------------------------------- #
 
 
 class _RepairLLM:
@@ -157,13 +154,13 @@ def test_an_unreadable_citation_never_attaches_the_whole_ledger():
     from inqtrix.agents.kernel.algorithm import _result_references
 
     for answer in ("Satz [K3–K5].", "Satz [unbelegt: K3–K5]."):
-        assert _result_references(answer, LEDGER, basis_fallback=True) == []
+        assert _result_references(answer, LEDGER, basis=EVERY_REFERENCE) == []
 
 
 def test_a_grouped_citation_lists_exactly_its_members():
     from inqtrix.agents.kernel.algorithm import _result_references
 
-    cited = _result_references("Satz [K2, W7].", LEDGER, basis_fallback=True)
+    cited = _result_references("Satz [K2, W7].", LEDGER, basis=EVERY_REFERENCE)
     assert [ref["label"] for ref in cited] == ["K2", "W7"]
 
 
@@ -240,14 +237,12 @@ def test_a_childs_groups_links_and_renames_translate_in_one_pass():
 def test_every_agent_writer_is_told_the_one_citation_form():
     from inqtrix.agents.prompts import (
         agent_answer_system_prompt,
-        agent_synthesis_system_prompt,
         build_agent_citation_repair_prompt,
         build_agent_kernel_system_prompt,
         build_deep_revision_prompt,
     )
 
     surfaces = {
-        "synthesis": agent_synthesis_system_prompt(),
         "answer": agent_answer_system_prompt(),
         "kernel": build_agent_kernel_system_prompt(),
         "repair": build_agent_citation_repair_prompt("Text", allowed_labels=["K1"]),
@@ -255,85 +250,6 @@ def test_every_agent_writer_is_told_the_one_citation_form():
     }
     for name, text in surfaces.items():
         assert text.count(CITATION_FORMAT) == 1, name
-
-
-# -- the mission's section writer, end to end -------------------------------- #
-
-
-def test_a_section_written_with_a_group_keeps_both_sources(monkeypatch):
-    """The mission's outline shows each section its labels singly, and a
-    section that writes a group anyway still cites both sources: the
-    stored memo reads [W1] [W2], and its references carry W1 and W2."""
-    from inqtrix.search_result import GroundedSearchResult, GroundedSource
-    from tests.agents.test_workspace_agent import (
-        OUTLINE,
-        PROFILE,
-        FakeSearch,
-        ScriptedLLM,
-        _memo_body,
-        approve_pending,
-        make_agent_client,
-        submit_agent,
-        wait_status,
-    )
-
-    plan = {
-        "summary_markdown": "Zwei Suchen, dann Synthese.",
-        "tasks": [
-            {"id": "t1", "title": "Lage A", "tool_kind": "web_instant",
-             "queries": ["Wie ist die Lage A 2026?"]},
-            {"id": "t2", "title": "Lage B", "tool_kind": "web_instant",
-             "queries": ["Wie ist die Lage B 2026?"]},
-            {"id": "s", "title": "Synthese", "tool_kind": "synthesis", "depends_on": ["t1", "t2"]},
-        ],
-        "success_criteria": ["Beide Lagen belegt."],
-    }
-    outline = json.loads(json.dumps(OUTLINE))
-    outline["sections"][0]["evidence_labels"] = ["W1", "W2"]
-    llm = ScriptedLLM(
-        overrides={
-            "AssignmentProfile": dict(PROFILE),
-            "ExecutionPlanModel": plan,
-            "ReportOutline": outline,
-            "SectionText": {"markdown": "Die Lage ist stabil.[W1, W2]"},
-        }
-    )
-    class OneSourcePerQuery(FakeSearch):
-        def search(self, query: str, **kwargs: Any) -> GroundedSearchResult:
-            self.queries.append(query)
-            return GroundedSearchResult(
-                answer=f"Antwort zu {query}",
-                sources=[
-                    GroundedSource(
-                        url=f"https://example.com/{len(self.queries)}",
-                        title=f"Quelle {len(self.queries)}",
-                        snippet="Beleg",
-                    )
-                ],
-            )
-
-    from tests.agents.test_workspace_agent import platform_without_web_preview
-
-    client = make_agent_client(
-        monkeypatch,
-        llm=llm,
-        search=OneSourcePerQuery(),
-        platform=platform_without_web_preview(),
-    )
-    with client:
-        run_id = submit_agent(client)
-        wait_status(client, run_id, {"waiting_for_approval"})
-        approve_pending(client, run_id)
-        final = wait_status(client, run_id, {"completed", "failed"})
-        memo = _memo_body(client, run_id)
-        artifacts = client.get(f"/v1/runs/{run_id}/artifacts").json()["data"]
-        memo_id = next(a["artifact_id"] for a in artifacts if a["kind"] == "memo")
-        memo_refs = client.get(f"/v1/runs/{run_id}/artifacts/{memo_id}").json()["refs"]
-    assert final["status"] == "completed", final
-    assert "[W1] [W2]" in memo and "[W1, W2]" not in memo
-    assert {ref["label"] for ref in memo_refs} >= {"W1", "W2"}
-    section_prompts = [p for name, p in llm.prompts if name == "SectionText"]
-    assert section_prompts and all("[W1, W2]" not in p for p in section_prompts)
 
 
 # -- the kernel's canvas ----------------------------------------------------- #
@@ -367,36 +283,6 @@ def test_a_canvas_with_an_unreadable_citation_is_handed_back(deps):  # noqa: F81
 
 
 # -- every writer exit passes the writer boundary ---------------------------- #
-
-
-class _SectionLLM:
-    def __init__(self, markdown: str) -> None:
-        self.markdown = markdown
-
-    def supports_structured_output(self, *, model: str | None = None) -> bool:
-        return True
-
-    def complete_structured(self, prompt: str, **_kwargs: Any) -> StructuredLLMResponse:
-        return StructuredLLMResponse(
-            parsed={"markdown": self.markdown}, content="", prompt_tokens=1, completion_tokens=1
-        )
-
-
-def test_the_mission_writer_exits_write_groups_singly():
-    from inqtrix.agents.synthesis import assemble_memo, finish_section, write_chat_answer
-
-    section, _usage = finish_section(
-        _SectionLLM(""), "Satz [K2, W7].", usage={}, known_labels=None,
-        internal_reference_ids=None, model=None, reasoning_effort=None, timeout=5.0,
-    )
-    assert section == "Satz [K2] [W7]."
-    answer, _usage = write_chat_answer(
-        _SectionLLM("Antwort [K2; W7]."), question="Frage", evidence_digest="",
-        contradictions_digest="", history="", prior_memo="", model=None,
-        reasoning_effort=None, timeout=5.0,
-    )
-    assert answer == "Antwort [K2] [W7]."
-    assert "Satz [K2] [W7]." in assemble_memo("Titel", [("Teil", "Satz [K2, W7].")])
 
 
 def test_the_kernel_answer_exit_writes_groups_singly():
@@ -470,7 +356,7 @@ def test_a_repair_that_drops_an_unreadable_only_citation_keeps_the_ledger_off():
     )
     answer = _validate_kernel_answer_citations(stub, "Der Markt wächst stark [K1–K2].", LEDGER)
     assert "[unbelegt: K1–K2]" in answer or "[unsupported: K1–K2]" in answer
-    assert _result_references(answer, LEDGER, basis_fallback=True) == []
+    assert _result_references(answer, LEDGER, basis=EVERY_REFERENCE) == []
 
 
 def test_marking_reaches_prose_only():
@@ -539,7 +425,3 @@ def test_an_unclosed_double_dollar_hides_no_citation():
     assert unknown_citation_labels(text, LEDGER) == ["W99"]
 
 
-def test_the_section_writer_role_is_told_the_one_citation_form():
-    from inqtrix.agents.prompts import SECTION_WRITER_ROLE, build_work_profile_system_prompt
-
-    assert build_work_profile_system_prompt(SECTION_WRITER_ROLE).count(CITATION_FORMAT) == 1

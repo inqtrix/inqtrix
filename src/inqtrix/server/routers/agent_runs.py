@@ -1,4 +1,4 @@
-"""Agent run control endpoints (``/v1/runs/{run_id}/plan|approvals|...``).
+"""Agent run control endpoints (``/v1/runs/{run_id}/approvals|clarifications|artifacts``).
 
 Thin HTTP layer over
 :class:`~inqtrix.services.agent_control_service.AgentControlService`.
@@ -19,7 +19,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
-from inqtrix.agents.report_requirement import REPORT_GUIDANCE_MAX_CHARS
 from inqtrix.agents.control_ports import (
     ApprovalAlreadyDecided,
     ApprovalNotFound,
@@ -33,12 +32,6 @@ from inqtrix.agents.control_ports import (
     ClarificationAlreadyAnswered,
     ClarificationNotFound,
     ClarificationRecord,
-    DecisionWithoutRequirementParts,
-    PlanNotFound,
-    PlanRecord,
-    PlanTaskCancellationConflict,
-    PlanTaskNotFound,
-    PlanTaskRecord,
     public_decision_payload,
 )
 from inqtrix.auth.principal import Principal, UserContext
@@ -53,6 +46,8 @@ from inqtrix.services.agent_control_service import (
 )
 from inqtrix.services.request_parsing import (
     error_response,
+    read_json_object,
+    read_optional_json_object,
     workspace_id_for_write,
     workspace_id_from_request,
 )
@@ -63,6 +58,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _RUN_NOT_FOUND = ("Run not found", "not_found")
+
+_RETIRED_DECISION_FIELDS = ("plan", "edited_tasks", "report_guidance", "report_rule_ids")
+"""Fields only the retired mission's plan gate read; a decision that carries
+one is refused by name, never decided with the field ignored."""
 
 
 def build_router(container: "AppContainer") -> APIRouter:
@@ -108,192 +107,6 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(404, *_RUN_NOT_FOUND)
         return summary
 
-    async def _json_object(req: Request) -> dict[str, Any] | None:
-        try:
-            body = await req.json()
-        except Exception:  # noqa: BLE001 — malformed body is a client error
-            return None
-        return body if isinstance(body, dict) else None
-
-    # -- plan (#4) -------------------------------------------------------- #
-
-    @router.get("/v1/runs/{run_id}/plan")
-    async def get_run_plan(
-        run_id: str,
-        req: Request,
-        principal: Principal = Depends(principal_dep),
-        visible_to: UserContext | None = Depends(user_context_dep),
-    ):
-        """Return one plan version (latest by default) with its tasks and
-        the version history (``?version=`` selects an older one)."""
-        resolved = await _resolve_run(
-            req, run_id, visible_to, mutation=False
-        )
-        if isinstance(resolved, JSONResponse):
-            return resolved
-        version_raw = req.query_params.get("version")
-        version: int | None = None
-        if version_raw is not None:
-            try:
-                version = int(version_raw)
-            except ValueError:
-                return error_response(
-                    400,
-                    "version must be an integer",
-                    "invalid_request_error",
-                )
-        try:
-            plan, tasks, versions = await service.get_plan(
-                run_id, version=version
-            )
-        except PlanNotFound:
-            return error_response(
-                404, "No plan available yet", "not_found"
-            )
-        return {
-            **_plan_payload(plan),
-            "tasks": [_task_payload(task) for task in tasks],
-            "versions": [_plan_payload(row) for row in versions],
-        }
-
-    @router.get("/v1/runs/{run_id}/tasks/{task_id}/result")
-    async def get_run_task_result(
-        run_id: str,
-        task_id: str,
-        req: Request,
-        principal: Principal = Depends(principal_dep),
-        visible_to: UserContext | None = Depends(user_context_dep),
-    ):
-        """Return complete Markdown and evidence for one plan task.
-
-        ``?version=`` addresses an older plan version. The regular plan
-        response remains compact so a run overview never transfers every
-        provider answer eagerly.
-        """
-        resolved = await _resolve_run(
-            req, run_id, visible_to, mutation=False
-        )
-        if isinstance(resolved, JSONResponse):
-            return resolved
-        version_raw = req.query_params.get("version")
-        version: int | None = None
-        if version_raw is not None:
-            try:
-                version = int(version_raw)
-            except ValueError:
-                return error_response(
-                    400,
-                    "version must be an integer",
-                    "invalid_request_error",
-                )
-        try:
-            task = await service.get_task_result(
-                run_id, task_id, version=version
-            )
-        except (PlanNotFound, PlanTaskNotFound):
-            return error_response(404, "Task not found", "not_found")
-        payload = task.result_payload or {}
-        references = [
-            dict(item)
-            for item in payload.get("evidence", [])
-            if isinstance(item, dict)
-        ]
-        claims = [
-            dict(item)
-            for item in payload.get("claims", [])
-            if isinstance(item, dict)
-        ]
-        usage = payload.get("usage")
-        normalized_usage = (
-            {
-                "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
-                "completion_tokens": int(
-                    usage.get("completion_tokens", 0) or 0
-                ),
-            }
-            if isinstance(usage, dict)
-            else {"prompt_tokens": 0, "completion_tokens": 0}
-        )
-        answer_markdown = str(payload.get("answer_markdown") or "")
-        failure_message = str(payload.get("failure_reason") or "")
-        failure_code = str(payload.get("failure_code") or "")
-        return {
-            "task_id": task.task_id,
-            "status": task.status,
-            "child_run_id": task.child_run_id,
-            "result_summary": task.result_summary,
-            "answer_markdown": answer_markdown,
-            "references": references,
-            "claims": claims,
-            "metrics": {
-                "reference_count": len(references),
-                "claim_count": len(claims),
-                **normalized_usage,
-                **(
-                    {
-                        "evidence_contract_status": str(
-                            payload["evidence_contract_status"]
-                        ),
-                        "confidence": int(payload.get("confidence", 0) or 0),
-                    }
-                    if payload.get("evidence_contract_status")
-                    else {}
-                ),
-            },
-            "error": (
-                {"code": failure_code, "message": failure_message}
-                if failure_code or failure_message
-                else None
-            ),
-            "legacy_summary_only": bool(
-                task.result_summary and not answer_markdown
-            ),
-            # A whole-document analysis: what was read of each document,
-            # extraction facts and the verified findings (server-built).
-            "document_analysis": (
-                dict(payload["document_analysis"])
-                if isinstance(payload.get("document_analysis"), dict)
-                else None
-            ),
-        }
-
-    @router.post("/v1/runs/{run_id}/tasks/{task_id}/cancel")
-    async def cancel_run_task(
-        run_id: str,
-        task_id: str,
-        req: Request,
-        principal: Principal = Depends(principal_dep),
-        visible_to: UserContext | None = Depends(user_context_dep),
-    ):
-        """Request cancellation of one source task, preserving siblings."""
-        resolved = await _resolve_run(
-            req, run_id, visible_to, mutation=True
-        )
-        if isinstance(resolved, JSONResponse):
-            return resolved
-        try:
-            task = await service.request_task_cancel(
-                run_id,
-                task_id,
-                workspace_id=resolved.get("workspace_id"),
-                principal=principal,
-                visible_to=visible_to,
-            )
-        except (PlanNotFound, PlanTaskNotFound, RunNotFound):
-            return error_response(404, "Task not found", "not_found")
-        except PlanTaskCancellationConflict as exc:
-            return error_response(
-                409,
-                "This task can no longer be cancelled.",
-                "task_cancel_conflict",
-                status=exc.task.status,
-            )
-        return {
-            "task_id": task.task_id,
-            "status": task.status,
-            "child_run_id": task.child_run_id,
-        }
-
     # -- approvals (#5, #6) -------------------------------------------------- #
 
     @router.get("/v1/runs/{run_id}/approvals")
@@ -323,23 +136,23 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        """Decide one approval (approve / reject / edit).
+        """Decide one tool approval (approve / reject / edit).
 
-        An edit carries ``plan`` for plan/replan approvals or ``actions``
-        (exactly one action, args-only change) for tool approvals.
+        An edit carries ``actions`` (exactly one action, args-only change).
         Replaying the SAME decision answers 200 with the stored state; a
-        different decision on an already-decided approval answers 409.
+        different decision on an already-decided approval answers 409. A
+        field only the retired mission's plan gate read is refused by name,
+        and a stored approval of a retired kind answers 400 with the reason
+        ``workflow_retired``.
         """
         resolved = await _resolve_run(
             req, run_id, visible_to, mutation=True
         )
         if isinstance(resolved, JSONResponse):
             return resolved
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         decision = body.get("decision")
         if not isinstance(decision, str) or not decision:
             return error_response(
@@ -350,36 +163,14 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "note must be a string.", "invalid_request_error"
             )
-        report_guidance = body.get("report_guidance")
-        if report_guidance is not None and (
-            not isinstance(report_guidance, str)
-            or len(report_guidance) > REPORT_GUIDANCE_MAX_CHARS
-        ):
-            return error_response(
-                400,
-                f'report_guidance must be a string of at most {REPORT_GUIDANCE_MAX_CHARS} characters.',
-                "invalid_request_error",
-            )
-        report_rule_ids = body.get("report_rule_ids")
-        # The shape only: the rule cap counts DISTINCT rules and is
-        # enforced by the resolver both entry points share.
-        if report_rule_ids is not None and (
-            not isinstance(report_rule_ids, list)
-            or not all(
-                isinstance(item, str) and item.strip()
-                for item in report_rule_ids
-            )
-        ):
-            return error_response(
-                400,
-                "report_rule_ids must be a list of rule IDs.",
-                "invalid_request_error",
-            )
-        plan_body = body.get("plan")
-        if plan_body is not None and not isinstance(plan_body, dict):
-            return error_response(
-                400, "plan must be an object.", "invalid_request_error"
-            )
+        for field in _RETIRED_DECISION_FIELDS:
+            if field in body:
+                return error_response(
+                    400,
+                    f"{field} is not part of an approval decision; send decision, "
+                    "note, actions or approval_scope.",
+                    "invalid_request_error",
+                )
         actions_body = body.get("actions")
         if actions_body is not None and not isinstance(actions_body, list):
             return error_response(
@@ -397,14 +188,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id=run_id,
                 approval_id=approval_id,
                 decision=decision,
-                plan_body=plan_body,
                 note=note or "",
-                report_guidance=(
-                    None
-                    if report_guidance is None
-                    else report_guidance.strip()
-                ),
-                report_rule_ids=report_rule_ids,
                 principal=principal,
                 visible_to=visible_to,
                 actions_body=actions_body,
@@ -412,7 +196,11 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         except AgentControlValidationError as exc:
             return error_response(
-                400, str(exc), exc.error_type, errors=exc.errors
+                400,
+                str(exc),
+                exc.error_type,
+                errors=exc.errors,
+                **({"reason": exc.reason} if exc.reason else {}),
             )
         except ApprovalNotFound:
             return error_response(
@@ -426,8 +214,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 status=exc.approval.status,
                 decision=exc.approval.decision,
             )
-        except DecisionWithoutRequirementParts as exc:
-            return error_response(409, str(exc), "conflict")
         except RunNotFound:
             return error_response(404, *_RUN_NOT_FOUND)
         except RunActive:
@@ -473,11 +259,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
         if isinstance(resolved, JSONResponse):
             return resolved
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         answer = body.get("answer")
         option_id = body.get("option_id")
         answers = body.get("answers")
@@ -625,11 +409,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
         if isinstance(resolved, JSONResponse):
             return resolved
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         content = body.get("content_markdown")
         if not isinstance(content, str):
             return error_response(
@@ -697,11 +479,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
         if isinstance(resolved, JSONResponse):
             return resolved
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         title = body.get("title")
         if not isinstance(title, str) or not title.strip():
             return error_response(
@@ -766,7 +546,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
         if isinstance(resolved, JSONResponse):
             return resolved
-        body = await _json_object(req) or {}
+        body, error = await read_optional_json_object(req)
+        if error is not None:
+            return error
         target = body.get("target", "editor_document")
         if target != "editor_document":
             return error_response(
@@ -830,40 +612,6 @@ def build_router(container: "AppContainer") -> APIRouter:
 
 
 # -- wire payloads ------------------------------------------------------------ #
-
-
-def _plan_payload(plan: PlanRecord) -> dict[str, Any]:
-    return {
-        "plan_id": plan.plan_id,
-        "run_id": plan.run_id,
-        "version": plan.version,
-        "status": plan.status,
-        "created_by": plan.created_by,
-        "summary_markdown": plan.summary_markdown,
-        "assumptions": list(plan.assumptions),
-        "success_criteria": list(plan.success_criteria),
-        "reason": plan.reason,
-        "created_at": plan.created_at,
-    }
-
-
-def _task_payload(task: PlanTaskRecord) -> dict[str, Any]:
-    return {
-        "task_id": task.task_id,
-        "ordinal": task.ordinal,
-        "title": task.title,
-        "tool_kind": task.tool_kind,
-        "objective": task.objective,
-        "queries": list(task.queries),
-        "gap_ids": list(task.gap_ids),
-        "depends_on": list(task.depends_on),
-        "budget": dict(task.budget),
-        "params": dict(task.params),
-        "expected_output": task.expected_output,
-        "status": task.status,
-        "child_run_id": task.child_run_id,
-        "result_summary": task.result_summary,
-    }
 
 
 def _approval_payload(approval: ApprovalRecord) -> dict[str, Any]:
@@ -931,7 +679,9 @@ def _revision_payload(revision: ArtifactRevisionRecord) -> dict[str, Any]:
         "revision": revision.revision,
         "created_by": revision.created_by,
         "created_at": revision.created_at,
-        # ``writing`` = a streaming flush (memo growing section by section);
-        # the reader's version list skips those, diffs still reach them.
+        # ``writing`` = a write the agent had not finished (the empty answer
+        # artifact a publication starts with; in a stored mission run, each
+        # memo flush); the reader's version list skips those, diffs still
+        # reach them.
         "status": revision.status,
     }

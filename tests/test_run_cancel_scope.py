@@ -2,8 +2,8 @@
 
 A cancelled run must end the provider call it waits for, wherever in the run
 that call is made. The probe used to be bound at single call sites: the
-chat-only path, the review passes and tools of the kernel and the whole
-workspace agent never bound it, so a stop there waited for the call to finish.
+chat-only path and the review passes and tools of the kernel never bound it,
+so a stop there waited for the call to finish.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from inqtrix.agents.algorithm import WorkspaceAgentAlgorithm
 from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
 from inqtrix.graph import run
 from inqtrix.knowledge.algorithm import KnowledgeAlgorithm
@@ -96,10 +95,9 @@ def test_a_research_node_sees_the_probe_its_run_bound(monkeypatch: pytest.Monkey
     ("engine", "inner"),
     [
         (KernelAgentAlgorithm, "_run_in_cancel_scope"),
-        (WorkspaceAgentAlgorithm, "_run_in_cancel_scope"),
         (KnowledgeAlgorithm, "_run_pipeline"),
     ],
-    ids=["agent_kernel", "workspace_agent", "knowledge"],
+    ids=["agent_kernel", "knowledge"],
 )
 def test_an_engine_binds_the_probe_for_its_whole_run(
     monkeypatch: pytest.MonkeyPatch, engine: type, inner: str

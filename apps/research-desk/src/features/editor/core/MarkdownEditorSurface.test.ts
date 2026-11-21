@@ -9,6 +9,7 @@ import {
 import { getSchema, type Extensions } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { EditorState, type Transaction } from '@tiptap/pm/state'
+import { history, undo } from '@tiptap/pm/history'
 import { describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import type { EditorSuggestionRecord } from '@/features/project/types'
@@ -36,6 +37,7 @@ import {
   editorSuggestionDecorationSignature,
   editorSuggestionShouldAutoStaleOnMissingTarget,
   editorBodyChangeDecision,
+  editorBodyChangeTransaction,
   editorBodyFromHost,
   editorSurfaceInitialContent,
   editorSurfaceLifecyclePolicy,
@@ -601,5 +603,65 @@ describe('MarkdownEditorSurface body-change wiring', () => {
     expect(source).toContain('editor.setEditable(editable, false)')
     // No call may omit the `false` that suppresses the empty update.
     expect(source).not.toMatch(/setEditable\([^,)]*\)/)
+  })
+})
+
+describe('the text of another writer in a running editor', () => {
+  const OWN = '# Plan\n\nAbsatz eins.\n\nAbsatz zwei.\n\nAbsatz drei.'
+
+  function parsed(markdown: string): ProseMirrorNode {
+    return bodySchema.nodeFromJSON(parseEditorMarkdown(markdown))
+  }
+
+  /** The editor after the user typed `text` at the end of the paragraph
+   * starting with `paragraph`, with that edit in its undo history. */
+  function typedInto(paragraph: string, text: string): EditorState {
+    const opened = EditorState.create({ doc: parsed(OWN), plugins: [history()], schema: bodySchema })
+    let end = -1
+    opened.doc.descendants((node, position) => {
+      if (node.isTextblock && node.textContent.startsWith(paragraph)) end = position + node.nodeSize - 1
+      return end < 0
+    })
+    const typing = opened.tr.insertText(text, end)
+    return opened.apply(typing)
+  }
+
+  function text(state: EditorState): string {
+    const blocks: string[] = []
+    state.doc.forEach((node) => blocks.push(node.textContent))
+    return blocks.join('|')
+  }
+
+  it('replaces only the changed range, keeps the caret and stays out of the undo history', () => {
+    const own = typedInto('Absatz eins', ' hier')
+    const caret = own.selection.from
+    const next = parsed('# Plan\n\nAbsatz eins. hier\n\nAbsatz zwei.\n\nAbsatz drei, dort.')
+
+    const adoption = editorBodyChangeTransaction(own, next)
+    expect(adoption).not.toBeNull()
+    const adopted = own.apply(adoption!)
+
+    expect(adopted.doc.eq(next)).toBe(true)
+    // Only paragraph three was replaced: the caret in paragraph one stays.
+    expect(adopted.selection.from).toBe(caret)
+    expect(adoption!.steps).toHaveLength(1)
+    const step = adoption!.steps[0].getMap()
+    let replacedFrom = -1
+    step.forEach((oldStart) => {
+      replacedFrom = oldStart
+    })
+    expect(replacedFrom).toBeGreaterThan(caret)
+
+    // Undo takes back the own typing only; the other writer's change stays.
+    let undone: EditorState | null = null
+    expect(undo(adopted, (transaction) => {
+      undone = adopted.apply(transaction)
+    })).toBe(true)
+    expect(text(undone!)).toBe('Plan|Absatz eins.|Absatz zwei.|Absatz drei, dort.')
+  })
+
+  it('has nothing to replace when the editor already shows the text', () => {
+    const own = typedInto('Absatz zwei', ' hier')
+    expect(editorBodyChangeTransaction(own, own.doc)).toBeNull()
   })
 })

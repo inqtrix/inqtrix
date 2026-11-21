@@ -17,7 +17,7 @@ handling live in [`otel.py`](../../src/inqtrix/observability/otel.py),
 | `inqtrix.answer.publish` | Span | Publication of a finished answer: `inqtrix.answer.started`, byte-bounded `inqtrix.output_text.delta` events of at most 2 KB and `inqtrix.answer.ready`; `inqtrix.answer.bytes` is the answer's UTF-8 size. For an agent answer it includes the publisher's artifact writes. |
 | `inqtrix.run.complete` | Span | The terminal write of a successful run segment: result payload and snapshot. |
 | Research `classify`, `plan`, `search`, `evaluate`, `answer` | Span | Node/round, numeric snapshots and the decision/status attributes exported by `graph._set_node_span_attributes`. |
-| Provider `chat` or `text_completion` | Generation | Purpose, effective model/effort (the effort asked for in `inqtrix.request.reasoning_effort`, the one the request carried in `inqtrix.request.reasoning_effort.sent` where the adapter reports it, as Azure and LiteLLM do), the forced tool choice of a role's turn (`inqtrix.request.tool_choice`, absent when the model may answer in text), usage, finish reason and the provider-call boundary. `inqtrix.provider.attempts` (also in the observation metadata as `attempts`) counts the requests the logical call sent, its retries included; a request the deadline stopped before it was sent does not count, and a provider outside the shared attempt hook reports none. `gen_ai.request.max_tokens` is the output budget actually sent, which Claude raises when thinking is on. A response the provider stopped before it was finished (finish reason `content_filter`, `length`, `max_tokens` and the like) has level WARNING and a status message naming the finish reason. A generation also has level WARNING from the third answer in a row with zero reasoning tokens at reasoning effort `medium` or higher, for a model whose card lists that effort (the provider may ignore the reasoning setting); an answer without a reasoning figure is not judged. |
+| Provider `chat` or `text_completion` | Generation | Purpose, effective model/effort (the effort asked for in `inqtrix.request.reasoning_effort`, the one the request carried in `inqtrix.request.reasoning_effort.sent` where the adapter reports it, as Azure and LiteLLM do), the `verbosity` the request carried, where the adapter reports it as Azure and LiteLLM do (`inqtrix.request.verbosity.sent`; absent when the request carried none or the provider reports nothing), the forced tool choice of a role's turn (`inqtrix.request.tool_choice`, absent when the model may answer in text), usage, finish reason and the provider-call boundary. `inqtrix.provider.attempts` (also in the observation metadata as `attempts`) counts the requests the logical call sent, its retries included; a request the deadline stopped before it was sent does not count, and a provider outside the shared attempt hook reports none. `gen_ai.request.max_tokens` is the output budget actually sent, which Claude raises when thinking is on. A response the provider stopped before it was finished (finish reason `content_filter`, `length`, `max_tokens` and the like) has level WARNING and a status message naming the finish reason. A generation also has level WARNING from the third answer in a row with zero reasoning tokens at reasoning effort `medium` or higher, for a model whose card lists that effort (the provider may ignore the reasoning setting); an answer without a reasoning figure is not judged. |
 | Kernel tool call `execute_tool <name>` | Tool | One per call the kernel's tool node executes, per execution segment, keyed by `gen_ai.tool.call.id` (the timeline row's `invocation_id`); outcome in `inqtrix.outcome`. See [Tool spans](#tool-spans). |
 | `inqtrix.session_title` | Span | Optional short-title work alongside a conversation. Its generation has purpose `session_title`, the dedicated Fast model and actual usage. The request records the final outcome after the title revision check and returns an optional `trace_id`. It is not a reasoning step of the answer. A timed-out HTTP waiter does not erase a provider completion or its quota booking. |
 | Grounded `web_search` | Generation | Standard input/output show the actual query and provider answer. Source metadata retains provider provenance and annotation offsets. The search engine is the model identity; provider-reported search tokens contribute to trace usage. Missing prices are not zero-cost evidence. `inqtrix.provider.attempts` (and `attempts` in the observation metadata) counts the requests the call sent, as for a provider generation. A search that degraded (an empty result after a provider failure, an answer the provider did not finish) has level WARNING and its notices as the status message. |
@@ -122,7 +122,7 @@ the merged read ranges, scanned ranges, unread remainder, `complete` and
 has an unread remainder or an open search, catalogue or comment page, a
 `covered` verdict names the remainder instead of ordering the model to stop.
 Every message the harness itself places into the transcript (sufficiency
-advice, post-mission advice, resolved skill inputs) begins with the harness-note
+advice, resolved skill inputs) begins with the harness-note
 prefix, so a captured model input distinguishes runtime advice from user text.
 An internal role run (a run with a work profile, such as the Deep review) is a
 child run of the same kernel: its trace nests under the parent run like a
@@ -139,26 +139,18 @@ of that run, and the stored result carries `work_result` (profile, status,
 value, and `read_before_result` — the sources read before the result was
 written) instead of an answer. On the parent, the role is one tool row
 (`tool.started`/`tool.finished`, tool `review_role`) whose invocation id is the
-role's origin key (`role-review`; a mission appends its review round,
-`role-review:2`), and the run's outcome record carries how many cited
-references the review had re-read (`reach`) and which points it could not
-confirm (`lines`).
-A memo section too large for one call is written the same way: a role run with
-profile `section_writer` under the mission, one tool row (tool `section_role`)
-whose invocation id is `section:<round>:<index>`, its model turns under purpose
-`agent_synthesis` like the single call it replaces, and its reads of the
-mission's evidence as `read_evidence` observations.
-A mission's review takes the role only when its material exceeds the
-single-call budget. Otherwise it is ONE generation with purpose
-`agent_deep_review` inside the mission's own trace: the same rendered handover,
-with the memo verbatim and the run's stored evidence behind it — every stored
-text once, each source with its `basis_id`. The revision is a second generation
-under the writer's node (`agent_synthesis`, or the answer node for a chat
-deliverable) whose input carries only the bases the findings name. When the
+role's origin key (`role-review`), and the run's outcome record carries how
+many cited references the review had re-read (`reach`) and which points it
+could not confirm (`lines`).
+A review takes the role only when its material exceeds the single-call budget.
+Otherwise it is ONE generation with purpose `agent_deep_review` inside the
+run's own trace: the same rendered handover, with the outputs verbatim and the
+run's stored evidence behind it — every stored text once, each source with its
+`basis_id`. The revision is a second generation under the kernel's node
+(`agent_kernel`) whose input carries only the bases the findings name. When the
 revision applied an edit of a model finding, one more generation re-checks
-those edits under purpose `agent_deep_review`, in the run's own trace in
-both engines, also after a review by role. There is none when the revision
-applied only server findings' edits, when every applied model edit is left
+those edits under purpose `agent_deep_review`, in the run's own trace, also
+after a review by role. There is none when every applied model edit is left
 unchecked before the call (no segment, more than 12 segments, or new text
 resting only on sources without stored source text), when the
 run has no review call, or when the re-check does not fit its model's
@@ -181,7 +173,10 @@ confirmation's code after a colon (none when the confirmation failed or
 answered nothing usable).
 The same producing readers attach `material_dependencies` to their tool
 artifact: the knowledge documents (windows and hits) and editor documents (with
-transferred comment ids) the result carried. The private transcript descriptor
+transferred comment ids) the result carried. A batch of subtasks attaches the
+knowledge documents the results of its children name, and `source_uses`: the
+sources it counts as used (`web`, `knowledge`), from which a resumed run
+rebuilds its counters. The private transcript descriptor
 records them as `materials`; a later `search_context`/`read_context` of that
 transcript re-authorizes every material against the reader's current rights and
 the source catalogue names a closed transcript with the reason
@@ -262,7 +257,13 @@ Unpriced model tokens and unavailable tool charges must be named in cost reports
 When a hosted search provider reports its underlying model, the generation and
 usage ledger use that model; the configured agent identity stays in
 `inqtrix.search.engine`. `inqtrix.search.tool_call_count` counts reported web-tool
-calls, not billable units. With content capture enabled, the complete available
+calls, not billable units. `inqtrix.search.answer_form` is present only on a
+search that was handed a form of the answer (`table` or `timeline`); a search
+without a form carries no such attribute, and neither does one whose provider
+takes no form (the record of the search and a log line keep that, see
+[logging](logging.md#web-search-answer-form-line)). The span holds the question;
+the brief that goes out with a form is the fixed text of that form and is not
+copied into it. With content capture enabled, the complete available
 provider response uses the same `inqtrix.response.raw` redaction and byte backstop
 as LLM responses. A missing response is marked unavailable. The protected raw
 envelope is not copied into evidence prose or the user-facing search ledger.
@@ -289,39 +290,31 @@ character range, total size and any continuation; the data portion is fenced.
 A partial window is not a fully read document. Metadata pointers refer to named
 material sections within the same selection. Judge transfer completeness from
 these ranges and the actual messages, never from the number of tool calls.
-Mission outline, section, review and revision generations also receive this retained
+The review and revision generations of a kernel run also receive this retained
 context through the shared evidence projection. Their captured prompts show
 selected citation labels, source passages and each matching provider answer
 once. A provider answer is explicitly distinct from an original source quote.
 No separate retrieval span or search generation is invented for this local
 projection; the ordinary content policy still controls prompt capture.
-The mission review's captured input includes its actual assignment, the numbered
-success criteria and, as run diagnostics with a `basis_id` and their method,
-the persisted task states, source-operation counts with discovery
-distinguished, the declared lexical Markdown word count, the known
-contradictions and the concrete unverified quote passages. These measurements
-allow execution and length findings to be checked instead of trusting a
-model's count. They add context to the existing generation, not another model
-call or a new source-verification score.
-A review without a usable verdict, or one that contradicts itself, emits
-`critic_unavailable` with its `reason` through the existing activity channel.
+The review's captured input includes its actual assignment, its success
+criteria (one per attached library rule), the run's clarification record and,
+as run diagnostics with a `basis_id`, the server's reading records (one per
+source version the run read and one per document analysis) and the evidence
+contract of each research run its references come from. These records let a
+reading finding be checked against server facts instead of trusting a
+model's account. They add context to the existing generation, not another
+model call or a new source-verification score.
+A review without a usable verdict emits `deep_review_unavailable` with its
+`reason` and `transport` through the existing activity channel; a verdict that
+contradicts itself reads `unavailable` (`inconsistent`) in the outcome record.
 Its raw generation and usage remain recorded; no passing score or automatic
 corrective generation is manufactured from it.
-This run-scoped decision also reaches the parent of a delegated mission. The
-completed-run recap names an unavailable review with the outcome record's
-summary instead of inferring a usable check from having visited the critic
-phase.
+The completed-run recap names an unavailable review with the outcome record's
+summary instead of inferring a usable check from a phase.
 Final review distinguishes source material from run diagnostics and output
 requirements. Findings identify their output and exact text anchor; revision
 results describe applied or refused changes against the reviewed version. These
 details explain a correction without treating a citation link as semantic proof.
-
-Mission evidence processing records `sufficiency_skipped` through the existing
-`inqtrix.agent.activity` channel when no failed or insufficient task outcome can
-make the preliminary coverage judgement affect replanning. The reason
-`no_unresolved_outcome` describes task status, not verified evidence coverage;
-no generation or synthetic `covered` verdict is recorded for this branch.
-The finished output still receives its normal content review.
 
 Claim extraction presents one source card containing provider reference ids.
 Its `citation_prompt_count` counts input citation URL entries represented by
@@ -346,19 +339,18 @@ Captured messages and tool arguments share credential redaction with audit
 logging, but do not inherit its short field previews. The content policy's
 serialized byte backstop owns trace truncation and reports it. This keeps
 ordinary-length queries, titles and tool text reconstructable in the trace.
-Direct search calls are attributed to `web_instant`; enclosing task identity
-is retained through the existing purpose context.
+Direct search calls are attributed to `web_instant`.
 
 Model-resolution records distinguish the requested run tier from the effective
 node tier. A high/mid run request can therefore remain visible while a fast node
 still uses its assigned model and effort. Explicit per-node model pins keep their
-precedence. Child research resolution comes from server configuration rather than
-a planner-selected task tier; profile and source-policy inheritance are separate.
-Mission critique and kernel final review resolve the selected model/tier/effort
-through those same records. Mission children retain that selection in their
+precedence. Child research resolution comes from server configuration; profile and
+source-policy inheritance are separate.
+The kernel's final review resolves the selected model/tier/effort through those
+same records. Knowledge children and role runs retain that selection in their
 existing request overrides and emit their own node resolutions. The kernel's
 automatic Deep effort increase is local to its loop and revision, not a selected
-value to copy into final review or mission children. A generation's effective
+value to copy into final review or child runs. A generation's effective
 model and effort must agree with its role's resolution; these records add no
 provider call and require no content capture to make the routing visible.
 
@@ -382,12 +374,10 @@ attachment order with the revision the run is frozen under (absent when only
 text was typed), and `inqtrix.requirement.composed_chars` is the size of the
 composed requirement. These are ids and counts, recorded under every content
 policy. A rule's label and text are user content: they reach a trace only as
-captured prompt content, in the first kernel user message or the mission's
-writing prompts. The attributes describe the submitted requirement, which
-the single mission a kernel run starts with `run_deep_mission` inherits, so
-that child's segments carry the same ids; a plan or replan decision that
-replaces a mission's requirement is recorded on its approval, not on the
-span. The run event `inqtrix.agent.requirement.attached` is the transcript's
+captured prompt content, in the first kernel user message. The attributes describe the submitted
+requirement, which no child inherits; on stored runs of the retired mission
+engine, a plan or replan decision that replaced the requirement is recorded on
+its approval, not on the span. The run event `inqtrix.agent.requirement.attached` is the transcript's
 record of the same requirement and is no trace observation.
 
 This category exists because a requirement shapes every writing prompt of a
@@ -413,8 +403,8 @@ the generated answer.
 ## Run scores
 
 With `INQTRIX_TRACE_SCORES=true`, a configured Langfuse OTLP sink receives scores
-after successful run-result publication. Existing Research assessments, Mission
-Critic verdicts and Deep review counts/booleans are copied, never re-evaluated.
+after successful run-result publication. Existing Research assessments and Deep
+review counts/booleans are copied, never re-evaluated.
 Unmeasured values are omitted. These are algorithm-produced signals, not
 independent evidence of semantic correctness; a reviewer can be wrong.
 
@@ -423,6 +413,14 @@ execution observation so they do not replace the parent's assessment. Score IDs
 derive from trace, execution span and score name; repeating an export updates the
 same score. Parked, cancelled and failed segments do not publish final scores.
 Deep fields describe the reviewer's submitted judgement, before applying edits.
+Two of them are the server's reading of that judgement, recorded once the
+verdict is assessed: `deep_review_basis` names what the review could check
+against (`evidence`, `knowledge`, or `provider_context` when every cited
+reference carries the search provider's context alone), and
+`deep_review_unexplained` lists the negative flags of a verdict that nothing
+explains (`complete`, `grounded`, `contradictions_named`, joined by a comma).
+A verdict whose negative flags are all explained carries no
+`deep_review_unexplained`.
 
 The existing OpenTelemetry batch/flush lifecycle sends scores off the run thread.
 Its bounded queue is a backstop, with SDK diagnostics routed into application
@@ -536,14 +534,14 @@ a tool body carries the context of the tool span that submitted it, so every
 segment of the child nests under that first, `parked` span; the resumed
 execution, which finds the child instead of submitting another, sits under
 the parent's next segment. Only kernel runs have these spans: a delegated
-research or mission child shows its own engine's spans, and a role run's
+research or knowledge child shows its own engine's spans, and a role run's
 tool spans sit under the role's own `inqtrix.run`.
 
 These rows never pass the tool node and have no tool span: an approval
 rejection, a child-batch guard answer, a rejected parallel `write_todos`, a
 patched dangling call, a role's typed result call, a batch the tool-call
-limit stopped before dispatch, and the `review_role`/`section_role`
-delegation rows (the role has its own run span). Invalid provider arguments
+limit stopped before dispatch, and the `review_role` delegation row (the role
+has its own run span). Invalid provider arguments
 produce neither row nor span.
 
 Inside the tool observation, a capability call opens a plain span named
@@ -573,10 +571,13 @@ quote leaves the first attempt's verdict as the run's outcome.
 
 ## Document analysis spans
 
-A mission `file_analysis` task opens one `agent.document_analysis` span under
-its `agent.task` span. Its window generations (`WindowExtraction`) and the
-reduce generation (`DocumentAnalysisResult`) nest under it, all under the
-`agent_file_analysis` node: one generation per window, so a 32-window
+The kernel's `analyze_document` opens one `agent.document_analysis` span under
+its `execute_tool analyze_document` observation, with one capability span per
+document read and citation (`knowledge.document.read`,
+`knowledge.document.cite`). Its window generations (`WindowExtraction`) nest
+under it, all under the `agent_file_analysis` node (traces of older mission
+runs also hold one such span per `file_analysis` task, under its `agent.task`
+span, with a reduce generation `DocumentAnalysisResult`): one generation per window, so a 32-window
 document shows 32 extraction generations whose inputs each hold exactly one
 fenced window. The span carries counts only, never content, regardless of the
 content-capture policy: `inqtrix.document.count`,

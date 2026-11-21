@@ -1,32 +1,30 @@
-import { formatClockTime, formatDuration } from '@/lib/time'
+import { formatClockTime } from '@/lib/time'
 import type { Locale, TranslationDictionary } from '../../i18n/translations'
 import { countLabel } from '@/i18n/plural'
 import { kernelToolLabel } from './activityPresentation'
 import type { AgentChildProgressRecord } from './model'
+import { shownOutcome } from './runPresentation'
 
 /**
- * Every key a `child.progress` projection may carry — the mirror of the
+ * Every key a `child.progress` projection carries — the mirror of the
  * server's copy blocks (`runs/shared.py::build_child_progress_payload`).
  * The demo simulator's child events are pinned against this list, so a
  * demo line can never show a field the real projection would not carry.
+ * Rows stored by older runs may carry more keys; the reducer reads them
+ * without this list.
  */
 export const CHILD_PROGRESS_PROJECTED_KEYS = new Set([
   // identity and lifecycle
   'task_id', 'child_run_id', 'run_status', 'event_type', 'attempt', 'updated_at',
   'snapshot', 'current_node', 'message', 'metrics', 'error',
-  // mission task events
-  'ordinal', 'tool_kind', 'status', 'title',
   // a kernel role child's settled step (name and server count)
   'tool', 'tool_calls',
-  // a task's searches
-  'operation', 'query', 'current', 'total', 'child_task_id',
-  // derived narration lines (synthesis, task result head, plan, discovery)
-  'narration_id', 'kind', 'text',
-  // a mission's decisions (kind shared with narration; label and detail)
-  'label', 'detail',
-  // a mission's outcome record (numbers and the bounded summary sentence;
-  // its lines and codes stay in the child)
-  'final', 'review', 'round', 'revision', 'accounting', 'applied', 'open', 'summary',
+  // a knowledge child's grounding verdict
+  'status', 'failure_code', 'marker', 'format_repaired',
+  // a knowledge child's retrieval notices (bounded counters, no text)
+  'reason', 'retrieval_mode', 'stage', 'requested_candidate_pool', 'returned_candidate_pool',
+  'final_top_k', 'final_evidence_complete', 'requested_top_k', 'returned_hits', 'candidate_cap',
+  'code', 'count', 'recommended_action',
 ])
 
 /** The child fields a parent line is allowed to speak from. */
@@ -36,30 +34,12 @@ export type ChildProgressView = Pick<
   | 'error'
   | 'snapshot'
   | 'runStatus'
-  | 'openTasks'
   | 'message'
-  | 'taskTitles'
-  | 'failedTasks'
-  | 'lastQuery'
-  | 'searchesDone'
   | 'lastTool'
   | 'toolCalls'
-  | 'section'
-  | 'sectionsDone'
   | 'startedAt'
   | 'updatedAt'
 >
-
-
-/** A query is shown as a phrase, not as the whole 240-character line;
- * the cut is visible. */
-const QUERY_PREVIEW_CHARS = 80
-
-export function queryPreview(query: string): string {
-  return query.length <= QUERY_PREVIEW_CHARS
-    ? query
-    : `${query.slice(0, QUERY_PREVIEW_CHARS - 1).trimEnd()}…`
-}
 
 const BROKEN_OFF: Record<string, 'childFailed' | 'childCancelled'> = {
   cancelled: 'childCancelled',
@@ -69,14 +49,12 @@ const BROKEN_OFF: Record<string, 'childFailed' | 'childCancelled'> = {
 /**
  * What a delegating parent can honestly say about its child RIGHT NOW.
  *
- * A kernel run that hands a deep mission to a child would otherwise show
- * one unchanging line for the child's entire lifetime. The child reports
- * its phase and its tasks all along; this line carries them across the
- * run boundary and renders them.
+ * A delegation is one tool row that can own the run for many minutes; the
+ * child reports its steps all along, and this line carries them across the
+ * run boundary.
  *
- * The line speaks only from what actually arrived. No phase and no task
- * means no line: a parent that invents progress is worse than a parent
- * that shows none.
+ * The line speaks only from what actually arrived: a parent that invents
+ * progress is worse than a parent that shows none.
  *
  * A child that COMPLETED gets no line — the delegation row's own check
  * already says so. A child that failed or was cancelled keeps one: the
@@ -90,30 +68,7 @@ export function childProgressLine(
   locale: Locale,
 ): string | null {
   const status = child.runStatus ?? ''
-  if (status === 'completed') {
-    // The delegation row's check says "done"; this line says what the
-    // mission did — counts from the projections, nothing invented. A
-    // research child (no task projections) keeps no summary line.
-    const started = Object.keys(child.taskTitles ?? {}).length
-    if (started === 0) return null
-    const failed = child.failedTasks?.length ?? 0
-    const open = child.openTasks?.length ?? 0
-    const done = Math.max(0, started - failed - open)
-    const elapsed = child.startedAt !== undefined && child.updatedAt !== undefined
-      ? formatDuration(child.updatedAt - child.startedAt)
-      : ''
-    return t.agent.timeline.childSummary
-      .replace('{tasks}', () => countLabel(started, t.agent.timeline.taskCountOne, t.agent.timeline.taskCount))
-      .replace('{done}', String(done))
-      .replace('{failed}', String(failed))
-      .replace('{sections}', () => countLabel(
-        child.sectionsDone ?? 0,
-        t.agent.timeline.sectionCountOne,
-        t.agent.timeline.sectionCount,
-      ))
-      .replace('{elapsed}', () => elapsed)
-      .replace(/ · $/, '')
-  }
+  if (status === 'completed') return null
   const brokenOff = BROKEN_OFF[status]
   if (brokenOff) {
     const reason = child.error?.trim()
@@ -126,12 +81,11 @@ export function childProgressLine(
     // The tray owns the decision; the line only says why nothing moves.
     parts.push(t.agent.timeline.childWaiting)
   } else if (child.toolCalls !== undefined) {
-    // A kernel role child (a review, a section writer) has no mission
-    // phase or tasks: its settled steps say what it does — the last
-    // one's tool and the server's count, sampled every few calls. Its
-    // start is a server time shown as a clock time: a duration up to the
-    // last sampled step stood still between samples and read like a
-    // stalled review.
+    // A kernel role child (a review, a section writer) reports no tasks:
+    // its settled steps say what it does — the last one's tool and the
+    // server's count, sampled every few calls. Its start is a server time
+    // shown as a clock time: a duration up to the last sampled step stood
+    // still between samples and read like a stalled review.
     const known = kernelToolLabel(child.lastTool ?? '', t)
     parts.push(
       !child.lastTool || known === child.lastTool ? t.agent.timeline.childToolStepUnknown : known,
@@ -141,75 +95,15 @@ export function childProgressLine(
       parts.push(t.agent.timeline.childRunningSince.replace('{time}', () => formatClockTime(child.startedAt!, locale)))
     }
   } else {
-    // `agent.activity`, not `agent.stations`: the line says what the
-    // child is DOING ("Führt Aufgaben aus"), and it is the only map that
-    // covers every mission phase — `stations` has no `evidence` entry.
-    // The phase word only when no task is open: "Führt Aufgaben aus ·
-    // Aufgabe 5 „…"" would say the same thing twice, and the task names the
-    // work more precisely than the phase does.
+    // A role child reports its phase before its first settled step:
+    // `agent.activity` names what it does (`execution` -> "Führt
+    // Aufgaben aus"). A research child reports no phase; its typed
+    // snapshot speaks instead.
     const phases = t.agent.activity as Record<string, string | undefined>
     const phase = child.snapshot?.phase
     const phaseLabel = phase ? phases[phase] : undefined
-    if (phaseLabel && (child.openTasks ?? []).length === 0) parts.push(phaseLabel)
+    if (phaseLabel) parts.push(phaseLabel)
     if (!phase) parts.push(...researchChildFacts(child, t))
-  }
-
-  const open = child.openTasks ?? []
-  if (open.length > 1) {
-    // A mission runs its wave in parallel. Naming ONE of five as "the"
-    // current task read as if the other four did not exist — and the
-    // phase hung on the slowest of them for thirteen minutes.
-    parts.push(
-      t.agent.activity.parallelTasks.replace('{count}', String(open.length)),
-    )
-  } else if (open.length === 1) {
-    // Ordinals are zero-based on the wire and one-based for a reader.
-    // The plan task's title names the unit of work when it crossed.
-    const title = child.taskTitles?.[open[0]]?.trim()
-    parts.push(
-      title
-        ? t.agent.timeline.childTaskTitled
-          .replace('{number}', String(open[0] + 1))
-          .replace('{title}', () => title)
-        : t.agent.timeline.childTask.replace('{number}', String(open[0] + 1)),
-    )
-  }
-
-  // What the child is doing INSIDE the task: during execution the
-  // latest search and the count of completed ones; during synthesis
-  // the derived line (outline, section written). Searches are not
-  // shown once the phase moved on — a stale query would read as if
-  // the writer were still searching.
-  const phaseNow = child.snapshot?.phase
-  if (!phaseNow || phaseNow === 'execution' || phaseNow === 'evidence') {
-    const query = child.lastQuery?.trim()
-    if (query) {
-      parts.push(
-        t.agent.timeline.childSearch.replace('{query}', () => queryPreview(query)),
-      )
-    }
-    const done = child.searchesDone ?? 0
-    if (done > 0) {
-      parts.push(countLabel(
-        done,
-        t.agent.timeline.childSearchDoneOne,
-        t.agent.timeline.childSearchesDone,
-      ))
-    }
-  } else if (phaseNow === 'synthesis' || phaseNow === 'critic') {
-    const section = child.section?.trim()
-    if (section) parts.push(section)
-  }
-
-  // Settled failures stay visible: a mission that lost two tasks and
-  // went on planning must not read as two tasks still running.
-  const failed = child.failedTasks?.length ?? 0
-  if (failed > 0) {
-    parts.push(countLabel(
-      failed,
-      t.agent.timeline.childTaskFailedOne,
-      t.agent.timeline.childTasksFailed,
-    ))
   }
 
   // The number that MOVES. Everything above can stand still for ten
@@ -266,4 +160,28 @@ function researchChildFacts(
     ))
   }
   return facts
+}
+
+/**
+ * The one line a settled delegation of a stored kernel run keeps about the
+ * retired mission it handed its task to: how the child ended and its
+ * review's summary sentence. A completed mission without a record claims
+ * no review ("Ohne Ausgang", as the recap says); a mission that broke off
+ * says so with its reason. `null` while the child has not ended.
+ */
+export function childDelegationLine(
+  child: Pick<AgentChildProgressRecord, 'error' | 'outcome' | 'runStatus'>,
+  t: TranslationDictionary,
+): string | null {
+  const status = child.runStatus ?? ''
+  const brokenOff = BROKEN_OFF[status]
+  if (status !== 'completed' && !brokenOff) return null
+  const reason = child.error?.trim()
+  const ended = brokenOff
+    ? reason ? `${t.agent.timeline[brokenOff]}: ${reason}` : t.agent.timeline[brokenOff]
+    : t.agent.timeline.childCompleted
+  const review = child.outcome
+    ? shownOutcome(child.outcome)?.summary ?? ''
+    : status === 'completed' ? t.agent.timeline.recapNoOutcome : ''
+  return [t.agent.timeline.childRun, ended, review].filter(Boolean).join(' · ')
 }

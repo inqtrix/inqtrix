@@ -89,7 +89,8 @@ def build_router(container: "AppContainer") -> APIRouter:
         version takes them, and each one stops the run claims of the worker
         that claims it. A run bound below stays: with a stored checkpoint it
         ends at its next claim, without one the claim binds it to the current
-        contract.
+        contract. A run of a retired mode needs neither: it ends at its claim,
+        and a parked one at the next wait sweep, with ``workflow_retired``.
         """
         resolved, error = await require_instance_admin(
             provider, request, principal_dep

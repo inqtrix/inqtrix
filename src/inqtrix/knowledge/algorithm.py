@@ -1382,6 +1382,10 @@ class KnowledgeAlgorithm:
                 # badges the passage and highlights the quoted span.
                     "quotes": published_quotes.get(f"K{index}", []),
                     "source_span": evidence.as_dict()["source_span"],
+                # What the span above is worth, as every hit of a knowledge
+                # search says it: without it a reader takes the reference
+                # for one stored before spans were verified.
+                    "provenance_status": evidence.provenance_status,
                     "revision_id": evidence.revision_id,
                     "generation_id": evidence.generation_id,
                 # Best-effort source page (PDFs only) for a page-level "open at

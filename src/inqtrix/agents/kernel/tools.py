@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Mapping
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 from dataclasses import asdict, dataclass
 
 from pydantic import StrictInt, StrictStr
@@ -23,7 +23,11 @@ from inqtrix.agents.context_archive import (
     ARCHIVE_CATALOGUE_PAGE_SIZE, ARCHIVE_CATALOGUE_MAX_PAGE_SIZE,
     ARCHIVE_READ_WINDOW_CHARS, archived_result_pointer, catalogue_page, encode_archive_data,
 )
-from inqtrix.project.editor_ports import EDITOR_CONTEXT_COMMENT_PAGE_SIZE
+from inqtrix.project.editor_ports import (
+    COLLABORATION_DOCUMENT_CODE,
+    COLLABORATION_DOCUMENT_NOTICE,
+    EDITOR_CONTEXT_COMMENT_PAGE_SIZE,
+)
 from inqtrix.project.editor_search import EDITOR_SEARCH_MAX_MATCHES, EDITOR_SEARCH_QUERY_MAX
 
 from inqtrix.agents.clarification import (
@@ -34,12 +38,18 @@ from inqtrix.agents.clarification import (
 )
 from inqtrix.agents.control_ports import (
     ArtifactNotFound,
-    session_memo_artifact_id,
     ArtifactRevisionConflict,
     ClarificationNotFound,
     artifact_event_payload,
 )
-from inqtrix.agents.kernel.deps import kernel_deps, run_coro
+from inqtrix.agents.kernel.deps import (
+    RESEARCH_WINDOWS,
+    collaboration_document_read,
+    kernel_deps,
+    run_coro,
+)
+from inqtrix.agents.source_policy import batch_assignment_mode
+from inqtrix.agents.tier_policy import resolve_tier_policy
 from inqtrix.agents.artifact_names import NAMED_ARTIFACT_KINDS
 from inqtrix.agents.kernel.interrupts import (
     ask_user_clarification_id,
@@ -57,6 +67,7 @@ from inqtrix.agents.report_quality import (
 from inqtrix.citation_labels import (
     DELEGATED_FAMILIES,
     citation_pattern,
+    cited_labels,
     mark_malformed_citations,
 )
 from inqtrix.agents.phase_models import (
@@ -65,8 +76,16 @@ from inqtrix.agents.phase_models import (
 )
 from inqtrix.evidence import evidence_cut_words
 from inqtrix.i18n import detect_ui_language, t
-from inqtrix.knowledge.retrieval_warnings import notice_family, notice_severity
+from inqtrix.knowledge.retrieval_warnings import (
+    collect_search_notices,
+    knowledge_run_entries,
+    notice_family,
+    notice_severity,
+    search_notice_lines,
+)
 from inqtrix.prompt_language import resolve_answer_language
+from inqtrix.search_form import DEFAULT_ANSWER_FORM, AnswerForm
+from inqtrix.text import LOG_CUT_MARKER, shorten_visibly
 from inqtrix.untrusted_content import (
     neutralize_fence_delimiters as _neutralize,
     untrusted_fence as _untrusted_fence,
@@ -113,6 +132,14 @@ EDITOR_READ_TOOLS: tuple[str, ...] = (
 """The two receipt-producing editor read tools — the ONLY ToolMessage
 names the receipt reconstruction trusts (a marker-shaped line relayed
 by any other tool must never mint a receipt)."""
+
+EDITOR_READ_RECORD = "editor_read"
+"""``ToolMessage.artifact`` key under which both editor read tools record
+what they read: ``document_id``, ``revision`` and ``content_mode``. The
+receipt reconstruction takes the content mode only from this record of a
+message of one of :data:`EDITOR_READ_TOOLS`, and only when its id and
+revision match the marker of the same message — never from the result text,
+which carries document content other people write."""
 
 DELIVERABLE_KINDS = ("memo", "email", "talking_points", "generic")
 """Format hints a kernel canvas deliverable may carry
@@ -185,6 +212,16 @@ def failed_tool_message(message: Any) -> bool:
     if str(getattr(message, "status", "") or "") == "error":
         return True
     return tool_message_text(message).startswith(SOURCE_TOOL_FAILURE_PREFIXES)
+
+
+def _restriction_text(code: str, message: str) -> str:
+    """The visible text of a refused call, one wording per code.
+
+    A capability refusal reaches the model in this shape, and a tool body
+    that refuses the same thing itself uses it too, so the model reads one
+    text for one code whichever layer refused.
+    """
+    return f"Tool error ({code}): {message} Mention this restriction in the answer."
 
 
 def _require_allowed(tool_name: str) -> str | None:
@@ -285,6 +322,34 @@ def _editor_material(document_id: str, comment_ids: list[str] | None = None) -> 
     ]}}
 
 
+def _record_editor_read(document_id: str, revision: int, content_mode: str) -> dict[str, Any]:
+    """Record one editor read in the run and in its stored tool message.
+
+    Returns the artifact entry (:data:`EDITOR_READ_RECORD`) a resumed segment
+    rebuilds the mode from. The mode is set before the receipt: a proposal of
+    the same turn checks the receipt first and the mode second, so once it
+    sees this read's receipt it sees its mode as well.
+    """
+    deps = kernel_deps()
+    deps.editor_read_modes[document_id] = content_mode
+    deps.editor_read_receipts[document_id] = int(revision)
+    return {EDITOR_READ_RECORD: {
+        "document_id": document_id, "revision": int(revision), "content_mode": content_mode,
+    }}
+
+
+def _content_mode_lines(content_mode: str) -> str:
+    """The content-mode line of an editor read result, outside the data fence.
+
+    A document in collaboration mode adds the hint that it accepts no agent
+    proposal, in the one wording the patch tool refuses with.
+    """
+    lines = f"content_mode: {content_mode}\n"
+    if content_mode == "collaboration":
+        lines += f"{COLLABORATION_DOCUMENT_NOTICE}\n"
+    return lines
+
+
 def _material_window_note(output: Any, tool_name: str) -> str:
     window = output.window
     note = (
@@ -333,9 +398,68 @@ def _extraction_note(facts: dict[str, Any] | None, status: str = "none") -> str:
     )
 
 
-_MAX_BATCH_ASSIGNMENTS = 3
+MAX_BATCH_ASSIGNMENTS = 3
 """Ceiling for one delegate_batch call — bounded supervisor fan-out
-(reliability-wall consensus), never swarm-width."""
+(reliability-wall consensus), never swarm-width. The children of one batch
+count against their user's ``RUN_MAX_CONCURRENT_PER_USER``; the server warns
+at startup when that cap is below this width."""
+
+
+_BATCH_MODES = ("research", "knowledge")
+"""What one assignment of a batch may be, as its refusal names them."""
+
+
+_ADMISSION_MARKS = tuple(
+    f"{prefix} " for prefix in SOURCE_TOOL_FAILURE_PREFIXES if prefix.endswith(":")
+)
+"""The marks an assignment's refusal may open with, read from the one
+contract of the tool texts: unavailable, blocked. The batch puts the one of
+its reason in front of the assignment's number: a batch that names two
+marks, or none, is not the failed call the run settles."""
+
+
+class _BatchChild(NamedTuple):
+    """One admitted assignment of a batch, as its child is submitted."""
+
+    objective: str
+    mode: str
+    """The run mode of the child, not the mode the assignment names."""
+    overrides: dict[str, Any]
+    window: str | None
+    """The time window of a research child, where the assignment named one."""
+    profile: str | None
+    """The knowledge profile of a knowledge child."""
+
+
+_RECENCY_ECHO_CHARS = 40
+"""Room for the window a refusal quotes back to the model: enough to
+recognise any attempt, too little for a long text to return into the
+history a second time."""
+
+
+def _child_recency(value: Any) -> tuple[str | None, str]:
+    """The time window a research assignment names, or why it names none.
+
+    ``(window, "")`` for one of the windows a research run knows, read
+    whatever its case and surrounding blanks; ``(None, "")`` where the call
+    names none (left out, empty or null); ``(None, problem)`` for anything
+    else, the named value quoted on one line and visibly shortened.
+
+    A tool checks here before it submits a child. The run request refuses
+    an unknown window as well, but only at the submit and in words about a
+    field the model never named, and in a batch the children of the earlier
+    assignments are already submitted by then.
+    """
+    if value is None:
+        return None, ""
+    named = str(value).strip()
+    if not named:
+        return None, ""
+    if named.lower() in RESEARCH_WINDOWS:
+        return named.lower(), ""
+    shown = shorten_visibly(named, _RECENCY_ECHO_CHARS, marker=LOG_CUT_MARKER)
+    return None, f"unknown recency {shown!r}; the windows are {', '.join(RESEARCH_WINDOWS)}"
+
 
 def _offload_bulky_result(
     text: str,
@@ -487,7 +611,8 @@ def _source_name(ref: dict[str, Any]) -> str:
     INTERNAL document has no such identity, and falling back to its
     document id put the exact string the writer guard then has to keep out
     of the prose in front of the model. One rule for every source list the
-    kernel renders, shared with the mission's evidence cards.
+    kernel renders, shared with the register lines of
+    :func:`~inqtrix.agents.evidence.evidence_digest`.
     """
     from inqtrix.agents.evidence_context import (
         internal_reference_name, is_internal_reference,
@@ -611,6 +736,8 @@ def _invoke_capability_inner(
             and capability_id not in UNCOUNTED_KNOWLEDGE_CAPABILITIES
         ):
             deps.record_source_tool_use("knowledge")
+            if capability_id == "knowledge.search":
+                deps.knowledge_searches += 1
         return output
     except UnknownCapability:
         log.warning("Capability %s is not registered.", capability_id)
@@ -637,9 +764,7 @@ def _invoke_capability_inner(
                 code=exc.code,
             )
         return _CapabilityFailureText(
-            f"Tool error ({exc.code}): {exc.message} "
-            "Mention this restriction in the answer.",
-            code=exc.code,
+            _restriction_text(exc.code, exc.message), code=exc.code
         )
 
 # Module-level guarded import (not builder-local like the bridges):
@@ -684,13 +809,6 @@ class ChildScope:
     """The parent's Stufe (``''`` = legacy depth semantics)."""
     depth: str
     """The parent's depth, which carries the price class of a run without a Stufe."""
-    report_requirement: str
-    """The composed result requirement the parent is frozen under (``''``
-    for none). Only a child that writes the parent's deliverable receives
-    it — see ``inherit_requirement`` on :func:`submit_or_find_child`."""
-    report_rules: tuple[dict[str, Any], ...]
-    """The rule parts that requirement was composed from
-    (``{template_id, label, title, revision}``), travelling with the text."""
 
 
 def kernel_child_scope(deps: Any = None) -> ChildScope:
@@ -713,19 +831,90 @@ def kernel_child_scope(deps: Any = None) -> ChildScope:
         knowledge_scope=deps.knowledge_scope,
         tier=deps.tier or "",
         depth=deps.depth or "",
-        report_requirement=deps.report_requirement or "",
-        report_rules=tuple(deps.report_rules),
     )
+
+
+SOURCE_USES = "source_uses"
+"""Artifact key of a batch's tool message: the sources the batch counts as
+used, each once (``"web"`` for a research assignment, ``"knowledge"`` for a
+knowledge assignment), whatever became of their children: a delegated
+subtask counts like the single tool that delegates it. A resumed run
+rebuilds its counters from here, as the running one recorded them."""
+
+
+def _child_documents(references: Any) -> list[tuple[str, str]]:
+    """The project documents the references of a child's result name.
+
+    Each as ``(document_id, collection_id)``; a reference of a knowledge
+    run names no collection, and the transcript binds the run's own
+    boundary anyway. Everything that is no reference of a document is
+    left out.
+    """
+    return [
+        (str(reference["document_id"]), str(reference.get("collection_id") or ""))
+        for reference in references or []
+        if isinstance(reference, Mapping) and reference.get("document_id")
+    ]
+
+
+def knowledge_child_refusal(scope: ChildScope) -> str | None:
+    """Why this run cannot start a knowledge child, or None where it can.
+
+    An explicitly empty collection boundary leaves the child nothing to
+    search; it would answer "nothing relevant" without a search, and the
+    parent would read an absence nobody looked for. A server without the
+    knowledge run mode cannot resolve the child at all: asked for it, the
+    resolver raises and ends the parent run, so it is asked first.
+    """
+    collections = scope.knowledge_collection_ids
+    if collections is not None and not collections:
+        return "Tool blocked: this run has no knowledge collection in reach."
+    if scope.resolver is None or not scope.resolver.executes("knowledge"):
+        return "Tool unavailable: project knowledge is not set up on this server."
+    return None
+
+
+def _knowledge_search_note(stored_result: Mapping[str, Any]) -> str:
+    """The notes of a knowledge child's search, for the model of its parent.
+
+    A hit list the search cut short reads as complete unless the report
+    says so. The notes come from the child's stored result, in the reader
+    words of the notice contract (one sentence per code over the child's
+    searches) and under the header of the agent's own knowledge search.
+    """
+    notices = collect_search_notices(
+        [knowledge_run_entries(stored_result.get("knowledge_retrieval"))]
+    )
+    return _search_note_block(
+        [f"- {line}" for line in search_notice_lines(notices, "en")],
+        limited=any(notice.severity == "limit" for notice in notices),
+    )
+
+
+def _search_note_block(lines: list[str], *, limited: bool) -> str:
+    """The notes of a knowledge search as one block of a tool text.
+
+    Only a limit may claim the hit list is incomplete; a duplicate collapse
+    reports protection and gets the neutral header. No lines, no block.
+    """
+    if not lines:
+        return ""
+    header = (
+        "Search note – the hit list is no proof of completeness:"
+        if limited
+        else "Search note:"
+    )
+    return f"\n\n{header}\n" + "\n".join(lines)
 
 
 def inherited_stufe(tier: str, depth: str) -> dict[str, Any]:
     """The child's Stufe/depth overrides — ONE inheritance rule.
 
     A child inherits the parent's Stufe (``agent_tier``); the request bridge
-    derives ``depth`` from it, so a ``tief`` mission plans its research
-    children with the tier's own default profile and ceiling instead of
-    forcing DEEP on every child. A run without a Stufe keeps the legacy
-    depth path unchanged.
+    derives ``depth`` from it, so the research child of a ``tief`` run works
+    with the tier's own child profile instead of forcing DEEP on every
+    child. A run without a Stufe keeps the legacy depth path
+    unchanged.
 
     This is also what makes a role a child of the run that ordered it rather
     than of the server's defaults: a review commissioned by a ``tief`` run
@@ -747,13 +936,14 @@ def submit_or_find_child(
     autonomy: str = "",
     work_profile: str = "",
     handover: Any = None,
-    inherit_requirement: bool = False,
+    web_recency: str | None = None,
+    knowledge_profile: str | None = None,
 ) -> dict[str, Any] | str:
     """Idempotently submit one child run (or find the earlier submit).
 
     The caller re-executes on resume (a tool after its interrupt, a
-    post-loop after its park, a mission node after its interrupt), so the
-    submission is idempotent via ``origin_key`` — the re-execution finds the
+    post-loop after its park), so the submission is idempotent via
+    ``origin_key`` — the re-execution finds the
     already-submitted child instead of spawning a second one (child run rows
     are the truth, no control row backs this park). Returns the child row,
     or a VISIBLE failure string.
@@ -761,21 +951,21 @@ def submit_or_find_child(
     ``work_profile`` and ``handover`` turn the child into an internal role
     run of the kernel; they exist on this server-side seam only.
 
-    ``inherit_requirement`` hands the scope's result requirement (text and
-    rule parts, frozen as the parent resolved them) to a mission child
-    whose memo IS the parent's deliverable — the single mission a kernel
-    starts with ``run_deep_mission``. Every other child gets none: a
-    research child delivers evidence, a batch strand one of several memos
-    and a role its handover, which already states what it reviews against.
+    No child inherits the parent's result requirement: a research child
+    delivers evidence, a batch strand one of several reports and a role its
+    handover, which already states what it reviews against.
 
-    Raises:
-        ValueError: ``inherit_requirement`` for a child that is not a
-            mission (a programming error, never model input).
+    ``web_recency`` is the time window a research child is to prefer for
+    its sources, as the assignment named it (:func:`_child_recency`). It
+    reaches the child as the ``web_recency`` of its run request and is
+    handed on only when set, so a child without a window is submitted as
+    before.
+
+    ``knowledge_profile`` is the knowledge profile a knowledge child
+    searches with: the one of the parent's tier, never the model's pick. It
+    reaches the child as ``knowledge_filters.profile``; the collections the
+    child may search are the parent's pinned boundary, as for every child.
     """
-    if inherit_requirement and mode != "workspace_agent":
-        raise ValueError(
-            f"Only a mission child inherits the result requirement (mode={mode})."
-        )
     if scope.run_service is None or scope.resolver is None:
         log.warning(
             "Child-run tool invoked without run_service/resolver (mode=%s).",
@@ -801,13 +991,16 @@ def submit_or_find_child(
             "mode": mode,
             "agent_overrides": agent_overrides,
         }
-        if mode == "workspace_agent" or work_profile:
-            # Mission planning, writing and review honor the parent's
-            # selected model settings. Research owns its separate roles.
+        if mode == "knowledge" or work_profile:
+            # A role honors the parent's selected model settings, and so
+            # does a knowledge child: it answers a question of this run.
+            # Research owns its separate roles.
             resolve_payload["agent_overrides"] = {
                 **scope.model_overrides,
                 **agent_overrides,
             }
+        if knowledge_profile:
+            resolve_payload["knowledge_filters"] = {"profile": knowledge_profile}
         if scope.stack_name:
             # Children execute on the PARENT'S provider stack —
             # a run admitted on stack X must never silently fan out
@@ -845,14 +1038,7 @@ def submit_or_find_child(
                 },
                 work_profile=work_profile,
                 handover=handover,
-                **(
-                    {
-                        "report_requirement": scope.report_requirement,
-                        "report_rules": [dict(part) for part in scope.report_rules],
-                    }
-                    if inherit_requirement
-                    else {}
-                ),
+                **({"web_recency": web_recency} if web_recency else {}),
             )
         except RunQueueFull:
             # A transient queue condition must not FAIL the parent
@@ -881,7 +1067,7 @@ def build_kernel_tools() -> list[Any]:
     the web, the context, the editor document, the evidence, the canvas and
     research reports; ``write_canvas`` and ``propose_editor_patch``;
     ``load_skill``; and the child-run tools (``delegate_batch``,
-    ``run_web_research``, ``run_deep_mission``). Which of them gate per mode
+    ``run_web_research``). Which of them gate per mode
     is the policy module's decision (``interrupt_on``), never the tools' own.
 
     Raises:
@@ -1044,8 +1230,7 @@ def build_kernel_tools() -> list[Any]:
                 ]
             )
             if not questions:
-                # Same guard as the phase machine's clarify node: an
-                # empty prompt cannot be asked — parking on it would
+                # An empty prompt cannot be asked — parking on it would
                 # strand the run on a question no one can see.
                 log.warning(
                     "ask_user discarded because it has no usable question (run=%s).",
@@ -1165,21 +1350,12 @@ def build_kernel_tools() -> list[Any]:
             )
             for warning in getattr(output, "warnings", [])
         ]
-        # Only a limit may claim the hit list is incomplete; a duplicate
-        # collapse reports protection and gets the neutral header.
-        limited = any(
-            notice_severity(str(getattr(warning, "code", "") or "")) == "limit"
-            for warning in getattr(output, "warnings", [])
-        )
-        warning_block = (
-            (
-                "\n\nSearch note – the hit list is no proof of completeness:\n"
-                if limited
-                else "\n\nSearch note:\n"
-            )
-            + "\n".join(warning_lines)
-            if warning_lines
-            else ""
+        warning_block = _search_note_block(
+            warning_lines,
+            limited=any(
+                notice_severity(str(getattr(warning, "code", "") or "")) == "limit"
+                for warning in getattr(output, "warnings", [])
+            ),
         )
         if not output.hits:
             # "nothing indexed" and "nothing matched" are
@@ -1382,8 +1558,152 @@ def build_kernel_tools() -> list[Any]:
                     )
         return "\n".join(lines), _knowledge_material((document_id, collection_id))
 
+    @tool(response_format="content_and_artifact")
+    def analyze_document(
+        document_ids: list[str],
+        objective: str,
+        fields: list[str],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+    ) -> tuple[str, dict[str, Any]]:
+        """Have the server read whole project documents and answer named fields.
+
+        The server reads every window of each document and checks every
+        passage it reports against the document. You get, per document and
+        field, one state with its evidence labels or reasons: verified
+        passages (what they say stands in their text), not found (only
+        after a complete reading), not found in the verified passages, or
+        not read. The evidence labels it returns are verified
+        passages: cite them as they are, without cite_document_passages.
+        Use it to pull named facts out of whole documents or to establish
+        that a document does not say something; read a window with
+        read_project_document to follow one passage in its context or to
+        render a document's course section by section.
+
+        Args:
+            document_ids: Ids of the documents to analyse, from search hits.
+            objective: What the analysis is for, in one or two sentences.
+            fields: The facts to pull out, one short line each, at most
+                five per call; each is a column of the table. Keep them
+                apart: the server does not check which field a passage
+                serves.
+
+        Returns:
+            Per document and field its state with evidence labels or
+            reasons, and the verified text of the cited sections.
+        """
+        from inqtrix.agents.document_analysis import analyse_documents
+        from inqtrix.agents.document_table import (
+            RECORD_KEY,
+            analysis_failure,
+            analysis_text,
+            checked_request,
+            evidence_split,
+            reading_record,
+        )
+        from inqtrix.agents.kernel.analysis_ports import (
+            analysis_unavailable,
+            kernel_analysis_ports,
+            scope_document_count,
+        )
+
+        blocked = _require_allowed("analyze_document")
+        if blocked:
+            return blocked, {}
+        deps = kernel_deps()
+        request = checked_request(
+            document_ids, objective, fields,
+            document_limit=max(1, int(deps.platform.document_analysis_max_documents)),
+        )
+        if isinstance(request, str):
+            return f"Tool error (invalid_input): {request} Nothing was read.", {}
+        for document_id in request.document_ids:
+            blocked = _require_released("knowledge_document", document_id)
+            if blocked:
+                return blocked, {}
+        unavailable = analysis_unavailable(deps)
+        if unavailable:
+            return unavailable, {}
+        scope = scope_document_count(deps)
+        opened: dict[str, str] = {}
+        outcome = analyse_documents(
+            kernel_analysis_ports(deps, call_id=tool_call_id, opened=opened),
+            objective=request.objective,
+            criteria=list(request.fields),
+            documents=[(document_id, "") for document_id in request.document_ids],
+            collection_documents=scope,
+        )
+        deps.book_usage(
+            outcome.usage.get("prompt_tokens", 0), outcome.usage.get("completion_tokens", 0)
+        )
+        registered = {
+            str(ref.get("reference_id") or ""): ref
+            for ref in (deps.register_references(list(outcome.evidence)) if outcome.evidence else [])
+        }
+        sections = {
+            (str(evidence["document_id"]), int(evidence["chunk_index"])):
+                registered.get(deps.reference_id(evidence), evidence)
+            for evidence in outcome.evidence
+        }
+        record = reading_record(
+            outcome.report,
+            objective=request.objective,
+            references={key: str(ref.get("reference_id") or "") for key, ref in sections.items()},
+            call_id=tool_call_id,
+        )
+        deps.remember_document_analysis(record)
+        numbers = {document.document_id: index for index, document in enumerate(outcome.report.documents, start=1)}
+
+        def evidence_note(ref: dict[str, Any]) -> str:
+            page = ref.get("page_number")
+            return (
+                f"{_ref_note(ref)} — document {numbers.get(str(ref.get('document_id') or ''), '?')}"
+                + (f", page {page}" if page else "")
+            )
+
+        shown, rest = evidence_split(list(sections.values()))
+        window_limited = any(
+            gap.reason == "window_limit"
+            for document in outcome.report.documents
+            for gap in document.unanalysed
+        )
+        text = analysis_text(
+            outcome.report, record,
+            labels={
+                str(ref.get("reference_id") or ""): str(ref.get("label") or "")
+                for ref in sections.values() if ref.get("label")
+            },
+            evidence_blocks=[
+                f"{evidence_note(ref)}\n{_untrusted_fence(str(ref.get('excerpt') or ''), 'knowledge-base')}"
+                for ref in shown
+            ],
+            overflow_lines=[f"- {evidence_note(ref)}" for ref in rest],
+            scope_documents=scope,
+            run_windows=(
+                (deps.document_windows_used, int(deps.platform.document_analysis_max_windows_per_run))
+                if window_limited else None
+            ),
+        )
+        failure = analysis_failure(outcome.report, outcome.halted)
+        if failure:
+            # A failed step under the contract of the tool texts; the record
+            # stays, so the windows it claimed stay booked for the run.
+            text = f"Tool error ({failure}): the analysis read nothing it could report.\n\n{text}"
+        else:
+            deps.record_source_tool_use("knowledge")
+        artifact: dict[str, Any] = {RECORD_KEY: record}
+        if opened:
+            artifact.update(_knowledge_material(*opened.items()))
+        return (
+            _offload_bulky_result(
+                text,
+                tool="analyze_document",
+                reference_lines="\n".join(f"- {evidence_note(ref)}" for ref in sections.values()),
+            ),
+            artifact,
+        )
+
     @tool
-    def web_instant(query: str) -> str:
+    def web_instant(query: str, answer_form: AnswerForm | None = None) -> str:
         """Run ONE quick web search with an external source.
 
         Use this tool for current or external facts that are not in the
@@ -1395,6 +1715,15 @@ def build_kernel_tools() -> list[Any]:
 
         Args:
             query: The one self-contained evidence question.
+            answer_form: The form the search is asked to answer in.
+                Leave it out for the usual overview. table: when the
+                answer consists of values per period or per object; the
+                search is asked for one row per value. timeline: for the
+                events of a period; the search is asked for dated events,
+                the newest first. The form changes how the answer is laid
+                out, not what is searched or how reliable it is. A search
+                provider that takes no form answers as usual, and the
+                result then says so in its first line.
 
         Returns:
             Answer text of the search plus a source list (URL, title).
@@ -1403,7 +1732,12 @@ def build_kernel_tools() -> list[Any]:
         if blocked:
             return blocked
         deps = kernel_deps()
-        output = _invoke_capability("web.search.instant", {"query": query})
+        # No form is the default form. The capability decides what a form
+        # means: the default one asks the provider for nothing.
+        form = answer_form or DEFAULT_ANSWER_FORM
+        output = _invoke_capability(
+            "web.search.instant", {"query": query, "answer_form": form}
+        )
         if isinstance(output, str):
             return output
         deps.book_usage(output.prompt_tokens, output.completion_tokens)
@@ -1422,11 +1756,22 @@ def build_kernel_tools() -> list[Any]:
             f"{len(registered_rows)} sources delivered by the search provider "
             "fully registered."
         )
+        # A form the provider was not handed: the model reads an answer in
+        # another form than it chose and must not take that for a miss of
+        # its own. The note leads the result, where no projection of a long
+        # result drops it.
+        form_note = (
+            "Note: the search provider takes no answer form, so the answer "
+            f"below comes in its usual form, not as the {form} that was "
+            "asked for.\n\n"
+            if output.parameters.get("answer_form_sent") is False
+            else ""
+        )
         answer = normalize_agent_markdown(
             output.answer or "(no answer text)"
         )
         return _offload_bulky_result(
-            f"{_untrusted_fence(answer, 'web')}"
+            f"{form_note}{_untrusted_fence(answer, 'web')}"
             f"\n\nSources:\n{sources or '- none'}{ledger_note}",
             tool="web_instant",
             reference_lines=sources,
@@ -1580,11 +1925,10 @@ def build_kernel_tools() -> list[Any]:
                 "already said. The identifiers belong exclusively in "
                 "reference_ids. The document was not saved."
             )
-        # Citation parity with the mission engine (report_quality, one
-        # definition): every [K#]/[W#] in the text must resolve against
-        # the ATTACHED references — those become the artifact refs the
-        # UI links. Unknown labels fail loudly; the kernel loop is its
-        # own repair round.
+        # One citation definition (report_quality): every [K#]/[W#] in the
+        # text must resolve against the ATTACHED references — those become
+        # the artifact refs the UI links. Unknown labels fail loudly; the
+        # kernel loop is its own repair round.
         unknown_labels = unknown_citation_labels(normalized_markdown, refs)
         if unknown_labels:
             attached = ", ".join(
@@ -1628,10 +1972,9 @@ def build_kernel_tools() -> list[Any]:
                     kind=current.kind if current is not None else "deliverable",
                     session_id=deps.session_id or None,
                     # The name belongs to the DOCUMENT: an update keeps
-                    # it, the same rule the mission follows. Renaming is
-                    # an explicit user action, not a side effect of
-                    # writing new content — otherwise every turn could
-                    # silently re-label a file the user had named.
+                    # it. Renaming is an explicit user action, not a side
+                    # effect of writing new content — otherwise every turn
+                    # could silently re-label a file the user had named.
                     title=current.title if current is not None else title,
                     status="ready",
                     content_markdown=normalized_markdown,
@@ -1763,14 +2106,24 @@ def build_kernel_tools() -> list[Any]:
         # [E3] would be invisible to the citation check, and a copied
         # [W3] would silently resolve to a DIFFERENT source.
         body, rename_note, source_lines = _merge_child_evidence(
-            body, references
+            body, references, gathered=False
         )
         # A report has no title of its own (no H1 anywhere in the corpus):
         # the run's question is what the UI shows, so it is the name here.
-        title = str(summary.get("question") or wanted).strip()
+        # It is stored text, sometimes another user's and several lines
+        # long: like in the first message it stands in a fence, never on
+        # the server's own lines of this answer.
+        from inqtrix.agents.prompts import attached_report_title
+
+        title = attached_report_title({
+            "title": str(summary.get("question") or wanted).strip(),
+            "title_clipped": bool(summary.get("question_clipped")),
+        })
         fenced = _untrusted_fence(body, "research-report")
         text = (
-            f"Research report {wanted}\nTitle: {_neutralize(title)}\n"
+            f"Research report {wanted}\n"
+            "Title (stored text, sometimes written by another user):\n"
+            f"{_untrusted_fence(title, 'artifact-titles')}\n"
             f"Sources in the report: {len(references)}\n\n"
             f"{fenced}{rename_note}"
             + (f"\n\nEvidence:\n{source_lines}" if source_lines else "")
@@ -1984,9 +2337,13 @@ def build_kernel_tools() -> list[Any]:
             )
         except ArtifactNotFound:
             return f"Canvas document not found: {artifact_id}."
+        # A document's references are handed to the run with its text, so
+        # that its labels stay citable; reading it gathers none of them.
         registered = {
             str(ref.get("reference_id") or ""): ref
-            for ref in deps.register_references([dict(ref) for ref in record.refs])
+            for ref in deps.register_references(
+                [dict(ref) for ref in record.refs], gathered=False
+            )
         }
         # The text cites the DOCUMENT's labels; the run's ledger may have
         # renumbered the same sources. Each line leads with the label the
@@ -2047,9 +2404,12 @@ def build_kernel_tools() -> list[Any]:
         Mandatory BEFORE every propose_editor_patch: read first, then
         propose — a proposal without a prior read is rejected. The
         output names the current revision; when proposing, the server
-        checks it against the then-current state. Follow the exact next-read
-        arguments for more text; search_editor_document locates exact anchors
-        anywhere in the document. Comment pages have a separate continuation.
+        checks it against the then-current state. The output also names
+        the document's content_mode: a document in collaboration mode
+        accepts no proposal, so describe the change in your answer
+        instead. Follow the exact next-read arguments for more text;
+        search_editor_document locates exact anchors anywhere in the
+        document. Comment pages have a separate continuation.
 
         Args:
             document_id: The editor document.
@@ -2081,8 +2441,9 @@ def build_kernel_tools() -> list[Any]:
         )
         if isinstance(output, str):
             return output, {}
-        deps = kernel_deps()
-        deps.editor_read_receipts[output.id] = int(output.revision)
+        read_record = _record_editor_read(
+            output.id, output.revision, output.content_mode
+        )
         marker = EDITOR_READ_MARKER.format(
             document_id=output.id, revision=output.revision
         )
@@ -2116,7 +2477,9 @@ def build_kernel_tools() -> list[Any]:
         return (
             f"{marker}\n"
             f"document_id: {output.id}\n"
-            f"revision: {output.revision}\n\n"
+            f"revision: {output.revision}\n"
+            + _content_mode_lines(output.content_mode)
+            + "\n"
             + _material_window_note(output, "read_editor_document")
             + f"\n{fenced}{comment_block}",
             {
@@ -2128,6 +2491,7 @@ def build_kernel_tools() -> list[Any]:
                     continuation_open=output.next_comments is not None,
                 )),
                 **_editor_material(output.id, [comment.id for comment in output.comments]),
+                **read_record,
             },
         )
 
@@ -2143,10 +2507,13 @@ def build_kernel_tools() -> list[Any]:
         the BYTE-EXACT original Markdown excerpt as the ``find``
         candidate plus original context as quote_before/quote_after
         candidates — take these values over unchanged into
-        propose_editor_patch, then the server anchors exactly. Limits:
-        search text at most 300 characters; at most 5 hits are shown,
-        further ones have exact next-search arguments. Counts apply to the
-        part at or after offset; the version is checked on every continuation.
+        propose_editor_patch, then the server anchors exactly. The result
+        names the document's content_mode: a document in collaboration
+        mode accepts no proposal, so describe the change in your answer
+        instead. Limits: search text at most 300 characters; at most 5
+        hits are shown, further ones have exact next-search arguments.
+        Counts apply to the part at or after offset; the version is
+        checked on every continuation.
 
         Args:
             document_id: The editor document.
@@ -2186,8 +2553,9 @@ def build_kernel_tools() -> list[Any]:
         )
         if isinstance(output, str):
             return output, {}
-        deps = kernel_deps()
-        deps.editor_read_receipts[output.id] = int(output.revision)
+        read_record = _record_editor_read(
+            output.id, output.revision, output.content_mode
+        )
         marker = EDITOR_READ_MARKER.format(
             document_id=output.id, revision=output.revision
         )
@@ -2199,14 +2567,16 @@ def build_kernel_tools() -> list[Any]:
                 continuation_open=output.next_search is not None,
             ).model_dump()),
             **_editor_material(output.id),
+            **read_record,
         }
+        head = f"{marker}\n" + _content_mode_lines(output.content_mode)
         coverage = (
             f"Source version: {output.version}\nContent fingerprint: {output.content_hash}\n"
             f"Scanned range: [{output.offset}, {output.end}) of {output.total_chars} Unicode characters.\n"
         )
         if not matches:
             return (
-                f"{marker}\n"
+                head
                 + coverage
                 + f"No hits for the search text in document "
                 f"{output.id} (revision {output.revision}).",
@@ -2227,7 +2597,7 @@ def build_kernel_tools() -> list[Any]:
             else ""
         )
         return (
-            f"{marker}\n"
+            head
             + coverage
             + f"{total} hits in document {output.id} "
             f"(revision {output.revision}):\n\n"
@@ -2241,27 +2611,8 @@ def build_kernel_tools() -> list[Any]:
         edits: list[dict[str, Any]],
         summary: str = "",
     ) -> str:
-        """Propose changes to one of the user's editor documents.
-
-        The proposal is NEVER applied directly — the user reviews it as
-        a tracked change in the editor. Prerequisite: you have read the
-        document in THIS run with read_editor_document or
-        search_editor_document — unread targets are rejected, and if
-        the document changed in the meantime the proposal is refused
-        with a revision conflict (then read again). Every change is an
-        anchored edit object with the fields: position (replace | before
-        | after | append), find (the text to replace/anchor on, exactly
-        as in the document), text (new text), optional quote_before/
-        quote_after (anchor context) and note (reason).
-
-        Args:
-            document_id: The target document in the editor.
-            edits: List of anchored edit objects (at least one).
-            summary: One sentence on what the patch does as a whole.
-
-        Returns:
-            Patch id and status of the proposal.
-        """
+        """The text result of ``propose_editor_patch``; that tool's docstring
+        is the description the model reads."""
         blocked = _require_allowed("propose_editor_patch")
         if blocked:
             return blocked
@@ -2277,6 +2628,14 @@ def build_kernel_tools() -> list[Any]:
                 "Tool error (editor.read_required): read the document "
                 f"{document_id} first with read_editor_document or "
                 "search_editor_document — read first, then propose."
+            )
+        if collaboration_document_read(deps, document_id):
+            # Such a document accepts no agent proposal. The gate predicate
+            # spares this call the approval card, but an edited card or a
+            # read of the same turn can still lead here, so the refusal is
+            # this body's, before the capability: no proposal, no patch row.
+            return _restriction_text(
+                COLLABORATION_DOCUMENT_CODE, COLLABORATION_DOCUMENT_NOTICE
             )
         output = _invoke_capability(
             "editor.patch.propose",
@@ -2296,7 +2655,7 @@ def build_kernel_tools() -> list[Any]:
         )
 
     def _merge_child_evidence(
-        answer: str, references: list[dict[str, Any]]
+        answer: str, references: list[dict[str, Any]], *, gathered: bool
     ) -> tuple[str, str, str]:
         """Register child refs and translate the child text's labels.
 
@@ -2307,10 +2666,14 @@ def build_kernel_tools() -> list[Any]:
         silently resolve to the parent's DIFFERENT W3, and write_canvas
         only catches unknown labels, not wrong-source ones). Returns
         ``(translated_text, rename_note, source_lines)``.
+
+        *gathered* says whose work the references are: a research this run
+        delegated found them for it; an attached report the run reads only
+        hands them over (``KernelDeps.gathered_reference_ids``).
         """
         deps = kernel_deps()
         raw_child_refs = [dict(ref) for ref in references]
-        trusted_refs = deps.register_references(raw_child_refs)
+        trusted_refs = deps.register_references(raw_child_refs, gathered=gathered)
         registered = {
             str(ref.get("reference_id") or ""): ref for ref in trusted_refs
         }
@@ -2339,7 +2702,11 @@ def build_kernel_tools() -> list[Any]:
         return answer, rename_note, source_lines
 
     def _broken_off_child_report(
-        child_id: str, *, mode: str, reason: str
+        child_id: str,
+        *,
+        mode: str,
+        reason: str,
+        materials: list[tuple[str, str]] | None = None,
     ) -> str:
         """What a subtask that stopped early still hands up.
 
@@ -2388,12 +2755,14 @@ def build_kernel_tools() -> list[Any]:
             references = attach_web_search_lineage(references, raw_ledger)
         if not text and not references:
             return broken_off_child_body(notice, text="", source_lines="")
+        if materials is not None:
+            materials.extend(_child_documents(references))
 
         # Same evidence pipeline as a completed child: the labels are
         # translated in the tool, so the parent can cite these sources
         # like any other.
         text, rename_note, source_lines = _merge_child_evidence(
-            text, references
+            text, references, gathered=True
         )
         return _offload_bulky_result(
             broken_off_child_body(
@@ -2453,13 +2822,23 @@ def build_kernel_tools() -> list[Any]:
         )
 
     def _child_report(
-        child: dict[str, Any], *, mode: str, condensed: bool
+        child: dict[str, Any],
+        *,
+        mode: str,
+        condensed: bool,
+        materials: list[tuple[str, str]] | None = None,
     ) -> str:
         """Return one child's report without discarding provider evidence.
 
         Single-child delegation receives the complete report. Batch delegation
         receives the established bounded summary. In both cases references and
         the producing Websearch Ledger are merged into the parent run.
+
+        A knowledge child hands over what its answer cites, and the notes
+        of its search. *materials* collects the project documents the
+        child's result names, cited or not, for the caller that binds them
+        to its tool message: the text handed over was written from all of
+        them.
         """
         deps = kernel_deps()
         store = deps.run_service.run_store
@@ -2474,10 +2853,13 @@ def build_kernel_tools() -> list[Any]:
                 child["status"],
             )
             return _broken_off_child_report(
-                child_id, mode=mode, reason=reason
+                child_id, mode=mode, reason=reason, materials=materials
             )
         stored_result = store.result(child_id, visible_to=deps.visible_to)
-        from inqtrix.agents.kernel.evidence_read import retained_search_ledger
+        from inqtrix.agents.kernel.evidence_read import (
+            research_evidence_note,
+            retained_search_ledger,
+        )
 
         raw_ledger = retained_search_ledger(deps, child_id, stored_result)
         if isinstance(raw_ledger, dict):
@@ -2487,7 +2869,7 @@ def build_kernel_tools() -> list[Any]:
             from inqtrix.agents.scheduler import project_child_run_outcome
 
             outcome = project_child_run_outcome(
-                store, child_id, 1, visible_to=deps.visible_to
+                store, child_id, visible_to=deps.visible_to
             )
             if outcome is None or outcome.status != "completed":
                 reason = (
@@ -2515,6 +2897,21 @@ def build_kernel_tools() -> list[Any]:
                 for reference in stored_result.get("references", []) or []
                 if isinstance(reference, dict) and reference.get("cited", True)
             ]
+        if materials is not None:
+            # Before any filter: a document the answer drew on without a
+            # citation this code can read still stands behind the text.
+            materials.extend(_child_documents(stored_result.get("references")))
+        if mode == "knowledge":
+            # A knowledge run stores every passage it used and marks them
+            # all as cited. Evidence for this run is what its answer cites,
+            # as for every child: the labels of the whole answer, also where
+            # the bounded summary ends before the sentence that cites one.
+            cited = set(cited_labels(str(stored_result.get("answer", ""))))
+            references = [
+                reference
+                for reference in references
+                if str(reference.get("label") or "") in cited
+            ]
         if isinstance(raw_ledger, dict):
             from inqtrix.evidence import attach_web_search_lineage
 
@@ -2522,14 +2919,17 @@ def build_kernel_tools() -> list[Any]:
                 references, raw_ledger
             )
         text, rename_note, source_lines = _merge_child_evidence(
-            text, references
+            text, references, gathered=True
+        )
+        search_note = (
+            _knowledge_search_note(stored_result) if mode == "knowledge" else ""
         )
         raw_metrics = stored_result.get("metrics")
         metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
         # The parent's transcript gets ONE line per finished child — the
-        # assignment plus the report's head — the same derived line a
-        # mission writes per task, so a kernel run with research children
-        # tells the reader what came back instead of only that a tool ran.
+        # assignment plus the report's head — so a kernel run with research
+        # children tells the reader what came back instead of only that a
+        # tool ran.
         _emit_child_result_line(
             deps,
             child,
@@ -2542,34 +2942,8 @@ def build_kernel_tools() -> list[Any]:
             ),
         )
         coverage = _coverage_words(metrics, "en")
-        memo_note = ""
-        if mode == "workspace_agent":
-            memo = _mission_memo(deps, child_id)
-            memo_note = _mission_memo_note(memo)
-            if memo is not None:
-                # The memo IS this turn's deliverable, whoever's process
-                # wrote it: announce it on the parent stream like an own
-                # write, so the turn lists the file even when the deep-
-                # verify pass leaves it unchanged. The parent resumes in a
-                # later segment after the park and cannot know where the
-                # memo stood before the dispatch, so the hand-over names the
-                # file and its revision only — no diff base, no line counts
-                # (a wrong base would read as a one-step change).
-                payload = artifact_event_payload(memo)
-                for key in ("from_revision", "lines_added", "lines_removed"):
-                    payload.pop(key, None)
-                deps.emit(ARTIFACT_UPDATED_EVENT, payload)
-            # The next model turn gets the one-time advisory: the memo
-            # is the deliverable, the deep-verify pass is the check.
-            deps.post_mission_nudge_pending = True
-        contract = str(metrics.get("evidence_contract_status") or "")
-        evidence_note = (
-            f"\n\nEvidence state of the subtask: {contract}, confidence "
-            f"{int(metrics.get('confidence', 0) or 0)}/10 — name it as an "
-            "open point, do not cite it as evidence."
-            if contract in {"needs_review", "source_context_only"}
-            else ""
-        )
+        evidence_state = research_evidence_note(metrics)
+        evidence_note = f"\n\n{evidence_state}" if evidence_state else ""
         # A budget cut in the child is partial coverage, never "no
         # sources": the model must name the gap instead of starting a
         # second child for sources the first one already had.
@@ -2586,50 +2960,15 @@ def build_kernel_tools() -> list[Any]:
             + rename_note
             + evidence_note
             + coverage_note
-            + (f"\n\nSources:\n{source_lines}" if source_lines else "")
-            + memo_note,
+            + search_note
+            + (f"\n\nSources:\n{source_lines}" if source_lines else ""),
             tool=mode,
             reference_lines=source_lines,
             status_lines="\n\n".join(
-                note.strip() for note in (evidence_note, coverage_note, memo_note)
+                note.strip()
+                for note in (evidence_note, coverage_note, search_note)
                 if note.strip()
             ),
-        )
-
-    def _mission_memo(deps: Any, child_id: str) -> Any:
-        """The session memo a mission child wrote, or None."""
-        if not deps.session_id:
-            return None
-        memo_id = session_memo_artifact_id(deps.session_id, child_id)
-        try:
-            return run_coro(
-                deps.control.get_session_artifact_by_id(
-                    deps.session_id, memo_id
-                )
-            )
-        except ArtifactNotFound:
-            return None
-
-    def _mission_memo_note(memo: Any) -> str:
-        """The mission's memo IS the deliverable — say so to the model.
-
-        Before, the kernel re-synthesized the 20 KB memo into its own
-        canvas (a second, lossy compression) although the memo already
-        is a session document. The note names the document, its id and
-        revision, so the kernel refers to it and only amends it.
-        """
-        if memo is None:
-            return ""
-        return (
-            f"\n\nThe mission's memo is available as the document "
-            f"'{_neutralize(memo.title)}' (artifact_id {memo.artifact_id}, revision "
-            f"{memo.revision}) in this session and is the deliverable of "
-            "this assignment: write no second document with the same "
-            "content; extend or correct it only with new insights via "
-            "write_canvas(artifact_id, expected_revision). Before the "
-            "short conclusion read it in full with read_canvas(artifact_id) "
-            "and cite its evidence labels; then answer in the chat with "
-            "the short conclusion and the reference to the document."
         )
 
     def _await_child_run(
@@ -2639,7 +2978,7 @@ def build_kernel_tools() -> list[Any]:
         question: str,
         agent_overrides: dict[str, Any],
         autonomy: str = "",
-        inherit_requirement: bool = False,
+        web_recency: str | None = None,
     ) -> str:
         """Submit-or-find ONE child run, park until terminal, report."""
         deps = kernel_deps()
@@ -2650,7 +2989,7 @@ def build_kernel_tools() -> list[Any]:
             question=question,
             agent_overrides=agent_overrides,
             autonomy=autonomy,
-            inherit_requirement=inherit_requirement,
+            web_recency=web_recency,
         )
         if isinstance(child, str):
             return child
@@ -2678,11 +3017,14 @@ def build_kernel_tools() -> list[Any]:
         document in THIS run with read_editor_document or
         search_editor_document — unread targets are rejected, and if
         the document changed in the meantime the proposal is refused
-        with a revision conflict (then read again). Every change is an
-        anchored edit object with the fields: position (replace | before
-        | after | append), find (the text to replace/anchor on, exactly
-        as in the document), text (new text), optional quote_before/
-        quote_after (anchor context) and note (reason).
+        with a revision conflict (then read again). A document whose
+        read result says content_mode: collaboration accepts no
+        proposal: do not call this tool for it, describe the change in
+        your answer instead. Every change is an anchored edit object
+        with the fields: position (replace | before | after | append),
+        find (the text to replace/anchor on, exactly as in the
+        document), text (new text), optional quote_before/quote_after
+        (anchor context) and note (reason).
 
         Args:
             document_id: The target document in the editor.
@@ -2690,7 +3032,8 @@ def build_kernel_tools() -> list[Any]:
             summary: One sentence on what the patch does as a whole.
 
         Returns:
-            Patch id and status of the proposal.
+            Patch id and status of the proposal, or the tool error that
+            refused it.
         """
         text = _propose_editor_patch_text(document_id, edits, summary)
         # Anchors and conflict replies quote the document: a proposal that
@@ -2701,6 +3044,7 @@ def build_kernel_tools() -> list[Any]:
     def run_web_research(
         question: str,
         tool_call_id: Annotated[str, InjectedToolCallId],
+        recency: str | None = None,
     ) -> str:
         """Start a multi-step web research as a subtask.
 
@@ -2711,6 +3055,15 @@ def build_kernel_tools() -> list[Any]:
 
         Args:
             question: The complete research task.
+            recency: Optional preference for recent sources: day, week,
+                month or year, counted back from today. The subtask asks
+                its searches to focus on that period; it is a preference,
+                not a filter, so older sources can still appear. Name it
+                when the answer depends on the current state of a public
+                matter (law, authority guidance, standard, market data).
+                Leave it out otherwise: the subtask then judges by the
+                question. A period in the past belongs in the question,
+                not here.
 
         Returns:
             Report of the research run with its source list.
@@ -2750,6 +3103,14 @@ def build_kernel_tools() -> list[Any]:
         report_profile = deps.web_research_profile
         if report_profile is None:
             raise RuntimeError("permitted web research has no profile")
+        window, problem = _child_recency(recency)
+        if problem:
+            # A failure under the one contract of the tool texts: the row
+            # settles as failed and the call is no use of the web.
+            return (
+                f"Tool error (subtask.recency_invalid): {problem}. Name one "
+                "of them or leave recency out. No subtask was started."
+            )
         result = _await_child_run(
             tool_call_id=tool_call_id,
             mode="research",
@@ -2762,121 +3123,144 @@ def build_kernel_tools() -> list[Any]:
             # (the research graph carries no HITL gates, so the field is
             # inert there — consistency, not behavior).
             autonomy=deps.autonomy,
+            web_recency=window,
         )
         deps.record_source_tool_use("web")
         return result
 
-    @tool
-    def run_deep_mission(
-        assignment: str,
-        tool_call_id: Annotated[str, InjectedToolCallId],
-    ) -> str:
-        """Delegate a large assignment to the mission machine.
-
-        Use this tool for assignments with several research strands,
-        cited multi-source evidence or an explicit wish for a report. The
-        mission plans, researches and checks on its own (with its own
-        approvals) and delivers a memo.
-
-        Args:
-            assignment: The complete assignment for the mission.
-
-        Returns:
-            The mission's result memo.
-        """
-        blocked = _require_allowed("run_deep_mission")
-        if blocked:
-            return blocked
-        deps = kernel_deps()
-        return _await_child_run(
-            tool_call_id=tool_call_id,
-            mode="workspace_agent",
-            question=assignment,
-            agent_overrides=inherited_stufe(deps.tier, deps.depth),
-            autonomy=deps.autonomy,
-            # The mission's memo is the deliverable of this run: its
-            # writers must work under the requirement the user attached.
-            inherit_requirement=True,
-        )
-
     def _admit_batch_assignment(
         deps: Any, mode: str
-    ) -> tuple[str, dict[str, Any]] | str:
+    ) -> tuple[str, dict[str, Any], str | None] | str:
         """Per-assignment admission through the EXISTING chokepoints.
 
-        Returns ``(child_mode, agent_overrides)`` or a VISIBLE denial
-        string. Reuses the exact checks of the single-child tools —
-        zero new policy predicates.
+        Returns ``(child_mode, agent_overrides, knowledge_profile)`` or a
+        VISIBLE denial string that opens with the mark of its reason.
+        Reuses the exact checks of the single tools: a research assignment
+        passes the check of ``run_web_research``, a knowledge assignment
+        that of the agent's own knowledge search. A knowledge assignment
+        adds what only a child needs (:func:`knowledge_child_refusal`).
         """
-        if mode == "research":
-            blocked = _require_allowed("run_web_research")
+        if mode == "knowledge":
+            blocked = _require_allowed("search_project_knowledge")
             if blocked:
                 return blocked
-            if not deps.web_research_allowed:
-                return (
-                    "Tool blocked: the selected agent tier does not allow "
-                    "multi-step web research."
-                )
-            profile = deps.web_research_profile
-            if profile is None:
-                raise RuntimeError("permitted web research has no profile")
-            return "research", {
-                "report_profile": profile,
-                **inherited_stufe(deps.tier, deps.depth),
-            }
-        blocked = _require_allowed("run_deep_mission")
+            refusal = knowledge_child_refusal(kernel_child_scope(deps))
+            if refusal:
+                return refusal
+            # The profile of the tier, which a run without a tier has none
+            # of: its child searches with the profile of the knowledge run.
+            profile = (
+                resolve_tier_policy(deps.tier).rag_default_profile
+                if deps.tier
+                else None
+            )
+            return "knowledge", inherited_stufe(deps.tier, deps.depth), profile
+        blocked = _require_allowed("run_web_research")
         if blocked:
             return blocked
-        return "workspace_agent", inherited_stufe(deps.tier, deps.depth)
+        if not deps.web_research_allowed:
+            return (
+                "Tool blocked: the selected agent tier does not allow "
+                "multi-step web research."
+            )
+        profile = deps.web_research_profile
+        if profile is None:
+            raise RuntimeError("permitted web research has no profile")
+        return "research", {
+            "report_profile": profile,
+            **inherited_stufe(deps.tier, deps.depth),
+        }, None
 
-    @tool
+    @tool(response_format="content_and_artifact")
     def delegate_batch(
-        assignments: list[dict[str, str]],
+        assignments: list[dict[str, str | None]],
         tool_call_id: Annotated[str, InjectedToolCallId],
-    ) -> str:
+    ) -> tuple[str, dict[str, Any]]:
         """Start up to 3 subtasks IN PARALLEL and wait for all of them.
 
         Each element: {"objective": <complete assignment>, "mode":
-        "research" | "deep_mission"}. Use this tool instead of several
-        single subtask calls in one turn — the single tools remain right
-        for ONE subtask. Per assignment you receive a compact summary
-        (max. 300 words) with sources and the child run id; the children
-        run concurrently. Note: children consume their own token budget.
+        "research" | "knowledge"}. research: a multi-step
+        web research. knowledge: ONE question to the project knowledge that
+        stands on its own, answered from the collections of this run with
+        cited passages. A research assignment may add "recency": a
+        preference for sources from the past day | week | month | year, as
+        in run_web_research. Use this tool instead of several single
+        subtask calls in one turn — the single tools remain right for ONE
+        subtask. Per assignment you receive a compact summary (max. 300
+        words) with sources and the child run id; the children run
+        concurrently. Note: children consume their own token budget.
 
         Args:
             assignments: 1-3 independent assignments with objective and
-                mode.
+                mode, a research assignment optionally with recency.
 
         Returns:
             One result block per assignment, in assignment order.
         """
         blocked = _require_allowed("delegate_batch")
         if blocked:
-            return blocked
+            return blocked, {}
         deps = kernel_deps()
         if not isinstance(assignments, list) or not (
-            1 <= len(assignments) <= _MAX_BATCH_ASSIGNMENTS
+            1 <= len(assignments) <= MAX_BATCH_ASSIGNMENTS
         ):
             return (
-                "Invalid batch: 1 to "
-                f"{_MAX_BATCH_ASSIGNMENTS} assignments expected."
-            )
-        admitted: list[tuple[str, str, dict[str, Any]]] = []
+                "Tool error (subtask.batch_invalid): 1 to "
+                f"{MAX_BATCH_ASSIGNMENTS} assignments expected. No subtask "
+                "was started."
+            ), {}
+        admitted: list[_BatchChild] = []
         for index, assignment in enumerate(assignments):
             objective = str(
                 (assignment or {}).get("objective") or ""
             ).strip()
-            mode = str((assignment or {}).get("mode") or "").strip()
-            if not objective or mode not in ("research", "deep_mission"):
+            mode = batch_assignment_mode(assignment)
+            if not objective or mode not in _BATCH_MODES:
                 return (
-                    f"Invalid assignment {index + 1}: objective and "
-                    "mode (research | deep_mission) are mandatory."
-                )
+                    "Tool error (subtask.assignment_invalid): assignment "
+                    f"{index + 1}: objective and mode "
+                    f"({' | '.join(_BATCH_MODES)}) are mandatory. No subtask "
+                    "was started."
+                ), {}
+            # Every assignment is checked before the first child is
+            # submitted: a batch with one unusable assignment starts none
+            # of them. Every refusal of the batch is a failure under the
+            # one contract of the tool texts.
+            window, problem = _child_recency((assignment or {}).get("recency"))
+            if (window or problem) and mode != "research":
+                return (
+                    "Tool error (subtask.assignment_invalid): assignment "
+                    f"{index + 1}: recency applies to a research assignment "
+                    "only; a knowledge assignment takes none. "
+                    "Leave it out. No subtask was started."
+                ), {}
+            if problem:
+                return (
+                    "Tool error (subtask.assignment_invalid): assignment "
+                    f"{index + 1}: {problem}. Name one of them or leave "
+                    "recency out. No subtask was started."
+                ), {}
             outcome = _admit_batch_assignment(deps, mode)
             if isinstance(outcome, str):
-                return f"Assignment {index + 1}: {outcome}"
-            child_mode, overrides = outcome
-            admitted.append((objective, child_mode, overrides))
+                # The denial keeps the one mark of its reason in front, so
+                # the batch reads as the failed call it is.
+                # A refusal without a mark of its own is a block.
+                mark = next(
+                    (
+                        prefix
+                        for prefix in _ADMISSION_MARKS
+                        if outcome.startswith(prefix)
+                    ),
+                    _ADMISSION_MARKS[-1],
+                )
+                return (
+                    f"{mark}assignment {index + 1}: "
+                    f"{outcome.removeprefix(mark)} No subtask was started."
+                ), {}
+            child_mode, overrides, profile = outcome
+            admitted.append(
+                _BatchChild(objective, child_mode, overrides, window, profile)
+            )
         # Submit ALL children BEFORE the single park: the whole batch is
         # covered by ONE interrupt by construction — the multi-interrupt
         # crash class (and its orphan race) cannot occur here. A slot
@@ -2884,16 +3268,16 @@ def build_kernel_tools() -> list[Any]:
         # already-submitted siblings are still awaited and reported —
         # never abandoned mid-batch.
         slots: list[dict[str, Any] | str] = []
-        for index, (objective, child_mode, overrides) in enumerate(
-            admitted
-        ):
+        for index, planned in enumerate(admitted):
             child = submit_or_find_child(
                 kernel_child_scope(),
                 origin_key=f"{tool_call_id}:{index}",
-                mode=child_mode,
-                question=objective,
-                agent_overrides=overrides,
+                mode=planned.mode,
+                question=planned.objective,
+                agent_overrides=planned.overrides,
                 autonomy=deps.autonomy,
+                web_recency=planned.window,
+                knowledge_profile=planned.profile,
             )
             if isinstance(child, str):
                 log.warning(
@@ -2914,13 +3298,20 @@ def build_kernel_tools() -> list[Any]:
                 else slot
                 for slot in slots
             ]
-        if any(mode == "research" for _, mode, _ in admitted):
-            # Counter parity with rehydration, which counts ONE web use
-            # per delegate_batch ToolMessage NAME — so live records once
-            # per batch, never per child.
-            deps.record_source_tool_use("web")
+        # Each source the batch reaches counts once, never per child. The
+        # artifact names them, so a resumed run rebuilds the same counters
+        # from the stored message.
+        modes = {planned.mode for planned in admitted}
+        sources = [
+            source
+            for source, child_mode in (("knowledge", "knowledge"), ("web", "research"))
+            if child_mode in modes
+        ]
+        for source in sources:
+            deps.record_source_tool_use(source)
         blocks: list[str] = []
-        for index, ((_, child_mode, _overrides), slot) in enumerate(
+        materials: list[tuple[str, str]] = []
+        for index, (planned, slot) in enumerate(
             zip(admitted, slots, strict=True)
         ):
             if isinstance(slot, str):
@@ -2931,9 +3322,17 @@ def build_kernel_tools() -> list[Any]:
                 continue
             blocks.append(
                 f"## Subtask {index + 1}\n"
-                + _child_report(slot, mode=child_mode, condensed=True)
+                + _child_report(
+                    slot, mode=planned.mode, condensed=True, materials=materials
+                )
             )
-        return "\n\n".join(blocks)
+        # The reports carry text written from project documents: the
+        # documents the children's results name bind the transcript of
+        # this run.
+        return "\n\n".join(blocks), {
+            SOURCE_USES: sources,
+            **(_knowledge_material(*materials) if materials else {}),
+        }
 
 
     @tool
@@ -3043,7 +3442,7 @@ def build_kernel_tools() -> list[Any]:
 
         return (
             f"{marker}\n{SKILL_INPUTS_RESOLVED_MARKER}\n"
-            f"{build_skills_block([record], {record.id: answers})}"
+            f"{build_skills_block([record], {record.id: answers}, viewer_user_id=getattr(deps.principal, 'user_id', None))}"
         )
 
     return [
@@ -3053,6 +3452,7 @@ def build_kernel_tools() -> list[Any]:
         search_project_knowledge,
         read_project_document,
         cite_document_passages,
+        analyze_document,
         web_instant,
         read_canvas,
         read_research_report,
@@ -3062,7 +3462,6 @@ def build_kernel_tools() -> list[Any]:
         search_editor_document,
         propose_editor_patch,
         run_web_research,
-        run_deep_mission,
         delegate_batch,
         load_skill,
     ]

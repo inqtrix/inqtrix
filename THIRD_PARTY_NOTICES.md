@@ -13,7 +13,7 @@ and the canonical npm `package-lock.json`.
 |---|---:|
 | python | 86 |
 | python-dev | 29 |
-| react-prod | 478 |
+| react-prod | 477 |
 | react-dev | 192 |
 | node-prod | 5 |
 | node-dev | 32 |
@@ -57,13 +57,13 @@ and the canonical npm `package-lock.json`.
 | python | `jsonpointer` | 3.1.1 | BSD License | python package metadata: classifiers |
 | python | `langchain-core` | 1.6.3 | MIT License | python package metadata: classifiers |
 | python | `langchain-protocol` | 0.0.18 | MIT License | python package metadata: classifiers |
-| python | `langgraph` | 1.2.11 | MIT | python package metadata: License-Expression |
+| python | `langgraph` | 1.2.20 | MIT | python package metadata: License-Expression |
 | python | `langgraph-checkpoint` | 4.3.1 | MIT | python package metadata: License-Expression |
-| python | `langgraph-prebuilt` | 1.1.0 | MIT | python package metadata: License-Expression |
+| python | `langgraph-prebuilt` | 1.1.1 | MIT | python package metadata: License-Expression |
 | python | `langgraph-sdk` | 0.4.10 | MIT | python package metadata: License-Expression |
 | python | `langsmith` | 0.12.4 | MIT | python package metadata: License |
 | python | `magika` | 0.6.2 | Apache Software License | python package metadata: classifiers |
-| python | `mako` | 1.3.12 | MIT License | python package metadata: classifiers |
+| python | `mako` | 1.4.3 | MIT | python package metadata: License-Expression |
 | python | `markdown-it-py` | 4.0.0 | MIT License | python package metadata: classifiers |
 | python | `markdownify` | 1.2.2 | MIT License | python package metadata: classifiers |
 | python | `markitdown` | 0.1.6 | MIT | python package metadata: License-Expression |
@@ -94,7 +94,7 @@ and the canonical npm `package-lock.json`.
 | python | `six` | 1.17.0 | MIT License | python package metadata: classifiers |
 | python | `sniffio` | 1.3.1 | Apache Software License / MIT License | python package metadata: classifiers |
 | python | `soupsieve` | 3.0.4 | MIT | python package metadata: License-Expression |
-| python | `sqlalchemy` | 2.0.50 | MIT | python package metadata: License |
+| python | `sqlalchemy` | 2.0.57 | MIT | python package metadata: License |
 | python | `starlette` | 1.10.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `tenacity` | 9.1.4 | Apache Software License | python package metadata: classifiers |
 | python | `tldextract` | 5.3.2 | BSD-3-Clause | python package metadata: License-Expression |
@@ -125,12 +125,12 @@ and the canonical npm `package-lock.json`.
 | python-dev | `pluggy` | 1.6.0 | MIT License | python package metadata: classifiers |
 | python-dev | `portalocker` | 3.2.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python-dev | `prometheus-client` | 0.25.0 | Apache-2.0 AND BSD-2-Clause | python package metadata: License-Expression |
-| python-dev | `psycopg` | 3.3.4 | LGPL-3.0-only | python package metadata: License-Expression |
-| python-dev | `psycopg-pool` | 3.3.1 | LGPL-3.0-only | python package metadata: License-Expression |
+| python-dev | `psycopg` | 3.3.8 | LGPL-3.0-only | python package metadata: License-Expression |
+| python-dev | `psycopg-pool` | 3.3.3 | LGPL-3.0-only | python package metadata: License-Expression |
 | python-dev | `pytest` | 9.2.0 | MIT | python package metadata: License-Expression |
 | python-dev | `pytest-asyncio` | 1.3.0 | Apache-2.0 | python package metadata: License-Expression |
 | python-dev | `pytest-recording` | 0.14.0 | MIT | python package metadata: License-Expression |
-| python-dev | `qdrant-client` | 1.19.0 | Apache Software License | python package metadata: classifiers |
+| python-dev | `qdrant-client` | 1.20.0 | Apache Software License | python package metadata: classifiers |
 | python-dev | `redis` | 8.0.0 | MIT | python package metadata: License-Expression |
 | python-dev | `ruff` | 0.16.0 | MIT | python package metadata: License-Expression |
 | python-dev | `sortedcontainers` | 2.4.0 | Apache Software License | python package metadata: classifiers |
@@ -154,7 +154,6 @@ and the canonical npm `package-lock.json`.
 | react-prod | `@codemirror/language` | 6.12.3 | MIT | package-lock.json metadata |
 | react-prod | `@codemirror/lint` | 6.9.7 | MIT | package-lock.json metadata |
 | react-prod | `@codemirror/search` | 6.7.1 | MIT | package-lock.json metadata |
-| react-prod | `@codemirror/state` | 6.6.0 | MIT | package-lock.json metadata |
 | react-prod | `@codemirror/state` | 6.7.1 | MIT | package-lock.json metadata |
 | react-prod | `@codemirror/view` | 6.43.0 | MIT | package-lock.json metadata |
 | react-prod | `@floating-ui/core` | 1.8.0 | MIT | package-lock.json metadata |
@@ -849,3 +848,45 @@ and the canonical npm `package-lock.json`.
 | node-dev | `esbuild` | 0.28.1 | MIT | package-lock.json metadata |
 | node-dev | `playwright` | 1.61.1 | Apache-2.0 | package-lock.json metadata |
 | node-dev | `playwright-core` | 1.61.1 | Apache-2.0 | package-lock.json metadata |
+
+## Copied Code
+
+Code copied into this repository from other projects, as declared in `copied-code.json`. Its license text stands next to it.
+
+### Lucide icon data
+
+- Source: https://github.com/lucide-icons/lucide
+- License: ISC AND MIT, text in `apps/research-desk/src/components/icons/LICENSE-lucide.md`
+- Origin: SVG path data of the icons built with createIcon, and the shape of the icon component of lucide-react. 63 of the icons are those of lucide-react v0.554.0 that also lie in apps/research-desk/src/assets/icons/lucide; the version of the others is not recorded.
+- Paths:
+  - `apps/research-desk/src/components/icons/createIcon.tsx`
+  - `apps/research-desk/src/components/icons/index.tsx`
+
+### Lucide icon files
+
+- Source: https://github.com/lucide-icons/lucide
+- License: ISC AND MIT, text in `apps/research-desk/src/assets/icons/lucide/LICENSE.md`
+- Origin: SVG files of lucide-react v0.554.0.
+- Paths:
+  - `apps/research-desk/src/assets/icons/lucide`
+
+### shadcn/ui
+
+- Source: https://github.com/shadcn-ui/ui
+- License: MIT, text in `apps/research-desk/src/components/ui/LICENSE-shadcn-ui.md`
+- Origin: Components of the new-york style of the Tailwind CSS 3 registry (apps/www/registry/new-york/ui), partly changed in this project. The commit of the original copy is not recorded; compared against 84bd724d97005f98b54d064aed5883b79aac1fd3, the last commit that holds this registry.
+- Paths:
+  - `apps/research-desk/src/components/ui/badge.tsx`
+  - `apps/research-desk/src/components/ui/button.tsx`
+  - `apps/research-desk/src/components/ui/dropdown-menu.tsx`
+  - `apps/research-desk/src/components/ui/input.tsx`
+  - `apps/research-desk/src/components/ui/progress.tsx`
+  - `apps/research-desk/src/components/ui/resizable.tsx`
+  - `apps/research-desk/src/components/ui/scroll-area.tsx`
+  - `apps/research-desk/src/components/ui/select.tsx`
+  - `apps/research-desk/src/components/ui/separator.tsx`
+  - `apps/research-desk/src/components/ui/skeleton.tsx`
+  - `apps/research-desk/src/components/ui/switch.tsx`
+  - `apps/research-desk/src/components/ui/tabs.tsx`
+  - `apps/research-desk/src/components/ui/textarea.tsx`
+  - `apps/research-desk/src/components/ui/tooltip.tsx`

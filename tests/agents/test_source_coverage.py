@@ -38,7 +38,6 @@ from inqtrix.agents.control_memory import MemoryAgentControlStore
 from inqtrix.agents.kernel.algorithm import _checkpointed_source_coverage
 from inqtrix.agents.kernel.deps import KernelDeps, set_kernel_deps
 from inqtrix.agents.kernel.middleware import (
-    POST_MISSION_NUDGE_TEXT,
     SKILL_INPUTS_RESOLVED_FLAG,
     SKILL_INPUTS_RESOLVED_MARKER,
     SUFFICIENCY_NUDGE_FLAG,
@@ -260,13 +259,12 @@ def test_judge_prompt_lists_sources_under_reading_only_when_something_was_read()
 
 def test_every_harness_authored_transcript_message_names_its_provenance(monkeypatch) -> None:
     assert HARNESS_NOTE_PREFIX.startswith("Harness note")
-    assert POST_MISSION_NUDGE_TEXT.startswith(HARNESS_NOTE_PREFIX)
 
     from inqtrix.agents import skills_runtime
     from inqtrix.agents.kernel import middleware
 
     monkeypatch.setattr(middleware, "resolve_kernel_skill_inputs", lambda skill, clarification_scope: {})
-    monkeypatch.setattr(skills_runtime, "build_skills_block", lambda skills, resolved: "SKILL BLOCK")
+    monkeypatch.setattr(skills_runtime, "build_skills_block", lambda skills, resolved, **_: "SKILL BLOCK")
     deps = make_deps(StructuredJudgeLLM())
     deps.skills = [SimpleNamespace(id="skill_a")]
     set_kernel_deps(deps)

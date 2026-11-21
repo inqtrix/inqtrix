@@ -22,6 +22,7 @@ import * as Y from 'yjs'
 import { AppProviders } from '@/app/AppProviders'
 import {
   createEditorCollaborationSession,
+  saveEditorDocument,
   type EditorCollaborationCommentThread,
 } from '@/api/inqtrixClient'
 import { Info } from '@/components/icons'
@@ -100,7 +101,12 @@ import {
 import type {
   CollaborationCommentsHandle,
 } from '../useCollaborationComments'
-import { planEditorDocumentAutosave } from '../useEditorHistoryApi'
+import { serverDocumentPayload } from '../editorSync'
+import {
+  planEditorDocumentAutosave,
+  type EditorDocumentMergeOutcome,
+  type EditorDocumentPushOutcome,
+} from '../useEditorHistoryApi'
 import {
   createInstructionSuggestionRecords,
   editorAiReadOnlyReason,
@@ -132,6 +138,10 @@ declare global {
 
 const noOp = () => undefined
 const noOpAsync = async () => undefined
+/** For pages whose documents never come from a server: nothing to merge. */
+const noServerMerge = async (): Promise<EditorDocumentMergeOutcome> => {
+  throw new Error('This page holds no server documents to merge.')
+}
 const textImprovement = { enabled: false, workspaceId: 'browser-fixture' }
 const fixtureModuleStartedAt = performance.now()
 
@@ -175,7 +185,7 @@ function Surface({
   collaborationReviewPolicy?: Parameters<typeof MarkdownEditorSurface>[0]['collaborationReviewPolicy']
   comments?: Parameters<typeof MarkdownEditorSurface>[0]['comments']
   document: EditorDocumentRecord
-  onChange?: (contentMarkdown: string) => void
+  onChange?: (contentMarkdown: string, baseContentMarkdown: string) => void
   onEditorReady: Parameters<typeof MarkdownEditorSurface>[0]['onEditorReady']
   suggestions?: Parameters<typeof MarkdownEditorSurface>[0]['suggestions']
 }) {
@@ -749,6 +759,7 @@ function AiPublicationFixture() {
     dispatch,
     handedOverDiscussions: [],
     locale: 'de',
+    mergeServerDocument: noServerMerge,
     onGlobalSuccess: noOp,
     selectedModelTier: null,
     state,
@@ -877,6 +888,291 @@ function AiPublicationFixture() {
   )
 }
 
+const AGENT_PATCH_DOCUMENT_ID = 'agent-patch-document'
+
+function agentPatchReviewState(): ProjectState {
+  const base = createEmptyProjectState()
+  const document: EditorDocumentRecord = {
+    access: { mode: 'owner', permission: 'edit' },
+    contentMarkdown: [
+      '# Projektplan',
+      '',
+      'Der Bau dauert ca. sechs Wochen.',
+      '',
+      'Die Kosten liegen bei 18.000 Euro.',
+      '',
+      'Das Team trifft sich montags.',
+    ].join('\n'),
+    createdAt: '2026-07-15T08:00:00.000Z',
+    folderId: null,
+    id: AGENT_PATCH_DOCUMENT_ID,
+    metadataRevision: 1,
+    revision: 7,
+    // Saved on the server, so opening it asks the server for the agent's
+    // pending patches.
+    serverSynced: true,
+    source: 'blank',
+    title: 'Projektplan.md',
+    updatedAt: '2026-07-15T08:00:00.000Z',
+  }
+  return {
+    ...base,
+    dirty: false,
+    editorDocumentOrder: [document.id],
+    editorDocuments: { [document.id]: document },
+    editorUi: {
+      ...base.editorUi,
+      activeDocumentId: document.id,
+      openDocumentIds: [document.id],
+    },
+  }
+}
+
+/**
+ * A Markdown document whose suggestions are decided on the card of the
+ * document changes, wired as the editor workspace wires it: the real editor
+ * surface, the suggestion hook, and the card with the hook's own handlers.
+ * Opening the document mirrors the agent patches the server holds as
+ * pending, one group per patch; the page's routes answer the patch
+ * endpoints. The workspace's immediate save is a stand-in that saves through
+ * the same endpoint; `save=none` leaves it out, as a desk without project
+ * sync runs. The toolbar sends an instruction through the hook's own run,
+ * whose answer the page's route gives, adds suggestions of the editor's own
+ * assistant as such a run creates them (neither reaches a patch endpoint),
+ * lets a suggestion's passage change and saves the project. The outputs name
+ * each suggestion's agent patch and how many suggestions the next
+ * instruction replaces.
+ */
+function AgentPatchReviewFixture() {
+  const immediateSave = new URLSearchParams(window.location.search).get('save') !== 'none'
+  const [state, dispatch] = useReducer(researchDeskReducer, undefined, agentPatchReviewState)
+  const document = state.editorDocuments[AGENT_PATCH_DOCUMENT_ID]
+  const collaboration = useCollaborationDocument({
+    active: true,
+    apiKey: undefined,
+    document,
+    workspaceId: 'browser-fixture',
+  })
+  const [editor, setEditor] = useState<Editor | null>(null)
+  // Bodies the editor emitted itself: a suggestion applied in the editor is
+  // one, a body adopted from the server is none.
+  const [editorBodyChanges, setEditorBodyChanges] = useState(0)
+  const documentsRef = useRef(state.editorDocuments)
+  documentsRef.current = state.editorDocuments
+  // The immediate save as a stand-in: it saves the document's current body
+  // the way the autosave saves it and answers with the saved revision. A
+  // second writer is the concurrent-writers page's case, with the real
+  // sync hook.
+  const flushDocument = useCallback(async (
+    documentId: string,
+  ): Promise<EditorDocumentPushOutcome> => {
+    const record = documentsRef.current[documentId]
+    if (!record) return { kind: 'skipped' }
+    const saved = await saveEditorDocument(
+      record.id,
+      serverDocumentPayload(record),
+      { workspaceId: 'browser-fixture' },
+    )
+    dispatch({
+      contentMarkdown: record.contentMarkdown,
+      documentId: record.id,
+      revision: saved.revision,
+      type: 'adoptEditorDocumentRevision',
+    })
+    return {
+      contentMarkdown: record.contentMarkdown,
+      kind: 'saved',
+      metadataRevision: saved.metadata_revision,
+      revision: saved.revision,
+    }
+  }, [])
+  // The workspace's merge as a stand-in: the same reducer action, with the
+  // copy's id and title made here. This page saves no copy, and the decision
+  // that calls it does not read the outcome.
+  const mergeServerDocument = useCallback(async (
+    documentId: string,
+    server: EditorDocumentRecord,
+  ): Promise<EditorDocumentMergeOutcome> => {
+    const at = new Date().toISOString()
+    dispatch({
+      at,
+      conflictCopy: { id: `${documentId}-conflict-copy-${at}`, title: `${server.title} (Konfliktkopie)` },
+      documentId,
+      observed: null,
+      server: {
+        contentMarkdown: server.contentMarkdown,
+        folderId: server.folderId,
+        revision: server.revision,
+        title: server.title,
+      },
+      type: 'mergeServerEditorDocument',
+    })
+    return { kind: 'merged' }
+  }, [])
+  const controller = useEditorSuggestions({
+    activeDocument: document,
+    activeEditor: editor,
+    attachedCommentIds: [],
+    attachedRefs: [],
+    capabilities: null,
+    collaboration,
+    comments: [],
+    dispatch,
+    flushDocument: immediateSave ? flushDocument : undefined,
+    handedOverDiscussions: [],
+    locale: 'de',
+    mergeServerDocument,
+    onGlobalSuccess: noOp,
+    selectedModelTier: null,
+    state,
+  })
+  const assistantRuns = useRef(0)
+  // Two suggestions of one assistant run, created as the run creates them:
+  // a group of their own, replacing those of the run before.
+  const seedAssistantSuggestions = () => {
+    if (!editor) throw new Error('The editor is not ready.')
+    const now = new Date().toISOString()
+    assistantRuns.current += 1
+    const groupId = `assistant-suggestion-group-${assistantRuns.current}`
+    const suggestions = createInstructionSuggestionRecords({
+      activeEditor: editor,
+      document,
+      groupId,
+      locale: 'de',
+      now,
+      proposal: {
+        assistantMessage: '',
+        edits: [
+          {
+            find: 'Projektplan',
+            note: 'Titel geändert',
+            position: 'replace',
+            quote_after: '',
+            quote_before: '',
+            text: 'Bauplan',
+          },
+          {
+            find: 'montags',
+            note: 'Termin verschoben',
+            position: 'replace',
+            quote_after: '',
+            quote_before: '',
+            text: 'freitags',
+          },
+        ],
+      },
+    })
+    dispatch({
+      group: {
+        assistantMessage: '',
+        createdAt: now,
+        documentId: document.id,
+        id: groupId,
+        origin: { kind: 'global_run' },
+      },
+      replacesPreviousInstructionRun: true,
+      suggestions,
+      type: 'createEditorSuggestionGroup',
+    })
+  }
+  const copy = editorCopy.de
+  const changes = controller.documentSuggestions.filter((suggestion) => (
+    suggestion.status === 'pending' || suggestion.status === 'stale'
+  ))
+  return (
+    <main className="h-screen overflow-auto bg-background p-4">
+      <div className="flex flex-wrap gap-2 t-meta-sm" role="toolbar">
+        <button
+          data-testid="instruction-run"
+          disabled={!editor || controller.isGlobalRunning}
+          onClick={() => void controller.handleInstructionRun('Überarbeite das Dokument.')}
+          type="button"
+        >
+          Send instruction
+        </button>
+        <button
+          data-testid="assistant-seed"
+          disabled={!editor}
+          onClick={seedAssistantSuggestions}
+          type="button"
+        >
+          Seed assistant suggestions
+        </button>
+        <button
+          data-testid="suggestion-mark-stale"
+          onClick={() => {
+            // The last open suggestion goes stale, as when its passage changed.
+            const open = changes.filter((suggestion) => suggestion.status === 'pending').at(-1)
+            if (open) dispatch({ suggestionId: open.id, type: 'markEditorSuggestionStale' })
+          }}
+          type="button"
+        >
+          Mark last suggestion stale
+        </button>
+        <output data-testid="suggestion-statuses">
+          {controller.documentSuggestions
+            .map((suggestion) => `${suggestion.serverPatch
+              ? `${suggestion.serverPatch.patchId}/${suggestion.serverPatch.editId}`
+              : 'assistant'}:${suggestion.status}`)
+            .join(',')}
+        </output>
+        <output data-testid="replaceable-count">{controller.replaceableSuggestionCount}</output>
+        <button
+          data-testid="project-save"
+          onClick={() => dispatch({
+            connection: state.connection,
+            savedAt: new Date().toISOString(),
+            type: 'markProjectSaved',
+          })}
+          type="button"
+        >
+          Save project
+        </button>
+        <output data-testid="document-revision">{document.revision}</output>
+        <output data-testid="editor-body-changes">{editorBodyChanges}</output>
+        <output data-testid="project-dirty">{state.dirty ? 'dirty' : 'clean'}</output>
+      </div>
+      <section className="mt-3 h-64 overflow-hidden border border-border" data-testid="review-surface">
+        <Surface
+          collaboration={null}
+          document={document}
+          onChange={(contentMarkdown, baseContentMarkdown) => {
+            setEditorBodyChanges((count) => count + 1)
+            dispatch({
+              baseContentMarkdown,
+              contentMarkdown,
+              documentId: document.id,
+              type: 'updateEditorDocumentMarkdown',
+            })
+          }}
+          onEditorReady={setEditor}
+        />
+      </section>
+      <section className="mt-3 w-96" data-testid="review-changes">
+        <EditorDocumentChangesSection
+          labels={{
+            accept: copy.accept,
+            acceptAll: copy.acceptAll,
+            documentChanges: copy.documentChanges,
+            proposedChange: copy.proposedChange,
+            reject: copy.reject,
+            rejectAll: copy.rejectAll,
+            stale: copy.suggestionStale,
+          }}
+          onAcceptGroup={(groupId) => void controller.handleAcceptSuggestionGroup(groupId)}
+          onAcceptSuggestion={(suggestion) => void controller.handleAcceptSuggestion(suggestion)}
+          onRejectGroup={(groupId) => void controller.handleRejectSuggestionGroup(groupId)}
+          onRejectSuggestion={(suggestionId) => void controller.handleRejectSuggestion(suggestionId)}
+          onSelectSuggestion={noOp}
+          publishDisabledReason={controller.suggestionPublishDisabledReason}
+          suggestionErrors={controller.suggestionErrors}
+          suggestions={changes}
+        />
+      </section>
+    </main>
+  )
+}
+
 function activationState(): ProjectState {
   const base = createEmptyProjectState()
   const document: EditorDocumentRecord = {
@@ -960,9 +1256,10 @@ function ActivationFixture() {
         <Surface
           collaboration={null}
           document={document}
-          onChange={(contentMarkdown) => {
+          onChange={(contentMarkdown, baseContentMarkdown) => {
             setBodyChangeCount((count) => count + 1)
             dispatch({
+              baseContentMarkdown,
               contentMarkdown,
               documentId: document.id,
               type: 'updateEditorDocumentMarkdown',
@@ -2244,6 +2541,7 @@ function InstructionAnswerSwitchFixture() {
     dispatch,
     handedOverDiscussions: [],
     locale: 'de',
+    mergeServerDocument: noServerMerge,
     // A request that went out empties the composer, as in the workspace.
     onGlobalSuccess: () => composerRef.current?.clear(),
     selectedModelTier: null,
@@ -2386,6 +2684,8 @@ const fixture = scenario === 'switch'
     ? <CollaborationWriterFixture />
   : scenario === 'ai-publication'
     ? <AiPublicationFixture />
+  : scenario === 'agent-patch-review'
+    ? <AgentPatchReviewFixture />
   : scenario === 'activation'
     ? <ActivationFixture />
     : scenario === 'initial-suggest-policy'

@@ -861,7 +861,7 @@ def test_metadata_backed_text_call_preserves_controls_and_counts_once(exporter_a
 
 
 # ------------------------------------------------------------------ #
-# Purpose / run / task attribution
+# Purpose / run attribution
 # ------------------------------------------------------------------ #
 
 
@@ -871,9 +871,8 @@ def test_bound_purpose_lands_on_llm_search_and_embedding_spans(
     """Every provider span says which call site made the call.
 
     The wrappers are the one wrap point and cannot know their caller, so
-    the caller binds its purpose; without it a mission trace is a list
-    of anonymous text_completion rows (32 unattributed calls, 514 k
-    tokens in the reviewed Tief run).
+    the caller binds its purpose; without it a trace is a list of
+    anonymous text_completion rows.
     """
     from inqtrix.observability.context import bind_purpose
 
@@ -885,7 +884,7 @@ def test_bound_purpose_lands_on_llm_search_and_embedding_spans(
     embeddings = instrument_embeddings(
         FakeEmbeddings(), policy=SUMMARY, tracer_provider=provider
     )
-    with bind_purpose("agent_plan", task_id="t1", task_kind="web_instant"):
+    with bind_purpose("agent_kernel"):
         llm.complete_with_metadata("why?")
         search.search("find things")
         embeddings.embed_query("q")
@@ -893,11 +892,9 @@ def test_bound_purpose_lands_on_llm_search_and_embedding_spans(
     assert len(spans) == 3
     for span in spans:
         attrs = dict(span.attributes)
-        assert attrs["inqtrix.purpose"] == "agent_plan", span.name
-        assert attrs["inqtrix.task_id"] == "t1", span.name
-        assert attrs["inqtrix.task_kind"] == "web_instant", span.name
+        assert attrs["inqtrix.purpose"] == "agent_kernel", span.name
         # Mirrored into the filterable Langfuse namespace.
-        assert attrs["langfuse.observation.metadata.purpose"] == "agent_plan"
+        assert attrs["langfuse.observation.metadata.purpose"] == "agent_kernel"
 
 
 def test_purpose_is_absent_when_unbound_and_never_leaks(
@@ -916,22 +913,19 @@ def test_purpose_is_absent_when_unbound_and_never_leaks(
     assert "langfuse.observation.metadata.purpose" not in attrs
 
 
-def test_nested_bind_narrows_the_purpose_but_keeps_the_task(
-    exporter_and_provider,
-):
-    """A task span binds the task; the structured-call helper narrows the
-    purpose to its node without losing the task attribution."""
+def test_nested_bind_narrows_the_purpose(exporter_and_provider):
+    """The structured-call helper narrows the purpose of an enclosing bind
+    to its node."""
     from inqtrix.observability.context import bind_purpose
 
     exporter, provider = exporter_and_provider
     llm = _wrap_llm(SUMMARY, provider)
-    with bind_purpose("web_instant", task_id="t7", task_kind="web_instant"):
+    with bind_purpose("web_instant"):
         with bind_purpose("agent_citation_repair"):
             llm.complete_with_metadata("repair")
     (span,) = exporter.get_finished_spans()
     attrs = dict(span.attributes)
     assert attrs["inqtrix.purpose"] == "agent_citation_repair"
-    assert attrs["inqtrix.task_id"] == "t7"
 
 
 def test_run_id_from_the_log_context_lands_on_provider_spans(
@@ -954,9 +948,9 @@ def test_run_id_from_the_log_context_lands_on_provider_spans(
 
 
 def test_purpose_survives_copy_context_fan_out(exporter_and_provider):
-    """The mission fan-out submits pool work through copy_context(); the
-    bound purpose must travel with it or every parallel call is
-    anonymous again."""
+    """Pool work (the windows of a document analysis) is submitted through
+    copy_context(); the bound purpose must travel with it or every
+    parallel call is anonymous again."""
     import contextvars
     from concurrent.futures import ThreadPoolExecutor
 
@@ -964,7 +958,7 @@ def test_purpose_survives_copy_context_fan_out(exporter_and_provider):
 
     exporter, provider = exporter_and_provider
     llm = _wrap_llm(SUMMARY, provider)
-    with bind_purpose("claim_extract", task_id="t2"):
+    with bind_purpose("claim_extract"):
         with ThreadPoolExecutor(max_workers=1) as pool:
             pool.submit(
                 contextvars.copy_context().run,
@@ -974,7 +968,6 @@ def test_purpose_survives_copy_context_fan_out(exporter_and_provider):
     (span,) = exporter.get_finished_spans()
     attrs = dict(span.attributes)
     assert attrs["inqtrix.purpose"] == "claim_extract"
-    assert attrs["inqtrix.task_id"] == "t2"
 
 
 def test_structured_call_binds_its_node_as_the_purpose(exporter_and_provider):

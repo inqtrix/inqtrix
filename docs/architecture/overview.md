@@ -306,7 +306,7 @@ All strategy and provider customisations are passed via `AgentConfig`; no subcla
 - [Library API](library-api.md)
 - [Data architecture](data-architecture.md) -- where each kind of data lives and why (Postgres source of truth, lean Qdrant, object store, Valkey, browser), the storage matrix, the local-first vs server-persistent split, and the project-persistence tier.
 - [Knowledge engine](knowledge-engine.md) -- the second engine (`mode=knowledge`): hybrid retrieval, RRF, the gate loop, and grounding.
-- [Agent platform](agent-platform.md) -- the workspace agent (`mode=workspace_agent`): staged phase machine, plans and approvals, child research runs, memo artifact.
+- [Agent platform](agent-platform.md) -- the Agent Desk and its kernel (`mode=agent_kernel`), and what stays readable of runs of the retired mission engine (`mode=workspace_agent`).
 - [Nodes](websearch/nodes.md)
 - [Runs API](../extending/runs-api.md)
 - [Providers overview](../configuration/providers.md)

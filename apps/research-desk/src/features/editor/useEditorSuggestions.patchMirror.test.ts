@@ -45,6 +45,7 @@ function render(args: Partial<UseEditorSuggestionsArgs>): void {
     dispatch: () => undefined,
     handedOverDiscussions: [],
     locale: 'de',
+    mergeServerDocument: async () => ({ kind: 'merged' }),
     onGlobalSuccess: () => undefined,
     selectedModelTier: null,
     state: createEmptyProjectState(),

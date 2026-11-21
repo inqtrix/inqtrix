@@ -1,6 +1,8 @@
-"""Structured-output models of the workspace-agent phases.
+"""Structured-output models of the agent's model steps.
 
-Every LLM-facing phase parses into one of these via
+Clarification, the sufficiency judge, memory reflection, document-analysis
+windows, citation repair, the review and its re-check each parse into one of
+these via
 :func:`inqtrix.agents.patterns._structured.structured_call`. The
 ``complete_structured`` gotcha applies: EVERY field must be required for
 the provider's native structured mode, so all fields carry explicit
@@ -16,20 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from inqtrix.constants import (
     CLARIFICATION_OPTION_LABEL_CHARS,
-    DISCOVERY_CONTENT_QUESTIONS_MAX,
 )
 from inqtrix.quote_limits import CITE_QUOTE_MIN_WORDS
-
-READINESS_ROUTES = ("plan_now", "discover_first", "ask_user_first")
-"""Deterministic intake routing outcomes (intake phase)."""
-
-GAP_KINDS = (
-    "missing",
-    "outdated",
-    "contradictory",
-    "insufficient_detail",
-    "unknown_scope",
-)
 
 
 class ClarificationOptionModel(BaseModel):
@@ -80,164 +70,6 @@ class ClarificationQuestionModel(BaseModel):
     )
 
 
-ClarificationSubject = Literal[
-    "knowledge_scope", "sources", "output_form", "assignment"
-]
-"""The closed subject vocabulary of a proposed clarification question.
-The run's settings decide per subject whether a question is already
-answered (:func:`inqtrix.agents.clarification.filter_settled_questions`)."""
-
-
-class ProposedClarificationQuestion(ClarificationQuestionModel):
-    """A question the mission's intake or discovery analyst proposes.
-
-    The two extra fields are INTERNAL: the subject lets code decide
-    whether the run's settings already answer the question, and the
-    default assumption is what the run continues with when the question
-    is not asked. Neither reaches the stored round or the wire — the
-    clarification record projects them away.
-    """
-
-    subject: ClarificationSubject = Field(
-        description=(
-            "The ONE subject the question is about: knowledge_scope (which "
-            "knowledge collections), sources (web versus project "
-            "knowledge), output_form (only chat answer versus canvas "
-            "document) or assignment (everything else about the content, "
-            "including whether the result is an e-mail or a memo). A "
-            "question with two subjects is two questions."
-        )
-    )
-    default_assumption: str = Field(
-        description=(
-            "The assumption the run continues with when the question is "
-            "not asked, one sentence in the answer language."
-        )
-    )
-
-
-NEEDS_WEB_MEANING = (
-    "needs_web decides whether the run searches the public web at all: true "
-    "when the answer needs public sources beyond the project's documents "
-    "(current public facts, laws, publications, market data) or the user "
-    "asks for the web; false when the assignment is confined to the "
-    "project's documents or files, or needs no sources at all."
-)
-"""What the intake's ``needs_web`` binds, stated once for the schema and
-the intake prompt: the planner and the discovery obey it."""
-
-
-class AssignmentProfile(BaseModel):
-    """Intake output — what the assignment actually asks."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    language: str = Field(description="ISO language of the assignment.")
-    intent: str = Field(description="One-sentence reading of the goal.")
-    scope_clarity: Literal["clear", "underspecified", "ambiguous"] = Field(
-        description="clear | underspecified | ambiguous"
-    )
-    needs_web: bool = Field(description=NEEDS_WEB_MEANING)
-    needs_internal: bool
-    needs_files: bool
-    recency_sensitive: bool
-    contested_topic: bool
-    content_questions: list[str] = Field(
-        description=(
-            f"1-{DISCOVERY_CONTENT_QUESTIONS_MAX} self-contained, naturally "
-            "phrased questions about the subject matter, never keyword "
-            "chains; each is searched verbatim as one of the run's first "
-            "searches. An atomic assignment has exactly one. Form and "
-            "process requirements (citation style, reading completely, "
-            "length, structure, output form) belong in success_criteria, "
-            "never here."
-        )
-    )
-    clarification_questions: list[ProposedClarificationQuestion] = Field(
-        description=(
-            "Questions the user must answer BEFORE useful work can start "
-            "(empty when none). Each carries 2-4 likely answer options so "
-            "the user can click instead of type, its subject and the "
-            "default assumption."
-        )
-    )
-    response_form: str = Field(
-        description=(
-            "chat | canvas — chat for short conversational answers "
-            "(question, comparison, assessment, follow-up); canvas for "
-            "reports, memoranda and document-like deliverables that can "
-            "be reused or edited independently."
-        )
-    )
-    success_criteria: list[str] = Field(
-        description="3-5 measurable criteria in the answer language."
-    )
-
-
-class DiscoveryGap(BaseModel):
-    """One knowledge gap the discovery analyst identified."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    gap_id: str
-    kind: str = Field(description="One of the GAP_KINDS values.")
-    description: str = Field(
-        description=(
-            "Shown to the user verbatim: one plain sentence in the answer "
-            "language naming the missing content, without search, result "
-            "or tool vocabulary and without identifiers."
-        )
-    )
-    recommended_capability: str = Field(
-        description=(
-            "web_research | web_instant | rag_query | file_analysis"
-        )
-    )
-    blocking: bool = Field(
-        description=(
-            "True when research must close this gap before the synthesis; "
-            "questions for the user belong only in questions_for_user."
-        )
-    )
-
-
-class DiscoveryFinding(BaseModel):
-    """One already-known fact with its source reference."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    fact: str
-    source: str = Field(
-        description=(
-            "The source's title exactly as the discovery results write it "
-            "(the URL for a web result); never an identifier."
-        )
-    )
-    fresh: bool
-
-
-class DiscoveryResult(BaseModel):
-    """What a first look at the sources established: known facts, content
-    gaps and questions for the user."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    known_facts: list[DiscoveryFinding]
-    gaps: list[DiscoveryGap] = Field(
-        description=(
-            "Content gaps, the most important first: the transcript shows "
-            "the first one to the user."
-        )
-    )
-    questions_for_user: list[ProposedClarificationQuestion] = Field(
-        description=(
-            "Only questions that BLOCK planning (else empty), each with "
-            "2-4 likely answer options, its subject and the default "
-            "assumption."
-        )
-    )
-
-
 class SufficiencyJudgement(BaseModel):
     """Fast-tier coverage verdict (gate semantics)."""
 
@@ -247,49 +79,6 @@ class SufficiencyJudgement(BaseModel):
     missing: list[str] = Field(
         description="Criteria without sufficient evidence (empty when covered)."
     )
-
-
-class ContradictionFinding(BaseModel):
-    """One contradiction between evidence positions."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    internal_position: str
-    external_position: str
-    severity: str = Field(description="hard | soft")
-    likely_cause: str
-
-
-class ContradictionReport(BaseModel):
-    """Contradiction-analysis output over overlapping claim pairs."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    contradictions: list[ContradictionFinding]
-
-
-class ReportSection(BaseModel):
-    """One planned memo section."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    title: str
-    focus: str = Field(description="What the section must establish.")
-    criterion_ids: list[str] = Field(
-        description="Indices (as strings) of the success criteria covered."
-    )
-    evidence_labels: list[str] = Field(
-        description="[K#]/[W#] labels the section should cite."
-    )
-
-
-class ReportOutline(BaseModel):
-    """Outline — sections before any prose is written."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    title: str
-    sections: list[ReportSection]
 
 
 class MemoryCandidateModel(BaseModel):
@@ -355,40 +144,6 @@ class WindowExtraction(BaseModel):
     )
 
 
-class CriterionVerdict(BaseModel):
-    """Whether the verified findings answer one numbered criterion."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    criterion: int = Field(ge=1)
-    verdict: Literal["answered", "partly_answered", "not_addressed"]
-    findings: list[str] = Field(
-        default_factory=list, description="Finding ids (F1, F2, ...) that answer it."
-    )
-
-
-class DocumentAnalysisResult(BaseModel):
-    """The joined answer over VERIFIED findings only (reduce step)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    summary: str = Field(
-        min_length=1,
-        description="The answer to the objective, citing finding ids as [F1].",
-    )
-    criteria: list[CriterionVerdict] = Field(default_factory=list)
-    open_points: list[str] = Field(default_factory=list)
-
-
-class SectionText(BaseModel):
-    """One memo section's prose (structured so token usage is metered —
-    plain ``complete()`` discards usage metadata on real providers)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    markdown: str = Field(description="The section prose, Markdown.")
-
-
 class CitationRepairText(BaseModel):
     """A complete synthesis text after one citation-label repair."""
 
@@ -401,30 +156,6 @@ class CitationRepairText(BaseModel):
         )
     )
     """Complete Markdown after the sole bounded citation repair call."""
-
-
-class QuickWebQuery(BaseModel):
-    """One precise query for the deterministic quick-web route."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    query: str = Field(
-        min_length=1,
-        description=(
-            "One self-contained, naturally phrased evidence question "
-            "(subject, region if relevant, time range, and the evidence "
-            "sought) derived from the current question and relevant "
-            "conversation context — never a keyword chain."
-        ),
-    )
-    """The single query sent to ``web.search.instant`` after any required approval."""
-    recency: str = Field(
-        description=(
-            "Recency filter: '' when none is required, otherwise day, "
-            "week, month, or year."
-        )
-    )
-    """Optional provider recency filter; the model must emit an explicit empty string when no filter is needed."""
 
 
 class DeepReviewFinding(BaseModel):

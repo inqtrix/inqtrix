@@ -11,6 +11,7 @@ carry it, and a role re-reads what its parent reached — nothing else.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -64,7 +65,7 @@ CHAT_FINDING = {
 }
 REVISION = {"edits": [{"finding_id": "finding_1", "replacement": "Überarbeitete Antwort."}]}
 DELEGATION_AND_WRITE_TOOLS = {
-    "run_web_research", "run_deep_mission", "delegate_batch", "ask_user",
+    "run_web_research", "delegate_batch", "ask_user",
     "write_canvas", "propose_editor_patch", "web_instant", "search_context",
     "search_project_knowledge", "load_skill",
 }
@@ -242,6 +243,23 @@ def test_a_target_outside_the_handover_is_refused():
         _deep_run(client)
     prompt = llm.structured_calls[0]["prompt"]
     assert prompt.count("Tool blocked: This source is not part of your handover.") == 2
+
+
+def test_the_live_runner_knows_the_refusal_the_kernel_raises():
+    """The live runner tells a refused role read by one phrase of this refusal
+    (``HANDOVER_REFUSAL`` in its document-reading fixture). A reworded refusal
+    must turn this test red: otherwise the runner's check would pass every run
+    without seeing a refusal again."""
+    deps = _bare_deps("run_role")
+    deps.work_profile = resolve_work_profile("review")
+    with pytest.raises(AgentPolicyDenied) as refusal:
+        deps.require_released("knowledge_document", "kd_foreign")
+    fixture = (
+        Path(__file__).resolve().parents[2] / "tests/verification/fixtures/document-reading.mjs"
+    ).read_text(encoding="utf-8")
+    phrase = re.search(r"^export const HANDOVER_REFUSAL = '([^']+)'$", fixture, re.MULTILINE)
+    assert phrase, "The fixture no longer exports HANDOVER_REFUSAL."
+    assert phrase.group(1) in str(refusal.value)
 
 
 def test_released_sources_are_what_the_conversational_kernel_may_always_read():
@@ -578,6 +596,10 @@ def test_delivering_the_result_spends_no_tool_budget():
 
 
 def test_an_exhausted_role_budget_is_a_typed_outcome_not_a_question_to_the_user():
+    """The reason also reaches the run's outcome record: the answer block
+    shows the record's sentence in place of the closing narration, so a
+    reason that stopped on the way would leave the reader with the general
+    sentence."""
     llm = StructuredScriptedLLM([_text_turn("Erste Antwort.")], [dict(PASSING)])
     llm.role_reads = [lambda prompt: ("read_evidence", {})] * 3
     client = _client_with_tool_budget(llm, 2)
@@ -589,6 +611,12 @@ def test_an_exhausted_role_budget_is_a_typed_outcome_not_a_question_to_the_user(
         assert result["work_result"]["status"] == "budget_exhausted"
         assert client.get(f"/v1/runs/{run_id}/result").json()["answer"] == "Erste Antwort."
         assert any("Prüfbudget erschöpft" in text for text in _review_narrations(client, run_id))
+        record = [
+            event["data"] for event in _events(client, run_id)
+            if event["type"] == OUTCOME_EVENT
+        ][-1]
+    assert (record["review"], record["unavailable_reason"]) == ("unavailable", "budget_exhausted")
+    assert record["summary"] == "Prüfung am Budget beendet, Ergebnis ungeprüft"
 
 
 # -- a role run is no part of the conversation ------------------------------ #
@@ -759,7 +787,7 @@ def test_a_review_too_large_for_one_prompt_is_read_not_skipped():
 
 def test_the_role_system_prompt_is_english():
     from inqtrix.agents.prompts import DEEP_REVIEW_RUBRIC, build_work_profile_system_prompt
-    from tests.agents.test_prompt_language_contract import _assert_english
+    from tests.agents._agent_helpers import _assert_english
 
     _assert_english(build_work_profile_system_prompt(DEEP_REVIEW_RUBRIC))
 
@@ -770,7 +798,7 @@ def test_the_single_call_review_shares_the_rubric_with_the_role():
         build_review_call_system_prompt,
         evidence_fidelity_block,
     )
-    from tests.agents.test_prompt_language_contract import _assert_english
+    from tests.agents._agent_helpers import _assert_english
 
     system = build_review_call_system_prompt()
     _assert_english(system)

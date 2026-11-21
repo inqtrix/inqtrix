@@ -106,6 +106,9 @@ class AgentState(TypedDict):
     answer_claim_bindings: list[dict[str, Any]]
     answer_evidence_bindings: NotRequired[list[dict[str, Any]]]
     evidence_contract_status: NotRequired[str]
+    evidence_contract_causes: NotRequired[list[str]]
+    confidence_cap: NotRequired[int | None]
+    confidence_cap_reasons: NotRequired[list[str]]
     evidence_omissions: NotRequired[list[dict[str, Any]]]
     iteration_logs: list[dict[str, Any]]
     total_prompt_tokens: int
@@ -218,6 +221,9 @@ def initial_state(
         "answer_claim_bindings": [],
         "answer_evidence_bindings": [],
         "evidence_contract_status": "unknown",
+        "evidence_contract_causes": [],
+        "confidence_cap": None,
+        "confidence_cap_reasons": [],
         "evidence_omissions": [],
         "iteration_logs": [],
         "total_prompt_tokens": 0,
@@ -286,6 +292,25 @@ def check_cancel_event(state: dict[str, Any]) -> None:
 
 _VALID_PROGRESS_SEVERITIES = frozenset({"info", "warning", "success", "error"})
 
+RESEARCH_DONE_MARKER = "done"
+"""The progress message that ends a research run."""
+CHAT_ONLY_START_MARKER = "chat_only.start"
+"""The progress message that starts a chat without web search."""
+CHAT_ONLY_DONE_MARKER = "chat_only.done"
+"""The progress message that ends a chat without web search."""
+_RUN_MARKERS = frozenset({RESEARCH_DONE_MARKER, CHAT_ONLY_START_MARKER, CHAT_ONLY_DONE_MARKER})
+
+
+def is_reader_step(message: str) -> bool:
+    """Whether a queued progress message is a step a stream shows a reader.
+
+    The run markers mark a run's course for programs: they travel the
+    progress queue and the run events like a step, and every stream that
+    shows steps to a reader (the OpenAI-compatible stream, the library
+    stream, the Research Desk's protocol) leaves them out.
+    """
+    return message not in _RUN_MARKERS
+
 
 def emit_progress(
     s: dict,
@@ -300,58 +325,26 @@ def emit_progress(
             the run-event sink consume the message.
         message: User-visible localized text. Already passed through
             :func:`inqtrix.i18n.t` at the call site.
-        severity: Optional explicit severity override. Accepted values
-            are ``"info"``, ``"warning"``, ``"success"``, ``"error"``.
-            When omitted (or set to an unknown string), classification
-            falls back to :func:`_progress_event_severity` which scans
-            *message* for warning markers. Pass an explicit severity in
-            fallback or guardrail paths so a future i18n-string change
-            cannot silently demote a warning to info (no silent
-            fallbacks).
+        severity: The step's severity as its sender states it:
+            ``"info"``, ``"warning"``, ``"success"`` or ``"error"``.
+            Without one, or with any other value, the step is
+            ``"info"``; the wording of *message* never decides. A step
+            that reports a problem passes ``"warning"``.
     """
     q = s.get("progress")
     if q is not None:
         q.put(("progress", message))
     snapshot = build_run_snapshot(s, last_message=message)
-    if severity in _VALID_PROGRESS_SEVERITIES:
-        resolved_severity = severity
-    else:
-        resolved_severity = _progress_event_severity(message)
     emit_run_event(
         s,
         "inqtrix.progress.message",
         {
             "message": message,
             "phase": snapshot.get("current_node", ""),
-            "severity": resolved_severity,
+            "severity": severity if severity in _VALID_PROGRESS_SEVERITIES else "info",
             "snapshot": snapshot,
         },
     )
-
-
-def _progress_event_severity(message: str) -> str:
-    """Classify a human progress message for compact UI rendering."""
-    text = message.lower()
-    warning_markers = (
-        "algo-fail",
-        "fallback",
-        "fehlgeschlagen",
-        "failed",
-        "warnung",
-        "warning",
-        "retry",
-        "instabil",
-        "unstable",
-        "verlet",
-        "violat",
-        "unvollstaendig",
-        "unvollständig",
-        "kontextfenster",
-        "context window",
-    )
-    if any(marker in text for marker in warning_markers):
-        return "warning"
-    return "info"
 
 
 def build_run_snapshot(
@@ -422,7 +415,7 @@ def build_run_snapshot(
     }
     # The searches the provider executed: each left a query record, while a
     # planned query a deadline stopped did not. Only a run that records
-    # searches names them, so a parent never reads a mission or a role
+    # searches names them, so a parent never reads an agent run or a role
     # as a research that ran none.
     query_records = state.get("query_records")
     if query_records is not None:

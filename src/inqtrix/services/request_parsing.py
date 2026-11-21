@@ -2,8 +2,9 @@
 
 History formatting, OpenAI-content flattening, question/messages
 normalization with payload caps, the project namespace of reads and
-writes, and the OpenAI-style error envelope. Status codes, English diagnostics
-and cap calculations are covered by ``tests/contract``.
+writes, the JSON-object request body, boolean body fields, and the
+OpenAI-style error envelope. Status codes, English diagnostics and cap
+calculations are covered by ``tests/contract``.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from fastapi.responses import JSONResponse
 
 from inqtrix.constants import REQUEST_WAIT_MARGIN_SECONDS
 from inqtrix.settings import AgentSettings, ServerSettings
+from inqtrix.agents.session_context import _owner_text
+from inqtrix.untrusted_content import untrusted_fence
 
 if TYPE_CHECKING:
     from inqtrix.auth.directory import UserDirectory
@@ -38,6 +41,45 @@ def error_response(
     return JSONResponse(status_code=status_code, content={"error": error})
 
 
+INVALID_JSON_BODY = "Invalid JSON body"
+"""Message of the 400 that refuses a request body that is no JSON object."""
+
+
+async def read_json_object(
+    req: Request,
+) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    """Read the request body as a JSON object: ``(body, None)`` or ``(None, refusal)``.
+
+    A body that does not parse and a body that parses to anything but an
+    object (an array, a string, a number, ``true``, ``false``, ``null``) are
+    the same client error, refused with HTTP 400 ``invalid_request_error``
+    and the message :data:`INVALID_JSON_BODY`. A route with a sign-in check
+    reads the body after it, so a refused body never answers before that
+    check does; the helper itself does not enforce the order.
+    """
+    try:
+        body = await req.json()
+    except Exception:  # noqa: BLE001 - a malformed body is a client error
+        body = None
+    if not isinstance(body, dict):
+        return None, error_response(400, INVALID_JSON_BODY, "invalid_request_error")
+    return body, None
+
+
+async def read_optional_json_object(
+    req: Request,
+) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    """Like :func:`read_json_object`, for a route whose body may be left out.
+
+    Every field of such a route is optional, so an empty body is the empty
+    object. A body that is sent is read, and refused, exactly as by
+    :func:`read_json_object`.
+    """
+    if not await req.body():
+        return {}, None
+    return await read_json_object(req)
+
+
 HISTORY_CHAR_BUDGET = 32_000
 """Character budget of the whole client-supplied history block (about 8,000
 tokens)."""
@@ -48,15 +90,24 @@ instruction the user gave early ("always answer in English") stays in force
 however long the answers after it grow."""
 
 _MESSAGE_CUT_MARKER = " [... message shortened]"
-_USER_LABEL = "Nutzer"
+_USER_LABEL = "User"
 _ROLE_LABELS = {
     "user": _USER_LABEL,
-    "assistant": "Assistent",
+    "assistant": "Assistant",
     "system": "System",
     "developer": "System",
 }
 # Any other role (a tool result, a function answer) is no text of the user's.
 _OTHER_ROLE_LABEL = "Tool"
+
+
+def _render_turn(label: str, text: str) -> str:
+    """One kept turn: the user's own words outside (defused, continuation
+    lines prefixed so pasted text cannot pose as a heading); every other
+    role is stored text inside a ``client-history`` fence."""
+    if label == _USER_LABEL:
+        return f"{label}: {_owner_text(text)}"
+    return untrusted_fence(f"{label}: {text}", "client-history")
 
 
 def _omitted_line(count: int) -> str:
@@ -108,10 +159,12 @@ def format_history(messages: list[dict], max_messages: int = 20) -> str:
         label, content = window[index]
         floor = floors.get(index, 0)
         if len(content) - floor <= remaining:
-            kept[index] = f"{label}: {content}"
+            kept[index] = _render_turn(label, content)
             remaining -= len(content) - floor
         elif floor + remaining > 0:
-            kept[index] = f"{label}: {content[:floor + remaining].rstrip()}{_MESSAGE_CUT_MARKER}"
+            kept[index] = _render_turn(
+                label, f"{content[:floor + remaining].rstrip()}{_MESSAGE_CUT_MARKER}"
+            )
             remaining = 0
 
     parts: list[str] = []
@@ -201,22 +254,32 @@ async def workspace_id_for_write(
     )
 
 
+def boolean_field(body: dict[str, Any], key: str, default: bool) -> bool:
+    """A boolean field of the request body, *default* when the field is left out.
+
+    Only JSON ``true`` or ``false`` is accepted. Any other value, ``null``
+    included, is refused with HTTP 400: read as a Python truth value, the
+    text ``"false"`` would mean true.
+    """
+    raw = body.get(key, default)
+    if not isinstance(raw, bool):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {
+                "message": f"Field '{key}' must be true or false.",
+                "type": "invalid_request_error",
+            }},
+        )
+    return raw
+
+
 def incognito_from_request(body: dict[str, Any]) -> bool:
     """Whether the request asks that its content stays out of traces.
 
     Only a JSON boolean is accepted: a privacy request the server misread
     as absent would record what the caller asked to keep out.
     """
-    raw = body.get("incognito", False)
-    if not isinstance(raw, bool):
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {
-                "message": "Field 'incognito' must be true or false.",
-                "type": "invalid_request_error",
-            }},
-        )
-    return raw
+    return boolean_field(body, "incognito", False)
 
 
 def ui_language_from_request(body: dict[str, Any], mode: str) -> str:

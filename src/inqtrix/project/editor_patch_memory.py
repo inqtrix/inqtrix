@@ -3,7 +3,7 @@
 Lockstep counterpart of
 :class:`~inqtrix.storage.editor_patch_postgres.PostgresEditorPatchStore`:
 same port, same error types, same ordering. Thread-safe via one lock —
-the workspace-agent runtime proposes patches from worker threads (the
+the agent runtime proposes patches from worker threads (the
 ``control_memory`` precedent); no awaits happen while the lock is held.
 
 Retention mirrors the Postgres ``ON DELETE CASCADE`` only logically:

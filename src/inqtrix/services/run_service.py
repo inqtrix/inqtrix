@@ -267,7 +267,8 @@ def _execute_run_segment(
         # Opt-in hard per-run token cap (0 = off). Independent of the
         # monthly token quota: it bounds a single run, the quota blocks
         # the next one. The optional narrowing comes only from trusted
-        # server callers; planner-authored task budgets are never input.
+        # server callers; a budget stored in an agent child's replay body
+        # is never input (the worker drops it).
         token_budget=_effective_budget(
             runtime.settings.quota.max_tokens_per_run, token_budget
         ),
@@ -422,7 +423,7 @@ def _execute_run_segment(
         # payload. It has no answer to publish and none to stream — a role
         # that reached a user surface would be a second, unreviewed voice.
         _prune_uncollected_agent_metrics(payload)
-    elif mode in {"agent_kernel", "workspace_agent"}:
+    elif mode == "agent_kernel":
         _prune_uncollected_agent_metrics(payload)
         if answer_publisher is None:
             raise RunExecutionFailure(
@@ -483,9 +484,9 @@ _AGENT_REAL_METRIC_KEYS = frozenset(
 def _prune_uncollected_agent_metrics(payload: dict[str, Any]) -> None:
     """Drop research metrics an agent run never measured.
 
-    Agent results ride the shared research serialization, so every
-    research counter reached the wire as a hard zero: a mission with
-    sixteen knowledge searches and seven citations reported
+    Agent results ride the shared research serialization, so without
+    this every research counter would reach the wire as a hard zero: a
+    run with sixteen knowledge searches and seven citations would report
     ``total_queries: 0`` and ``total_citations: 0``. Zeros are a claim,
     not an absence — omitting the keys says "not measured here", which
     is the truth. What an agent run does measure (wall clock, tokens)
@@ -648,22 +649,23 @@ class RunService:
                 trees); lets deep descendants resolve their root run
                 without walking parents.
             session_id: Saved Agent or Knowledge session grouping the run.
-            autonomy: Workspace-agent permission mode, carried on
-                the run request and the worker replay payload; empty for
-                non-agent modes.
-            document_id: Target editor document of a workspace-agent
-                patch assignment; empty when the run has no edit
-                target. Carried like ``autonomy``.
-            response_form: Workspace-agent output-form override
-                (``chat``/``canvas``); empty delegates to the
-                intake profile. Carried like ``autonomy``.
+            autonomy: Agent permission mode, carried on the run request
+                and the worker replay payload; empty for non-agent modes.
+            document_id: Target editor document of an agent run's patch
+                proposal (``propose_editor_patch``); empty when the run has
+                no edit target. Carried like ``autonomy``.
+            response_form: Agent output-form choice (``chat``/``canvas``);
+                empty leaves the form to the run's Stufe and the model.
+                Carried like ``autonomy``.
             token_budget: Optional trusted per-run LLM-token ceiling that
-                narrows the deployment cap. Planner-authored task budgets
-                are compatibility-only data and never flow into this field.
-            origin_key: Idempotency key of the submitting kernel tool call or
-                mission plan-task attempt. Persisted in the replay body and
-                exposed on child summaries so checkpoint re-execution finds
-                the already-submitted run. Empty for every other caller.
+                narrows the deployment cap. The kernel submits its children
+                without one, and the worker ignores a budget stored in an
+                agent child's replay body (with a WARNING and an activity
+                row).
+            origin_key: Idempotency key of the submitting kernel tool call.
+                Persisted in the replay body and exposed on child summaries
+                so checkpoint re-execution finds the already-submitted run.
+                Empty for every other caller.
             skill_ids: Router-admitted skill ids; visibility
                 and count cap already enforced; carried on the request
                 and the worker replay payload.
@@ -699,10 +701,11 @@ class RunService:
                 the kernel user message, frozen with the first segment's
                 checkpoint. Never inherited by child runs and never part
                 of summaries; ``None`` everywhere else.
-            parent_task_id: Internal plan-task correlation for an agent
-                child. Persisted only in the durable replay payload so the
-                run store can project child progress onto the parent task.
-            parent_task_attempt: Logical task attempt corresponding to the
+            parent_task_id: Correlation key of an agent child in its
+                parent (the kernel passes the submitting call's origin key).
+                Persisted only in the durable replay payload so the run
+                store can project child progress onto the parent's row.
+            parent_task_attempt: Logical attempt corresponding to the
                 child. Independent of the run-row claim/fencing attempt.
             work_profile: Internal work profile of a role child. Exists on
                 this server-side seam only — no HTTP route passes it.
@@ -735,8 +738,7 @@ class RunService:
                 {
                     "depth": resolved.agent_settings.depth,
                     # The selected Stufe travels with the run (worker
-                    # replay, summaries, edit-path policy) exactly like
-                    # depth. Only echoed when selected: a no-tier run
+                    # replay, summaries) exactly like depth. Only echoed when selected: a no-tier run
                     # replays byte-identically to today, and a tier run
                     # replays the CONSISTENT (tier, bridged depth) pair,
                     # which the override validator accepts.

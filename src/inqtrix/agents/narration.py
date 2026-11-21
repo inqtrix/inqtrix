@@ -2,9 +2,9 @@
 
 The main window shows the agent "thinking along" as short prose in the
 run's answer language (:mod:`inqtrix.i18n`).
-Every line is built DETERMINISTICALLY from artifacts the run already
-produced (discovery result, plan summary, task outcomes, memo outline) —
-no extra LLM call, no invented chain-of-thought: it shows only what the
+Every line is built DETERMINISTICALLY from what the run already produced
+(the outcome of a delegated task, the documents it writes) — no extra LLM
+call, no invented chain-of-thought: it shows only what the
 run's data carries, never storytelling. Paragraph granularity by
 design: narration events are persisted rows that replay after a reload,
 so the channel stays bounded (~10-30 events per run); the typewriter
@@ -16,13 +16,9 @@ from __future__ import annotations
 import re
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from inqtrix.i18n import t, t_count
 from inqtrix.harness.contracts.events import NARRATION_EVENT
-
-if TYPE_CHECKING:
-    from inqtrix.agents.phase_models import DiscoveryResult
 
 
 def emit_narration(
@@ -35,23 +31,22 @@ def emit_narration(
     guard: Callable[[str], str],
     final: bool = True,
 ) -> None:
-    """THE one transcript line, for BOTH engines, silently skipping empties.
+    """THE one transcript line, silently skipping empties.
 
-    One emitter because the transcript is one reader surface. If each
-    engine built the payload itself, "does a narration line pass the
-    writer guard" would have as many answers as there are emit sites — and
-    the mission's answer would say nothing about the kernel's, where a
-    clarification question, a review passage and a child's report would
+    One emitter because the transcript is one reader surface. If each emit
+    site built the payload itself, "does a narration line pass the writer
+    guard" would have as many answers as there are emit sites, and a
+    clarification question, a review passage or a child's report could
     reach the reader as the model had written them.
 
-    ``guard`` is the engine's own projection of that one question: which
+    ``guard`` is the run's own projection of that one question: which
     internal identifiers could this text have copied, and which of them
     did the USER write. It is required, not defaulted — a default would
     be a way to emit an unguarded line, which is the state this emitter
     exists to end.
 
-    ``narration_id`` is DETERMINISTIC per emission site (plan version,
-    task id, section index ...), never a running counter — checkpointed
+    ``narration_id`` is DETERMINISTIC per emission site (a review, a
+    child's report, a limit ...), never a running counter — checkpointed
     nodes may re-execute after an interrupt, and a stable id keeps the
     replayed line recognizable instead of multiplying.
 
@@ -96,57 +91,6 @@ def first_sentences(text: str, limit: int = _TEXT_LIMIT) -> str:
     return head[:boundary].rstrip() + " ..."
 
 
-def discovery_narration(
-    discovery: "DiscoveryResult | None", *, language: str
-) -> str:
-    """One paragraph on what the exploration established.
-
-    The paragraph quotes the analyst's FIRST gap: the analyst contract
-    lists the most important gap first and writes every gap description
-    for the user — one plain sentence without search vocabulary or
-    identifiers (``DiscoveryGap.description`` and the analyst prompt's
-    rules). This builder adds only counted framing of its own.
-
-    ``language`` is keyword-only and has NO default: a caller that forgets
-    it fails loudly instead of silently emitting one fixed language.
-    """
-    if discovery is None:
-        return ""
-    words = {"language": language or ""}
-    facts = len(discovery.known_facts)
-    gaps = len(discovery.gaps)
-    if facts == 0 and gaps == 0:
-        return t(words, "agent_narration_discovery_empty")
-    parts = [
-        t(
-            words,
-            "agent_narration_discovery_counts",
-            facts=t_count(words, "agent_narration_discovery_facts", facts),
-            gaps=t_count(words, "agent_narration_discovery_gaps", gaps),
-        )
-    ]
-    if discovery.gaps:
-        parts.append(
-            t(
-                words,
-                "agent_narration_discovery_top_gap",
-                gap=first_sentences(discovery.gaps[0].description, 160),
-            )
-        )
-    return " ".join(part for part in parts if part)
-
-
-def plan_narration(
-    summary_markdown: str, task_count: int, *, language: str
-) -> str:
-    """The plan's own summary prose, framed with the task count."""
-    words = {"language": language or ""}
-    summary = first_sentences(summary_markdown)
-    if not summary:
-        return t_count(words, "agent_narration_plan_proposal", task_count)
-    return t_count(words, "agent_narration_plan_summary", task_count, summary=summary)
-
-
 def task_narration(title: str, summary: str) -> str:
     """One line per finished task: its title plus the result head.
 
@@ -163,19 +107,3 @@ def task_narration(title: str, summary: str) -> str:
     return f"{title}: {head}" if title else head
 
 
-def synthesis_narration(
-    title: str, section_count: int, *, language: str
-) -> str:
-    """Announces the memo being written (the canvas shows it live)."""
-    return t_count(
-        {"language": language or ""}, "agent_narration_synthesis", section_count, title=title
-    )
-
-
-def section_narration(title: str, *, language: str) -> str:
-    """One line per completed memo section."""
-    return t(
-        {"language": language or ""},
-        "agent_narration_section_written",
-        title=title,
-    )

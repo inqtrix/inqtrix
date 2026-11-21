@@ -1,5 +1,5 @@
 /**
- * Wire types for the workspace-agent control surfaces.
+ * Wire types for the agent run control surfaces.
  *
  * Snake_case mirrors the HTTP payloads verbatim (the client returns them
  * unconverted); record conversion lives in the feature layer, matching the
@@ -8,87 +8,22 @@
  * (re-)fetched.
  */
 
-/** One plan task row (`GET /v1/runs/{id}/plan` → `tasks[]`). */
-export type AgentPlanTaskWire = {
-  task_id: string
-  ordinal: number
-  title: string
-  tool_kind:
-    | 'web_research'
-    | 'web_instant'
-    | 'rag_query'
-    | 'file_analysis'
-    | 'synthesis'
-  objective: string
-  queries: string[]
-  gap_ids: string[]
-  depends_on: string[]
-  budget: Record<string, unknown>
-  params: Record<string, unknown>
-  expected_output: string
-  status: string
-  child_run_id: string | null
-  result_summary: string
-}
-
-/** Plan version metadata (embedded `versions[]` list). */
-export type AgentPlanVersionWire = {
-  plan_id: string
-  version: number
-  status: string
-  created_by: 'agent' | 'user'
-  reason: string
-  created_at: number
-}
-
-/** `GET /v1/runs/{id}/plan?version=` response. */
-export type AgentPlanWire = AgentPlanVersionWire & {
-  run_id: string
-  summary_markdown: string
-  assumptions: string[]
-  success_criteria: string[]
-  tasks: AgentPlanTaskWire[]
-  versions: AgentPlanVersionWire[]
-}
-
-/** Complete lazy task result (`GET .../tasks/{task_id}/result`). */
-export type AgentTaskResultWire = {
-  task_id: string
-  status: string
-  child_run_id: string | null
-  result_summary: string
-  answer_markdown: string
-  references: Record<string, unknown>[]
-  claims: Record<string, unknown>[]
-  metrics: {
-    reference_count: number
-    claim_count: number
-    prompt_tokens: number
-    completion_tokens: number
-  }
-  error: { code: string; message: string } | null
-  legacy_summary_only: boolean
-}
-
-/** Task cancellation acknowledgement. */
-export type AgentTaskCancelWire = {
-  task_id: string
-  status: 'cancel_requested' | 'cancelled'
-  child_run_id: string | null
-}
-
 /** One approval row (`GET /v1/runs/{id}/approvals`). */
 export type AgentApprovalWire = {
   approval_id: string
   run_id: string
-  kind: 'plan' | 'replan' | 'discovery' | 'patch' | 'tool'
+  /** `tool` for the kernel's gates. A stored run of the retired mission
+   * engine also carries `plan`, `replan`, `discovery` and `patch` rows;
+   * they are read for its transcript only. */
+  kind: string
   status: 'pending' | 'approved' | 'rejected' | 'edited'
   subject_type: string
   subject_id: string
   payload: Record<string, unknown>
   decision: string
-  /** Decision-scoped keys (edited actions/plan, `approval_scope: 'run'`
-   * for a run-wide tool grant). Older servers omit it. */
+  /** Decision-scoped keys (edited actions, `approval_scope: 'run'` for a
+   * run-wide tool grant; a stored mission plan gate's report requirement).
+   * Older servers omit it. */
   decision_payload?: Record<string, unknown>
   note: string
   decided_by_user_id: string | null
@@ -96,20 +31,14 @@ export type AgentApprovalWire = {
   decided_at: number | null
 }
 
-/** POST decision body for an approval. `plan` only with `decision: 'edit'`
- * on a plan/replan gate; `actions` only with `decision: 'edit'` on a `tool`
- * gate (exactly one action, args-only change — the backend re-validates the
- * edited args against the live tool schema). */
+/** POST decision body for an approval. `actions` only with
+ * `decision: 'edit'` on a `tool` gate (exactly one action, args-only
+ * change — the backend re-validates the edited args against the live tool
+ * schema). */
 export type AgentApprovalDecisionRequest = {
   decision: 'approve' | 'reject' | 'edit'
   note?: string
-  plan?: Record<string, unknown>
   actions?: { tool: string; args: Record<string, unknown> }[]
-  /** Decision-scoped user guidance for the report (structure, focus,
-   * audience) — rendered into the synthesis prompts server-side. */
-  report_guidance?: string
-  /** Prompt-library rule ids; the server resolves their text. */
-  report_rule_ids?: string[]
   /** Only with `decision: 'approve'` on a `tool` gate: `'run'` grants
    * the gated tools for the rest of the run (balanced mode only —
    * strict stays per-call and `propose_editor_patch` is never

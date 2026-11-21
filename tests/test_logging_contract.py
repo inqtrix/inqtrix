@@ -1041,16 +1041,16 @@ def test_unknown_inqtrix_logger_names_are_reported(
 def test_a_level_set_for_one_area_reaches_only_its_modules(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from inqtrix.agents import planner
+    from inqtrix.agents import scheduler
     from inqtrix.providers import bedrock
 
     _configure(config=_org_config(**{"inqtrix.providers": {"level": "DEBUG"}}))
     bedrock.log.debug("adapter detail %d", 1)
-    planner.log.debug("planner detail %d", 2)
+    scheduler.log.debug("scheduler detail %d", 2)
 
     out = capsys.readouterr().out
     assert "ORG DEBUG inqtrix.providers.bedrock adapter detail 1" in out
-    assert "planner detail" not in out
+    assert "scheduler detail" not in out
 
 
 def test_custom_configuration_keeps_existing_loggers_enabled(

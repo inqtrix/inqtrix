@@ -324,7 +324,7 @@ Key transitions inside `search()`:
 | `search_mode` | `"academic"` if applicable | For scholarly sources |
 | `return_related` | `True` on round 0 | Seeds future queries |
 
-Before dispatch, the search node filters these hints through the active provider's capability metadata. Providers may expose either `supported_search_parameters` or `search_capabilities`; unsupported hints are omitted instead of being sent to a backend that cannot express them. The iteration log records the resolved `supported_parameters` list for each run.
+Before dispatch, the search node filters these hints through the active provider's capability metadata. Providers may expose either `supported_search_parameters` or `search_capabilities`; unsupported hints are omitted instead of being sent to a backend that cannot express them. The iteration log records the resolved `supported_parameters` list for each run. A provider that takes an answer form lists `answer_form` there as well; the research engine never sends one, only the agent's quick web search does (see [The answer form is asked only of a provider that names it](../../extending/provider.md#the-answer-form-is-asked-only-of-a-provider-that-names-it)).
 
 ### Domain filter logic
 
@@ -474,8 +474,9 @@ flowchart TD
     B --> C["LLM: generate each section<br/>(body first, write_last after)"]
     C --> D["Assemble sections in display order"]
     D --> E["Sanitise markdown links<br/>(only allowed_urls)"]
-    E --> F["Audit answer-evidence bindings"]
-    F --> G["Append stats footer<br/>(sources, queries, rounds, time)"]
+    E --> F["Audit answer-evidence bindings<br/>and decide the evidence contract"]
+    F --> F2["Append evidence notice (cause of needs_review<br/>or source context only) and basis line"]
+    F2 --> G["Append stats footer<br/>(sources, queries, rounds, time)"]
     G --> H["Output: answer string"]
 ```
 
@@ -490,12 +491,14 @@ flowchart TD
     Draft[("data draft markdown")]
     Links["fn sanitize_answer_links()"]
     Audit["fn audit_answer_evidence_bindings()"]
+    Contract["fn _evidence_contract()"]
+    Closing["fn _answer_evidence_notice()<br/>fn _answer_evidence_basis_line()"]
     Footer["fn append stats footer"]
     Final[("data AgentState.answer")]
 
     Ledger --> Overview --> OverviewData --> Compose
     Compose --> SectionLLM --> Draft
-    Draft --> Links --> Audit --> Footer --> Final
+    Draft --> Links --> Audit --> Contract --> Closing --> Footer --> Final
 ```
 
 The answer node does not perform new search. It renders the single canonical
@@ -503,7 +506,13 @@ evidence overview from the ledger (see [Evidence pipeline — Rendering](evidenc
 invokes the section composer (one LLM call per section, body sections first
 and `write_last` sections like `executive_summary` / `summary` afterwards),
 sanitizes citations so only URLs in `allowed_urls` remain, then audits
-whether the cited URLs map back to EvidenceRecords.
+whether the cited URLs map back to EvidenceRecords. From the claim-level
+binding it decides the evidence contract (`_evidence_contract()`), caps
+`final_confidence` by the contract's ceiling, and appends, after the
+reference sections and before the stats footer, the evidence notice (only
+for a cause of `needs_review` or an answer from source context alone) and
+the basis line of the cited sources (see [Evidence notice and basis
+line](evidence.md#evidence-notice-and-basis-line)).
 
 ### Answer composer (one LLM call per section)
 
@@ -513,11 +522,16 @@ own dedicated page: [Answer composition](answer.md). In summary:
 - `_compose_answer_sections()` in `nodes.py` iterates
   through the active `AnswerSectionSpec` list and issues **one LLM call per
   section**.
-- The **system prompt** is built by `_build_answer_system_prompt_with_style()`
-  with `section_heading` set. Its bulk is shared across all section calls (full
-  `evidence_overview` + conditional CLAIM CALIBRATION / EVIDENCE DEPTH blocks +
-  CITATION RULES), but two blocks depend on the section, so the system prompt
-  is not byte-identical between sections:
+- The **system prompt** is built by `build_answer_section_system_prompt()`
+  (body in `_build_answer_system_prompt_with_style()`). Its bulk is shared
+  across all section calls (full `evidence_overview` + conditional CLAIM
+  CALIBRATION / EVIDENCE DEPTH blocks + ATTRIBUTION RULE + CITATION RULES),
+  but three blocks depend on the section, so the system prompt is not
+  byte-identical between sections:
+  - **EVIDENCE DEPTH** (fires with an active evidence-depth gap): only the
+    section that owns the evidence limits is told, under its own heading, to
+    name the thin cross-check as an evidence limit of the report; every other
+    section is told to leave that to it.
   - **TRANSPARENCY OBLIGATION** (fires when the evidence is weak): only the
     section that owns the evidence limits (`owns_evidence_limits` in the
     section plan, `evidence_limits_section_index()`) gets the directive to add
@@ -582,9 +596,11 @@ DEEP (6 sections; `executive_summary` is `write_last=True`):
 Length is steered by per-section `length_guidance` in the spec, not a fixed
 word target.
 
-If no report-eligible records exist but source-context records do, the final
-footer reports `Evidence-Contract: source_context_only`, not a
-missing-evidence failure. Forensic/deep runs still block normal report
+When no sentence that cites a source restates a statement recorded for that
+source, the contract is `source_context_only`, not a missing-evidence
+failure: the evidence notice under the report says so in the answer
+language, and `metrics.evidence_contract_status` carries the value. The stats
+footer names no contract status. Forensic/deep runs still block normal report
 synthesis when claim extraction failed for the whole run.
 
 ### Section composer memory
@@ -609,30 +625,42 @@ exact prompt structure.
 
 ### Fallback behaviour
 
-The answer node has three distinct LLM-call fallback paths and all of them are surfaced, because a fallback is never silent. Each path emits a `log.warning(...)` line, a `progress` event on the user-visible queue, an iteration-log marker (`_answer_fallback=True` plus a structured `_answer_fallback_kind` and `_answer_fallback_reason`), and prepends a visible `> [!WARNING] Antwort-Synthese-Fallback aktiv` block to the answer body so the degradation is also visible in the rendered markdown:
+The answer node has three distinct LLM-call fallback paths and all of them are surfaced, because a fallback is never silent. Each path emits a `log.warning(...)` line, a `progress` event on the user-visible queue, an iteration-log marker (`_answer_fallback=True` plus a structured `_answer_fallback_kind` and `_answer_fallback_reason`), and prepends a visible warning block to the answer body (`> [!WARNING] Kein geschriebener Bericht` in German answers, `> [!WARNING] No written report` in English ones) so the degradation is also visible in the rendered markdown:
 
 | `_answer_fallback_kind` | Trigger | Replacement body |
 |---|---|---|
-| `timeout` | `_compose_answer_sections` raised `AgentTimeout` | Visible warning header + the rendered EvidenceLedger overview (`evidence_overview.markdown` from `render_evidence_ledger_overview()`) verbatim, or a "no context yet" hint (`no_context_message`) when that overview is empty. |
+| `timeout` | `_compose_answer_sections` raised `AgentTimeout` | Visible warning header + the rendered EvidenceLedger overview (`evidence_overview.markdown` from `render_evidence_ledger_overview()`) verbatim. When that overview is empty the header comes in its second version, which says that no material has been gathered yet instead of announcing material beneath it (`research_answer_fallback_warning_no_material`), followed by a hint what to do (`no_context_message`). |
 | `no_fallback_model` | `_compose_answer_sections` raised a provider API error outside strict algorithm mode and `_resolve_answer_fallback_model()` returned `None` — the `evaluate` node's resolved model (the `mid` tier) is either empty or identical to the primary answer model | Same as `timeout`. |
 | `fallback_model_failed` | The primary call raised, the fallback model was attempted (`emit_progress("answer_fallback_model")`), and the fallback model also raised. | Same as `timeout`, plus the original primary error class is included in `_answer_fallback_reason`. |
+
+The progress step of each path ends with what the answer shows: the material
+gathered so far, or, without any, only the warning
+(`answer_fallback_outcome_material` / `answer_fallback_outcome_no_material`).
 
 In strict algorithm mode -- `report_profile` DEEP **or**
 `observability_profile=forensic`, see `_strict_algorithm_failure_mode()` --
 none of these three paths run: a timeout or provider error inside the answer
 node is recorded as a blocking algorithm failure and answered with the
-`Evidence-Contract: algorithm_failed` diagnostic report, whether or not a
+diagnostic report of the contract status `algorithm_failed`, whether or not a
 fallback model resolves.
 
 A successful fallback-model attempt sets `fallback_attempted=True`, `fallback_succeeded=True`, leaves `_answer_fallback=False`, and is signalled by the `answer_fallback_model` progress event only.
 
-This is separate from `ALGO-FAIL` handling. Blocking algorithm failures
-(`claim_extraction` always, `evidence_overview` only under
-`strict_algorithm_mode`) do not produce a
-normal answer fallback; the node returns a short diagnostic report with
-`Evidence-Contract: algorithm_failed` and pins confidence to 3 via
-`min(final_confidence or 3, 3)` -- a higher value is capped down, an unset or
-zero value is raised to 3.
+This is separate from `ALGO-FAIL` handling. Blocking algorithm failures (a
+model whose context window or capacity cannot take a report section, always;
+under `strict_algorithm_mode` also every claim extraction of the run failing,
+an evidence overview without a rendered record, and a failed or timed-out
+answer call) do not produce a normal answer fallback; the node returns a short
+diagnostic report with the contract status `algorithm_failed` and pins
+confidence to 3 via `min(final_confidence or 3, 3)` -- a higher value is
+capped down, an unset or zero value is raised to 3. The report reads in the
+answer language: a heading that no report was written, the reason in plain
+words, the run id and the run's counts, and then a section for operators
+with each blocking failure (phase, round and reason as code, the technical
+message verbatim) and the settings that show more (`OBSERVABILITY_PROFILE`,
+`INQTRIX_TRACING`). The server log names each failure with its phase and
+reason (`ALGO-FAIL phase=… reason=…`); the report itself carries no such
+marker.
 
 ## Per-node read/write summary
 
@@ -642,7 +670,7 @@ zero value is raised to 3.
 | plan | classification fields, `final_confidence`, `gaps`, `falsification_triggered`, `competing_events`, `queries`, `round`, `evidence_depth_gap` | `queries` (appended), query-slot diagnostics, `done` if no useful new queries |
 | search | next query batch, search hints, existing evidence/claims | `query_records`, `source_records`, `provider_citation_records`, `evidence_ledger`, `consolidated_claims`, `all_citations`, `source_quality_score`, `claim_quality_score`, `evidence_depth_gap`, `round` |
 | evaluate | evidence, claims, aspects, source metrics, previous confidence | `final_confidence`, `gaps`, `competing_events`, `evidence_consistency`, `evidence_sufficiency`, `evidence_depth_gap`, `done`, `falsification_triggered`, `utility_scores`, `_stop_reason` (runtime dict key), `stop_cascade`, `score_ledger` |
-| answer | Everything from the prior nodes | `answer`, `answer_finish_reason`, `answer_incomplete`, `answer_incomplete_reasons`, `final_confidence` (algorithm-failure pin and evidence-contract cap), `evidence_contract_status`, visible citation allowlist / label fields, `answer_claim_bindings`, `answer_evidence_bindings`, iteration log entries, token totals |
+| answer | Everything from the prior nodes | `answer`, `answer_finish_reason`, `answer_incomplete`, `answer_incomplete_reasons`, `final_confidence` (algorithm-failure pin and the evidence-contract cap, which includes the ceiling of an active evidence-depth gap), `evidence_contract_status`, `evidence_contract_causes`, `confidence_cap`, `confidence_cap_reasons`, visible citation allowlist / label fields, `answer_claim_bindings`, `answer_evidence_bindings`, iteration log entries, token totals |
 
 ## Cancel and deadline
 
@@ -716,20 +744,16 @@ no such field, so `<node>_model` resolves empty there and the tier decides.
 | **knowledge_rerank** | **fast** | none | Listwise ordering over a capped candidate list. Roughly an order of magnitude costlier and slower than a cross-encoder rerank API, which is why it is the fallback rather than the recommended path. |
 | **knowledge_gate** | **fast** | none | Repeated structured sufficiency checks; cost-sensitive and prompt-scaffolded. |
 | **knowledge_answer** | **high** | reasoning **on** | Final cited synthesis over retrieved evidence, largest quality lever in Knowledge mode. |
-| **agent_intake** / **agent_sufficiency** | **fast** | none | Workspace-agent assignment classification and coverage checks. |
-| **agent_discovery_analyst** / **agent_contradiction** / **agent_file_analysis** | **mid** | none | Compression and comparison work: probe digests, contradiction checks, and the per-window extraction and reduce of a whole-document analysis. |
-| **agent_plan** / **agent_synthesis** | **high** | none | The workspace agent's leverage points: executable planning and cited memo sections. |
+| **agent_sufficiency** | **fast** | none | The kernel's advisory evidence-sufficiency judgement. |
+| **agent_file_analysis** | **mid** | none | The per-window extraction of a whole-document analysis (`analyze_document`). |
 | **agent_kernel** | **high** | none | The kernel's own reasoning loop; in `mode=agent_kernel` this is the node a per-run override targets (see section 5). |
-| **agent_answer** | **high** | none | The workspace agent's final answer — an override-scoped thinking node (see section 5). |
-| **agent_answer_light** | **mid** | none | The lighter answer variant; also override-scoped (see section 5). |
-| **agent_patch** | **mid** | none | Bounded structured edits to existing text. |
-| **agent_deep_review** | **high** | selected or tier default | The one review of both agent engines: the mission's memo or answer and the kernel's Deep outputs, judged against assignment, success criteria and evidence — as one structured call or as the review role. After a revision it also re-checks each applied edit of a model finding in one structured call (schema `RevisionCheckVerdict`): one row per segment the server lists, from which the server settles each edit; when that call holds an edit, a second call with the same request confirms it, and only an edit both hold counts as re-checked. Follows the selected model and effort without inheriting the kernel loop's automatic Deep effort increase. |
+| **agent_deep_review** | **high** | selected or tier default | The review of a kernel run: its chat answer and canvases, judged against assignment, success criteria and evidence — as one structured call or as the review role. After a revision it also re-checks each applied edit of a model finding in one structured call (schema `RevisionCheckVerdict`): one row per segment the server lists, from which the server settles each edit; when that call holds an edit, a second call with the same request confirms it, and only an edit both hold counts as re-checked. Follows the selected model and effort without inheriting the kernel loop's automatic Deep effort increase. |
 | **agent_skill_point_check** | **fast** | none | Structured per-point skill check; likewise pinned to the tier map (see section 5). |
 
 `agent_citation_repair` is not in this table because it is not a routing node: it
 has no `NODE_TIER_ASSIGNMENT` entry and exists only as a telemetry label. The
 sole bounded repair of an unknown citation label reuses the model its caller
-(`agent_synthesis`, `agent_answer`, or the kernel) already resolved.
+(the kernel) already resolved.
 
 Default tier effort is **unset** for every tier, so out of the box tiers differ
 only by *model* and nothing gains implicit reasoning. Turn reasoning on
@@ -862,6 +886,7 @@ picker. Discovery surfaces expose a `chat_model_options` array with the
   "node": "direct_chat",
   "model": "claude-sonnet-4-6",
   "effort": "none",
+  "verbosity": "",
   "model_source": "tier:mid",
   "effort_source": "tier:mid",
   "requested_tier": "mid"
@@ -875,30 +900,26 @@ among the advertised tiers. Discovery is stack-scoped: on multi-stack servers
 the UI must read the selected stack's `models.chat_model_options` and must not
 silently fall back to `/health`, because `/health` describes the default stack.
 
-#### Agent modes: model selection for planning, writing and review
+#### Agent mode: model selection for the loop and its review
 
-For `mode=workspace_agent` a per-run override (`model_tier`/`model`/`effort` —
+In `mode=agent_kernel` a per-run override (`model_tier`/`model`/`effort` —
 whether from the request or from a skill pin) applies ONLY to the thinking
-nodes `agent_plan`, `agent_synthesis`, `agent_deep_review`, `agent_answer`, and
-`agent_answer_light` (`_OVERRIDE_SCOPED_NODES` in `agents/algorithm.py`).
-Classification, sufficiency, point checks and other helper roles keep their
-configured tiers. The kernel (`mode=agent_kernel`) uses the selected settings
-for `agent_kernel` and `agent_deep_review`. It records the selection after
+nodes `agent_kernel` and `agent_deep_review`; the helper calls keep their
+configured tiers. The kernel records the selection after
 request/skill precedence and before its automatic Deep effort increase. The
 increase belongs to the loop and its revision; a review with no selected effort
 uses its tier default, or the provider default for an explicitly selected model.
-An explicit `none` remains an explicit choice. Sufficiency, skill-point checks
-and memory reflection retain their independent tier assignments.
+An explicit `none` remains an explicit choice. Sufficiency, skill-point checks,
+file analysis and memory reflection retain their independent tier assignments.
 
-Single and batched mission children receive that recorded selection alongside
-the parent's Agent tier/depth. They resolve their own roles from those settings;
-the already-resolved kernel model and automatic Deep effort are not inherited.
+Knowledge children and role runs receive that recorded selection alongside the
+parent's Agent tier/depth; the already-resolved kernel model and automatic Deep
+effort are not inherited.
 The child's stored overrides and resolution events expose the actual handover.
-Child research runs do not inherit the parent's model override, and plan
-tasks cannot select their child's model tier. The selected Agent tier determines
-the default child report profile and its allowed ceiling; tasks may choose an
-in-ceiling profile. Without an Agent tier, normal/deep depth selects compact/deep.
-Instant web tasks execute one search-provider call without a research child.
+Child research runs do not inherit the parent's model override. The selected
+Agent tier fixes the child's report profile; without an Agent tier,
+normal/deep depth selects compact/deep. An instant web search (`web_instant`)
+executes one search-provider call without a research child.
 Every node still emits its `model_resolution` event, so the narrowed scope
 is auditable per run (`model_source: explicit_request` appears only on the
 thinking nodes).
@@ -919,15 +940,22 @@ as a `node_model_resolution` iteration-log event:
   "model": "claude-opus-4-7",
   "tier": "high",
   "effort": "medium",
+  "verbosity": "",
   "model_source": "tier:high",
   "effort_source": "tier:high",
   "requested_tier": ""
 }
 ```
 
+`verbosity` is the level a node that writes prose for a reader asks for when
+the card of its model names one (`answer` here, and the turns of the agent kernel);
+every other node, and every model without such a rule, carries an empty value.
+
 If provider model metadata is missing, or resolution produces an empty model, the
-runtime additionally emits a warning progress event and a
-`node_model_resolution_warning` iteration-log marker. The latest descriptor for
+runtime additionally logs an English warning naming node and provider, emits a
+warning progress event in the run's language ("Warnung: Für diesen Schritt
+ließ sich kein Modell bestimmen; es gilt die Voreinstellung des Anbieters")
+and writes a `node_model_resolution_warning` iteration-log marker. The latest descriptor for
 each node is also kept in `state["node_model_resolutions"]` so terminal result
 surfaces can report exactly what a run used.
 

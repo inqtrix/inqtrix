@@ -20,7 +20,14 @@ export function SummaryGroup({ children, label }: { children: ReactNode; label: 
 
 export type StatusRowTone = 'default' | 'muted' | 'success' | 'warning'
 
-/** One status line: a muted label and a tone-coded value pill. */
+/**
+ * One status line: a muted label and a tone-coded value pill.
+ *
+ * The pill is narrow and cuts what does not fit, so it holds a short value
+ * only; whatever needs words goes to `hint`. A value of unknown length (a
+ * model name) stays reachable in full through the pill's title. The label
+ * wraps instead of being cut.
+ */
 export function StatusRow({
   hint,
   label,
@@ -35,8 +42,9 @@ export function StatusRow({
 }) {
   const row = (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1">
-      <span className="truncate t-meta-sm text-muted-foreground">{label}</span>
+      <span className="min-w-0 break-words t-meta-sm text-muted-foreground">{label}</span>
       <span
+        title={value}
         className={cn(
           'max-w-36 truncate rounded-md px-1.5 py-0.5 text-right t-meta-sm font-medium',
           tone === 'success' && 'bg-success-subtle text-success',

@@ -228,123 +228,24 @@ def wait_status(
     pytest.fail(f"run {run_id} never reached {statuses}")
 
 
-@pytest.mark.parametrize("batched", [False, True])
-@pytest.mark.parametrize("selection", [
-    {},
-    {"model": "chosen-model"},
-    {"model": "chosen-model", "effort": "none"},
-    {"model_tier": "fast"},
-    {"model_tier": "mid", "effort": "low"},
-])
-def test_mission_child_inherits_selection_without_resolved_kernel_defaults(
-    monkeypatch, batched, selection,
-):
-    from inqtrix.core.results import AgentResult
-
-    tool_name = "delegate_batch" if batched else "run_deep_mission"
-    arguments = (
-        {"assignments": [{"objective": "Kurzes Memo.", "mode": "deep_mission"}]}
-        if batched else {"assignment": "Kurzes Memo."}
-    )
-    llm = ScriptedToolLLM([
-        _tool_turn("call_selected_mission", tool_name, arguments),
-        _text_turn("Auftrag erledigt."),
-    ])
-    client = make_client(monkeypatch, llm)
-    received = []
-
-    class Mission:
-        id = "workspace_agent"
-        display_name = "Mission"
-        contract_version = 1
-
-        def capabilities(self):
-            return {}
-
-        def run(self, request, *, runtime, context):
-            received.append({
-                key: getattr(context.agent_settings, key)
-                for key in ("model", "model_tier", "effort")
-            })
-            return AgentResult(answer="Kurzes Memo.", raw={"answer": "Kurzes Memo."})
-
-    monkeypatch.setitem(client.container.registry._items, "workspace_agent", Mission())
-    with client:
-        response = client.post("/v1/runs", json={
-            "question": "Lass ein kurzes Memo erstellen.",
-            "mode": "agent_kernel", "autonomy": "autonomous",
-            "agent_overrides": {"agent_tier": "tief", **selection},
-        })
-        assert response.status_code == 202, response.text
-        run_id = response.json()["run_id"]
-        summary = wait_status(client, run_id, {"completed", "failed"})
-        assert summary["status"] == "completed", summary
-        children = delegated(client.get(f"/v1/runs/{run_id}/children").json()["data"])
-        assert len(children) == 1
-        assert children[0]["status"] == "completed"
-        expected = {key: selection.get(key, "") for key in ("model", "model_tier", "effort")}
-        assert received == [expected]
-        stored = children[0]["agent_overrides"]
-        assert {key: stored.get(key, "") for key in expected} == expected
-        assert stored["agent_tier"] == "tief"
-        assert stored["depth"] == "deep"
-
-
 @pytest.mark.parametrize(
-    ("tool_name", "arguments", "inherits"),
+    ("tool_name", "arguments"),
     [
-        ("run_deep_mission", {"assignment": "Kurzes Memo."}, True),
-        (
-            "delegate_batch",
-            {"assignments": [{"objective": "Kurzes Memo.", "mode": "deep_mission"}]},
-            False,
-        ),
-        ("run_web_research", {"question": "Sachfrage."}, False),
-        (
-            "delegate_batch",
-            {"assignments": [{"objective": "Sachfrage.", "mode": "research"}]},
-            False,
-        ),
+        ("run_web_research", {"question": "Sachfrage."}),
+        ("delegate_batch", {"assignments": [{"objective": "Sachfrage.", "mode": "research"}]}),
     ],
-    ids=["single_mission", "batch_mission", "research", "batch_research"],
+    ids=["research", "batch_research"],
 )
-def test_only_a_single_mission_child_inherits_the_result_requirement(
-    monkeypatch, tool_name, arguments, inherits,
-):
-    """In tier 'tief' the single mission's memo IS the deliverable, so
-    the requirement the user attached must reach its writers — text and
-    parts, frozen as the parent resolved them. A batch strand writes one
-    of up to three memos, each announced as 'the deliverable'; inheriting
-    a whole-deliverable rule there would ask for up to three briefings, so
-    the kernel composes those itself. Research children deliver evidence,
-    never the result, and get nothing."""
+def test_no_child_inherits_the_result_requirement(monkeypatch, tool_name, arguments):
+    """The requirement the user attached shapes the run's own result. A
+    research child delivers evidence, never the result, and gets nothing."""
     import asyncio
-
-    from inqtrix.core.results import AgentResult
 
     llm = ScriptedToolLLM([
         _tool_turn("call_requirement_child", tool_name, arguments),
         _text_turn("Auftrag erledigt."),
     ])
     client = make_client(monkeypatch, llm)
-    received: list[tuple[str, tuple[dict[str, Any], ...]]] = []
-
-    class Mission:
-        id = "workspace_agent"
-        display_name = "Mission"
-        contract_version = 1
-
-        def capabilities(self):
-            return {}
-
-        def run(self, request, *, runtime, context):
-            received.append((request.report_requirement, request.report_rules))
-            return AgentResult(answer="Kurzes Memo.", raw={"answer": "Kurzes Memo."})
-
-    monkeypatch.setitem(client.container.registry._items, "workspace_agent", Mission())
-    research = tool_name == "run_web_research" or any(
-        item["mode"] == "research" for item in arguments.get("assignments", ())
-    )
     with client:
         rule = asyncio.run(client.container.prompt_template_service.create(
             {"title": "Briefing", "label": "briefing", "category": "instruction",
@@ -358,7 +259,7 @@ def test_only_a_single_mission_child_inherits_the_result_requirement(
             "agent_overrides": {"agent_tier": "tief"},
             "report_rule_ids": [rule.id],
             "report_guidance": "Fuer den Vorstand.",
-            **({"tool_directives": ["web_research"]} if research else {}),
+            "tool_directives": ["web_research"],
         })
         assert response.status_code == 202, response.text
         run_id = response.json()["run_id"]
@@ -371,34 +272,8 @@ def test_only_a_single_mission_child_inherits_the_result_requirement(
         child_body = store.execution_request_body(children[0]["run_id"])
     parts = [{"template_id": rule.id, "label": "briefing", "title": "Briefing", "revision": 1}]
     assert parent_body["report_rules"] == parts
-    if inherits:
-        assert child_body["report_requirement"] == parent_body["report_requirement"]
-        assert child_body["report_rules"] == parts
-        assert received == [(parent_body["report_requirement"], tuple(parts))]
-    else:
-        assert "report_requirement" not in child_body
-        assert "report_rules" not in child_body
-        assert received == ([] if research else [("", ())])
-
-
-def test_only_a_mission_child_can_be_handed_the_requirement():
-    """The requirement shapes a deliverable; a research child delivers
-    evidence. Handing it one is a programming error, refused before any
-    submission."""
-    from inqtrix.agents.kernel.tools import ChildScope, submit_or_find_child
-
-    scope = ChildScope(
-        run_id="run_parent", run_service=None, resolver=None, principal=None,
-        workspace_id=None, session_id="", stack_name="", source_policy=None,
-        model_overrides={}, knowledge_collection_ids=None,
-        knowledge_scope_explicit=False, knowledge_scope=None, tier="", depth="",
-        report_requirement="[Free requirement]\nKurz.", report_rules=(),
-    )
-    with pytest.raises(ValueError, match="Only a mission child inherits"):
-        submit_or_find_child(
-            scope, origin_key="call_1", mode="research", question="Frage",
-            agent_overrides={}, inherit_requirement=True,
-        )
+    assert "report_requirement" not in child_body
+    assert "report_rules" not in child_body
 
 
 @pytest.mark.parametrize("batched", [False, True])
@@ -790,6 +665,68 @@ def test_run_web_research_gates_in_balanced(monkeypatch):
         assert len(children) == 1
 
 
+class _HandoverLLM(ScriptedToolLLM):
+    """A model that writes its second assignment from the first child's report.
+
+    The mission ordered dependent tasks through its own graph. In the
+    kernel the model orders them; what the platform owes is the first
+    report in the turn that writes the second assignment.
+    """
+
+    REPORT = "Kindbericht zu: Marktlage Klimaanlagen 2026"
+
+    def __init__(self) -> None:
+        super().__init__([
+            _tool_turn("call_first", "run_web_research", {"question": "Marktlage Klimaanlagen 2026"}),
+            _text_turn("Antwort auf Basis beider Kindberichte."),
+        ])
+
+    def chat(self, messages: Any, *, tools: Any = None, **kwargs: Any) -> ChatTurn:
+        if len(self.chat_calls) != 1:
+            return super().chat(messages, tools=tools, **kwargs)
+        self.chat_calls.append({"messages": list(messages), "tools": tools})
+        replies = [str(message.get("content")) for message in messages if message.get("role") == "tool"]
+        handed = next((self.REPORT for reply in replies if self.REPORT in reply), "ohne Bericht")
+        return _tool_turn(
+            "call_second", "run_web_research", {"question": f"Preise der Anbieter laut „{handed}“"},
+        )
+
+
+def test_a_follow_up_assignment_is_written_from_the_first_report(monkeypatch):
+    """Dependent subtasks: the second assignment hands over what the first
+    child reported, because the report stands in the turn that writes it."""
+    llm = _HandoverLLM()
+    client = make_client(monkeypatch, llm)
+    researched: list[str] = []
+
+    def recording_child_graph(question: str, **kwargs: Any) -> dict[str, Any]:
+        researched.append(question)
+        return fake_child_graph(question, **kwargs)
+
+    monkeypatch.setattr(web_research_module, "run_web_graph", recording_child_graph)
+    with client:
+        response = client.post(
+            "/v1/runs",
+            json={
+                "question": "Erst die Marktlage, dann die Preise der genannten Anbieter.",
+                "mode": "agent_kernel",
+                "autonomy": "autonomous",
+                "tool_directives": ["web_research"],
+            },
+        )
+        assert response.status_code == 202, response.text
+        run_id = response.json()["run_id"]
+        wait_status(client, run_id, {"completed"})
+        children = client.get(f"/v1/runs/{run_id}/children").json()["data"]
+
+    assert {child["origin_key"] for child in children} == {"call_first", "call_second"}
+    # In this order: the second question exists only once the first report did.
+    assert researched == [
+        "Marktlage Klimaanlagen 2026",
+        f"Preise der Anbieter laut „{_HandoverLLM.REPORT}“",
+    ]
+
+
 def test_failed_child_is_a_visible_tool_result(monkeypatch):
     def broken_child_graph(question: str, **kwargs: Any) -> dict[str, Any]:
         raise RuntimeError("Recherche-Backend nicht erreichbar")
@@ -1170,13 +1107,13 @@ def test_child_batch_guard_blocks_parallel_single_child_calls(monkeypatch):
                 tool_calls=(
                     ToolCallRequest(
                         id="call_par1",
-                        name="run_deep_mission",
-                        arguments={"assignment": "A"},
+                        name="run_web_research",
+                        arguments={"question": "A"},
                     ),
                     ToolCallRequest(
                         id="call_par2",
-                        name="run_deep_mission",
-                        arguments={"assignment": "B"},
+                        name="run_web_research",
+                        arguments={"question": "B"},
                     ),
                 ),
                 finish_reason="tool_calls",
@@ -1362,13 +1299,13 @@ def test_balanced_parallel_child_calls_void_without_gate(monkeypatch):
                 tool_calls=(
                     ToolCallRequest(
                         id="call_bp1",
-                        name="run_deep_mission",
-                        arguments={"assignment": "A"},
+                        name="run_web_research",
+                        arguments={"question": "A"},
                     ),
                     ToolCallRequest(
                         id="call_bp2",
-                        name="run_deep_mission",
-                        arguments={"assignment": "B"},
+                        name="run_web_research",
+                        arguments={"question": "B"},
                     ),
                 ),
                 finish_reason="tool_calls",
@@ -1554,11 +1491,22 @@ def test_child_submissions_without_a_stufe_keep_the_depth_path(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("bulk", [False, True])
-def test_child_report_names_a_capped_evidence_contract(monkeypatch, bulk):
+@pytest.mark.parametrize(
+    ("bulk", "status", "capped"),
+    [
+        (False, "needs_review", True),
+        (True, "needs_review", True),
+        (False, "clean", False),
+        (False, "clean", True),
+    ],
+)
+def test_child_report_names_a_capped_evidence_contract(monkeypatch, bulk, status, capped):
     """A research child whose evidence audit capped its confidence tells
     the kernel so in its report — as an open point to name, not a source
-    to cite — instead of arriving as a confident-sounding text."""
+    to cite — instead of arriving as a confident-sounding text. The report
+    names the cause, the reason of the ceiling and what the child's cited
+    sources could be checked against; a clean child is not silent either,
+    and a clean child the depth gap capped names its ceiling."""
 
     def capped_child_graph(question: str, **kwargs: Any) -> dict[str, Any]:
         result = fake_child_graph(question, **kwargs)
@@ -1568,8 +1516,27 @@ def test_child_report_names_a_capped_evidence_contract(monkeypatch, bulk):
         result["result_state"].update(
             {
                 "final_confidence": 6,
-                "evidence_contract_status": "needs_review",
-                "evidence_depth_gap": {"active": True, "single_source_ratio": 0.93},
+                "evidence_contract_status": status,
+                **(
+                    {
+                        "evidence_contract_causes": (
+                            ["evidence_depth_gap"] if status == "needs_review" else []
+                        ),
+                        "confidence_cap": 6,
+                        "confidence_cap_reasons": ["no_cross_checked_claims"],
+                        "evidence_depth_gap": {
+                            "active": True, "single_source_ratio": 0.93,
+                            "reason": "no_cross_checked_claims",
+                        },
+                    }
+                    if capped
+                    else {
+                        "evidence_contract_causes": [],
+                        "confidence_cap": None,
+                        "confidence_cap_reasons": [],
+                        "evidence_depth_gap": {"active": False},
+                    }
+                ),
             }
         )
         return result
@@ -1601,180 +1568,33 @@ def test_child_report_names_a_capped_evidence_contract(monkeypatch, bulk):
     ]
     if bulk:
         assert any("The complete tool result is above. Retained original:" in str(message) for message in final_turn)
-    assert any(
-        "Evidence state of the subtask: needs_review, confidence 6/10" in str(message)
-        and "name it as an open point" in str(message)
-        for message in final_turn
-    ), [str(message)[:200] for message in final_turn]
-
-
-def test_mission_child_memo_is_the_deliverable_and_arms_one_advisory(
-    monkeypatch,
-):
-    """A completed mission child hands its memo on as THE deliverable.
-
-    The tool result names the session document (title, artifact id,
-    revision) instead of inviting a second canvas, and the very next
-    model turn carries one advisory — no second research child to
-    verify the mission — which is not repeated on later turns.
-    """
-    import asyncio
-
-    from inqtrix.agents.control_ports import session_memo_artifact_id
-    from inqtrix.core.results import AgentResult
-
-    llm = ScriptedToolLLM(
-        [
-            _tool_turn(
-                "call_mission",
-                "run_deep_mission",
-                {"assignment": "KI-Neuigkeiten dieser Woche, ausfuehrlich"},
-            ),
-            _tool_turn(
-                "call_read_memo",
-                "read_canvas",
-                {"artifact_id": "art_sess-mission_memo"},
-            ),
-            _text_turn("Kurzfazit — Details im Dokument 'Memo: KI-Woche'."),
-        ]
+    basis = (
+        "Basis: what the search provider returned for the cited sources; the "
+        "pages themselves were not read."
     )
-    client = make_client(monkeypatch, llm)
-    store = client.container.agent_control_service.store  # type: ignore[attr-defined]
-
-    class FakeMission:
-        id = "workspace_agent"
-        display_name = "Fake Mission"
-        contract_version = 1
-
-        def capabilities(self) -> dict[str, Any]:
-            return {}
-
-        def run(self, request: Any, *, runtime: Any, context: Any) -> Any:
-            run_id = str(context.run_id)
-            assert request.session_id == "sess-mission"
-            asyncio.run(
-                store.upsert_artifact(
-                    run_id=run_id,
-                    kind="memo",
-                    session_id=request.session_id,
-                    title="Memo: KI-Woche",
-                    status="final",
-                    content_markdown="# Memo\n\nInhalt der Mission.",
-                    payload={},
-                    refs=[],
-                    updated_by="mission",
-                    artifact_id=session_memo_artifact_id(
-                        request.session_id, run_id
-                    ),
-                )
-            )
-            refs = [{"label": "W1", "url": "https://example.org/conditions"}]
-            ledger = {"searches": {"query_mission": {
-                "query_id": "query_mission", "source_run_id": run_id,
-                "query": "Welche Bedingungen gelten?",
-                "provider_answer": "Die Registrierung muss vorher erfolgen.",
-                "citations": [{"url": refs[0]["url"], "citation_id": "citation_mission"}],
-            }}}
-            asyncio.run(store.upsert_artifact(
-                run_id=run_id, artifact_id=f"art_{run_id[-12:]}_evidence",
-                kind="evidence_bundle", session_id=None, title="Agent evidence",
-                status="ready", content_markdown="", refs=refs,
-                payload={"web_search_ledger": ledger}, updated_by="agent",
-            ))
-            raw = {"answer": "Die Registrierung muss vorher erfolgen. [W1]",
-                   "result_state": {"report_references": refs, "web_search_ledger": ledger}}
-            return AgentResult(answer=str(raw["answer"]), raw=raw)
-
-    registry = client.container.registry  # type: ignore[attr-defined]
-    monkeypatch.setitem(registry._items, "workspace_agent", FakeMission())
-
-    with client:
-        response = client.post(
-            "/v1/runs",
-            json={
-                "question": "Welche Neuigkeiten gibt es zu KI in dieser Woche?",
-                "mode": "agent_kernel",
-                "autonomy": "autonomous",
-                "session_id": "sess-mission",
-            },
-        )
-        assert response.status_code == 202, response.text
-        run_id = response.json()["run_id"]
-        wait_status(client, run_id, {"completed"})
-
-        children = client.get(f"/v1/runs/{run_id}/children").json()["data"]
-        assert [(c["mode"], c["status"]) for c in children] == [
-            ("workspace_agent", "completed")
-        ]
-        child_id = children[0]["run_id"]
-        assert "web_search_ledger" not in client.get(f"/v1/runs/{child_id}/result").json()
-        retained = client.get(
-            f"/v1/runs/{run_id}/artifacts/art_{run_id[-12:]}_evidence"
-        ).json()["payload"]["web_search_ledger"]["searches"]["query_mission"]
-        assert retained["source_run_id"] == child_id
-        assert retained["provider_answer"] == "Die Registrierung muss vorher erfolgen."
-
-        # The tool result names the memo as the deliverable.
-        tool_replies = [
-            m
-            for m in llm.chat_calls[1]["messages"]
-            if m.get("role") == "tool"
-        ]
-        content = str(tool_replies[0]["content"])
-        assert "is the deliverable of this assignment" in content
-        assert "Memo: KI-Woche" in content
-        assert "artifact_id art_sess-mission_memo" in content
-        assert "revision 1" in content
-        assert "write no second document" in content
-        # The memo is read in full before the summary; the summary cites
-        # its labels (the digest is only the head).
-        assert "read_canvas(artifact_id)" in content
-
-        # Exactly ONE advisory, on the turn right after the mission.
-        def advisories(call_index: int) -> list[dict[str, Any]]:
-            return [
-                m
-                for m in llm.chat_calls[call_index]["messages"]
-                if m.get("role") == "user"
-                and "The mission is complete" in str(m.get("content", ""))
-            ]
-
-        assert len(advisories(1)) == 1
-        assert "read_canvas(artifact_id)" in str(advisories(1)[0].get("content", ""))
-        assert len(advisories(2)) == 1  # history keeps it; not re-added
-        assert llm.chat_calls[2]["messages"].count(
-            advisories(1)[0]
-        ) == 1
-        # The kernel could read the memo it was pointed to.
-        memo_replies = [
-            m
-            for m in llm.chat_calls[2]["messages"]
-            if m.get("role") == "tool"
-            and "Canvas document: Memo: KI-Woche" in str(m.get("content", ""))
-        ]
-        assert len(memo_replies) == 1
-
-        result = client.get(f"/v1/runs/{run_id}/result").json()
-        assert result["answer"].startswith("Kurzfazit")
-
-        # The memo is announced on the PARENT stream as this turn's
-        # deliverable (the file chip) with its title and revision — no
-        # diff base and no line counts, because the parent cannot know
-        # where the memo stood before the dispatch (it resumes later).
-        # Mutation: dropping the emit fails this pin.
-        events = client.get(f"/v1/runs/{run_id}/events?format=json").json()["data"]
-        handed = [
-            e["data"]
-            for e in events
-            if e["type"] == "inqtrix.agent.artifact.updated"
-            and e["data"].get("kind") == "memo"
-        ]
-        assert len(handed) == 1
-        assert handed[0]["artifact_id"] == "art_sess-mission_memo"
-        assert handed[0]["title"] == "Memo: KI-Woche"
-        assert handed[0]["revision"] == 1
-        assert "from_revision" not in handed[0]
-        assert "lines_added" not in handed[0]
+    clean_means = (
+        "'clean' says that the cited sources carry recorded statements and a "
+        "cited sentence restates one, not that a statement was checked."
+    )
+    expected = {
+        ("needs_review", True): (
+            "Evidence state of the subtask: needs_review (the evidence-depth check "
+            "of the supported statements is not met), confidence 6/10 (ceiling 6: "
+            f"none of the supported statements counts as cross-checked). {basis} "
+            "Name it as an open point, do not cite it as evidence."
+        ),
+        ("clean", False): (
+            f"Evidence state of the subtask: clean, confidence 6/10. {basis} {clean_means}"
+        ),
+        ("clean", True): (
+            "Evidence state of the subtask: clean, confidence 6/10 (ceiling 6: "
+            "none of the supported statements counts as cross-checked). "
+            f"{basis} {clean_means}"
+        ),
+    }[(status, capped)]
+    assert any(
+        expected in str(message.get("content")) for message in final_turn
+    ), [str(message)[-700:] for message in final_turn]
 
 
 def test_a_follow_up_turn_keeps_the_citations_of_the_previous_answer(
@@ -1845,15 +1665,93 @@ def test_a_follow_up_turn_keeps_the_citations_of_the_previous_answer(
         assert result["references"][0]["label"] == "W1"
 
 
-def test_gruendlich_kernel_cannot_start_a_mission_but_delegates_research(
+def test_an_uncited_follow_up_lists_only_what_its_own_run_gathered(monkeypatch):
+    """Turn 2 of a session researches and answers without a citation label.
+
+    The run knows the session's earlier references, so their labels stay
+    citable; they are not its sources. The regression: the uncited answer
+    listed the whole ledger, the earlier turn's references included. A
+    reference the earlier turn left counts once this run finds it again.
+    """
+    import asyncio
+
+    found_again = "https://www.bafin.de/SharedDocs/Tests/quelle.html"
+    llm = ScriptedToolLLM(
+        [
+            _text_turn("Der Markt waechst."),
+            _tool_turn(
+                "call_research2",
+                "run_web_research",
+                {"question": "Marktlage Klimaanlagen 2026"},
+            ),
+            _text_turn("Kurz: weiter so."),
+        ]
+    )
+    client = make_client(monkeypatch, llm)
+    store = client.container.agent_control_service.store  # type: ignore[attr-defined]
+
+    def submit(question: str) -> str:
+        response = client.post(
+            "/v1/runs",
+            json={
+                "question": question,
+                "mode": "agent_kernel",
+                "autonomy": "autonomous",
+                "session_id": "sess-uncited",
+                "tool_directives": ["web_research"],
+            },
+        )
+        assert response.status_code == 202, response.text
+        run_id = response.json()["run_id"]
+        wait_status(client, run_id, {"completed"})
+        return run_id
+
+    with client:
+        previous = submit("Wie entwickelt sich der Markt?")
+        # What the earlier turn retained: two references in its ledger.
+        asyncio.run(
+            store.upsert_artifact(
+                run_id=previous,
+                kind="evidence_bundle",
+                session_id=None,
+                title="Kernel evidence",
+                status="ready",
+                content_markdown="",
+                payload={"schema_version": 1, "web_search_ledger": {}},
+                refs=[
+                    {"label": "W1", "url": found_again, "title": "Primaerquelle"},
+                    {
+                        "label": "W2",
+                        "url": "https://example.org/nur-im-ersten-zug",
+                        "title": "Nur im ersten Zug",
+                    },
+                ],
+                updated_by="agent",
+                artifact_id=f"art_{previous[-12:]}_evidence",
+            )
+        )
+        run_id = submit("Und wie geht es weiter?")
+        result = client.get(f"/v1/runs/{run_id}/result").json()
+        ledger, _ = asyncio.run(
+            store.get_artifact(run_id, f"art_{run_id[-12:]}_evidence")
+        )
+
+    assert result["answer"] == "Kurz: weiter so."
+    # The probe sees the earlier reference in this run's ledger: an empty
+    # list below would otherwise prove nothing.
+    assert "https://example.org/nur-im-ersten-zug" in [
+        reference.get("url") for reference in ledger.refs
+    ]
+    assert [reference["url"] for reference in result["references"]] == [found_again]
+
+
+def test_gruendlich_kernel_delegates_research_and_no_mission(
     monkeypatch,
 ):
-    """The middle rung of the ladder, enforced at the chokepoint: a
-    ``gruendlich`` kernel gets a VISIBLE denial for ``run_deep_mission``
-    (naming the rung that has it); a batch with a ``deep_mission``
-    assignment is denied as a whole (fail-closed, nothing dispatched),
-    while a research-only batch dispatches and the child inherits the
-    Stufe."""
+    """The middle rung delegates research children that inherit its Stufe.
+    The retired mission is neither a tool nor a batch mode: a call of the
+    tool is a visible error, and a batch with a ``deep_mission``
+    assignment is refused as a whole (fail-closed, nothing dispatched)."""
     llm = ScriptedToolLLM(
         [
             _tool_turn(
@@ -1913,13 +1811,10 @@ def test_gruendlich_kernel_cannot_start_a_mission_but_delegates_research(
             ]
             return str(replies[-1]["content"])
 
-        denial = tool_reply(1)
-        assert "Tool blocked" in denial
-        assert "tier 'gruendlich'" in denial
-        assert "only in the tier 'tief'" in denial
+        assert "run_deep_mission is not a valid tool" in tool_reply(1)
         mixed = tool_reply(2)
-        assert mixed.startswith("Assignment 2: Tool blocked")
-        assert "tier 'gruendlich'" in mixed
+        assert mixed.startswith("Tool error (subtask.assignment_invalid): assignment 2: ")
+        assert "(research | knowledge)" in mixed
         assert "Kindbericht zu: Strang A untersuchen" in tool_reply(3)
 
 

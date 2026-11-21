@@ -31,9 +31,12 @@ function job(overrides: Partial<ResearchJob> = {}): ResearchJob {
   }
 }
 
-function renderCard(cardJob: ResearchJob, options: { expanded?: boolean } = {}) {
+function renderCard(
+  cardJob: ResearchJob,
+  options: { expanded?: boolean; locale?: 'de' | 'en' } = {},
+) {
   return renderToStaticMarkup(
-    <LocaleProvider initialLocale="de">
+    <LocaleProvider initialLocale={options.locale ?? 'de'}>
       <TooltipProvider>
         <ResearchJobCard
           isExpanded={options.expanded ?? false}
@@ -106,5 +109,24 @@ describe('ResearchJobCard failure details', () => {
     const markup = renderCard(job({ error: 'Die Quelle war nicht lesbar.', status: 'failed' }), { expanded: true })
     expect(markup).toContain('Die Quelle war nicht lesbar.')
     expect(markup).not.toContain('<details')
+  })
+})
+
+describe('ResearchJobCard report profile', () => {
+  it.each([
+    ['running', 'compact', 'Profil: Kompakt'],
+    ['queued', 'schnell', 'Profil: Schnell'],
+    ['completed', 'deep', 'Profil: Tief'],
+    ['failed', 'compact', 'Profil: Kompakt'],
+  ] as const)('names the profile of a %s run', (status, reportProfile, label) => {
+    expect(renderCard(job({ reportProfile, status }))).toContain(`>${label}<`)
+  })
+
+  it('names it in English for an English desk', () => {
+    expect(renderCard(job({ reportProfile: 'compact' }), { locale: 'en' })).toContain('>Profile: Compact<')
+  })
+
+  it('names no profile for a run that stored none', () => {
+    expect(renderCard(job())).not.toContain('Profil:')
   })
 })

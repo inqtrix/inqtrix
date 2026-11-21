@@ -10,7 +10,7 @@ from typing import Callable
 
 import pytest
 
-from inqtrix.agents.algorithm import _child_task_outcome
+from inqtrix.agents.scheduler import project_child_run_outcome
 from inqtrix.core.results import AgentResult
 from inqtrix.exceptions import (
     AgentCancelled,
@@ -221,31 +221,27 @@ def _submit_child(algorithm: object) -> tuple[RunService, dict]:
 
 
 @pytest.mark.parametrize(
-    ("exception_factory", "status", "error_type", "retryable"),
+    ("exception_factory", "status", "error_type"),
     [
         (
             lambda: AgentRateLimited("model-a", RuntimeError("429")),
             "failed",
             "rate_limited",
-            False,
         ),
         (
             lambda: AgentProviderTimeout("provider request"),
             "failed",
             "provider_timeout",
-            False,
         ),
         (
             lambda: AgentTimeout("run deadline"),
             "failed",
             "run_timeout",
-            False,
         ),
         (
             lambda: ConnectionError("connection reset"),
             "failed",
             "temporary_transport",
-            False,
         ),
         (
             lambda: AzureOpenAIAPIError(
@@ -253,7 +249,6 @@ def _submit_child(algorithm: object) -> tuple[RunService, dict]:
             ),
             "failed",
             "upstream_5xx",
-            False,
         ),
         (
             lambda: AzureOpenAIAPIError(
@@ -261,19 +256,16 @@ def _submit_child(algorithm: object) -> tuple[RunService, dict]:
             ),
             "failed",
             "provider_error",
-            False,
         ),
         (
             lambda: AgentTokenBudgetExceeded("budget"),
             "failed",
             "token_budget_exceeded",
-            False,
         ),
         (
             lambda: AgentCancelled("client"),
             "cancelled",
             "cancelled",
-            False,
         ),
     ],
     ids=[
@@ -287,11 +279,10 @@ def _submit_child(algorithm: object) -> tuple[RunService, dict]:
         "client-cancel",
     ],
 )
-def test_native_child_terminal_type_drives_parent_retry_contract(
+def test_native_child_terminal_type_reaches_the_parent_as_its_failure_code(
     exception_factory: Callable[[], Exception],
     status: str,
     error_type: str,
-    retryable: bool,
 ) -> None:
     service, child = _submit_child(_RaisingAlgorithm(exception_factory()))
 
@@ -301,12 +292,9 @@ def test_native_child_terminal_type_drives_parent_retry_contract(
     else:
         assert child["error"] is None
 
-    outcome = _child_task_outcome(
-        SimpleNamespace(run_service=service), child["run_id"], 1
-    )
+    outcome = project_child_run_outcome(service.run_store, child["run_id"])
     assert outcome is not None
     assert outcome.failure_code == error_type
-    assert outcome.transient is retryable
 
 
 def test_returned_graph_rate_limit_marker_cannot_complete_native_child() -> None:
@@ -314,9 +302,6 @@ def test_returned_graph_rate_limit_marker_cannot_complete_native_child() -> None
 
     assert child["status"] == "failed"
     assert child["error"]["type"] == "rate_limited"
-    outcome = _child_task_outcome(
-        SimpleNamespace(run_service=service), child["run_id"], 1
-    )
+    outcome = project_child_run_outcome(service.run_store, child["run_id"])
     assert outcome is not None
     assert outcome.failure_code == "rate_limited"
-    assert outcome.transient is False

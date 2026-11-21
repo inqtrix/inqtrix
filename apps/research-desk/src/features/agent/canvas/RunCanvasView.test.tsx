@@ -26,7 +26,6 @@ function overview(error: ResearchRunSummary['error']): string {
     mode: 'agent_kernel',
     question: 'Frage',
     queue_position: null,
-    result_url: '/result',
     run_id: 'run-1',
     snapshot: {},
     stack: 'default',
@@ -69,5 +68,22 @@ describe('the failure line of the run overview', () => {
     // An unknown failure stays visible as it arrived.
     expect(overview({ message: 'Unbekannter Ausfall', type: 'brand_new_code' }))
       .toContain('Unbekannter Ausfall')
+  })
+})
+
+describe('the run view of a run the desk does not have', () => {
+  it('says the run is no longer available', () => {
+    // Without a run there is nothing to show; the view inspects no child
+    // run in its place.
+    const context = { pollingRunIds: [], runs: {} } as unknown as AgentCanvasContextValue
+    const html = renderToStaticMarkup(
+      <AgentCanvasReactContext.Provider value={context}>
+        <RunCanvasView descriptor={{ runId: 'run-gone', view: 'run' }} />
+      </AgentCanvasReactContext.Provider>,
+    )
+    const t = translations.de.agent.canvas
+    expect(html).toContain(t.runUnavailable)
+    expect(html).not.toContain(t.empty)
+    expect(overview(null)).not.toContain(t.runUnavailable)
   })
 })

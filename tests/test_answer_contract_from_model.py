@@ -20,7 +20,7 @@ from inqtrix.nodes import (
     evaluate,
     search,
 )
-from inqtrix.prompts import build_answer_system_prompt, build_evaluate_format_suffix
+from inqtrix.prompts import build_answer_section_system_prompt, build_evaluate_format_suffix
 from inqtrix.providers.base import ProviderContext
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
 from inqtrix.settings import AgentSettings
@@ -299,6 +299,21 @@ def _evaluate_with(
     return state, llm, _drain(queue)
 
 
+def test_the_evaluator_reads_the_search_providers_excerpt_by_its_one_name():
+    """The evaluator's claim ledger says what a status checked in the same
+    words the writer reads, and never that a source's own text was read."""
+    _, llm, _ = _evaluate_with("STATUS: SUFFICIENT\nCONFIDENCE: 8\nGAPS: Keine" + _EVAL_TAIL)
+    prompt = llm.prompts[-1]
+
+    assert (
+        "- verified: the search provider's excerpt of a source was checked and "
+        "states the claim. attributed: the search provider's answer attributes "
+        "the claim to its sources; the search provider's excerpt does not state "
+        "it, or there is none."
+    ) in prompt
+    assert "own text" not in prompt and "no source text was checked" not in prompt
+
+
 def test_evaluator_judges_coverage_via_covered_aspects():
     state, llm, _ = _evaluate_with("STATUS: INSUFFICIENT\nCONFIDENCE: 6\nGAPS: Oesterreich fehlt\nCOVERED_ASPECTS: [1, 3]" + _EVAL_TAIL)
     assert state["uncovered_aspects"] == [COMPARISON_SUBS[1]]
@@ -318,7 +333,8 @@ def test_missing_covered_aspects_line_keeps_the_open_list_and_says_so():
     state, _, messages = _evaluate_with("STATUS: SUFFICIENT\nCONFIDENCE: 8\nGAPS: Keine" + _EVAL_TAIL)
     assert state["uncovered_aspects"] == COMPARISON_SUBS
     assert state["coverage_source"] == "missing"
-    assert any("COVERED_ASPECTS" in m for m in messages), messages
+    # The step says it in reader words; the field name stays in the log.
+    assert any("Evaluation without sub-question coverage" in m for m in messages), messages
 
 
 def test_covered_aspects_accepts_numeric_strings_and_flags_lists_without_numbers():
@@ -331,7 +347,8 @@ def test_covered_aspects_accepts_numeric_strings_and_flags_lists_without_numbers
     odd, _, messages = _evaluate_with('STATUS: INSUFFICIENT\nCONFIDENCE: 6\nGAPS: x\nCOVERED_ASPECTS: ["Deutschland", "Fristen"]' + _EVAL_TAIL)
     assert odd["uncovered_aspects"] == COMPARISON_SUBS
     assert odd["coverage_source"] == "unparsable"
-    assert any("COVERED_ASPECTS" in m for m in messages), messages
+    # The step says it in reader words; the field name stays in the log.
+    assert any("Evaluation without sub-question coverage" in m for m in messages), messages
 
 
 def test_temporal_consistency_is_asked_for_every_question_and_event_hints_only_in_event_mode():
@@ -385,20 +402,29 @@ def test_evaluate_format_suffix_is_built_per_mode():
     assert "COMPETING_EVENTS:" in live and "COVERED_ASPECTS:" in live
 
 
+def _section_prompt(state: dict) -> str:
+    return build_answer_section_system_prompt(
+        state,
+        heading="Kernaussagen",
+        instruction="State the most important facts.",
+        length_guidance="short",
+        section_position=2,
+        section_total=4,
+    )
+
+
 def test_answer_prompt_carries_the_contract_block():
     base = {
-        "question": "Vergleich?",
-        "language": "de",
+        "answer_lang": "de",
         "answer_contract": "comparison",
         "required_aspects": COMPARISON_SUBS,
         "uncovered_aspects": [],
-        "source_tier_counts": {"primary": 1, "mainstream": 0, "stakeholder": 0, "unknown": 0, "low": 0},
         "claim_status_counts": {"verified": 1, "contested": 0, "unverified": 0},
     }
-    comparison = build_answer_system_prompt(dict(base))
+    comparison = _section_prompt(dict(base))
     assert "ANSWER FORM: comparison." in comparison
     assert "SUB-QUESTION COVERAGE:" in comparison
-    general = build_answer_system_prompt({**base, "answer_contract": "general"})
+    general = _section_prompt({**base, "answer_contract": "general"})
     assert "ANSWER FORM:" not in general
 
 
@@ -407,17 +433,15 @@ def test_answer_prompt_says_when_coverage_was_not_judged():
     whose evaluation failed or never ran says so instead of presenting the
     initial open list as a finding."""
     base = {
-        "question": "Vergleich?",
-        "language": "de",
+        "answer_lang": "de",
         "answer_contract": "comparison",
         "required_aspects": COMPARISON_SUBS,
         "uncovered_aspects": [COMPARISON_SUBS[2]],
-        "source_tier_counts": {"primary": 1, "mainstream": 0, "stakeholder": 0, "unknown": 0, "low": 0},
         "claim_status_counts": {"verified": 1, "contested": 0, "unverified": 0},
     }
-    judged = build_answer_system_prompt({**base, "coverage_source": "llm"})
+    judged = _section_prompt({**base, "coverage_source": "llm"})
     assert "Still open according to the evaluation" in judged and COMPARISON_SUBS[2] in judged
-    unjudged = build_answer_system_prompt({**base, "coverage_source": "fallback"})
+    unjudged = _section_prompt({**base, "coverage_source": "fallback"})
     assert "Coverage not judged" in unjudged
     assert "Still open according to the evaluation" not in unjudged
 

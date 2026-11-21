@@ -4,11 +4,12 @@ import { fileURLToPath } from 'node:url'
 
 import { defineConfig, devices } from '@playwright/test'
 
+import { fixtureWebServer } from '../../e2e/fixture-server.ts'
 import { fixtureWorkers } from '../../e2e/fixture-workers.ts'
 
-const port = 5187
 const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH
 const appDirectory = path.dirname(fileURLToPath(import.meta.url))
+const { baseURL, ...webServer } = fixtureWebServer(process.env, appDirectory)
 const repositoryRoot = path.resolve(appDirectory, '../..')
 const runId = process.env.INQTRIX_VERIFICATION_RUN_ID ?? 'developer'
 const listOnly = process.argv.includes('--list')
@@ -49,14 +50,8 @@ export default defineConfig({
       ],
   testDir: './browser-tests',
   use: {
-    baseURL: `http://127.0.0.1:${port}`,
+    baseURL,
     headless: true,
   },
-  webServer: {
-    command: `npm exec -- vite --host 127.0.0.1 --port ${port} --strictPort`,
-    cwd: appDirectory,
-    reuseExistingServer: true,
-    timeout: 120_000,
-    url: `http://127.0.0.1:${port}/browser-tests/fixtures/editor-lifecycle.html`,
-  },
+  webServer,
 })

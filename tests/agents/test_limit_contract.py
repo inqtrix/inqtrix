@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from inqtrix.agents.control_memory import MemoryAgentControlStore
-from inqtrix.agents.discovery import build_probe_plan
 from inqtrix.agents.kernel.deps import run_coro
 from inqtrix.agents.limit_contract import (
     LIMIT_CHOICE_CANCEL,
@@ -25,20 +26,6 @@ def test_extension_is_monotonic_and_operator_bounded() -> None:
     assert next_extended_limit(current=30, ceiling=60) == 60
     assert next_extended_limit(current=30, ceiling=45, required=44) == 45
     assert next_extended_limit(current=60, ceiling=60) == 60
-
-
-def test_discovery_budget_retains_visible_omission_count() -> None:
-    plan = build_probe_plan(
-        None,
-        question="Aktuelle Preise?",
-        collection_ids=[],
-        max_calls=1,
-        web_preview_allowed=True,
-    )
-    assert len(plan.probes) == 1
-    assert plan.requested_count == 3
-    assert plan.limit == 1
-    assert plan.omitted_count == 2
 
 
 def test_gate_creation_is_idempotent_and_persists_exact_reason() -> None:
@@ -277,7 +264,13 @@ def test_effective_tool_grants_folds_only_run_scoped_tool_approves() -> None:
         _row("apr_patch", tool="propose_editor_patch"),
     ]
     for row in rows:
-        run_coro(store.create_approval(row))
+        if row.kind == "tool":
+            run_coro(store.create_approval(row))
+        else:
+            # A stored approval of a mission run: data no run creates any
+            # more, put into the store as stored.
+            with store._lock:
+                store._approvals[row.approval_id] = row
 
     grants = effective_tool_grants(store, run_id=run_id, run_async=run_coro)
     assert grants == frozenset({"web_instant", "load_skill"})
@@ -285,6 +278,60 @@ def test_effective_tool_grants_folds_only_run_scoped_tool_approves() -> None:
         effective_tool_grants(store, run_id="run_other", run_async=run_coro)
         == frozenset()
     )
+
+
+def _batch_row(
+    approval_id: str,
+    run_id: str,
+    *,
+    modes: tuple[str, ...] = ("knowledge",),
+    scope: str | None = "run",
+    decision: str = "approve",
+    named: bool = True,
+):
+    from inqtrix.agents.control_ports import ApprovalRecord
+
+    payload: dict = {"actions": [{
+        "tool": "delegate_batch",
+        "args": {"assignments": [{"objective": "Welche Pflichten?", "mode": mode} for mode in modes]},
+        "summary": "",
+    }]}
+    if named:
+        payload["knowledge_scope"] = ["Richtlinien"]
+    return ApprovalRecord(
+        approval_id=approval_id, run_id=run_id, kind="tool", status="approved", payload=payload,
+        decision=decision, decision_payload={"approval_scope": scope} if scope is not None else {},
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "granted"),
+    [
+        ({}, True),
+        ({"modes": ("research", "knowledge")}, True),
+        ({"modes": ("research",), "named": False}, False),
+        ({"modes": ("research",)}, False),
+        ({"named": False}, False),
+        ({"scope": None}, False),
+        ({"decision": "reject"}, False),
+    ],
+    ids=[
+        "knowledge batch, collections named", "mixed batch, collections named", "research batch",
+        "research batch on a card that named collections", "collections not named", "granted once", "rejected",
+    ],
+)
+def test_a_run_grant_at_a_card_that_named_the_collections_covers_knowledge_batches(row: dict, granted: bool) -> None:
+    """A grant for the run given where the card named the collections the
+    assignments search covers later batches with knowledge assignments over
+    that boundary; any other grant, or none, does not."""
+    from inqtrix.agents.limit_contract import knowledge_batch_granted
+
+    store = MemoryAgentControlStore()
+    run_id = "run_batch_grant_1"
+    run_coro(store.create_approval(_batch_row("apr_batch", run_id, **row)))
+
+    assert knowledge_batch_granted(store, run_id=run_id, run_async=run_coro) is granted
+    assert knowledge_batch_granted(store, run_id="run_other", run_async=run_coro) is False
 
 
 # -- a budget that bound for the wrong reason ------------------------------- #

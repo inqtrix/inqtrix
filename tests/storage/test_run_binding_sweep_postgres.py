@@ -18,7 +18,6 @@ import uuid
 import pytest
 from sqlalchemy import select, update
 
-from inqtrix.harness.contracts import binding as binding_module
 from inqtrix.harness.contracts.binding import RunBindingNewer
 from inqtrix.runs.postgres_store import PostgresRunStore
 from inqtrix.storage.db import build_engine
@@ -79,8 +78,9 @@ def dispatch():
 
 @pytest.fixture()
 def store(cleaned, dispatch):
-    def cleanup(run_id: str, mode: str) -> None:
+    def cleanup(run_id: str, mode: str, *, never_claimed: bool = False) -> None:
         # The shared test database may hand it other tests' runs as well.
+        assert not never_claimed, "a parked run was claimed before it parked"
         cleaned.append((run_id, mode, _committed_status(run_id)))
 
     store = PostgresRunStore(
@@ -224,10 +224,31 @@ def test_a_parked_run_bound_to_an_older_contract_ends_at_once(store, cleaned):
     assert _cleaned_for(cleaned, run_id) == [(run_id, "agent_kernel", "cancelled")]
 
 
-def test_a_parked_run_of_a_retired_mode_ends_at_once(store, cleaned, monkeypatch):
-    monkeypatch.setattr(
-        binding_module, "RETIRED_WORKFLOWS", frozenset({"workspace_agent"})
+def test_the_api_process_without_a_worker_ends_a_retired_wait_at_its_start(store, cleaned):
+    """Without a queue worker nobody else ends such a run before its wait expires."""
+    from types import SimpleNamespace
+
+    from inqtrix.server.app import end_outdated_waits_in_process
+
+    run_id = _submit(store, "workspace_agent", 1)
+    _park(store, run_id, "waiting_for_approval")
+    container = SimpleNamespace(
+        settings=SimpleNamespace(
+            queue=SimpleNamespace(backend="memory"),
+            storage=SimpleNamespace(backend="postgres"),
+        ),
+        registry=SimpleNamespace(workflow_contracts=lambda: {"agent_kernel": 7}),
+        run_store=store,
     )
+
+    store._call(end_outdated_waits_in_process(container))
+
+    assert _row(store, run_id)["status"] == "cancelled"
+    assert _last_event(store, run_id)[1]["reason"] == "workflow_retired"
+    assert _cleaned_for(cleaned, run_id) == [(run_id, "workspace_agent", "cancelled")]
+
+
+def test_a_parked_run_of_a_retired_mode_ends_at_once(store, cleaned):
     run_id = _submit(store, "workspace_agent", 1)
     _park(store, run_id, "waiting_for_input")
 

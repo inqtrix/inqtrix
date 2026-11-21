@@ -825,6 +825,23 @@ class TestResearchAgentConstruction:
 
         assert chunks == ["Hallo ", "Welt"]
 
+    def test_stream_of_a_chat_without_search_shows_no_run_markers(self):
+        """A chat without web search marks its start and its end for
+        programs; the stream a reader follows carries only steps and the
+        answer, never the markers themselves."""
+        from inqtrix.providers.base import ProviderContext
+        from tests._fake_providers import FakeLLM
+
+        settings = AgentSettings(testing_mode=True, skip_search=True)
+        providers = ProviderContext(llm=FakeLLM(answer_override="Hallo Welt"), search=None)
+        agent = ResearchAgent(AgentConfig())
+        agent._ensure_initialised = lambda: (providers, None, settings)
+
+        chunks = list(agent.stream("Was ist ein Satz?"))
+
+        assert chunks[-3:] == ["---\n", "Hallo ", "Welt"]
+        assert not [chunk for chunk in chunks if "chat_only" in chunk]
+
 
 # ------------------------------------------------------------------ #
 # Pydantic model tests
@@ -864,8 +881,9 @@ class TestPydanticModels:
 
 
 def test_metrics_carry_the_single_source_ratio_of_an_active_depth_gap() -> None:
-    """The share the research child prints as 'NN % Einzelquellen' is also
-    a structured metric, so a parent run can carry it forward."""
+    """The single-source share of an active evidence-depth gap
+    (``single_source_ratio``) is also a structured metric, so a parent run
+    can carry it forward."""
     from inqtrix.result import ResearchResult
 
     def raw(gap: dict) -> dict:
@@ -885,6 +903,114 @@ def test_metrics_carry_the_single_source_ratio_of_an_active_depth_gap() -> None:
     assert active.metrics.single_source_ratio == 0.93
     inactive = ResearchResult.from_raw(raw({"active": False, "single_source_ratio": 0.93}))
     assert inactive.metrics.single_source_ratio == 0.0
+
+
+def _raw_with_contract(**state: object) -> dict:
+    return {
+        "answer": "Die Antwort",
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        "result_state": {"answer": "Die Antwort", "round": 1, **state},
+    }
+
+
+def test_metrics_carry_why_the_contract_reads_as_it_does() -> None:
+    """Cause, ceiling and the depth gap's own reasons travel as fields, so a
+    reader of the result does not have to guess them from the status."""
+    from inqtrix.result import ResearchResult
+
+    metrics = ResearchResult.from_raw(_raw_with_contract(
+        final_confidence=6,
+        evidence_contract_status="needs_review",
+        evidence_contract_causes=["citation_without_claim"],
+        confidence_cap=6,
+        confidence_cap_reasons=["citation_without_claim", "no_cross_checked_claims"],
+        evidence_depth_gap={
+            "active": True,
+            "single_source_ratio": 0.0,
+            "reason": "no_cross_checked_claims",
+        },
+    )).metrics
+
+    assert metrics.evidence_contract_causes == ["citation_without_claim"]
+    assert metrics.confidence_cap == 6
+    assert metrics.confidence_cap_reasons == [
+        "citation_without_claim", "no_cross_checked_claims",
+    ]
+    assert metrics.evidence_depth_gap_reasons == ["no_cross_checked_claims"]
+
+
+def test_an_inactive_depth_gap_reports_no_reasons() -> None:
+    from inqtrix.result import ResearchResult
+
+    metrics = ResearchResult.from_raw(_raw_with_contract(
+        evidence_contract_status="clean",
+        evidence_depth_gap={"active": False, "reason": "no_cross_checked_claims"},
+    )).metrics
+
+    assert metrics.evidence_depth_gap_reasons == []
+    assert metrics.evidence_contract_causes == []
+    assert metrics.confidence_cap is None
+    assert metrics.confidence_cap_reasons == []
+
+
+def test_basis_follows_the_material_of_the_cited_references() -> None:
+    """The basis names the material behind the cited references: only what
+    the search provider returned, stored source text, or nothing because
+    nothing is cited. A reference the answer does not cite never counts."""
+    from inqtrix.result import ResearchResult
+
+    web = {
+        "label": "E1", "url": "https://example.org/a",
+        "grounded_support": "Der Anbieter fasst zusammen.",
+    }
+    document = {
+        "label": "K1", "document_id": "doc_1", "chunk_index": 0,
+        "excerpt": "Wortlaut aus dem Dokument.",
+    }
+    uncited = {
+        "label": "E2", "url": "https://example.org/b", "cited": False,
+        "excerpt": "Nur gesehen, nicht zitiert.",
+    }
+
+    def metrics(*references: dict):
+        return ResearchResult.from_raw(_raw_with_contract(
+            evidence_contract_status="clean",
+            report_references=list(references),
+        )).metrics
+
+    provider_only = metrics(web, uncited)
+    assert provider_only.evidence_basis == "provider_context"
+    assert (provider_only.cited_reference_count,
+            provider_only.provider_only_reference_count) == (1, 1)
+
+    mixed = metrics(web, document)
+    assert mixed.evidence_basis == "evidence"
+    assert (mixed.cited_reference_count,
+            mixed.provider_only_reference_count) == (2, 1)
+
+    nothing_cited = metrics(uncited)
+    assert nothing_cited.evidence_basis == "none"
+    assert (nothing_cited.cited_reference_count,
+            nothing_cited.provider_only_reference_count) == (0, 0)
+
+
+def test_a_result_from_before_the_fields_reads_as_not_recorded() -> None:
+    """A stored result without the fields keeps its old meaning: its basis
+    is unknown, and nothing reads a cause or a ceiling into it."""
+    from inqtrix.result import ResearchMetrics
+
+    old = ResearchMetrics.model_validate({
+        "confidence": 6,
+        "evidence_contract_status": "needs_review",
+        "single_source_ratio": 0.93,
+    })
+
+    assert old.evidence_basis == "unknown"
+    assert old.evidence_contract_causes == []
+    assert old.evidence_depth_gap_reasons == []
+    assert old.confidence_cap is None
+    assert old.confidence_cap_reasons == []
+    assert (old.cited_reference_count, old.provider_only_reference_count) == (0, 0)
 
 
 def test_metrics_carry_the_evidence_budget_cut_of_the_answer() -> None:

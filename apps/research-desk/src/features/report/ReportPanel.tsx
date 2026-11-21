@@ -33,7 +33,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { withFrontmatter } from '@/features/project/markdown'
 import { partitionReportReferences, sourceRoleLabel } from '@/features/project/reportReferences'
 import type { ResearchRunRecord } from '@/features/project/types'
-import type { ReportReference } from '@/features/researchRuns/types'
+import type { ReportReference, ResearchMetrics } from '@/features/researchRuns/types'
 import { useRunningDuration } from '@/features/researchRuns/useRunningDuration'
 import { useLocale } from '@/i18n/LocaleProvider'
 import type { TranslationDictionary } from '@/i18n/translations'
@@ -941,8 +941,11 @@ function ResearchSourceEvidence({ reference, ledger, label }: {
   </AgentDisclosure>
 }
 
-/** What the research ties to one source: each statement with whether this
- * source's own text was checked, else the claim's status. */
+/** What the research ties to one source: each statement with whether the
+ * search provider's excerpt of this source was checked and states it, else
+ * the claim's status. A statement verified through the excerpt of another
+ * source is only attributed here, as the server's contract for `checked`
+ * says. */
 export function ReferenceStatements({ statements }: {
   statements: NonNullable<ReportReference['statements']>
 }) {
@@ -955,7 +958,9 @@ export function ReferenceStatements({ statements }: {
           <li className="text-sm leading-6" key={`${index}-${statement.text}`}>
             <span className="text-foreground">{statement.text}</span>{' '}
             <span className="t-label text-muted-foreground">
-              ({statement.checked ? t.report.statementChecked : claimStatusLabel(statement.status, t)})
+              ({statement.checked
+                ? t.report.statementChecked
+                : claimStatusLabel(statement.status === 'verified' ? 'attributed' : statement.status, t)})
             </span>
           </li>
         ))}
@@ -972,6 +977,7 @@ export function ReportEvidence({ run }: { run: ResearchRunRecord }) {
   const topSources = run.result?.topSources ?? []
   const topClaims = run.result?.topClaims ?? []
   const fallbackSources = references.length === 0 ? topSources : []
+  const capWords = metrics ? confidenceCapWords(metrics, t) : null
 
   if (metrics || references.length > 0 || fallbackSources.length > 0 || topClaims.length > 0) {
     return (
@@ -982,8 +988,10 @@ export function ReportEvidence({ run }: { run: ResearchRunRecord }) {
             <EvidenceMetric label={t.runCard.sources} value={metrics.total_citations ?? 0} />
             <EvidenceMetric label={t.report.sourceQuality} value={formatScore(metrics.sources?.quality_score)} />
             <EvidenceMetric label={t.report.claimQuality} value={formatScore(metrics.claims?.quality_score)} />
-            <EvidenceMetric label={t.report.evidenceContract} value={metrics.evidence_contract_status ?? 'unknown'} />
-            <EvidenceMetric label={t.report.aspectCoverage} value={formatPercent(metrics.aspect_coverage)} />
+            {/* The fifth figure fills its row: the cells after it span the grid. */}
+            <EvidenceMetric label={t.report.aspectCoverage} value={formatPercent(metrics.aspect_coverage)} span />
+            <EvidenceMetric label={t.report.evidenceBasis} value={evidenceBasisWords(metrics, t)} wide />
+            {capWords !== null && <EvidenceMetric label={t.report.confidenceCap} value={capWords} wide />}
           </section>
         )}
         {citedReferences.length > 0 && (
@@ -1081,17 +1089,63 @@ function isDisplayableAgentEvent(event: ResearchRunRecord['events'][number]) {
   )
 }
 
+/** What a report's cited sources rest on, in the words of the basis line
+ * under the report. A result stored before the server recorded the basis
+ * says so instead of showing a guess. */
+export function evidenceBasisWords(
+  metrics: Partial<ResearchMetrics>,
+  t: ReturnType<typeof useLocale>['t'],
+): string {
+  const words = t.report.evidenceBasisWords
+  if (metrics.evidence_basis === 'provider_context') return words.providerContext
+  if (metrics.evidence_basis === 'evidence') {
+    const providerOnly = metrics.provider_only_reference_count ?? 0
+    const cited = metrics.cited_reference_count ?? 0
+    if (providerOnly > 0 && cited > 0) {
+      const mixed = words.providerOnly
+        .replace('{providerOnly}', String(providerOnly))
+        .replace('{cited}', String(cited))
+      return `${words.evidence} ${mixed}`
+    }
+    return words.evidence
+  }
+  if (metrics.evidence_basis === 'none') return words.none
+  return words.notRecorded
+}
+
+/** The confidence ceiling with its reasons in words, or null when the result
+ * records no ceiling. A reason the Desk has no words for is left out rather
+ * than shown as a code. */
+export function confidenceCapWords(
+  metrics: Partial<ResearchMetrics>,
+  t: ReturnType<typeof useLocale>['t'],
+): string | null {
+  const cap = metrics.confidence_cap
+  if (typeof cap !== 'number') return null
+  const known: Record<string, string> = t.report.confidenceCapReasons
+  const reasons = (metrics.confidence_cap_reasons ?? [])
+    .filter((reason) => Object.prototype.hasOwnProperty.call(known, reason))
+    .map((reason) => known[reason])
+  return reasons.length > 0 ? `${cap} / 10: ${reasons.join('; ')}` : `${cap} / 10`
+}
+
 function EvidenceMetric({
   label,
   value,
+  wide = false,
+  span = false,
 }: {
   label: string
   value: number | string
+  /** A sentence rather than a figure: spans the grid and reads as text. */
+  wide?: boolean
+  /** A figure that spans the grid, so no cell stands alone in its row. */
+  span?: boolean
 }) {
   return (
-    <div className="rounded-md border border-border bg-background p-3">
+    <div className={cn('rounded-md border border-border bg-background p-3', (wide || span) && 'sm:col-span-2')}>
       <p className="t-label text-muted-foreground">{label}</p>
-      <p className="mt-1 text-sm font-semibold text-foreground">{value}</p>
+      <p className={cn('mt-1 text-sm text-foreground', wide ? 'leading-6' : 'font-semibold')}>{value}</p>
     </div>
   )
 }

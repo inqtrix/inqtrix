@@ -193,6 +193,11 @@ def test_late_completion_is_charged_without_publishing_title(monkeypatch):
         '"quoted"',
         "A label.",
         "Title: label",
+        "Titel: Batteriepass",
+        "thema: KI-Verordnung",
+        "Betreff : Angebot",
+        ": Batteriepass",
+        "Batteriepass:",
         "one two three four five six seven",
         "a" * 61,
     ],
@@ -200,6 +205,27 @@ def test_late_completion_is_charged_without_publishing_title(monkeypatch):
 def test_title_schema_rejects_unusable_labels(title):
     with pytest.raises(ValidationError):
         SessionTitle(title=title)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Digitaler Batteriepass: Geltung und Batterietypen",
+        "Batteriepass: Geltungsbeginn und Batterien",
+        "EU AI Act: Pflichten für Anbieter",
+    ],
+)
+def test_title_schema_accepts_a_subject_with_a_colon(title):
+    """A colon between a subject and its aspect is how a topic label reads;
+    only a word that announces the output itself is no subject."""
+    assert SessionTitle(title=title).title == title
+
+
+def test_title_prompt_names_the_announcing_prefix_and_allows_a_colon():
+    prompt = module.title_prompt("Ab wann gilt der Batteriepass?", "de")
+
+    assert "colon" not in prompt
+    assert 'such as "Title:"' in prompt
 
 
 def test_title_schema_accepts_natural_unicode_and_word_internal_apostrophes():

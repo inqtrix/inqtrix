@@ -498,6 +498,9 @@ def test_a_document_is_read_with_the_labels_it_uses():
     # A label another source owns in the reader's ledger is never attached
     # to the document's source by the listing.
     assert own["reference_id"] not in line
+    # Reading a document hands its sources to the run so that their labels
+    # stay citable; only what the run found itself is its basis of work.
+    assert deps.gathered_reference_ids == {own["reference_id"]}
 
 
 def test_an_update_keeps_the_document_name_and_says_so():

@@ -25,6 +25,7 @@ from inqtrix.project.knowledge_sessions_ports import (
 from inqtrix.runs.deletion_operations import DeletionOperationConflict
 from inqtrix.services.request_parsing import (
     error_response,
+    read_json_object,
     workspace_id_for_write,
     workspace_id_from_request,
 )
@@ -68,13 +69,6 @@ def _require_numbers(body: dict[str, Any]) -> bool:
     )
 
 
-async def _json_object(req: Request) -> Any:
-    try:
-        return await req.json()
-    except Exception:
-        return None
-
-
 def build_router(container: "AppContainer") -> APIRouter:
     service = container.knowledge_sessions_service
     deletion_service = container.asset_deletion_service
@@ -110,8 +104,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if not isinstance(body, dict) or not _require_numbers(body):
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
+        if not _require_numbers(body):
             return error_response(400, "Invalid body", "invalid_request_error")
         try:
             group = await service.save_group(
@@ -159,8 +155,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if not isinstance(body, dict) or not _require_numbers(body):
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
+        if not _require_numbers(body):
             return error_response(400, "Invalid body", "invalid_request_error")
         items_json = body.get("items_json", "[]")
         if not isinstance(items_json, str):

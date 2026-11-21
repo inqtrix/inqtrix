@@ -63,16 +63,18 @@ def test_policy_matrix_per_autonomy():
         "web_instant",
         "search_project_knowledge",
         "run_web_research",
-        "run_deep_mission",
         "delegate_batch",
         "load_skill",
         "propose_editor_patch",
     }
-    # Every balanced gate except the always-gated patch tool carries a
-    # grant-aware predicate. Fail-closed: outside a deps context (no
-    # run) nothing counts as granted, so the gate fires.
+    # Every balanced gate carries a predicate. The always-gated patch
+    # tool's is no grant: it skips only a proposal the tool refuses
+    # without effect (a document the run read in collaboration mode).
+    # Fail-closed: outside a deps context (no run) nothing counts as
+    # granted or read, so the gate fires.
     assert "when" in balanced["web_instant"]
-    assert "when" not in balanced["propose_editor_patch"]
+    assert "when" in balanced["propose_editor_patch"]
+    assert "when" in autonomous["propose_editor_patch"]
     assert balanced["web_instant"]["allowed_decisions"] == [
         "approve",
         "edit",
@@ -80,6 +82,7 @@ def test_policy_matrix_per_autonomy():
     ]
     probe = SimpleNamespace(tool_call={"args": {"query": "x"}})
     assert balanced["web_instant"]["when"](probe) is True
+    assert balanced["propose_editor_patch"]["when"](probe) is True
     from inqtrix.agents.kernel.deps import set_kernel_deps
 
     try:
@@ -90,6 +93,7 @@ def test_policy_matrix_per_autonomy():
         assert balanced["web_instant"]["when"](probe) is False
         # ... and never a different tool's gate.
         assert balanced["load_skill"]["when"](probe) is True
+        assert balanced["propose_editor_patch"]["when"](probe) is True
     finally:
         set_kernel_deps(None)
     assert balanced["web_instant"]["when"](probe) is True
@@ -148,8 +152,8 @@ def test_policy_matrix_per_autonomy():
         calls = [
             {
                 "id": f"c{index}",
-                "name": "run_deep_mission",
-                "args": {"assignment": "x"},
+                "name": "run_web_research",
+                "args": {"question": "x"},
                 "type": "tool_call",
             }
             for index in range(count)
@@ -158,7 +162,7 @@ def test_policy_matrix_per_autonomy():
             state={"messages": [AIMessage(content="", tool_calls=calls)]}
         )
 
-    for tool_name in ("run_web_research", "run_deep_mission", "delegate_batch"):
+    for tool_name in ("run_web_research", "delegate_batch"):
         child_when = balanced[tool_name]["when"]
         assert child_when(_turn_with_child_calls(1)) is True
         assert child_when(_turn_with_child_calls(2)) is False
@@ -168,23 +172,24 @@ def test_policy_matrix_per_autonomy():
         "web_instant",
         "search_project_knowledge",
         "read_project_document",
+        "analyze_document",
         "read_canvas",
         "read_research_report",
         "write_canvas",
         "read_editor_document",
         "search_editor_document",
         "run_web_research",
-        "run_deep_mission",
         "delegate_batch",
         "load_skill",
         "propose_editor_patch",
         "read_context",
         "search_context",
     }
-    # Only the child-run tools carry a predicate; the rest gate flatly.
-    child_gated = {"run_web_research", "run_deep_mission", "delegate_batch"}
+    # Only the child-run tools and the patch tool carry a predicate; the
+    # rest gate flatly.
+    predicated = {"run_web_research", "delegate_batch", "propose_editor_patch"}
     assert all(
-        ("when" in config) == (name in child_gated)
+        ("when" in config) == (name in predicated)
         for name, config in strict.items()
     )
     with pytest.raises(ValueError):

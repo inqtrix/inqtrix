@@ -28,7 +28,7 @@ class _Store:
 
 def _resolved(*, depth: str) -> SimpleNamespace:
     return SimpleNamespace(
-        mode="workspace_agent",
+        mode="agent_kernel",
         stack_name="",
         agent_overrides={},
         knowledge_filters={},
@@ -36,7 +36,7 @@ def _resolved(*, depth: str) -> SimpleNamespace:
     )
 
 
-def test_agent_submission_persists_effective_depth_for_later_plan_edits() -> None:
+def test_agent_submission_persists_effective_depth_for_worker_replay() -> None:
     store = _Store()
     service = RunService(
         registry=_Registry(),
@@ -76,7 +76,7 @@ def test_a_run_is_bound_to_the_contract_its_algorithm_carries() -> None:
         workspace_id=None,
     )
 
-    assert store.submission["mode"] == "workspace_agent"
+    assert store.submission["mode"] == "agent_kernel"
     assert store.submission["workflow_contract"] == 3
 
 

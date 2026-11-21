@@ -14,7 +14,7 @@ type AppRailProps = {
    * backend advertises `features.knowledge`, or in demo mode). */
   showKnowledge?: boolean
   /** Capability gate for the Agent Desk entry (true when the backend
-   * advertises `features.workspace_agent`, or in demo mode). */
+   * advertises `features.agent_desk`, or in demo mode). */
   showAgent?: boolean
   /** Pending share invitations awaiting consent — a count chip on the
    * settings entry so the inbox is discoverable from anywhere. 0 hides it. */

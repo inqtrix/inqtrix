@@ -2,7 +2,6 @@ import type { JSONContent } from '@tiptap/core'
 import { useMemo, type Dispatch, type SetStateAction } from 'react'
 
 import type { AgentResponseForm } from './AgentComposer'
-import type { AgentEngineMode } from './agentStatusOverview'
 import type { AgentCanvasCommentDraft } from './canvas/commentQueue'
 import {
   DEFAULT_AGENT_SOURCE_POLICY,
@@ -18,7 +17,7 @@ import {
  * It lives in the desk, not in the workspace: the desk unmounts a workspace
  * on every view switch, and a draft that lived in the workspace came back as
  * bare text — capsules gone from the sentence, attachments dropped, the
- * engine reset. The plain text lives beside it (`agentDraftQuestion`), which
+ * run setup reset. The plain text lives beside it (`agentDraftQuestion`), which
  * the menus and the empty-state examples read and write.
  */
 export type AgentComposerDraft = {
@@ -26,7 +25,6 @@ export type AgentComposerDraft = {
   canvasCommentQueue: AgentCanvasCommentDraft[]
   /** The composer document, capsules included; null before the first edit. */
   doc: JSONContent | null
-  engineMode: AgentEngineMode | null
   /** The knowledge switch of a session that does not exist yet. */
   knowledgeSwitch: AgentKnowledgeSwitch | undefined
   pinnedCanvasArtifactId: string | null
@@ -42,7 +40,6 @@ export function emptyAgentComposerDraft(): AgentComposerDraft {
   return {
     canvasCommentQueue: [],
     doc: null,
-    engineMode: null,
     knowledgeSwitch: undefined,
     pinnedCanvasArtifactId: null,
     reportIds: [],

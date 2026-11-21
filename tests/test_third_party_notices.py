@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -195,6 +196,50 @@ version = "1.0.0"
         ),
         encoding="utf-8",
     )
+    _write_copied_code(root)
+
+
+def _widget_entry(**overrides: Any) -> dict[str, Any]:
+    entry = {
+        "name": "Widget kit",
+        "source": "https://example.invalid/widget-kit",
+        "license": "MIT",
+        "license_file": "vendor/widget/LICENSE-widget.md",
+        "origin": "Widget components, compared against commit abc123.",
+        "paths": ["vendor/widget/widget.ts"],
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _icons_entry() -> dict[str, Any]:
+    return {
+        "name": "Dot icons",
+        "source": "https://example.invalid/dot-icons",
+        "license": "ISC",
+        "license_file": "vendor/icons/LICENSE.md",
+        "origin": "SVG files of release 1.0.",
+        "paths": ["vendor/icons"],
+    }
+
+
+def _write_copied_code(root: Path, entries: list[dict[str, Any]] | None = None) -> None:
+    """A copied file with its license beside it, and a copied folder with its
+    license inside it, declared in ``copied-code.json``."""
+    widget = root / "vendor" / "widget"
+    widget.mkdir(parents=True, exist_ok=True)
+    (widget / "widget.ts").write_text("export const widget = 1\n", encoding="utf-8")
+    (widget / "LICENSE-widget.md").write_text("MIT License\n", encoding="utf-8")
+    icons = root / "vendor" / "icons"
+    icons.mkdir(parents=True, exist_ok=True)
+    (icons / "dot.svg").write_text("<svg/>\n", encoding="utf-8")
+    (icons / "LICENSE.md").write_text("ISC License\n", encoding="utf-8")
+    if entries is None:
+        entries = [_widget_entry(), _icons_entry()]
+    (root / "copied-code.json").write_text(
+        json.dumps({"schema_version": "inqtrix-copied-code-v1", "copied_code": entries}),
+        encoding="utf-8",
+    )
 
 
 def _metadata_provider(name: str) -> dict[str, Any]:
@@ -283,3 +328,110 @@ def test_check_outputs_detects_stale_generated_files(tmp_path):
         python_metadata_provider=_metadata_provider,
     )
     assert [path.name for path in stale] == ["THIRD_PARTY_NOTICES.md"]
+
+
+def test_copied_code_is_listed_with_source_license_origin_and_paths(tmp_path):
+    generator = _load_generator()
+    _write_fixture_repo(tmp_path)
+
+    markdown, json_document = generator.build_documents(
+        tmp_path,
+        python_metadata_provider=_metadata_provider,
+    )
+
+    payload = json.loads(json_document)
+    assert payload["sources"]["copied_code"] == "copied-code.json"
+    assert payload["copied_code"] == [
+        {
+            "name": "Dot icons",
+            "source": "https://example.invalid/dot-icons",
+            "license": "ISC",
+            "license_file": "vendor/icons/LICENSE.md",
+            "origin": "SVG files of release 1.0.",
+            "paths": ["vendor/icons"],
+        },
+        {
+            "name": "Widget kit",
+            "source": "https://example.invalid/widget-kit",
+            "license": "MIT",
+            "license_file": "vendor/widget/LICENSE-widget.md",
+            "origin": "Widget components, compared against commit abc123.",
+            "paths": ["vendor/widget/widget.ts"],
+        },
+    ]
+    section = markdown.split("## Copied Code", 1)[1]
+    assert "### Widget kit" in section
+    assert "- Source: https://example.invalid/widget-kit" in section
+    assert "- License: MIT, text in `vendor/widget/LICENSE-widget.md`" in section
+    assert "- Origin: Widget components, compared against commit abc123." in section
+    assert "  - `vendor/widget/widget.ts`" in section
+    assert "  - `vendor/icons`" in section
+
+
+def test_an_empty_copied_code_list_says_so(tmp_path):
+    generator = _load_generator()
+    _write_fixture_repo(tmp_path)
+    _write_copied_code(tmp_path, entries=[])
+
+    markdown, json_document = generator.build_documents(
+        tmp_path,
+        python_metadata_provider=_metadata_provider,
+    )
+
+    assert json.loads(json_document)["copied_code"] == []
+    assert markdown.split("## Copied Code", 1)[1].rstrip().endswith("None.")
+
+
+def test_a_missing_copied_code_list_fails_loudly(tmp_path):
+    generator = _load_generator()
+    _write_fixture_repo(tmp_path)
+    (tmp_path / "copied-code.json").unlink()
+
+    with pytest.raises(generator.NoticeGenerationError, match="copied-code.json not found"):
+        generator.build_documents(tmp_path, python_metadata_provider=_metadata_provider)
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        (
+            _widget_entry(paths=["vendor/widget/gone.ts"]),
+            "'vendor/widget/gone.ts', which does not exist",
+        ),
+        (
+            _widget_entry(license_file="vendor/widget/GONE.md"),
+            "'vendor/widget/GONE.md', which does not exist",
+        ),
+        (_widget_entry(paths=["../outside.ts"]), "stay inside it"),
+        (_widget_entry(paths=["/etc/hostname"]), "stay inside it"),
+        (
+            _widget_entry(license_file="vendor/icons/LICENSE.md"),
+            "does not stand next to 'vendor/widget/widget.ts'",
+        ),
+        (_widget_entry(paths=[]), "lists no paths"),
+        (
+            {key: value for key, value in _widget_entry().items() if key != "origin"},
+            "lacks origin",
+        ),
+    ],
+)
+def test_a_copied_code_entry_that_does_not_hold_fails_loudly(tmp_path, entry, message):
+    generator = _load_generator()
+    _write_fixture_repo(tmp_path)
+    _write_copied_code(tmp_path, entries=[entry])
+
+    with pytest.raises(generator.NoticeGenerationError, match=re.escape(message)):
+        generator.build_documents(tmp_path, python_metadata_provider=_metadata_provider)
+
+
+def test_the_repository_declares_its_copied_code_where_it_lies():
+    generator = _load_generator()
+
+    entries = generator.collect_copied_code(Path(__file__).parents[1])
+
+    # Reading the list proves every declared path and license file exists
+    # and each license stands next to its code: a copy that moved or went
+    # without the list fails here, not only when the notices are refreshed.
+    assert {"shadcn/ui", "Lucide icon data", "Lucide icon files"} <= {
+        entry.name for entry in entries
+    }

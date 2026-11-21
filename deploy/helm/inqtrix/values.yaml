@@ -53,7 +53,7 @@ config:
   INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
   # Connection budget. Every API and worker process keeps one pool for all its
   # stores and logs its limit at startup: POOL_SIZE + MAX_OVERFLOW, plus the
-  # agent checkpointer's own pool where the workspace agent runs. Size the sum
+  # agent checkpointer's own pool where the agent kernel runs. Size the sum
   # over ALL replicas below Postgres max_connections, raise that ceiling on the
   # BUNDLED server with postgres.maxConnections, or front the database with a
   # transaction pooler (pgbouncer.enabled below); a process whose own budget
@@ -586,7 +586,7 @@ pgbouncer:
 
 qdrant:
   enabled: false
-  image: docker.io/qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
+  image: docker.io/qdrant/qdrant:v1.20.0@sha256:9bfc89f9914fc14876a88c05270685921a55b8877b254a98bcc1cc2f0a424cd2
   imagePullPolicy: IfNotPresent
   # The chart runs the upstream image as a fixed non-root UID on vanilla
   # Kubernetes. The template therefore routes every mutable Qdrant path

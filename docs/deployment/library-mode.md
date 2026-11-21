@@ -141,7 +141,7 @@ for chunk in agent.stream("Meine Frage", include_progress=False):
     print(chunk, end="", flush=True)
 ```
 
-Progress messages look like `Analysiere Frage...`, `Plane Suchanfragen (Runde 1/4)...`, `Durchsuche 8 Suchanfragen (Runde 1/4)...`, `Bewerte Informationsqualitaet (nach Runde 1/4)...`, `Formuliere Antwort (nach 3 Runden)...` — the number in the search message counts the search queries executed in that round, not the sources found. These are the German variants: the progress strings are bilingual and follow the language detected in the question, so an English question yields `Analyzing question...`, `Planning search queries (round 1/4)...`, `Searching 8 queries (round 1/4)...`, `Evaluating information quality (after round 1/4)...` and `Formulating answer (after 3 rounds)...` instead.
+Progress messages look like `Analysiere Frage...`, `Plane Suchanfragen (Runde 1/4)...`, `Durchsuche 8 Suchanfragen (Runde 1/4)...`, `Bewerte Informationsqualität (nach Runde 1/4)...`, `Formuliere Antwort (nach 3 Runden)...` — the number in the search message counts the search queries executed in that round, not the sources found. These are the German variants: the progress strings are bilingual and follow the language detected in the question, so an English question yields `Analyzing question...`, `Planning search queries (round 1/4)...`, `Searching 8 queries (round 1/4)...`, `Evaluating information quality (after round 1/4)...` and `Formulating answer (after 3 rounds)...` instead.
 
 From async code, use the coroutine and the async generator. Both work from any event loop, a notebook's included, and keep it free while the run works:
 

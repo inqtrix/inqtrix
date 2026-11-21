@@ -112,26 +112,6 @@ def test_a_resumed_kernel_segment_recounts_its_searches_from_the_checkpoint():
     assert _checkpointed_web_searches(SimpleNamespace(values={"messages": messages})) == 2
 
 
-def test_a_mission_counts_the_instant_searches_it_ran():
-    """A web task runs its one search; a research task is a delegation
-    whose child counts its own; discovery probes are searches."""
-    from inqtrix.agents.algorithm import _mission_web_searches
-
-    tasks = [
-        SimpleNamespace(task_id="t1", tool_kind="web_instant", queries=["a"]),
-        SimpleNamespace(task_id="t2", tool_kind="web_instant", queries=["c"]),
-        SimpleNamespace(task_id="t3", tool_kind="web_research", queries=["d", "e"]),
-        SimpleNamespace(task_id="t4", tool_kind="rag_query", queries=["f"]),
-    ]
-    outcomes = {
-        "t1": SimpleNamespace(status="completed"),
-        "t2": SimpleNamespace(status="failed"),
-        "t3": SimpleNamespace(status="completed"),
-        "t4": SimpleNamespace(status="completed"),
-    }
-    assert _mission_web_searches(tasks, outcomes, base_counts={"web": 2, "knowledge": 1}) == 3
-
-
 def test_a_kernel_run_counts_its_searches_across_its_parks():
     """Each search waits for its approval, so the second one runs in a later
     segment: the count that segment reports comes back from the checkpoint,
@@ -167,37 +147,3 @@ def test_a_kernel_run_counts_its_searches_across_its_parks():
         summary = wait_status(client, run_id, {"completed"})
     execution = summary["snapshot"]["execution"]
     assert (len(search.queries), execution["web_searches"]) == (2, 2)
-
-
-def test_a_mission_reports_the_searches_its_provider_ran(monkeypatch):
-    """The provider's own record is the oracle: the web task's search and
-    discovery's web probe count, and nothing else does."""
-    from tests.agents.test_workspace_agent import (
-        FakeSearch,
-        ScriptedLLM,
-        make_agent_client,
-        submit_agent,
-        wait_status,
-    )
-
-    plan = {
-        "summary_markdown": "Ein Instant-Task.",
-        "tasks": [
-            {
-                "id": "t1",
-                "title": "Fakt nachschlagen",
-                "tool_kind": "web_instant",
-                "objective": "Aktuelles Marktvolumen kritisch pruefen.",
-                "queries": ["Welches belastbare Marktvolumen wird fuer 2026 berichtet?"],
-                "expected_output": "Eine belegte Kurzantwort mit Risiken.",
-            },
-            {"id": "s", "title": "Synthese", "tool_kind": "synthesis", "depends_on": ["t1"]},
-        ],
-    }
-    search = FakeSearch()
-    client = make_agent_client(monkeypatch, llm=ScriptedLLM(overrides={"ExecutionPlanModel": plan}), search=search)
-    with client:
-        run_id = submit_agent(client, autonomy="autonomous")
-        summary = wait_status(client, run_id, {"completed"})
-    executed = summary["snapshot"]["execution"]["web_searches"]
-    assert (executed, executed >= 1) == (len(search.queries), True)

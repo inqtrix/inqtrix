@@ -66,6 +66,15 @@ class EditorPatchValidationError(ValueError):
     """
 
 
+class CollaborationDocumentProposalRefused(RuntimeError):
+    """Raised when an agent proposal targets a document in collaboration mode.
+
+    Such a document accepts no agent proposal. The refusal writes no patch
+    row and no audit entry, and it needs no current collaboration
+    projection.
+    """
+
+
 def apply_edits(
     content: str, edits: list[dict[str, Any]]
 ) -> tuple[str, list[str]]:
@@ -252,19 +261,39 @@ class EditorPatchService:
         it would only resolve against content its author never saw.
         ``None`` keeps the legacy unpinned behavior.
 
+        A document in collaboration mode accepts no agent proposal. For
+        ``source == "agent"`` the access check runs first, without the
+        projection barrier, so a denial stays the indistinct absence; the
+        mode check follows, before any projection read, and the document
+        the projection read returns is checked once more, because it may
+        have been converted in between. Other sources keep the
+        collaboration branch below.
+
         Raises:
             DocumentNotFound: Unknown/foreign document (indistinct 404).
+            CollaborationDocumentProposalRefused: An agent proposal to a
+                document in collaboration mode.
             EditorPatchValidationError: Unknown source or edit position.
             PatchRevisionConflict: ``expected_revision`` no longer matches
                 the document's current revision.
         """
         if source not in PATCH_SOURCES:
             raise EditorPatchValidationError(f"unknown patch source: {source!r}")
+        if source == "agent":
+            self._refuse_agent_proposal(
+                await self._editor_persistence.get_document(
+                    document_id,
+                    visible_to=visible_to,
+                    minimum=SharePermission.SUGGEST,
+                )
+            )
         document = await self._editor_persistence.get_document_for_ai(
             document_id,
             visible_to=visible_to,
             minimum=SharePermission.SUGGEST,
         )
+        if source == "agent":
+            self._refuse_agent_proposal(document)
         if (
             expected_revision is not None
             and expected_revision != document.revision
@@ -729,6 +758,14 @@ class EditorPatchService:
     # -- helpers -------------------------------------------------------------- #
 
     @staticmethod
+    def _refuse_agent_proposal(document: EditorDocument) -> None:
+        """Refuse an agent proposal to a document in collaboration mode."""
+        if document.content_mode == "collaboration":
+            raise CollaborationDocumentProposalRefused(
+                "agent proposals are refused for documents in collaboration mode"
+            )
+
+    @staticmethod
     def _applied_replay(
         patch: EditorPatchRecord, expected_revision: int
     ) -> EditorPatchRecord | None:
@@ -871,7 +908,7 @@ class EditorPatchService:
                 resource_type="editor_document",
                 resource_id=document_id,
                 detail=detail,
-                # ``agent`` when a workspace-agent run proposed the edits;
+                # ``agent`` when an agent run proposed the edits;
                 # ``actor_user_id`` still carries the effective actor.
                 # Apply/reject stay user actions (the default).
                 actor_type=actor_type,

@@ -3,8 +3,8 @@ import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import {
+  AGENT_KERNEL_STATIONS,
   agentPulseActiveIndex,
-  agentStationsFor,
   isActiveAgentRun,
   isGateAgentRun,
   type AgentRunRecord,
@@ -39,17 +39,11 @@ export function AgentPulseTrack({
   const isWorking = isActiveAgentRun(run.status) && !isGate
   const isDone = run.status === 'completed'
   const isStopped = run.status === 'failed' || run.status === 'cancelled'
-  // The furthest station this run ACTUALLY reached. Filling the whole
-  // line on completion would let a kernel run — which only ever reports
-  // intake and execution — claim it had also run a discovery, a plan
-  // and a verification pass. The track reads as a record of what
-  // happened, so it stops where the run stopped and leaves the rest
-  // pale.
-  // Which line this engine actually travels: the kernel only ever
-  // reports `execution` and `done`, so the mission's six stations would
-  // describe a flow it never had.
-  const stations = agentStationsFor(run.snapshot?.execution?.effective_mode)
-  const activeIndex = agentPulseActiveIndex(run.station, isDone, stations)
+  // The furthest station this run ACTUALLY reached: a completed run holds
+  // its result, one that stopped stays where it stopped and leaves the
+  // rest pale.
+  const stations = AGENT_KERNEL_STATIONS
+  const activeIndex = agentPulseActiveIndex(run.station, isDone)
 
   return (
     <div aria-hidden="true" className={cn('min-w-0', className)}>

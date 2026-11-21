@@ -658,6 +658,7 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
             estimated_input_tokens=estimate_request_tokens(sent_openai_request(create_kwargs, provider="azure")),
             max_output_tokens=int(create_kwargs.get(self._token_budget_parameter) or 0) or None,
             reasoning_effort=str(create_kwargs.get("reasoning_effort") or "") or None,
+            verbosity=str(create_kwargs.get("verbosity") or "") or None,
         )
 
     # -- LLMProvider interface ---------------------------------------------
@@ -673,6 +674,7 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> str:
         """Generate text through Azure OpenAI and discard token metadata.
 
@@ -690,6 +692,12 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
             state: Optional mutable agent state for token tracking.
             deadline: Optional absolute monotonic deadline for the full
                 run.
+            reasoning_effort: Optional per-call reasoning-effort override.
+            verbosity: Optional level for the visible answer (``"low"``,
+                ``"medium"``, ``"high"``). It goes out as ``verbosity`` over
+                Chat Completions and as ``text.verbosity`` over the Responses
+                API and wins over a ``verbosity`` in ``request_params``;
+                ``None`` sends nothing of its own.
 
         Returns:
             str: Visible assistant text for the completion.
@@ -710,6 +718,7 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
                 state=state,
                 deadline=deadline,
                 reasoning_effort=reasoning_effort,
+                verbosity=verbosity,
             )
         ).content
 
@@ -724,6 +733,7 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> LLMResponse:
         """Generate text and metadata through Azure OpenAI.
 
@@ -750,6 +760,12 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
                 through ``track_tokens()`` when provided.
             deadline: Optional absolute monotonic deadline for the full
                 run.
+            reasoning_effort: Optional per-call reasoning-effort override.
+            verbosity: Optional level for the visible answer (``"low"``,
+                ``"medium"``, ``"high"``). It goes out as ``verbosity`` over
+                Chat Completions and as ``text.verbosity`` over the Responses
+                API and wins over a ``verbosity`` in ``request_params``;
+                ``None`` sends nothing of its own.
 
         Returns:
             LLMResponse: Structured response containing visible content,
@@ -785,6 +801,8 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
         create_kwargs = self._apply_call_reasoning_effort(
             create_kwargs, reasoning_effort, use_model=use_model
         )
+        if verbosity:
+            create_kwargs["verbosity"] = verbosity
 
         try:
             r = await self._acreate_chat_completion(
@@ -897,6 +915,13 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
         silently degraded)."""
         return True
 
+    def supports_verbosity(self, *, model: str | None = None) -> bool:
+        """Both OpenAI APIs take a ``verbosity``; this adapter puts the one a
+        text call carries into its request. Which call sites ask for one, and
+        for which model, is decided before the call
+        (:func:`inqtrix.model_routing.prose_verbosity`)."""
+        return True
+
     def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
         """The efforts this adapter can send for *model*: the card's, without what its API refuses.
 
@@ -923,6 +948,7 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | None = None,
+        verbosity: str | None = None,
     ) -> ChatTurn:
         """Run one native tool-calling chat turn.
 
@@ -959,6 +985,8 @@ class AzureOpenAILLM(AsyncNativeLLMProvider):
         create_kwargs = self._apply_call_reasoning_effort(
             create_kwargs, reasoning_effort, use_model=use_model
         )
+        if verbosity:
+            create_kwargs["verbosity"] = verbosity
         if tools:
             create_kwargs["tools"] = list(tools)
         if tool_choice is not None:

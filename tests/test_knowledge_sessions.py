@@ -19,6 +19,7 @@ from inqtrix.project.knowledge_sessions_ports import (
     KnowledgeSessionNotFound,
 )
 from inqtrix.services.knowledge_sessions_service import KnowledgeSessionsService
+from tests._store_doubles import BothNames
 
 
 USER = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -36,6 +37,135 @@ def _scoped(user_id: uuid.UUID) -> UserContext:
             role="member",
         )
     )
+
+
+class _HistoricalRuns(BothNames):
+    """Run store double that reports who owns runs under a session id."""
+
+    def __init__(self, owners: set[tuple[str | None, uuid.UUID | None]]) -> None:
+        self.owners = owners
+
+    def session_owners(
+        self, session_id: str
+    ) -> set[tuple[str | None, uuid.UUID | None]]:
+        del session_id
+        return set(self.owners)
+
+
+@pytest.mark.asyncio
+async def test_claim_refuses_a_session_id_that_carries_another_owners_runs() -> None:
+    """A share recipient who saw an agent session id cannot occupy it.
+
+    Knowledge runs write the same ``runs.session_id`` column as agent runs.
+    Without this check a second owner on the id locks the real owner out of
+    the agent session (its claim then sees two owners and answers 404).
+    """
+    service = KnowledgeSessionsService(
+        store=MemoryKnowledgeSessionStore(),
+        run_store=_HistoricalRuns({("default", ALICE)}),
+    )
+
+    with pytest.raises(KnowledgeSessionNotFound):
+        await service.claim_session(
+            "as_alice",
+            title="Occupy",
+            caller_user_id=BOB,
+            workspace_id=None,
+            visible_to=_scoped(BOB),
+        )
+
+
+@pytest.mark.asyncio
+async def test_claim_accepts_the_single_historical_owner() -> None:
+    service = KnowledgeSessionsService(
+        store=MemoryKnowledgeSessionStore(),
+        run_store=_HistoricalRuns({("default", ALICE)}),
+    )
+
+    claimed = await service.claim_session(
+        "ks_alice",
+        title="Mine",
+        caller_user_id=ALICE,
+        workspace_id=None,
+        visible_to=_scoped(ALICE),
+    )
+
+    assert claimed.id == "ks_alice"
+
+
+async def _save_as(service, session_id: str, user_id: uuid.UUID, *, title: str = "S", updated_at: float = 1.0):
+    return await service.save_session(
+        id=session_id, title=title, items_json="[]", group_id=None,
+        created_at=1.0, updated_at=updated_at, caller_user_id=user_id,
+        workspace_id=None, visible_to=_scoped(user_id),
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_refuses_a_session_id_that_carries_another_owners_runs() -> None:
+    """Saving is the second way a registry row comes to be; it follows the claim.
+
+    A user who knows another user's agent session id could save a session
+    under it. Nothing of the owner's became reachable, but the row could
+    neither run (the claim refuses the id) nor be deleted again (the
+    deletion stops at the foreign runs under the id).
+    """
+    store = MemoryKnowledgeSessionStore()
+    service = KnowledgeSessionsService(
+        store=store, run_store=_HistoricalRuns({("default", ALICE)}),
+    )
+
+    with pytest.raises(KnowledgeSessionNotFound):
+        await _save_as(service, "as_alice", BOB, title="Occupy")
+
+    with pytest.raises(KnowledgeSessionNotFound):
+        await store.get_session("as_alice")
+
+
+@pytest.mark.asyncio
+async def test_save_refuses_a_row_its_owner_holds_under_another_owners_runs() -> None:
+    """A row from before the rule does not outrank the runs under its id."""
+    store = MemoryKnowledgeSessionStore()
+    await store.upsert_session(
+        id="as_alice", title="Left behind", items_json="[]", group_id=None,
+        created_at=1.0, updated_at=1.0, created_by_user_id=BOB, workspace_id=None,
+    )
+    service = KnowledgeSessionsService(
+        store=store, run_store=_HistoricalRuns({("default", ALICE)}),
+    )
+
+    with pytest.raises(KnowledgeSessionNotFound):
+        await _save_as(service, "as_alice", BOB, title="Renamed", updated_at=2.0)
+
+    assert (await store.get_session("as_alice")).title == "Left behind"
+
+
+@pytest.mark.asyncio
+async def test_save_refuses_an_id_whose_runs_have_two_owners() -> None:
+    service = KnowledgeSessionsService(
+        store=MemoryKnowledgeSessionStore(),
+        run_store=_HistoricalRuns({("default", ALICE), ("default", BOB)}),
+    )
+
+    with pytest.raises(KnowledgeSessionNotFound):
+        await _save_as(service, "ks_contested", ALICE)
+
+
+@pytest.mark.asyncio
+async def test_save_accepts_the_owner_of_the_runs_and_an_id_without_runs() -> None:
+    owned = KnowledgeSessionsService(
+        store=MemoryKnowledgeSessionStore(),
+        run_store=_HistoricalRuns({("default", ALICE)}),
+    )
+    assert (await _save_as(owned, "ks_alice", ALICE, title="Mine")).title == "Mine"
+    # The rule reads the runs under the id, not the row: saving again passes.
+    again = await _save_as(owned, "ks_alice", ALICE, title="Mine, renamed", updated_at=2.0)
+    assert again.title == "Mine, renamed"
+
+    fresh = KnowledgeSessionsService(
+        store=MemoryKnowledgeSessionStore(), run_store=_HistoricalRuns(set()),
+    )
+    assert (await _save_as(fresh, "ks_new", BOB)).id == "ks_new"
 
 
 @pytest.fixture()

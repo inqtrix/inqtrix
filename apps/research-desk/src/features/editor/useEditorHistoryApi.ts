@@ -13,6 +13,12 @@
  * flow). This hook only hydrates + autosaves once the project is opted in
  * (syncActive), seeding its synced fingerprint to WHAT THE SERVER HOLDS so a
  * local-newer entity is pushed up rather than stranded.
+ *
+ * A Markdown document can have a second writer (another tab, an accepted
+ * agent patch). A version saved elsewhere is merged into the local text with
+ * the base both build on (markdownMerge, as Git merges); changes that
+ * overlap leave the local version in a conflict copy saved at once. Nothing
+ * pauses and nothing is deleted on that way.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -51,18 +57,23 @@ import {
   deleteTolerant404,
   syncCollection,
 } from '@/features/project/syncCollection'
+import { createProjectEntityId } from '@/features/project/entityId'
 import {
   useProjectSyncLifecycle,
   useSyncScope,
   type SyncLifecycleToken,
 } from '@/features/project/useProjectSyncLifecycle'
-import type {
-  EditorDocumentRecoveryCapture,
-  ResearchDeskAction,
+import {
+  keepsLocalEditorText,
+  type EditorDocumentRecoveryCapture,
+  type EditorObservedServerMetadata,
+  type ResearchDeskAction,
 } from '@/features/researchDesk/state'
+import type { InqtrixRequestError } from '@/api/inqtrixClient'
 import { messageFromError } from '@/api/requestErrorText'
+import { editorConflictCopyTitle } from './editorCopy'
 
-const AUTOSAVE_DEBOUNCE_MS = 1_500
+export const AUTOSAVE_DEBOUNCE_MS = 1_500
 const PAGE_LIMIT = 200
 
 type CommentFingerprint = { documentId: string; updatedAt: string }
@@ -98,14 +109,49 @@ export type EditorDocumentAutosavePlan =
     }
   | { kind: 'none' }
 
+/** What merging a server version into a document's record left: `merged`
+ * when the record holds the server's version with any own changes that did
+ * not overlap it (or the record had moved past that version already),
+ * `conflict` when the own version overlapped and now lives in the conflict
+ * copy, saved at once while project sync runs. */
+export type EditorDocumentMergeOutcome =
+  | { kind: 'merged' }
+  | { conflictCopyId: string; kind: 'conflict' }
+
 /** Result of pushing one document: `saved` carries the server's adopted
- * revisions, `rebased` means a concurrent writer won the revision guard
- * (the local record was rebased onto the server state), `skipped` means
- * the autosave plan had nothing to push for this record. */
+ * revisions and the body the server now holds (`null` when only the
+ * metadata of a collaboration document was saved). `merged` and `conflict`
+ * mean a concurrent writer won the revision guard and its version was merged
+ * into the record (see {@link EditorDocumentMergeOutcome}); the record then
+ * sits on the server's revision and a save of it goes through. `converted`
+ * means the document was converted to collaboration elsewhere: own changes
+ * went to a conflict copy, and the record took the converted document.
+ * `skipped` means the autosave plan had nothing to push for this record. */
 export type EditorDocumentPushOutcome =
-  | { kind: 'saved'; metadataRevision: number | undefined; revision: number }
-  | { kind: 'rebased' }
+  | {
+      contentMarkdown: string | null
+      kind: 'saved'
+      metadataRevision: number | undefined
+      revision: number
+    }
+  | EditorDocumentMergeOutcome
+  | { conflictCopyId: string | null; kind: 'converted' }
   | { kind: 'skipped' }
+
+/** A copy that keeps this tab's version of a document after it overlapped a
+ * version saved elsewhere. Known to this session only: after a reload the
+ * copy's title says what it is. */
+export type EditorConflictCopy = {
+  copyDocumentId: string
+  originalDocumentId: string
+  /** `concurrent_change`: another writer saved an overlapping change.
+   * `content_mode_changed`: the document was converted to collaboration
+   * elsewhere while this tab had changes the server never got. */
+  reason: 'concurrent_change' | 'content_mode_changed'
+  /** Whether the server confirmed the copy's first save. Until then the
+   * copy exists only in this tab. */
+  saved: boolean
+}
 
 /** Keep the legacy body contract and collaboration metadata contract disjoint. */
 export function planEditorDocumentAutosave(
@@ -317,6 +363,8 @@ type UseEditorHistoryApiOptions = {
   editorComments: Record<string, EditorCommentThreadRecord>
   editorDocuments: Record<string, EditorDocumentRecord>
   editorFolders: Record<string, EditorFolderRecord>
+  /** Language of the titles of conflict copies. */
+  locale: 'de' | 'en'
   /** In-session load counter (bumped on every wholesale project replace). Part
    * of the lifecycle identity so a switch to another synced project re-hydrates
    * from its own server state instead of inheriting this one's synced map. */
@@ -333,6 +381,10 @@ type UseEditorHistoryApiOptions = {
 }
 
 export type EditorHistoryApiHandle = {
+  /** The conflict copies of this session, oldest first, with the document
+   * whose server version each one's text overlapped and whether its first
+   * save is confirmed. A copy deleted since is left out. */
+  conflictCopies: readonly EditorConflictCopy[]
   error: string | null
   /** Authoritative readiness for the currently requested body. Metadata and
    * comments are intentionally excluded: they may refresh behind visible
@@ -345,14 +397,30 @@ export type EditorHistoryApiHandle = {
     options?: { retry?: boolean },
   ) => Promise<void>
   /** Push one document's current body to the server NOW (serialized against
-   * the autosave loop) and return the fresh server revisions, or `null` when
-   * the push could not produce an authoritative base (sync inactive, plan
-   * skipped, or a concurrent writer won and the record was rebased). The
-   * share/collaboration-enable flow uses this so converting a document never
-   * depends on the global project dirty flag. */
+   * the autosave loop). `saved` returns the fresh server revisions and the
+   * body the server now holds. When a concurrent writer won the revision
+   * guard, its version is merged into the record and the record is saved
+   * once more, read after the render that applied the merge: the caller
+   * gets `saved` and goes on. Only when that second save loses too does it
+   * get `merged` or `conflict`. `converted` means the document was converted
+   * to collaboration elsewhere; `skipped` means nothing was pushed (sync
+   * inactive, not hydrated yet, no such document, or nothing to push for
+   * it); a failed push throws. Two flows build on the saved base: the
+   * share/collaboration-enable flow, so converting a document never depends
+   * on the global project dirty flag, and accepting an agent patch on the
+   * server, which applies the patch on the returned revision so that text
+   * typed before is part of what the patch is applied to. */
   flushDocumentForShare: (
     documentId: string,
   ) => Promise<EditorDocumentPushOutcome>
+  /** Merge a version of a Markdown document the server holds now (after an
+   * accepted agent patch) into its record, by the same rule as a save that
+   * lost against another writer, serialized against the autosave. A
+   * conflict copy is saved at once while project sync runs. */
+  mergeServerDocument: (
+    documentId: string,
+    server: EditorDocumentRecord,
+  ) => Promise<EditorDocumentMergeOutcome>
   registerOpenedServerDocument: (
     document: EditorDocumentRecord,
     provenance: EditorServerDocumentProvenance,
@@ -367,6 +435,7 @@ export function useEditorHistoryApi({
   editorComments,
   editorDocuments,
   editorFolders,
+  locale,
   projectEpoch,
   refreshToken,
   selectedDocumentId,
@@ -378,6 +447,8 @@ export function useEditorHistoryApi({
 
   const documentsRef = useRef(editorDocuments)
   documentsRef.current = editorDocuments
+  const localeRef = useRef(locale)
+  localeRef.current = locale
   const foldersRef = useRef(editorFolders)
   foldersRef.current = editorFolders
   const commentsRef = useRef(editorComments)
@@ -414,6 +485,38 @@ export function useEditorHistoryApi({
   const bindSyncPass = useSyncScope(syncActive, syncIdentity)
   const [serverObservationEpoch, setServerObservationEpoch] = useState(0)
   const [documentBodyObservationEpoch, setDocumentBodyObservationEpoch] = useState(0)
+
+  // Conflict copies of this session: which copy keeps the version of which
+  // document, and whether the server confirmed its first save.
+  const conflictCopiesRef = useRef(new Map<string, EditorConflictCopy>())
+  const [conflictCopyList, setConflictCopyList] = useState<readonly EditorConflictCopy[]>([])
+  const publishConflictCopies = useCallback(() => {
+    setConflictCopyList([...conflictCopiesRef.current.values()])
+  }, [])
+
+  // A render barrier. The reducer decides a merge with the record as it is
+  // when the action runs; the caller learns the outcome from the state that
+  // render produced, never from a second computation that could see another
+  // text. Each wait bumps a generation of its own; the effect of the render
+  // that carries it resolves the wait. The dispatch before the bump is part
+  // of that render, so the state read afterwards holds the action's result.
+  const [renderedGeneration, setRenderedGeneration] = useState(0)
+  const requestedGenerationRef = useRef(0)
+  const renderWaitsRef = useRef<Array<{ generation: number; resolve: () => void }>>([])
+  useEffect(() => {
+    const due = renderWaitsRef.current.filter((wait) => wait.generation <= renderedGeneration)
+    if (due.length === 0) return
+    renderWaitsRef.current = renderWaitsRef.current.filter(
+      (wait) => wait.generation > renderedGeneration,
+    )
+    for (const wait of due) wait.resolve()
+  }, [renderedGeneration])
+  const afterNextRender = useCallback(() => new Promise<void>((resolve) => {
+    requestedGenerationRef.current += 1
+    const generation = requestedGenerationRef.current
+    renderWaitsRef.current.push({ generation, resolve })
+    setRenderedGeneration(generation)
+  }), [])
 
   const registerOpenedServerDocument = useCallback((
     document: EditorDocumentRecord,
@@ -483,9 +586,12 @@ export function useEditorHistoryApi({
         if (isCollaborationDocument(detailRecord)) {
           dispatch({ document: detailRecord, type: 'setServerEditorDocumentDetail' })
         } else if (shouldLoadLegacyEditorBody(detailRecord)) {
+          // Text and revision of the detail together: someone may have saved
+          // since the list this record's revision came from.
           dispatch({
-            contentMarkdown: detail.content_markdown ?? '',
+            contentMarkdown: detailRecord.contentMarkdown,
             documentId,
+            revision: detailRecord.revision,
             type: 'setServerEditorDocumentBody',
           })
         }
@@ -535,8 +641,147 @@ export function useEditorHistoryApi({
     }
   }, [loadDocumentBody])
 
+  // -- a version another writer saved ------------------------------------- #
+
+  // pushDocument, defined below, saves conflict copies too; the helpers in
+  // this section reach it through this ref.
+  const pushDocumentRef = useRef<
+    (document: EditorDocumentRecord) => Promise<EditorDocumentPushOutcome>
+  >(async () => ({ kind: 'skipped' }))
+
+  /** Records an exact server detail as this tab's latest observation of the
+   * document, whose text is now loaded. */
+  const noteServerDetail = useCallback((detail: EditorDocumentRecord) => {
+    retiredServerDocumentIdsRef.current.delete(detail.id)
+    serverDocumentsRef.current.set(detail.id, detail)
+    metadataRevisionsRef.current.set(detail.id, detail.metadataRevision ?? 1)
+    loadedDocsRef.current.add(detail.id)
+    documentBodyErrorsRef.current.delete(detail.id)
+    setDocumentBodyObservationEpoch((current) => current + 1)
+  }, [])
+
+  const markConflictCopySaved = useCallback((documentId: string) => {
+    const copy = conflictCopiesRef.current.get(documentId)
+    if (!copy || copy.saved) return
+    conflictCopiesRef.current.set(documentId, { ...copy, saved: true })
+    publishConflictCopies()
+  }, [publishConflictCopies])
+
+  /** Registers a conflict copy the reducer created and saves it at once,
+   * without the autosave delay: until then it exists in this tab only. Runs
+   * under the flush lock. A failed save stays visible as the sync error,
+   * and the autosave saves the copy later like any unsaved document. Without
+   * project sync the copy is a document of the project like any other. */
+  const keepConflictCopy = useCallback(async (
+    copy: EditorDocumentRecord,
+    originalDocumentId: string,
+    reason: EditorConflictCopy['reason'],
+  ) => {
+    conflictCopiesRef.current.set(copy.id, {
+      copyDocumentId: copy.id,
+      originalDocumentId,
+      reason,
+      saved: false,
+    })
+    publishConflictCopies()
+    if (!syncActiveRef.current || !hydratedRef.current) return
+    try {
+      const outcome = await pushDocumentRef.current(copy)
+      if (outcome.kind === 'saved') syncedDocsRef.current.set(copy.id, copy.updatedAt)
+    } catch (caught) {
+      setError(messageFromError(caught))
+    }
+  }, [publishConflictCopies])
+
+  /** Merges a version of a Markdown document another writer saved into its
+   * record (`mergeServerEditorDocument`, which merges with the record's own
+   * base) and saves a conflict copy at once. Runs under the flush lock, so
+   * no save of the record runs meanwhile. The outcome is read from the state
+   * the merge produced: a conflict copy exists under the id given to it. */
+  const mergeServerStateLocked = useCallback(async (
+    documentId: string,
+    server: EditorDocumentRecord,
+  ): Promise<EditorDocumentMergeOutcome> => {
+    const local = documentsRef.current[documentId]
+    const seen = serverDocumentsRef.current.get(documentId)
+    const at = new Date()
+    const conflictCopyId = createProjectEntityId('editor-doc')
+    dispatch({
+      at: at.toISOString(),
+      conflictCopy: {
+        id: conflictCopyId,
+        title: editorConflictCopyTitle(local?.title ?? server.title, at, localeRef.current),
+      },
+      documentId,
+      observed: seen ? observedServerMetadata(seen) : null,
+      server: {
+        contentMarkdown: server.contentMarkdown,
+        folderId: server.folderId,
+        revision: server.revision,
+        title: server.title,
+      },
+      type: 'mergeServerEditorDocument',
+    })
+    noteServerDetail(server)
+    await afterNextRender()
+    const record = documentsRef.current[documentId]
+    if (
+      record
+      && syncedDocsRef.current.has(documentId)
+      && record.revision === server.revision
+      && record.contentMarkdown === server.contentMarkdown
+      && record.title === server.title
+      && record.folderId === server.folderId
+    ) {
+      // The record holds exactly the server's version: nothing to save.
+      syncedDocsRef.current.set(documentId, record.updatedAt)
+    }
+    const copy = documentsRef.current[conflictCopyId]
+    if (!copy) return { kind: 'merged' }
+    await keepConflictCopy(copy, documentId, 'concurrent_change')
+    return { conflictCopyId, kind: 'conflict' }
+  }, [afterNextRender, dispatch, keepConflictCopy, noteServerDetail])
+
+  /** The document was converted to collaboration elsewhere. Own changes go
+   * to a conflict copy first (`copyEditorDocumentBeforeConversion`); then
+   * the record takes the converted document the way an opened one does, and
+   * the editor switches to collaboration. Runs under the flush lock. */
+  const adoptConvertedDocumentLocked = useCallback(async (
+    documentId: string,
+    detail: EditorDocumentRecord,
+  ): Promise<EditorDocumentPushOutcome> => {
+    const local = documentsRef.current[documentId]
+    const at = new Date()
+    const conflictCopyId = createProjectEntityId('editor-doc')
+    dispatch({
+      at: at.toISOString(),
+      conflictCopy: {
+        id: conflictCopyId,
+        title: editorConflictCopyTitle(local?.title ?? detail.title, at, localeRef.current),
+      },
+      documentId,
+      projectionMarkdown: detail.contentMarkdown,
+      type: 'copyEditorDocumentBeforeConversion',
+    })
+    dispatch({ document: detail, type: 'setServerEditorDocumentDetail' })
+    registerOpenedServerDocument(detail, 'exact_detail')
+    await afterNextRender()
+    const copy = documentsRef.current[conflictCopyId]
+    if (!copy) return { conflictCopyId: null, kind: 'converted' }
+    await keepConflictCopy(copy, documentId, 'content_mode_changed')
+    return { conflictCopyId, kind: 'converted' }
+  }, [afterNextRender, dispatch, keepConflictCopy, registerOpenedServerDocument])
+
   // -- pushing one entity ----------------------------------------------- #
 
+  /** Saves one document. The save carries the revision the record builds
+   * on, and the server's revision guard takes it only on top of that
+   * revision. When another writer saved since, nothing of either version is
+   * dropped: its version is merged into the record with the record's base
+   * (`merged`); changes that overlap leave the own version in a conflict
+   * copy saved at once and the record on the server's version
+   * (`conflict`); a conversion to collaboration elsewhere keeps own changes
+   * in such a copy (`converted`). Nothing pauses, and no path here deletes. */
   const pushDocument = useCallback(async (
     document: EditorDocumentRecord,
   ): Promise<EditorDocumentPushOutcome> => {
@@ -566,7 +811,12 @@ export function useEditorHistoryApi({
       const savedRecord = documentRecordFromServer(saved)
       retiredServerDocumentIdsRef.current.delete(document.id)
       serverDocumentsRef.current.set(document.id, savedRecord)
-      return { kind: 'saved', metadataRevision, revision: saved.revision }
+      return {
+        contentMarkdown: null,
+        kind: 'saved',
+        metadataRevision,
+        revision: saved.revision,
+      }
     }
 
     let record = document
@@ -578,15 +828,20 @@ export function useEditorHistoryApi({
       // bumped this server-held document's updatedAt while its body was never
       // loaded (it is still ""). The PUT is a full-record upsert, so sending
       // body="" would ERASE the server's real body. Fetch the current server
-      // body first and push the merged record (new metadata + kept body).
-      const detail = await getEditorDocument(document.id, optionsRef.current)
-      const contentMarkdown = detail.content_markdown ?? ''
+      // body first and push the merged record (new metadata + kept body),
+      // on the revision that body belongs to: the list this record's
+      // revision came from may be older, and its revision would lose the
+      // revision guard although nobody writes concurrently.
+      const detail = documentRecordFromServer(
+        await getEditorDocument(document.id, optionsRef.current),
+      )
       dispatch({
-        contentMarkdown,
+        contentMarkdown: detail.contentMarkdown,
         documentId: document.id,
+        revision: detail.revision,
         type: 'setServerEditorDocumentBody',
       })
-      record = { ...document, contentMarkdown }
+      record = { ...document, contentMarkdown: detail.contentMarkdown, revision: detail.revision }
     }
     try {
       const saved = await saveEditorDocument(
@@ -595,12 +850,14 @@ export function useEditorHistoryApi({
         optionsRef.current,
       )
       // Adopt the server's new revision as our base (revision now tracks the
-      // SERVER, not local edits). Revision-only, never touching content/
-      // updatedAt/dirty: the flush fingerprint is updatedAt, so this cannot
-      // wedge a re-flush, and a live keystroke during the save keeps its
-      // newer body. Without this, the next save would re-send the same base+1
-      // and 409 against the just-advanced server on every flush.
+      // SERVER, not local edits), with the text this save sent. Never
+      // touching content/updatedAt/dirty: the flush fingerprint is
+      // updatedAt, so this cannot wedge a re-flush, and a live keystroke
+      // during the save keeps its newer body and stays out of the base.
+      // Without this, the next save would re-send the same base+1 and 409
+      // against the just-advanced server on every flush.
       dispatch({
+        contentMarkdown: record.contentMarkdown,
         documentId: record.id,
         revision: saved.revision,
         type: 'adoptEditorDocumentRevision',
@@ -633,38 +890,46 @@ export function useEditorHistoryApi({
       loadedDocsRef.current.add(record.id)
       documentBodyErrorsRef.current.delete(record.id)
       setDocumentBodyObservationEpoch((current) => current + 1)
+      markConflictCopySaved(record.id)
       return {
+        contentMarkdown: record.contentMarkdown,
         kind: 'saved',
         metadataRevision: adoptedMetadataRevision,
         revision: saved.revision,
       }
     } catch (cause) {
       if (!hasHttpStatus(cause, 409)) throw cause
-      // The server's revision guard refused this save: a concurrent
-      // writer (typically an agent patch apply) advanced the document
-      // past our base. Refetch and rebase onto the server revision.
-      // pushedContentMarkdown lets the reducer tell whether the user
-      // kept typing during the PUT->GET window: if not, it adopts the
-      // server body; if so, it KEEPS the live keystrokes and re-pushes
-      // them on the fresh base (never silently overwriting a live edit).
-      console.warn(
-        `[inqtrix] Editor-Dokument ${record.id}: Autosave verlor den `
-        + 'Revision-Guard (409) — Server-Stand wird uebernommen.',
+      // The server's revision guard refused this save: another writer saved
+      // past the revision this record builds on, or converted the document
+      // to collaboration. Its version is fetched and kept together with the
+      // local one.
+      const detail = documentRecordFromServer(
+        await getEditorDocument(record.id, optionsRef.current),
       )
-      const detail = await getEditorDocument(record.id, optionsRef.current)
-      dispatch({
-        contentMarkdown: detail.content_markdown ?? '',
-        documentId: record.id,
-        pushedContentMarkdown: record.contentMarkdown,
-        revision: detail.revision,
-        type: 'rebaseServerEditorDocument',
-      })
-      loadedDocsRef.current.add(record.id)
-      documentBodyErrorsRef.current.delete(record.id)
-      setDocumentBodyObservationEpoch((current) => current + 1)
-      return { kind: 'rebased' }
+      if (convertedElsewhere(cause, detail)) {
+        const converted = await adoptConvertedDocumentLocked(record.id, detail)
+        console.warn(
+          `[inqtrix] Editor document ${record.id}: the save was refused (409) `
+          + 'because the document was converted to collaboration elsewhere; '
+          + (converted.kind === 'converted' && converted.conflictCopyId
+            ? `the local changes are kept in the copy ${converted.conflictCopyId}.`
+            : 'there were no local changes to keep.'),
+        )
+        return converted
+      }
+      const merged = await mergeServerStateLocked(record.id, detail)
+      console.warn(
+        `[inqtrix] Editor document ${record.id}: the save lost the revision `
+        + `guard (409) against revision ${detail.revision}; `
+        + (merged.kind === 'conflict'
+          ? 'the changes overlap, so the document now holds that version and '
+            + `the local version is kept in the copy ${merged.conflictCopyId}.`
+          : 'that version was merged with the local text; own changes save on top of it.'),
+      )
+      return merged
     }
-  }, [dispatch])
+  }, [adoptConvertedDocumentLocked, dispatch, markConflictCopySaved, mergeServerStateLocked])
+  pushDocumentRef.current = pushDocument
 
   const pushFolder = useCallback(async (folder: EditorFolderRecord) => {
     await saveEditorFolder(folder.id, serverFolderPayload(folder), optionsRef.current)
@@ -803,13 +1068,10 @@ export function useEditorHistoryApi({
     }
   }, [bindSyncPass, pushComment, pushDocument, pushFolder])
 
-  const flushDocumentForShare = useCallback(async (
-    documentId: string,
-  ): Promise<EditorDocumentPushOutcome> => {
-    if (!syncActiveRef.current || !hydratedRef.current) return { kind: 'skipped' }
-    // Serialize against the debounced autosave loop: wait for an in-flight
-    // cycle, then hold the same lock while pushing this one document, so the
-    // share flow can never race a concurrent PUT of the same record.
+  /** Runs `work` while holding the flush lock: waits for an in-flight
+   * autosave pass or immediate save, holds the lock while `work` runs, and
+   * starts an autosave pass that was asked for meanwhile. */
+  const withFlushLock = useCallback(async <T>(work: () => Promise<T>): Promise<T> => {
     while (flushingRef.current) {
       await new Promise<void>((resolve) => {
         window.setTimeout(resolve, 50)
@@ -817,21 +1079,7 @@ export function useEditorHistoryApi({
     }
     flushingRef.current = true
     try {
-      // Der Record wird ERST HIER gelesen, INNERHALB der Sperre. Ein vor dem
-      // Warten gelesener Stand ist beim Senden wieder alt: genau in diesem
-      // Fenster uebernimmt der laufende Autosave die naechste Revision, und
-      // der Flush schickt danach die vorige. Der Server verweigert das
-      // korrekt mit 409 -- und weil der Aufrufer denselben veralteten Stand
-      // erneut schickte, konnte die angebotene Wiederholung nie gelingen.
-      const document = documentsRef.current[documentId]
-      if (!document) return { kind: 'skipped' }
-      const outcome = await pushDocument(document)
-      if (outcome.kind === 'saved') {
-        // Mark this fingerprint as synced so the next autosave cycle does not
-        // re-push the identical body.
-        syncedDocsRef.current.set(document.id, document.updatedAt)
-      }
-      return outcome
+      return await work()
     } finally {
       flushingRef.current = false
       if (flushPendingRef.current) {
@@ -839,7 +1087,167 @@ export function useEditorHistoryApi({
         void flush()
       }
     }
-  }, [flush, pushDocument])
+  }, [flush])
+
+  const flushDocumentForShare = useCallback(async (
+    documentId: string,
+  ): Promise<EditorDocumentPushOutcome> => {
+    if (!syncActiveRef.current || !hydratedRef.current) return { kind: 'skipped' }
+    // Serialized against the debounced autosave loop, so the share flow can
+    // never race a concurrent PUT of the same record.
+    return withFlushLock(async () => {
+      // The record is read only here, inside the lock. A record read before
+      // the wait is stale by the time it is sent: in exactly that window the
+      // running autosave adopts the next revision, and the flush would send
+      // the previous one. The server refuses that with 409, and a caller
+      // that sent the same stale record again could never succeed.
+      const document = documentsRef.current[documentId]
+      if (!document) return { kind: 'skipped' }
+      const outcome = await pushDocument(document)
+      if (outcome.kind === 'saved') {
+        // Mark this fingerprint as synced so the next autosave cycle does not
+        // re-push the identical body.
+        syncedDocsRef.current.set(document.id, document.updatedAt)
+        return outcome
+      }
+      if (outcome.kind !== 'merged' && outcome.kind !== 'conflict') return outcome
+      // Another writer won the revision guard, and its version is merged
+      // into the record now, on its revision (after a conflict: its version,
+      // with the own one in the saved copy). pushDocument returned after the
+      // render that applied the merge, so this read sees the merged record.
+      // One more save gives the caller a saved revision to go on from.
+      const merged = documentsRef.current[documentId]
+      if (!merged) return outcome
+      const second = await pushDocument(merged)
+      if (second.kind === 'saved') syncedDocsRef.current.set(merged.id, merged.updatedAt)
+      return second
+    })
+  }, [pushDocument, withFlushLock])
+
+  const mergeServerDocument = useCallback((
+    documentId: string,
+    server: EditorDocumentRecord,
+  ): Promise<EditorDocumentMergeOutcome> => withFlushLock(
+    () => mergeServerStateLocked(documentId, server),
+  ), [mergeServerStateLocked, withFlushLock])
+
+  /** After a refresh of the lists: merges the newer server version of each
+   * document whose text this tab holds, so a change saved elsewhere shows
+   * without a reload instead of being overwritten by the next save here.
+   * Serialized against the autosave; a save that lost the revision guard
+   * meanwhile has merged the same version already, which the reducer then
+   * ignores. */
+  const mergeNewerServerVersions = useCallback((
+    documentIds: readonly string[],
+    token: SyncLifecycleToken,
+  ) => withFlushLock(async () => {
+    for (const documentId of documentIds) {
+      if (token.cancelled) return
+      const local = documentsRef.current[documentId]
+      const listed = serverDocumentsRef.current.get(documentId)
+      if (
+        !local
+        || !listed
+        || isCollaborationDocument(local)
+        || listed.revision <= local.revision
+      ) continue
+      const detail = documentRecordFromServer(
+        await getEditorDocument(documentId, optionsRef.current),
+      )
+      if (token.cancelled) return
+      if (isCollaborationDocument(detail)) continue
+      await mergeServerStateLocked(documentId, detail)
+    }
+  }), [mergeServerStateLocked, withFlushLock])
+  const mergeNewerServerVersionsRef = useRef(mergeNewerServerVersions)
+  mergeNewerServerVersionsRef.current = mergeNewerServerVersions
+
+  /** A conversion to collaboration elsewhere that a refresh of the lists
+   * shows before a save of this tab meets it. Own text of each document
+   * (`copyEditorDocumentBeforeConversion`) goes to a conflict copy, then
+   * `reconcile` takes the lists, which switches the document to
+   * collaboration, and the copies are saved at once. Under the flush lock,
+   * so no save of such a document runs in between. `null` when the
+   * lifecycle ended meanwhile; nothing is copied then. */
+  const copyBeforeConversions = useCallback(<T,>(
+    documentIds: readonly string[],
+    token: SyncLifecycleToken,
+    reconcile: () => T,
+  ): Promise<T | null> => withFlushLock(async () => {
+    const projections: EditorDocumentRecord[] = []
+    for (const documentId of documentIds) {
+      const local = documentsRef.current[documentId]
+      // A save refused for the conversion may have taken it meanwhile.
+      if (!local || isCollaborationDocument(local)) continue
+      const detail = documentRecordFromServer(
+        await getEditorDocument(documentId, optionsRef.current),
+      )
+      if (token.cancelled) return null
+      if (isCollaborationDocument(detail)) projections.push(detail)
+    }
+    const copies: Array<{ conflictCopyId: string; documentId: string }> = []
+    for (const detail of projections) {
+      const local = documentsRef.current[detail.id]
+      if (!local || isCollaborationDocument(local)) continue
+      const at = new Date()
+      const conflictCopyId = createProjectEntityId('editor-doc')
+      dispatch({
+        at: at.toISOString(),
+        conflictCopy: {
+          id: conflictCopyId,
+          title: editorConflictCopyTitle(local.title, at, localeRef.current),
+        },
+        documentId: detail.id,
+        projectionMarkdown: detail.contentMarkdown,
+        type: 'copyEditorDocumentBeforeConversion',
+      })
+      copies.push({ conflictCopyId, documentId: detail.id })
+    }
+    const result = reconcile()
+    await afterNextRender()
+    for (const { conflictCopyId, documentId } of copies) {
+      const copy = documentsRef.current[conflictCopyId]
+      if (copy) await keepConflictCopy(copy, documentId, 'content_mode_changed')
+    }
+    return result
+  }), [afterNextRender, dispatch, keepConflictCopy, withFlushLock])
+  const copyBeforeConversionsRef = useRef(copyBeforeConversions)
+  copyBeforeConversionsRef.current = copyBeforeConversions
+
+  // An editor text that overlapped a version which reached the record
+  // before the editor showed it waits on the record
+  // (`pendingConflictMarkdown`, see the reducer's updateEditorDocumentMarkdown).
+  // It becomes a conflict copy at once: the copy action runs right here,
+  // so no later action can meet the waiting text, and the copy is saved
+  // under the flush lock like every conflict copy.
+  const pendingCopiesRef = useRef(new Map<string, string>())
+  useEffect(() => {
+    for (const document of Object.values(editorDocuments)) {
+      const pending = document.pendingConflictMarkdown
+      if (pending === undefined) {
+        pendingCopiesRef.current.delete(document.id)
+        continue
+      }
+      if (pendingCopiesRef.current.get(document.id) === pending) continue
+      pendingCopiesRef.current.set(document.id, pending)
+      const at = new Date()
+      const conflictCopyId = createProjectEntityId('editor-doc')
+      dispatch({
+        at: at.toISOString(),
+        conflictCopy: {
+          id: conflictCopyId,
+          title: editorConflictCopyTitle(document.title, at, localeRef.current),
+        },
+        documentId: document.id,
+        type: 'copyPendingEditorConflictVersion',
+      })
+      void withFlushLock(async () => {
+        await afterNextRender()
+        const copy = documentsRef.current[conflictCopyId]
+        if (copy) await keepConflictCopy(copy, document.id, 'concurrent_change')
+      })
+    }
+  }, [afterNextRender, dispatch, editorDocuments, keepConflictCopy, withFlushLock])
 
   // -- reset + hydrate lifecycle (re-armed on project identity) ---------- #
 
@@ -858,8 +1266,12 @@ export function useEditorHistoryApi({
     documentBodyErrorsRef.current.clear()
     exactDetailProvenanceRef.current.clear()
     loadedCommentsRef.current.clear()
+    if (conflictCopiesRef.current.size > 0) {
+      conflictCopiesRef.current.clear()
+      publishConflictCopies()
+    }
     setDocumentBodyObservationEpoch((current) => current + 1)
-  }, [])
+  }, [publishConflictCopies])
 
   const hydrate = useCallback((token: SyncLifecycleToken) => {
     documentBodyRequestGenerationRef.current += 1
@@ -884,114 +1296,171 @@ export function useEditorHistoryApi({
           cursor = page.next_cursor ?? undefined
         } while (cursor)
         if (token.cancelled) return
-        // On the first hydration, documents already in the local project carry
-        // an authoritative body loaded from project markdown. On a background
-        // refresh, server-only metadata rows are already present locally too;
-        // only the explicit loaded set may preserve their body readiness.
-        const locallyPresentIds = editorLocallyAuthoritativeDocumentIds({
+        // Takes the lists: dispatches the reconcile, seeds the save
+        // fingerprints and the server observation, and names the documents
+        // whose text this tab holds and whose server version is newer.
+        const reconcile = (): string[] => {
+          // On the first hydration, documents already in the local project carry
+          // an authoritative body loaded from project markdown. On a background
+          // refresh, server-only metadata rows are already present locally too;
+          // only the explicit loaded set may preserve their body readiness.
+          const locallyPresentIds = editorLocallyAuthoritativeDocumentIds({
+            alreadyHydrated: hydratedRef.current,
+            loadedDocumentIds: loadedDocsRef.current,
+            projectDocumentIds: Object.keys(documentsRef.current),
+          })
+          if (folderRecords.length > 0) {
+            dispatch({ folders: folderRecords, type: 'upsertServerEditorFolders' })
+          }
+          const authoritativeDocumentIds = new Set(
+            documentRecords.map((document) => document.id),
+          )
+          const retiredDocumentIds = new Set<string>()
+          for (const documentId of authoritativeDocumentIds) {
+            retiredServerDocumentIdsRef.current.delete(documentId)
+          }
+          for (const [documentId, document] of Object.entries(documentsRef.current)) {
+            if (
+              (document.serverSynced === true || document.access?.mode === 'shared')
+              && !authoritativeDocumentIds.has(documentId)
+            ) {
+              retiredDocumentIds.add(documentId)
+            }
+          }
+          for (const documentId of serverDocumentsRef.current.keys()) {
+            if (!authoritativeDocumentIds.has(documentId)) {
+              retiredDocumentIds.add(documentId)
+            }
+          }
+          const recoveryCaptures: EditorDocumentRecoveryCapture[] = []
+          const capturedAt = new Date().toISOString()
+          for (const documentId of retiredDocumentIds) {
+            const localDocument = documentsRef.current[documentId]
+            if (!localDocument) continue
+            const collaborationRecovery =
+              consumeCollaborationRecoveryRef.current?.(documentId) ?? null
+            const hasChangedLocalDocument = (
+              syncedDocsRef.current.has(documentId)
+              && syncedDocsRef.current.get(documentId) !== localDocument.updatedAt
+            )
+            const hasPendingPrivateComment = Object.values(
+              commentOutboxRef.current,
+            ).some((entry) => (
+              entry.documentId === documentId
+              && entry.operation === 'upsert'
+            ))
+            if (
+              !collaborationRecovery
+              && !hasChangedLocalDocument
+              && !hasPendingPrivateComment
+            ) continue
+            recoveryCaptures.push({
+              capturedAt,
+              contentMarkdown: collaborationRecovery?.contentMarkdown
+                ?? localDocument.contentMarkdown,
+              documentId,
+            })
+          }
+          // Establish the no-resurrection boundary before dispatching. A
+          // debounced flush can run between this continuation and React's next
+          // render; it must already exclude every remotely retired id.
+          for (const documentId of retiredDocumentIds) {
+            retiredServerDocumentIdsRef.current.add(documentId)
+            serverDocumentsRef.current.delete(documentId)
+            syncedDocsRef.current.delete(documentId)
+            metadataRevisionsRef.current.delete(documentId)
+            loadedDocsRef.current.delete(documentId)
+            documentBodyErrorsRef.current.delete(documentId)
+            documentBodyRequestsRef.current.delete(documentId)
+            exactDetailProvenanceRef.current.delete(documentId)
+            loadedCommentsRef.current.delete(documentId)
+            for (const [commentId, fingerprint] of syncedCommentsRef.current) {
+              if (fingerprint.documentId === documentId) {
+                syncedCommentsRef.current.delete(commentId)
+              }
+            }
+          }
+          // A list row carries no text: for the documents whose text this tab
+          // holds, the reconcile takes only metadata, and the newer text is
+          // merged below. A local title or folder still equal to what this tab
+          // last saw on the server takes the server's; a different one is an
+          // open local rename or move.
+          const observedMetadata: Record<string, EditorObservedServerMetadata> = {}
+          for (const documentId of locallyPresentIds) {
+            const seen = serverDocumentsRef.current.get(documentId)
+            if (seen) observedMetadata[documentId] = observedServerMetadata(seen)
+          }
+          dispatch({
+            documents: documentRecords,
+            localTextDocumentIds: [...locallyPresentIds],
+            observedMetadata,
+            recoveryCaptures,
+            retiredDocumentIds: [...retiredDocumentIds],
+            type: 'reconcileServerEditorDocuments',
+          })
+          // Seed each fingerprint to WHAT THE SERVER HOLDS (its updated_at);
+          // a local-newer entity then differs and the first autosave pushes it.
+          // A document whose text this tab holds keeps its own updatedAt in
+          // the reconcile; on a refresh its fingerprint is still that of its
+          // last save here. Replaced by the server's, it would differ although
+          // nothing changed here, and the next pass would write the server's
+          // text back as a new revision.
+          const newerServerDocumentIds: string[] = []
+          for (const record of documentRecords) {
+            const keepsText = keepsLocalEditorText(record, locallyPresentIds)
+            if (
+              keepsText
+              && record.revision > (documentsRef.current[record.id]?.revision ?? Infinity)
+            ) {
+              newerServerDocumentIds.push(record.id)
+            }
+            serverDocumentsRef.current.set(record.id, record)
+            if (record.access?.mode === 'shared') continue
+            if (!keepsText || !syncedDocsRef.current.has(record.id)) {
+              syncedDocsRef.current.set(record.id, record.updatedAt)
+            }
+            metadataRevisionsRef.current.set(record.id, record.metadataRevision ?? 1)
+            if (locallyPresentIds.has(record.id)) {
+              // Its body is authoritative locally: never overwrite it on open
+              // (a local-newer body must survive + be pushed up), and it may be
+              // pushed directly without first fetching the server body.
+              loadedDocsRef.current.add(record.id)
+            }
+          }
+          for (const record of folderRecords) {
+            syncedFoldersRef.current.set(record.id, record.updatedAt)
+          }
+          hydratedRef.current = true
+          setHydrated(true)
+          setServerObservationEpoch((current) => current + 1)
+          setDocumentBodyObservationEpoch((current) => current + 1)
+          setError(null)
+          return newerServerDocumentIds
+        }
+        // A conversion elsewhere that the lists show before a save meets it:
+        // own text of such a document goes to a conflict copy first, as on
+        // a save refused for the conversion; the reconcile then switches the
+        // document to collaboration.
+        const textIds = editorLocallyAuthoritativeDocumentIds({
           alreadyHydrated: hydratedRef.current,
           loadedDocumentIds: loadedDocsRef.current,
           projectDocumentIds: Object.keys(documentsRef.current),
         })
-        if (folderRecords.length > 0) {
-          dispatch({ folders: folderRecords, type: 'upsertServerEditorFolders' })
-        }
-        const authoritativeDocumentIds = new Set(
-          documentRecords.map((document) => document.id),
-        )
-        const retiredDocumentIds = new Set<string>()
-        for (const documentId of authoritativeDocumentIds) {
-          retiredServerDocumentIdsRef.current.delete(documentId)
-        }
-        for (const [documentId, document] of Object.entries(documentsRef.current)) {
-          if (
-            (document.serverSynced === true || document.access?.mode === 'shared')
-            && !authoritativeDocumentIds.has(documentId)
-          ) {
-            retiredDocumentIds.add(documentId)
-          }
-        }
-        for (const documentId of serverDocumentsRef.current.keys()) {
-          if (!authoritativeDocumentIds.has(documentId)) {
-            retiredDocumentIds.add(documentId)
-          }
-        }
-        const recoveryCaptures: EditorDocumentRecoveryCapture[] = []
-        const capturedAt = new Date().toISOString()
-        for (const documentId of retiredDocumentIds) {
-          const localDocument = documentsRef.current[documentId]
-          if (!localDocument) continue
-          const collaborationRecovery =
-            consumeCollaborationRecoveryRef.current?.(documentId) ?? null
-          const hasChangedLocalDocument = (
-            syncedDocsRef.current.has(documentId)
-            && syncedDocsRef.current.get(documentId) !== localDocument.updatedAt
-          )
-          const hasPendingPrivateComment = Object.values(
-            commentOutboxRef.current,
-          ).some((entry) => (
-            entry.documentId === documentId
-            && entry.operation === 'upsert'
-          ))
-          if (
-            !collaborationRecovery
-            && !hasChangedLocalDocument
-            && !hasPendingPrivateComment
-          ) continue
-          recoveryCaptures.push({
-            capturedAt,
-            contentMarkdown: collaborationRecovery?.contentMarkdown
-              ?? localDocument.contentMarkdown,
-            documentId,
+        const convertedIds = documentRecords
+          .filter((record) => {
+            const local = documentsRef.current[record.id]
+            return textIds.has(record.id)
+              && isCollaborationDocument(record)
+              && local !== undefined
+              && !isCollaborationDocument(local)
           })
+          .map((record) => record.id)
+        const newerServerDocumentIds = convertedIds.length > 0
+          ? await copyBeforeConversionsRef.current(convertedIds, token, reconcile)
+          : reconcile()
+        if (newerServerDocumentIds && newerServerDocumentIds.length > 0) {
+          await mergeNewerServerVersionsRef.current(newerServerDocumentIds, token)
         }
-        // Establish the no-resurrection boundary before dispatching. A
-        // debounced flush can run between this continuation and React's next
-        // render; it must already exclude every remotely retired id.
-        for (const documentId of retiredDocumentIds) {
-          retiredServerDocumentIdsRef.current.add(documentId)
-          serverDocumentsRef.current.delete(documentId)
-          syncedDocsRef.current.delete(documentId)
-          metadataRevisionsRef.current.delete(documentId)
-          loadedDocsRef.current.delete(documentId)
-          documentBodyErrorsRef.current.delete(documentId)
-          documentBodyRequestsRef.current.delete(documentId)
-          exactDetailProvenanceRef.current.delete(documentId)
-          loadedCommentsRef.current.delete(documentId)
-          for (const [commentId, fingerprint] of syncedCommentsRef.current) {
-            if (fingerprint.documentId === documentId) {
-              syncedCommentsRef.current.delete(commentId)
-            }
-          }
-        }
-        dispatch({
-          documents: documentRecords,
-          recoveryCaptures,
-          retiredDocumentIds: [...retiredDocumentIds],
-          type: 'reconcileServerEditorDocuments',
-        })
-        // Seed each fingerprint to WHAT THE SERVER HOLDS (its updated_at);
-        // a local-newer entity then differs and the first autosave pushes it.
-        for (const record of documentRecords) {
-          serverDocumentsRef.current.set(record.id, record)
-          if (record.access?.mode === 'shared') continue
-          syncedDocsRef.current.set(record.id, record.updatedAt)
-          metadataRevisionsRef.current.set(record.id, record.metadataRevision ?? 1)
-          if (locallyPresentIds.has(record.id)) {
-            // Its body is authoritative locally: never overwrite it on open
-            // (a local-newer body must survive + be pushed up), and it may be
-            // pushed directly without first fetching the server body.
-            loadedDocsRef.current.add(record.id)
-          }
-        }
-        for (const record of folderRecords) {
-          syncedFoldersRef.current.set(record.id, record.updatedAt)
-        }
-        hydratedRef.current = true
-        setHydrated(true)
-        setServerObservationEpoch((current) => current + 1)
-        setDocumentBodyObservationEpoch((current) => current + 1)
-        setError(null)
       } catch (caught) {
         if (!token.cancelled) setError(messageFromError(caught))
       }
@@ -1005,10 +1474,12 @@ export function useEditorHistoryApi({
     hydrate,
   })
 
-  // Authoritative re-hydration on user invalidations (sharing): a document
-  // shared with this user must appear WITHOUT a page reload. No reset —
-  // the hydrate upserts are updatedAt-guarded and re-seed fingerprints to
-  // the server state, so local-newer edits survive and re-push.
+  // Authoritative re-hydration on user invalidations (sharing), focus,
+  // coming back online and a reconnect: a document shared with this user
+  // must appear WITHOUT a page reload. No reset — the hydrate upserts are
+  // updatedAt-guarded and re-seed fingerprints to the server state, so
+  // local-newer edits survive and re-push; a document whose text this tab
+  // holds keeps it, and a newer server version of it is merged in.
   const lastRefreshTokenRef = useRef(refreshToken)
   useEffect(() => {
     if (
@@ -1186,9 +1657,35 @@ export function useEditorHistoryApi({
     syncActive,
   ])
 
+  const conflictCopies = useMemo(
+    () => conflictCopyList.filter((copy) => editorDocuments[copy.copyDocumentId] !== undefined),
+    [conflictCopyList, editorDocuments],
+  )
+
+  // Until the server confirms a conflict copy's first save, or while an
+  // editor text waits to become one, the own version exists in this tab
+  // only: leaving the page asks first. Without project sync nothing goes
+  // to the server, and the project keeps the copy like any other document.
+  const leavingAsks = syncActive && (
+    conflictCopies.some((copy) => !copy.saved)
+    || Object.values(editorDocuments).some((document) => document.pendingConflictMarkdown !== undefined)
+  )
+  useEffect(() => {
+    if (!leavingAsks) return
+    const ask = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      // Engines that still need the legacy form of the question.
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', ask)
+    return () => window.removeEventListener('beforeunload', ask)
+  }, [leavingAsks])
+
   return {
+    conflictCopies,
     error,
     flushDocumentForShare,
+    mergeServerDocument,
     prefetchDocumentBody,
     registerOpenedServerDocument,
     selectedDocumentBodyHydration,
@@ -1200,4 +1697,16 @@ function requireEditorMetadataRevision(revision: number | undefined): number {
     throw new Error('The server returned an invalid editor metadata revision.')
   }
   return revision
+}
+
+function observedServerMetadata(document: EditorDocumentRecord): EditorObservedServerMetadata {
+  return { folderId: document.folderId, title: document.title }
+}
+
+/** Whether a refused save met a document converted to collaboration
+ * elsewhere: the server names that reason, and the detail fetched after the
+ * refusal shows the mode in any case. */
+function convertedElsewhere(cause: unknown, detail: EditorDocumentRecord): boolean {
+  return (cause as InqtrixRequestError).detail?.reason === 'content_mode_changed'
+    || isCollaborationDocument(detail)
 }

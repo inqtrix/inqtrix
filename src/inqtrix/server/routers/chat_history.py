@@ -43,6 +43,7 @@ from inqtrix.services.chat_history_service import ChatValidationError
 from inqtrix.project.session_titles import SessionTitleConflict, parse_title_intent
 from inqtrix.services.request_parsing import (
     error_response,
+    read_json_object,
     workspace_id_for_write,
     workspace_id_from_request,
 )
@@ -142,11 +143,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Create or idempotently update a thread (autosave upsert)."""
-        body = await _json_object(req)
-        if not isinstance(body, dict):
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         created_at = body.get("created_at")
         updated_at = body.get("updated_at")
         if not isinstance(created_at, (int, float)) or not isinstance(
@@ -251,11 +250,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Append/upsert messages into a thread the caller may edit."""
-        body = await _json_object(req)
-        if not isinstance(body, dict):
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         raw_messages = body.get("messages")
         if not isinstance(raw_messages, list):
             return error_response(
@@ -320,11 +317,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Create or idempotently update a thread group."""
-        body = await _json_object(req)
-        if not isinstance(body, dict):
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         created_at = body.get("created_at")
         updated_at = body.get("updated_at")
         if not isinstance(created_at, (int, float)) or not isinstance(
@@ -367,10 +362,3 @@ def build_router(container: "AppContainer") -> APIRouter:
 
     return router
 
-
-async def _json_object(req: Request) -> Any:
-    """Parse the request body as JSON, or ``None`` on a malformed body."""
-    try:
-        return await req.json()
-    except Exception:
-        return None

@@ -302,66 +302,8 @@ def test_a_source_role_conflict_names_the_source_not_its_domain(
 
 
 # --------------------------------------------------------------------- #
-# Retries, replans, revisions and skills
+# Revisions and skills
 # --------------------------------------------------------------------- #
-
-
-def test_a_transient_retry_names_the_task_form_and_the_code(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    from inqtrix.agents.scheduler import TaskOutcome, execute_wave
-
-    def executor(task: Any, attempt: int) -> Any:
-        if attempt == 1:
-            return TaskOutcome(
-                status="failed",
-                transient=True,
-                failure_code="rate_limited",
-                failure_reason=f"provider said {MARKER}",
-            )
-        return TaskOutcome(status="completed", summary="ok")
-
-    with caplog.at_level(logging.WARNING, logger="inqtrix"):
-        execute_wave(
-            [SimpleNamespace(task_id=f"Plan {MARKER}")],
-            executor=executor,
-            max_parallel=1,
-            cancelled=lambda: False,
-            language="de",
-        )
-
-    (line,) = [line for line in _warnings(caplog) if "retrying" in line]
-    assert MARKER not in line
-    assert "Task <task> failed transiently (failure_code=rate_limited)" in line
-
-
-def test_a_failed_replan_counts_its_dropped_analyses(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    from inqtrix.agents import planner
-    from inqtrix.agents.planner import PlanningFailed
-    from tests.agents.test_execution_resume_contract import _ScriptedPlannerLLM, _replan
-    from tests.agents.test_execution_resume_contract import _task as _record_task
-    from tests.agents.test_plan_validation import _analysis_delta, _new_task, _previous
-
-    def leaves_the_synthesis_dependency(plan: Any, ids: set[str]) -> Any:
-        # The validation after the drop fails, so the line is written.
-        return plan.model_copy(update={"tasks": [task for task in plan.tasks if task.id not in ids]})
-
-    monkeypatch.setattr(planner, "without_tasks", leaves_the_synthesis_dependency)
-    dropped = f"Analyse_{MARKER}"
-    delta = _analysis_delta(_new_task(dropped, "file_analysis"), _new_task("t4", "web_instant"))
-    with caplog.at_level(logging.WARNING, logger="inqtrix"):
-        with pytest.raises(PlanningFailed):
-            _replan(
-                _ScriptedPlannerLLM([delta, dict(delta)]),
-                _previous(_record_task("t1", "file_analysis", status="completed")),
-                drop_new_task=lambda task: task.task_id == dropped,
-            )
-
-    (line,) = [line for line in _warnings(caplog) if "dropped analyses" in line]
-    assert MARKER not in line
-    assert "without the 1 dropped analyses" in line
 
 
 def test_revision_ids_the_review_did_not_locate_are_counted(
@@ -389,12 +331,30 @@ def _skill() -> SimpleNamespace:
     )
 
 
+class _PointCheckLLM:
+    """A provider whose skill point check answers with a fixed reply."""
+
+    def __init__(self, reply: dict[str, Any]) -> None:
+        self.reply = reply
+
+    def supports_structured_output(self, *, model: str | None = None) -> bool:
+        return True
+
+    def complete_structured(self, prompt: str, *, schema_name: str, **kwargs: Any) -> Any:
+        from inqtrix.providers.base import StructuredLLMResponse
+
+        del prompt, kwargs
+        assert schema_name == "SkillPointCheck", schema_name
+        return StructuredLLMResponse(
+            parsed=dict(self.reply), content="", prompt_tokens=1, completion_tokens=1
+        )
+
+
 def _check_points(script: Any) -> None:
     from inqtrix.agents.skills_runtime import check_skill_points
-    from tests.agents.test_workspace_agent import ScriptedLLM
 
     check_skill_points(
-        ScriptedLLM(overrides={"SkillPointCheck": script}),
+        _PointCheckLLM(script),
         skill=_skill(),
         question="Wohin?",
         history="",
@@ -413,42 +373,6 @@ def test_a_skill_point_check_names_the_skill_by_its_id(caplog: pytest.LogCapture
     lines = [line for line in _warnings(caplog) if "SkillPointCheck for skill" in line]
     assert len(lines) == 2
     assert all("skl_1" in line and MARKER not in line for line in lines)
-
-
-# --------------------------------------------------------------------- #
-# Task references
-# --------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize(
-    ("task_id", "expected"),
-    [
-        ("t1", "t1"),
-        ("t123", "t123"),
-        ("s", "s"),
-        ("t1234", "<task>"),
-        ("Berlin_Mueller", "<task>"),
-        ("Plan für Berlin", "<task>"),
-        ("", "<task>"),
-    ],
-)
-def test_task_ids_appear_only_in_the_planner_form(task_id: str, expected: str) -> None:
-    from inqtrix.agents.plan_models import loggable_task_id
-
-    assert loggable_task_id(task_id) == expected
-
-
-def test_a_task_label_without_title_logs_the_planner_form(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    from inqtrix.agents.algorithm import _task_label
-
-    with caplog.at_level(logging.WARNING, logger="inqtrix"):
-        _task_label(f"Plan {MARKER}", None, {"language": "de"})
-
-    (line,) = _warnings(caplog)
-    assert MARKER not in line
-    assert "task <task>" in line
 
 
 # --------------------------------------------------------------------- #

@@ -202,10 +202,9 @@ docker compose logs api worker | jq -c 'select(.user == "usr_ab12cd34ef56aa77")'
 
 ## Content rule and foreign libraries
 
-Logs never carry prompts, answers, document or source text, free URLs or queries, tokens, passwords or raw identities, on any level. Allowed are fixed English messages, ids, numbers, type names, configured model names and pseudonyms. Two kinds of values stand in for content where a line needs to name something:
+Logs never carry prompts, answers, document or source text, free URLs or queries, tokens, passwords or raw identities, on any level. Allowed are fixed English messages, ids, numbers, type names, configured model names and pseudonyms. Where a line needs to name something, a stand-in takes the place of the content:
 
 - A line that names the errors of a failed validation names each as `type@field`, for example `int_parsing@MAX_ROUNDS` for a setting read from the environment, never with the rejected value.
-- A plan task appears by its id only in the form the planner assigns (`t1`, `t2`, …, `s`); an id in any other form appears as `<task>`, because a model can write any text into it.
 
 `InqtrixLogFilter` enforces the parts of that rule that do not depend on the call site:
 
@@ -382,7 +381,7 @@ An application that uses Inqtrix as a library owns its logging, as the Python lo
 
 ## Structured runtime events and the trace
 
-Structured runtime events are emitted by `inqtrix.runtime_logging.emit_runtime_event(...)`. It is not a second logging system and it writes no log lines. Iteration events first enter the protected run audit; the fail-closed operational projection, only identifiers, lifecycle and status fields, models, counters, usage and timings, is then attached to the active span, never to a logger, so it needs a recording span and a trace sink (`INQTRIX_TRACING=file` or `otlp`); the log keeps the `RUN start:` and `RUN end:` lifecycle lines. Independent of the profile, the node and task spans always carry the step's *decision* as plain attributes (stop reason, confidence, coverage, claim and source counts, contract status, evidence-budget cut counts); the forensic events remain the content-bearing detail behind `OBSERVABILITY_PROFILE=forensic`.
+Structured runtime events are emitted by `inqtrix.runtime_logging.emit_runtime_event(...)`. It is not a second logging system and it writes no log lines. Iteration events first enter the protected run audit; the fail-closed operational projection, only identifiers, lifecycle and status fields, models, counters, usage and timings, is then attached to the active span, never to a logger, so it needs a recording span and a trace sink (`INQTRIX_TRACING=file` or `otlp`); the log keeps the `RUN start:` and `RUN end:` lifecycle lines. Independent of the profile, the node spans always carry the step's *decision* as plain attributes (stop reason, confidence, coverage, claim and source counts, contract status, evidence-budget cut counts); the forensic events remain the content-bearing detail behind `OBSERVABILITY_PROFILE=forensic`.
 
 ## Lifecycle and timeout lines
 
@@ -561,7 +560,7 @@ The no-silent-fallbacks rule requires every fallback path to emit all three of: 
 - `_confidence_parsed`, `_evidence_consistency_parsed`, `_evidence_sufficiency_parsed`
 - `_claim_extraction_fallback` — claim extraction failed for at least one source. A full-round failure also emits an `algorithm_failure` event with `phase=claim_extraction`.
 - `algorithm_report_blocked` — answer synthesis was blocked because a core evidence-path failure would otherwise produce a normal-looking report from unaudited source context.
-- `_answer_fallback` plus `_answer_fallback_kind` / `_answer_fallback_reason` — answer synthesis took a fallback path (`timeout`, `no_fallback_model`, or `fallback_model_failed`). The answer body starts with a visible `> [!WARNING] Antwort-Synthese-Fallback aktiv` block so the degradation is also surfaced in the rendered output, not only in operator logs.
+- `_answer_fallback` plus `_answer_fallback_kind` / `_answer_fallback_reason` — answer synthesis took a fallback path (`timeout`, `no_fallback_model`, or `fallback_model_failed`). The answer body starts with a visible warning block in the answer language (`> [!WARNING] Kein geschriebener Bericht` / `> [!WARNING] No written report`) so the degradation is also surfaced in the rendered output, not only in operator logs.
 - `_stop_reason`
 - `Run cancelled by client disconnect`
 
@@ -605,6 +604,18 @@ of its own: the placeholders stand in the model input of the trace.
 A summary call that fails, comes back cut off or filtered, or would not fit the
 model's input budget, and an archive that is unavailable, end the model call with
 their error; no compaction event is written for them.
+
+## Web search answer form line
+
+The agent's quick web search may ask for a form of the answer (`table`,
+`timeline`). A search provider that names no answer form is not handed one and
+searches as usual (logger `inqtrix.capabilities.catalog.web`):
+
+- `Web search runs without the requested answer form <form>: the search
+  provider <class> names no answer form.` (INFO, once per such search): `<form>`
+  is one of the fixed names, `<class>` the class name of the provider. The record
+  of the search carries `answer_form_sent: false`, and the tool result tells the
+  model so in its first line.
 
 ## Worker claim safety markers
 

@@ -165,6 +165,92 @@ async def test_model_tiers_default_to_no_preference_for_legacy_rows(store) -> No
 
 
 @pytest.mark.asyncio
+async def test_second_save_overwrites_the_last_choices(store) -> None:
+    """The last picks must survive a SECOND upsert, not just the first INSERT.
+
+    A column missing from the ON CONFLICT update set keeps the first pick for
+    good: every later pick saves without an error and changes nothing.
+    """
+    await store.upsert_preferences(
+        user_id=USER, contrast_mode="standard", locale="en", theme="dark",
+        theme_preset="slate", user_bubble_tone="mint", updated_at=1.0,
+        last_research_profile="schnell", last_agent_tier="schnell",
+    )
+    await store.upsert_preferences(
+        user_id=USER, contrast_mode="standard", locale="en", theme="dark",
+        theme_preset="slate", user_bubble_tone="mint", updated_at=2.0,
+        last_research_profile="deep", last_agent_tier="tief",
+    )
+    prefs = await store.get_preferences(user_id=USER)
+    assert (prefs.last_research_profile, prefs.last_agent_tier) == ("deep", "tief")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("last_research_profile", "turbo"),
+        ("last_research_profile", "tief"),
+        ("last_agent_tier", "deep"),
+        ("last_agent_tier", "standard"),
+    ],
+)
+async def test_last_choice_check_constraints_reject_values_outside_their_domain(
+    store, field, value,
+) -> None:
+    """The database refuses an unknown pick even if the service is bypassed."""
+    from sqlalchemy.exc import DBAPIError, IntegrityError
+
+    with pytest.raises((IntegrityError, DBAPIError)):
+        await store.upsert_preferences(
+            user_id=USER, contrast_mode="standard", locale="en", theme="dark",
+            theme_preset="slate", user_bubble_tone="mint", updated_at=1.0,
+            **{field: value},
+        )
+
+
+@pytest.mark.asyncio
+async def test_last_choices_default_to_no_pick_for_a_save_without_them(store) -> None:
+    await store.upsert_preferences(
+        user_id=USER, contrast_mode="standard", locale="en", theme="dark",
+        theme_preset="slate", user_bubble_tone="mint", updated_at=1.0,
+    )
+    prefs = await store.get_preferences(user_id=USER)
+    assert (prefs.last_research_profile, prefs.last_agent_tier) == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_the_installed_rules_accept_exactly_the_python_domains(store) -> None:
+    """The rules at the head of the schema and the service accept the same picks.
+
+    Read from the installed schema rather than from one revision, so a later
+    revision that widens a rule is judged by what it installed. The empty
+    value is part of both domains: it means no pick.
+    """
+    import re
+
+    from inqtrix.agents.tier_policy import AGENT_TIERS
+    from inqtrix.report_profiles import ReportProfile
+
+    async with store._session() as session:
+        rows = (await session.execute(text(
+            "SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint "
+            "WHERE conrelid = 'account_preferences'::regclass AND conname IN "
+            "('ck_account_preferences_last_research_profile', "
+            "'ck_account_preferences_last_agent_tier')"
+        ))).all()
+    accepted = {
+        row.conname: set(re.findall(r"'([a-z_]*)'::text", row.definition)) for row in rows
+    }
+    assert accepted == {
+        "ck_account_preferences_last_research_profile": (
+            {profile.value for profile in ReportProfile} | {""}
+        ),
+        "ck_account_preferences_last_agent_tier": set(AGENT_TIERS) | {""},
+    }
+
+
+@pytest.mark.asyncio
 async def test_distinct_users_independent(store) -> None:
     await store.upsert_preferences(
         user_id=USER_A, contrast_mode="high", locale="de", theme="dark",

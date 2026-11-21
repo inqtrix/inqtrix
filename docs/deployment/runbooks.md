@@ -89,6 +89,12 @@ inqtrix-deploy status
 inqtrix-deploy logs api --follow --tail 200
 ```
 
+After a cold start with `--profile observability`, an `ERROR`
+`Failed to export spans batch due to timeout, max retries or shutdown.` from
+API or worker in the first seconds means that Langfuse was not up yet: those
+traces are lost, requests are not affected. The same line later, or any other
+`ERROR`, is worth a look.
+
 ## Stop / restart
 
 ```bash
@@ -234,11 +240,12 @@ A Qdrant **minor** version bump is not a plain image swap. Two upstream rules
 govern it, and neither is enforced by the stack:
 
 1. **One minor version at a time.** Storage compatibility is guaranteed for a
-   single minor step only (1.18.x to 1.19.x). Crossing more than one requires
-   landing on each intermediate minor first.
-2. **The storage migration is not reversible.** The first 1.19 start rewrites
-   the storage directory in place. Reverting the pinned tag afterwards does
-   **not** undo it — the older server cannot read the migrated directory.
+   single minor step only (for example 1.19.x to 1.20.x). Crossing more than
+   one requires landing on each intermediate minor first.
+2. **The storage migration is not reversible.** A new minor may rewrite the
+   storage directory in place on its first start (1.19 did). Reverting the
+   pinned tag afterwards does **not** undo it: the older server cannot read
+   the migrated directory.
 
 So a rollback plan means a copy of the volume, taken before the new image
 starts, not a second image reference:

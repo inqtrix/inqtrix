@@ -52,6 +52,49 @@ def test_compose_stops_the_api_before_the_stores_it_probes() -> None:
         assert depends_on[store] == {"condition": "service_started", "required": False}
 
 
+def test_compose_starts_the_api_after_the_object_store() -> None:
+    """With the ``s3`` profile the API starts once SeaweedFS answers on its
+    S3 port, so the availability probe at start never meets a store that is
+    still booting. ``required: false`` keeps the profile optional."""
+    services = _stack_services()
+
+    assert services["api"]["depends_on"]["seaweedfs"] == {
+        "condition": "service_healthy",
+        "required": False,
+    }
+
+    # "Healthy" must mean "the S3 port answers": the health check probes the
+    # port the server is started with, not the master or volume port.
+    seaweedfs = services["seaweedfs"]
+    s3_port = re.search(r"-s3\.port=(\d+)", seaweedfs["command"][0])
+    assert s3_port is not None
+    probe = " ".join(seaweedfs["healthcheck"]["test"])
+    assert f"http://127.0.0.1:{s3_port.group(1)}" in probe
+
+
+def test_no_service_outside_the_observability_profile_waits_for_it() -> None:
+    """Langfuse needs services of its own to start. If one of them fails,
+    Langfuse never starts, and ``required: false`` does not help a service
+    that waits for it: Compose then does not start that service either. So
+    no service outside the ``observability`` profile depends on one inside
+    it; a cold start may lose its first traces instead."""
+    services = _stack_services()
+    observability = {
+        name
+        for name, service in services.items()
+        if "observability" in service.get("profiles", [])
+    }
+    # Guards the profile name: an empty set would pass the check below.
+    assert {"clickhouse", "langfuse", "langfuse-worker"} <= observability
+
+    waiting = {
+        name: sorted(set(service.get("depends_on", {})) & observability)
+        for name, service in services.items()
+        if name not in observability
+    }
+    assert {name: edges for name, edges in waiting.items() if edges} == {}
+
+
 def test_compose_scopes_migration_environment_to_one_shot_job() -> None:
     """A privileged migration DSN must never enter API or worker env files."""
     stack = yaml.safe_load(

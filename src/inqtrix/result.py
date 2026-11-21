@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, NamedTuple, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -25,6 +25,8 @@ from inqtrix.evidence import (
     pinned_tiers_from_records,
     attach_web_search_lineage,
     build_web_search_ledger,
+    cited_material_basis,
+    reference_material_kind,
 )
 from inqtrix.urls import normalize_url
 from inqtrix.scoring import claim_assessments
@@ -331,6 +333,27 @@ class AgentSourceCoverage(BaseModel):
     continuation_open: bool
 
 
+class AgentDocumentAnalysis(BaseModel):
+    """What one document analysis of the run read of one document (server facts).
+
+    The server read these ranges for the analysis; the model saw only the
+    verified passages. Ranges are half-open Unicode code-point spans.
+    """
+
+    # A later field must not make a stored run unreadable for this
+    # version: unknown keys are ignored.
+    model_config = ConfigDict(extra="ignore")
+
+    document_id: str = Field(min_length=1, max_length=4096)
+    version: str = Field(default="", max_length=1024)
+    total_chars: int = Field(ge=0)
+    complete: bool
+    analysed_ranges: list[list[int]] = Field(default_factory=list)
+    unanalysed: list[dict[str, Any]] = Field(default_factory=list)
+    windows_planned: int = Field(default=0, ge=0)
+    windows_analysed: int = Field(default=0, ge=0)
+
+
 class AgentExecution(BaseModel):
     """Canonical effective execution state shown by the Agent Desk.
 
@@ -408,6 +431,16 @@ class AgentExecution(BaseModel):
         ),
     )
     """Web searches the run's own provider calls executed; null when the payload did not record it."""
+    knowledge_searches: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Searches of the knowledge base the run executed itself; a read "
+            "of a document is a use of the source in tool_use_counts and no "
+            "search. Null when the payload did not record it."
+        ),
+    )
+    """Searches of the knowledge base the run executed itself; null when the payload did not record it."""
     limits: dict[str, AgentExecutionLimit] = Field(
         default_factory=dict,
         description=(
@@ -433,6 +466,15 @@ class AgentExecution(BaseModel):
         ),
     )
     """Source coverage ledger; the default preserves older payloads."""
+    document_analyses: list[AgentDocumentAnalysis] = Field(
+        default_factory=list,
+        description=(
+            "Per document a document analysis of the run read on the server: "
+            "the ranges it analysed, those it did not with their reason, and "
+            "whether it read the whole document. Empty when the run analysed none."
+        ),
+    )
+    """Reading facts of the run's document analyses; the default preserves older payloads."""
     work_profile: str = Field(
         "",
         description=(
@@ -1201,8 +1243,9 @@ class ReportReferenceStatement(BaseModel):
     """The claim's status: ``verified``, ``attributed``, ``contested`` or
     ``unverified``."""
     checked: bool = False
-    """Whether THIS source's own text was checked and states the statement;
-    a statement verified through another page is only attributed here."""
+    """Whether the search provider's excerpt of THIS source was checked and
+    states the statement; a statement verified through the excerpt of
+    another source is only attributed here."""
 
 
 class ReportReference(BaseModel):
@@ -1340,9 +1383,8 @@ class ReportReference(BaseModel):
     provider_snippet: str | None = Field(
         None,
         description=(
-            "Snippet supplied by the web-search provider for this citation. "
-            "It is provider metadata, not a verbatim excerpt independently "
-            "read from the linked page."
+            "The search provider's excerpt for this citation. It is provider "
+            "metadata, not text Inqtrix read from the linked page."
         ),
     )
     page_number: int | None = Field(
@@ -1419,8 +1461,9 @@ class ReportReference(BaseModel):
         description=(
             "Every statement the claim ledger ties to this source, from "
             "every search that cited it, once each, with its status and "
-            "whether this source's own text was checked. Empty without "
-            "claims and on older payloads."
+            "whether the search provider's excerpt of this source was "
+            "checked and states it. Empty without claims and on older "
+            "payloads."
         ),
     )
 
@@ -1448,10 +1491,12 @@ class Claim(BaseModel):
         "unverified",
         description=(
             "Verification status assigned by the consolidation "
-            "strategy. One of ``verified`` (supported, and a source's own "
-            "text was checked and states the claim), ``attributed`` "
-            "(supported, but only the search provider's answer ties the "
-            "claim to its sources; no source text was checked), "
+            "strategy. One of ``verified`` (supported, and the search "
+            "provider's excerpts that state the claim carry that support on "
+            "their own), ``attributed`` (supported only together with the "
+            "search provider's answer, which ties the claim to its sources: "
+            "no excerpt states the claim, or the stating excerpts alone "
+            "carry no support), "
             "``contested`` (supporting and contradicting sources, or "
             "conflicting values, both present), or ``unverified`` "
             "(insufficient evidence). Before 0.2.0.10 ``verified`` also "
@@ -1748,31 +1793,40 @@ class ResearchMetrics(BaseModel):
     verified_claims_used_count: int = Field(
         0,
         description=(
-            "Number of verified consolidated claims (a source's own text "
-            "was checked) marked as used in the final answer by the "
-            "deterministic binding audit. Claims the search provider only "
-            "attributes are not counted, so a run on a provider that "
-            "returns no source text reports 0."
+            "Number of verified consolidated claims (checked against the "
+            "search provider's excerpt) marked as used in the final answer "
+            "by the deterministic binding audit. Claims the search provider "
+            "only attributes are not counted, so a run on a provider that "
+            "returns no excerpts reports 0."
         ),
     )
-    """Number of verified consolidated claims (a source's own text was checked) marked as used in the final answer by the deterministic binding audit. Claims the search provider only attributes are not counted, so a run on a provider that returns no source text reports 0."""
+    """Number of verified consolidated claims (checked against the search provider's excerpt) marked as used in the final answer by the deterministic binding audit. Claims the search provider only attributes are not counted, so a run on a provider that returns no excerpts reports 0."""
     evidence_contract_status: str = Field(
         "unknown",
         description=(
-            "Compact status of the evidence-to-answer contract, decided by "
-            "the claim-level binding of cited answer sentences. ``clean``: "
-            "at least one cited sentence carries a consolidated claim and "
-            "nothing cited is unsubstantiated. ``needs_review``: a claim is "
-            "carried, but some citation is unsubstantiated (a URL with no "
-            "record, or a record with no claim). ``source_context_only``: "
-            "sources were cited but no sentence carries a consolidated "
-            "claim. ``algorithm_failed``: report synthesis was blocked. "
-            "``unknown``: no audit ran. ``algorithm_failed`` (cap 3), "
-            "``source_context_only`` (cap 4) and ``needs_review`` (cap 6) "
-            "each cap final_confidence; ``clean`` and ``unknown`` do not."
+            "Compact status of the evidence-to-answer contract. "
+            "``clean``: at least one cited sentence carries a "
+            "consolidated claim, and no cause in "
+            "``evidence_contract_causes`` holds. ``needs_review``: a "
+            "claim is carried, but one of those causes holds: a citation "
+            "is unsubstantiated (a URL with no record, or a record with "
+            "no claim) or a non-blocking step failed. "
+            "``source_context_only``: sources were cited but no sentence "
+            "carries a consolidated claim. ``algorithm_failed``: report "
+            "synthesis was blocked. ``unknown``: no audit ran, or the run "
+            "had no citable evidence to audit. ``algorithm_failed`` (cap "
+            "3), ``source_context_only`` (cap 4) and ``needs_review`` "
+            "(cap 6) each cap final_confidence; ``unknown`` does not, and "
+            "``clean`` is capped at 6 only by an active evidence-depth "
+            "gap (see ``confidence_cap``). ``clean`` says that the cited "
+            "sources carry recorded claims and a cited sentence restates "
+            "one, not that a claim was checked against its source. A "
+            "``needs_review`` result without ``evidence_contract_causes`` "
+            "was stored before that field existed and can also stand for "
+            "an active evidence-depth gap alone."
         ),
     )
-    """Compact status of the evidence-to-answer contract, decided by the claim-level binding of cited answer sentences. ``clean``: at least one cited sentence carries a consolidated claim and nothing cited is unsubstantiated. ``needs_review``: a claim is carried, but some citation is unsubstantiated (a URL with no record, or a record with no claim). ``source_context_only``: sources were cited but no sentence carries a consolidated claim. ``algorithm_failed``: report synthesis was blocked. ``unknown``: no audit ran. ``algorithm_failed`` (cap 3), ``source_context_only`` (cap 4) and ``needs_review`` (cap 6) each cap final_confidence; ``clean`` and ``unknown`` do not."""
+    """Compact status of the evidence-to-answer contract. ``clean``: at least one cited sentence carries a consolidated claim, and no cause in ``evidence_contract_causes`` holds. ``needs_review``: a claim is carried, but one of those causes holds: a citation is unsubstantiated (a URL with no record, or a record with no claim) or a non-blocking step failed. ``source_context_only``: sources were cited but no sentence carries a consolidated claim. ``algorithm_failed``: report synthesis was blocked. ``unknown``: no audit ran, or the run had no citable evidence to audit. ``algorithm_failed`` (cap 3), ``source_context_only`` (cap 4) and ``needs_review`` (cap 6) each cap final_confidence; ``unknown`` does not, and ``clean`` is capped at 6 only by an active evidence-depth gap (see ``confidence_cap``). ``clean`` says that the cited sources carry recorded claims and a cited sentence restates one, not that a claim was checked against its source. A ``needs_review`` result without ``evidence_contract_causes`` was stored before that field existed and can also stand for an active evidence-depth gap alone."""
     single_source_ratio: float = Field(
         0.0,
         description=(
@@ -1782,6 +1836,99 @@ class ResearchMetrics(BaseModel):
         ),
     )
     """Share of supported claims (verified or attributed) resting on a single source while the evidence-depth gap was active; 0.0 otherwise."""
+    evidence_contract_causes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What holds the contract at ``needs_review``, each entry "
+            "sufficient on its own: ``unknown_citation`` (a cited link "
+            "has no evidence record), ``citation_without_claim`` (a cited "
+            "record carries no claim) and ``algorithm_failure`` (a "
+            "non-blocking step failed). The evidence-depth gap is no "
+            "cause; it caps the confidence instead (see "
+            "``confidence_cap_reasons``). Empty for every other status, "
+            "which is its own reason, and on results stored before the "
+            "field existed."
+        ),
+    )
+    """What holds the contract at ``needs_review``, each entry sufficient on its own: ``unknown_citation`` (a cited link has no evidence record), ``citation_without_claim`` (a cited record carries no claim) and ``algorithm_failure`` (a non-blocking step failed). The evidence-depth gap is no cause; it caps the confidence instead (see ``confidence_cap_reasons``). Empty for every other status, which is its own reason, and on results stored before the field existed."""
+    evidence_depth_gap_reasons: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Why the evidence-depth gap was active: "
+            "``no_cross_checked_claims`` (three or more supported claims, "
+            "none with the basis ``cross_checked``; a claim with a "
+            "primary source keeps the basis ``primary_source`` however "
+            "many sources it has), ``majority_single_source_claims`` "
+            "(three or more supported claims, more than half with a "
+            "single source) and ``central_claim_single_quality_source`` "
+            "(a claim stating a number rests on one quality source). "
+            "Empty while the gap was inactive."
+        ),
+    )
+    """Why the evidence-depth gap was active: ``no_cross_checked_claims`` (three or more supported claims, none with the basis ``cross_checked``; a claim with a primary source keeps the basis ``primary_source`` however many sources it has), ``majority_single_source_claims`` (three or more supported claims, more than half with a single source) and ``central_claim_single_quality_source`` (a claim stating a number rests on one quality source). Empty while the gap was inactive."""
+    confidence_cap: int | None = Field(
+        None,
+        description=(
+            "The ceiling the evidence contract put on ``confidence``: 3 "
+            "(``algorithm_failed``), 4 (``source_context_only``), 6 "
+            "(``needs_review``, and any claim-bound answer with an active "
+            "evidence-depth gap, ``clean`` included), or ``None`` when no "
+            "ceiling applied. ``confidence`` can lie below it; the "
+            "ceiling only says how high it could have been."
+        ),
+    )
+    """The ceiling the evidence contract put on ``confidence``: 3 (``algorithm_failed``), 4 (``source_context_only``), 6 (``needs_review``, and any claim-bound answer with an active evidence-depth gap, ``clean`` included), or ``None`` when no ceiling applied. ``confidence`` can lie below it; the ceiling only says how high it could have been."""
+    confidence_cap_reasons: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Why the ceiling applied: ``algorithm_failed`` or "
+            "``source_context_only`` for the lower ceilings; for the "
+            "ceiling of 6 the entries of ``evidence_contract_causes``, "
+            "then the reasons of an active evidence-depth gap (see "
+            "``evidence_depth_gap_reasons``) instead of one blanket word, "
+            "so a ``clean`` answer the gap capped names only the gap's "
+            "reasons. Empty without a ceiling."
+        ),
+    )
+    """Why the ceiling applied: ``algorithm_failed`` or ``source_context_only`` for the lower ceilings; for the ceiling of 6 the entries of ``evidence_contract_causes``, then the reasons of an active evidence-depth gap (see ``evidence_depth_gap_reasons``) instead of one blanket word, so a ``clean`` answer the gap capped names only the gap's reasons. Empty without a ceiling."""
+    evidence_basis: str = Field(
+        "unknown",
+        description=(
+            "The material behind the references flagged as cited. "
+            "``provider_context``: every one carries only what the search "
+            "provider returned about the source and no stored text of a "
+            "document; this is what a web search yields, and the search "
+            "provider's excerpt does not change it. ``evidence``: any "
+            "other mix, in practice a cited reference that carries the "
+            "stored text of a document (a cited reference without any "
+            "stored material also falls here). ``none``: no reference is "
+            "flagged as cited. ``unknown``: a result stored before the "
+            "field existed. The same rule names the basis of a review "
+            "verdict in an agent run. The basis describes the references, "
+            "not the claims: a claim can be ``verified`` against the "
+            "search provider's excerpt while the basis reads "
+            "``provider_context``."
+        ),
+    )
+    """The material behind the references flagged as cited. ``provider_context``: every one carries only what the search provider returned about the source and no stored text of a document; this is what a web search yields, and the search provider's excerpt does not change it. ``evidence``: any other mix, in practice a cited reference that carries the stored text of a document (a cited reference without any stored material also falls here). ``none``: no reference is flagged as cited. ``unknown``: a result stored before the field existed. The same rule names the basis of a review verdict in an agent run. The basis describes the references, not the claims: a claim can be ``verified`` against the search provider's excerpt while the basis reads ``provider_context``."""
+    cited_reference_count: int = Field(
+        0,
+        description=(
+            "Number of references flagged as cited: for a research report "
+            "the sources its body cites. A run mode that does not set the "
+            "flag counts every reference."
+        ),
+    )
+    """Number of references flagged as cited: for a research report the sources its body cites. A run mode that does not set the flag counts every reference."""
+    provider_only_reference_count: int = Field(
+        0,
+        description=(
+            "Number of cited references that carry only what the search "
+            "provider returned. Equal to ``cited_reference_count`` under "
+            "the basis ``provider_context``, lower otherwise."
+        ),
+    )
+    """Number of cited references that carry only what the search provider returned. Equal to ``cited_reference_count`` under the basis ``provider_context``, lower otherwise."""
     rendered_evidence_record_count: int = Field(
         0,
         description=(
@@ -1915,6 +2062,99 @@ class ResearchResultExportOptions(BaseModel):
         ),
     )
     """Optional hard cap on the exported ``top_claims`` list. ``None`` (default) keeps the full list. Use a positive integer to truncate."""
+
+
+class ResearchReferences(NamedTuple):
+    """The references of a research report and the basis they give."""
+
+    references: list[ReportReference]
+    """The report's references with their search lineage attached."""
+    web_search_ledger: dict[str, Any]
+    """The provider searches the references were matched against."""
+    evidence_basis: str
+    """``provider_context``, ``evidence`` or ``none``, as
+    ``ResearchMetrics.evidence_basis`` describes them."""
+    cited_reference_count: int
+    """References flagged as cited."""
+    provider_only_reference_count: int
+    """Cited references that carry only what the search provider returned."""
+
+
+def research_references(
+    result_state: Mapping[str, Any],
+    *,
+    tiering: Any,
+) -> ResearchReferences:
+    """The references of a research state and the basis its cited ones give.
+
+    The one derivation of a report's basis: :meth:`ResearchResult.from_raw`
+    reports it in the metrics, and the answer node prints it in the line
+    under the report, both from the same state. The basis follows the
+    material kind of each cited reference by the rule a review verdict uses
+    for its own basis; an uncited reference never counts. *tiering* places a
+    reference whose tier neither the reference nor the run's source records
+    know.
+    """
+    tier_by_url = pinned_tiers_from_records(result_state.get("source_records", {}) or {})
+    web_search_ledger = build_web_search_ledger(
+        run_id=str(result_state.get("_run_id", "") or "legacy_research"),
+        query_records=[
+            dict(record)
+            for record in result_state.get("query_records", []) or []
+            if isinstance(record, dict)
+        ],
+        query_synthesis={
+            str(key): dict(value)
+            for key, value in (
+                (result_state.get("query_synthesis") or {}).items()
+                if isinstance(
+                    result_state.get("query_synthesis"), Mapping
+                )
+                else ()
+            )
+            if isinstance(value, dict)
+        },
+        citation_records=[
+            dict(record)
+            for record in (
+                result_state.get("provider_citation_records", []) or []
+            )
+            if isinstance(record, dict)
+        ],
+    )
+    raw_references = [
+        dict(reference)
+        for reference in (
+            result_state.get("report_references")
+            or result_state.get("references", [])
+            or []
+        )
+        if isinstance(reference, dict)
+    ]
+    references = _report_references_from_state(
+        attach_web_search_lineage(raw_references, web_search_ledger),
+        tier_by_url=tier_by_url,
+        tiering=tiering,
+    )
+    cited_material = [
+        reference_material_kind(
+            {
+                "excerpt": reference.excerpt,
+                "source_text": reference.source_text,
+                "grounded_support": reference.grounded_support,
+            },
+            search_context=bool(reference.query_ids),
+        )
+        for reference in references
+        if reference.cited
+    ]
+    return ResearchReferences(
+        references=references,
+        web_search_ledger=web_search_ledger,
+        evidence_basis=cited_material_basis(cited_material) or "none",
+        cited_reference_count=len(cited_material),
+        provider_only_reference_count=cited_material.count("provider_context"),
+    )
 
 
 class ResearchResult(BaseModel):
@@ -2148,46 +2388,9 @@ class ResearchResult(BaseModel):
             Source(url=u, tier=tier_by_url.get(u) or tiering.tier_for_url(u))
             for u in ordered_urls[:60]
         ]
-        web_search_ledger = build_web_search_ledger(
-            run_id=str(result_state.get("_run_id", "") or "legacy_research"),
-            query_records=[
-                dict(record)
-                for record in result_state.get("query_records", []) or []
-                if isinstance(record, dict)
-            ],
-            query_synthesis={
-                str(key): dict(value)
-                for key, value in (
-                    (result_state.get("query_synthesis") or {}).items()
-                    if isinstance(
-                        result_state.get("query_synthesis"), Mapping
-                    )
-                    else ()
-                )
-                if isinstance(value, dict)
-            },
-            citation_records=[
-                dict(record)
-                for record in (
-                    result_state.get("provider_citation_records", []) or []
-                )
-                if isinstance(record, dict)
-            ],
-        )
-        raw_references = [
-            dict(reference)
-            for reference in (
-                result_state.get("report_references")
-                or result_state.get("references", [])
-                or []
-            )
-            if isinstance(reference, dict)
-        ]
-        references = _report_references_from_state(
-            attach_web_search_lineage(raw_references, web_search_ledger),
-            tier_by_url=tier_by_url,
-            tiering=tiering,
-        )
+        report = research_references(result_state, tiering=tiering)
+        references = report.references
+        web_search_ledger = report.web_search_ledger
 
         # -- claims --
         consolidated: list[dict] = result_state.get("consolidated_claims", [])
@@ -2236,6 +2439,16 @@ class ResearchResult(BaseModel):
             if depth_gap.get("active")
             else 0.0
         )
+        evidence_depth_gap_reasons = (
+            [
+                reason
+                for reason in str(depth_gap.get("reason") or "").split(",")
+                if reason
+            ]
+            if depth_gap.get("active")
+            else []
+        )
+        confidence_cap = result_state.get("confidence_cap")
         metrics = ResearchMetrics(
             rounds=result_state.get("round", 0),
             elapsed_seconds=0.0,  # filled by caller
@@ -2258,6 +2471,24 @@ class ResearchResult(BaseModel):
             verified_claims_used_count=verified_claims_used_count,
             evidence_contract_status=evidence_contract_status,
             single_source_ratio=single_source_ratio,
+            evidence_contract_causes=[
+                str(cause)
+                for cause in result_state.get("evidence_contract_causes") or []
+            ],
+            evidence_depth_gap_reasons=evidence_depth_gap_reasons,
+            confidence_cap=(
+                int(confidence_cap)
+                if isinstance(confidence_cap, int)
+                and not isinstance(confidence_cap, bool)
+                else None
+            ),
+            confidence_cap_reasons=[
+                str(reason)
+                for reason in result_state.get("confidence_cap_reasons") or []
+            ],
+            evidence_basis=report.evidence_basis,
+            cited_reference_count=report.cited_reference_count,
+            provider_only_reference_count=report.provider_only_reference_count,
             rendered_evidence_record_count=int(
                 result_state.get("rendered_evidence_record_count", 0) or 0
             ),

@@ -818,3 +818,36 @@ describe('researchRunToJob live-status events', () => {
     expect(new Set(job.events.map((event) => event.time)).size).toBe(1)
   })
 })
+
+describe('researchRunToJob report profile', () => {
+  const runWith = (agentOverrides: Record<string, unknown>) => ({
+    agentOverrides,
+    events: [],
+    metrics: { claims: 0, queries: 0, rounds: '0 / 2', sources: 0 },
+    phaseState: { activePhase: 'analysis', completedPhases: [] },
+    runId: 'run-profile',
+    status: 'completed',
+    submittedAt: '2026-08-22T11:47:00.000Z',
+    summary: { title: 'Frage' },
+  }) as unknown as Parameters<typeof researchRunToJob>[0]
+
+  it.each([
+    // The server stores the request as it admitted it.
+    [{ report_profile: 'compact' }, 'compact'],
+    // A run the demo starts in the browser keeps the request the composer
+    // built, in the client's own spelling.
+    [{ reportProfile: 'schnell' }, 'schnell'],
+    [{ report_profile: 'deep', reportProfile: 'schnell' }, 'deep'],
+  ])('reads the profile a run was asked for from %o', (agentOverrides, profile) => {
+    expect(researchRunToJob(runWith(agentOverrides), 'de').reportProfile).toBe(profile)
+  })
+
+  it.each([
+    // A run started without a profile (an API run) is not given one by guess.
+    [{}],
+    [{ report_profile: 'tief' }],
+    [{ reportProfile: 7 }],
+  ])('names no profile for %o', (agentOverrides) => {
+    expect(researchRunToJob(runWith(agentOverrides), 'de').reportProfile).toBeUndefined()
+  })
+})

@@ -45,15 +45,18 @@ from tests.test_knowledge_routes import KnowledgeStubLLM
 _URL = "postgresql+asyncpg://u:p@127.0.0.1:1/db"
 
 
-def _everything_on() -> Settings:
+def _everything_on(*, queue_backend: str = "memory") -> Settings:
     return Settings(
         server=ServerSettings(public_base_url="https://inqtrix.example"),
         storage=StorageSettings(backend="postgres", database_url=_URL),
         auth=AuthSettings(mode="local", session_secret="s" * 40, pat_pepper="p" * 40),
-        queue=QueueSettings(valkey_url="redis://127.0.0.1:1/0"),
+        queue=QueueSettings(backend=queue_backend, valkey_url="redis://127.0.0.1:1/0"),
         quota=QuotaSettings(enabled=True),
         knowledge=KnowledgeSettings(
             enabled=True,
+            # Without Qdrant the vectors stay inside each process, which the
+            # composition announces with a WARNING (pinned below).
+            vector_backend="memory",
             embedding_model="text-embedding-3-small",
             embedding_api_key="k",
             embedding_base_url="http://127.0.0.1:1",
@@ -119,6 +122,35 @@ def test_the_worker_builds_one_engine_for_everything(built) -> None:
     assert len(built) == 1
     assert worker.database_engine is built[0]
     assert not isinstance(built[0].pool, NullPool)
+
+
+# The composition's own warning text: a reword must be caught here.
+_VOLATILE_INDEX = (
+    "INQTRIX_VECTOR_BACKEND=memory keeps the knowledge vectors in this process "
+    "while documents and chunks live in Postgres."
+)
+
+
+def _volatile_index_warnings(caplog: pytest.LogCaptureFixture) -> int:
+    return sum(
+        1
+        for record in caplog.records
+        if record.levelno == logging.WARNING and _VOLATILE_INDEX in record.getMessage()
+    )
+
+
+def test_everything_on_without_qdrant_warns_in_the_api_and_refuses_the_worker(caplog) -> None:
+    """Postgres keeps the documents while the vectors stay in the process.
+
+    The API on the in-process queue warns once. A worker always runs behind
+    Valkey (the worker entry refuses the in-process queue), where the
+    in-process index cannot be shared, so its composition refuses to start."""
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        create_app(settings=_everything_on(), providers=_providers())
+    assert _volatile_index_warnings(caplog) == 1
+
+    with pytest.raises(RuntimeError, match="cannot be shared with INQTRIX_QUEUE_BACKEND=valkey"):
+        _compose_worker(_everything_on(queue_backend="valkey"), SimpleNamespace(check=lambda: None))
 
 
 def test_every_store_of_the_api_sits_on_the_engine(built) -> None:

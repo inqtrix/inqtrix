@@ -1,4 +1,4 @@
-"""Candidate-only memory reflection for completed workspace-agent runs."""
+"""Candidate-only memory reflection for completed agent runs."""
 
 from __future__ import annotations
 
@@ -20,8 +20,6 @@ def run_memory_reflection(
     *,
     question: str,
     memo_markdown: str,
-    critic_digest: str,
-    task_digest: str,
     model: str | None,
     reasoning_effort: str | None,
     timeout: float,
@@ -33,8 +31,6 @@ def run_memory_reflection(
         prompt=build_agent_memory_reflection_prompt(
             question=question,
             memo_markdown=memo_markdown,
-            critic_digest=critic_digest,
-            task_digest=task_digest,
             language=language,
         ),
         model_cls=MemoryReflection,

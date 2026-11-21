@@ -8,7 +8,6 @@ from inqtrix.text import (
     iter_word_chunks,
     number_spans,
     shorten_visibly,
-    start_at_word,
 )
 
 
@@ -203,31 +202,3 @@ class TestNumberSpans:
     )
     def test_separate_values_stay_apart(self, text, numbers):
         assert [text[start:end] for start, end in number_spans(text)] == numbers
-
-
-class TestStartAtWord:
-    """Where a passage taken from the middle of a text opens."""
-
-    def test_a_start_inside_a_word_moves_to_the_next_word(self):
-        text = "alpha beta gamma"
-        assert text[start_at_word(text, 7, reach=10):] == "gamma"
-
-    def test_a_start_on_a_word_stays(self):
-        text = "alpha beta gamma"
-        assert text[start_at_word(text, 6, reach=10):] == "beta gamma"
-
-    def test_a_start_never_opens_inside_a_number(self):
-        text = "Summe 1 500 000 EUR offen"
-        assert text[start_at_word(text, 8, reach=20):] == "EUR offen"
-        thin = "Summe 1\u2009500\u2009000 EUR offen"
-        assert thin[start_at_word(thin, 8, reach=20):] == "EUR offen"
-
-    def test_an_overlong_word_is_entered_but_a_number_is_not(self):
-        """No boundary within reach: the start stays inside the word but
-        moves past the number it would split, and the far boundary beyond
-        the reach does not swallow the word."""
-        text = "x" * 30 + "1.500.000" + "y" * 30 + " Ende"
-        assert text[start_at_word(text, 33, reach=10):] == "y" * 30 + " Ende"
-
-    def test_the_start_of_the_text_stays(self):
-        assert start_at_word("alpha beta", 0, reach=5) == 0

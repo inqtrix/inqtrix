@@ -16,7 +16,7 @@ function initialRun(): AgentRunRecord {
     status: 'running', agent_overrides: { autonomy: 'balanced' },
     created_at: start, started_at: start, finished_at: null, elapsed_seconds: null,
     queue_position: null, snapshot: { current_node: 'agent_kernel' }, error: null,
-    events_url: '', result_url: '',
+    events_url: '',
   })
   run.phase = 'execution'
   run.todosAt = start + 2
@@ -27,16 +27,12 @@ function initialRun(): AgentRunRecord {
   ]
   run.stepLog = [
     { kind: 'narration', seq: 1, at: start + 1, text: 'Ich vergleiche die Quellen und halte offene Punkte im Memo fest.' },
-    { kind: 'activity', seq: 2, at: start + 2, label: 'run_deep_mission', detail: 'Quellen vergleichen und Aussagen belegen', activityKey: 'tool:mission', status: 'completed' },
+    { kind: 'activity', seq: 2, at: start + 2, label: 'run_web_research', detail: 'Quellen vergleichen und Aussagen belegen', activityKey: 'tool:research', status: 'completed' },
   ]
   run.children = {
-    mission: {
-      childRunId: 'mission', taskId: 'mission', runStatus: 'completed', startedAt: start + 2, updatedAt: start + 80,
-      snapshot: { phase: 'done' }, openTasks: [], failedTasks: [],
-      taskTitles: { 0: 'Primärquellen auswerten', 1: 'Memo zur Leitfrage formulieren' },
-      taskIds: { research: 0, memo: 1 }, taskStartedAt: { 0: start + 5, 1: start + 65 },
-      taskSettledAt: { 0: start + 64, 1: start + 80 }, taskKinds: { 0: 'web_research', 1: 'synthesis' },
-      taskResults: { 0: 'Drei Quellen mit unterschiedlichen Anwendungsbereichen', 1: 'Vergleich mit offenen Punkten erstellt' },
+    research: {
+      childRunId: 'research', taskId: 'research', runStatus: 'completed', startedAt: start + 2, updatedAt: start + 80,
+      snapshot: { current_node: 'answer', total_queries: 4 },
     },
   }
   return run
@@ -129,8 +125,6 @@ function Fixture() {
     answerClarification: async () => undefined, decideApproval: async () => undefined,
     answerChildClarification: async () => undefined, decideChildApproval: async () => undefined,
     loadArtifactRevision: async () => ({ content_markdown: '' }),
-    applyPatch: async () => ({ kind: 'applied', revision: 1, appliedEditIds: [] }), rejectPatch: async () => undefined,
-    planDrafts: {}, setPlanDraft: () => undefined, planSource: { collections: [], vectorBackendLabel: null },
   }
   return (
     <main className="min-h-screen bg-background text-foreground">

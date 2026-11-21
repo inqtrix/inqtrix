@@ -24,6 +24,7 @@ from inqtrix.pagination import (
     list_envelope,
 )
 from inqtrix.project.editor_ports import (
+    CONTENT_MODE_CHANGED_TEXT,
     DocumentContentModeConflict,
     DocumentMetadataConflict,
     DocumentNotFound,
@@ -42,6 +43,7 @@ from inqtrix.services.editor_persistence_service import (
 )
 from inqtrix.services.request_parsing import (
     error_response,
+    read_json_object,
     workspace_id_for_write,
     workspace_id_from_request,
 )
@@ -287,11 +289,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Create or idempotently update a document (autosave upsert)."""
-        body = await _json_object(req)
-        if not isinstance(body, dict):
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         created_at = body.get("created_at")
         updated_at = body.get("updated_at")
         if not isinstance(created_at, (int, float)) or not isinstance(
@@ -358,7 +358,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         except DocumentContentModeConflict:
             return error_response(
                 409,
-                "Document content is already being synchronized live.",
+                CONTENT_MODE_CHANGED_TEXT,
                 "conflict",
                 reason="content_mode_changed",
             )
@@ -382,11 +382,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Owner-only metadata CAS that never mutates the document body."""
-        body = await _json_object(req)
-        if not isinstance(body, dict):
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         expected = body.get("expected_metadata_revision")
         if not isinstance(expected, int):
             return error_response(
@@ -523,11 +521,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Upsert comments into a document the caller may edit."""
-        body = await _json_object(req)
-        if not isinstance(body, dict):
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         raw_comments = body.get("comments")
         if not isinstance(raw_comments, list):
             return error_response(
@@ -577,11 +573,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Create or revise one creator-private unpublished AI proposal."""
-        body = await _json_object(req)
-        if not isinstance(body, dict):
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         draft = body.get("draft")
         if not isinstance(draft, dict):
             return error_response(
@@ -623,11 +617,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Discard one private draft with an exact revision/patch guard."""
-        body = await _json_object(req)
-        if not isinstance(body, dict):
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             await service.delete_comment_suggestion_draft(
                 document_id,
@@ -673,11 +665,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Create or idempotently update an editor folder."""
-        body = await _json_object(req)
-        if not isinstance(body, dict):
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         created_at = body.get("created_at")
         updated_at = body.get("updated_at")
         if not isinstance(created_at, (int, float)) or not isinstance(
@@ -719,10 +709,3 @@ def build_router(container: "AppContainer") -> APIRouter:
 
     return router
 
-
-async def _json_object(req: Request) -> Any:
-    """Parse the request body as JSON, or ``None`` on a malformed body."""
-    try:
-        return await req.json()
-    except Exception:
-        return None

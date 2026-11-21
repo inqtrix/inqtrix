@@ -130,7 +130,8 @@ _STRUCTURE_REASONS: dict[str, str] = {
 class _Unit(NamedTuple):
     """One URL an affirmed witness binds a claim to: the provider answer
     (``answer``, its query id) that bound it, the source's tier, and the
-    source's own text when the provider returned it (``page_text``)."""
+    search provider's excerpt of the source when it returned one
+    (``page_text``)."""
 
     url: str
     domain: str
@@ -197,9 +198,9 @@ def _support_structure(
 
 
 def _checked_units(units: list[_Unit]) -> list[_Unit]:
-    """The units whose source's own text states the claim
-    (:func:`~inqtrix.strategies._claim_values.page_states_claim`); a page
-    text that near-duplicates an already counted one (a wire story on two
+    """The units whose search-provider excerpt states the claim
+    (:func:`~inqtrix.strategies._claim_values.page_states_claim`); an
+    excerpt that near-duplicates an already counted one (a wire story on two
     sites) counts once."""
     counted: list[set[str]] = []
     checked: list[_Unit] = []
@@ -565,8 +566,9 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
         is the support structure over all affirmed witnesses
         (``primary_source``, ``cross_checked``, ``quality_source``, or
         ``missing_primary_source``/``weak_evidence`` without support). The
-        status says what was checked: ``verified`` when the source texts a
-        provider returned state the claim on their own, ``attributed`` when
+        status says what was checked: ``verified`` when the search
+        provider's excerpts of the sources state the claim on their own,
+        ``attributed`` when
         only the provider's answer ties the claim to its sources (a tier is
         who speaks, never what a page says). Purely negated evidence is
         kept visible via ``contradict_count`` but supports nothing. Two
@@ -666,7 +668,8 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
         # second witness — it keeps its evidence id but adds no support
         # and no independent domain. Every URL a witness is bound to is one
         # unit of support: which provider answer bound the claim to which
-        # source, and that source's own text when the provider returned it.
+        # source, and the search provider's excerpt of that source when it
+        # returned one.
         counted_snippets: list[set[str]] = []
         support_count = syndicated_count = 0
         units: list[_Unit] = []
@@ -735,9 +738,10 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
 
         tier_counts, _ = quality_from_tiers(_tier_of(url) for url in source_urls)
         longest_text = max((str(e.get("claim_text", "")) for e in entries), key=len, default="")
-        # The structure is read over ALL witnesses, whether or not a source
-        # returned its own text, so the research loop sees the same support
-        # from every provider. Page texts only decide what was checked.
+        # The structure is read over ALL witnesses, whether or not the
+        # search provider returned an excerpt, so the research loop sees the
+        # same support from every provider. Excerpts only decide what was
+        # checked.
         structure, primary_basis = _support_structure(
             units,
             claim_type=claim_type,
@@ -769,7 +773,7 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
                     else _STRUCTURE_REASONS[structure]
                 ),
                 (
-                    "checked against source text"
+                    "checked against the search provider's excerpt"
                     if checked_structure
                     else "attributed by the search provider"
                 ),
@@ -841,7 +845,7 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
 
         Contested claims come first, then supported ones (verified and
         attributed alike, in the consolidation's order, so the selection is
-        the same whether or not a provider returned source text): both are
+        the same whether or not a provider returned excerpts): both are
         always preferred, and the few contested claims must never fall off
         behind the many supported ones (a value conflict has two sides, and
         a reader needs both). Unverified claims are only kept up to
@@ -898,9 +902,10 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
         """Compute claim-status counts and the aggregate claim quality score.
 
         The score weights supported claims by the depth of their support
-        structure, whether a source text was checked or the provider only
-        attributes the claim (the counts say which). Independent cross-checks
-        carry full weight, a primary source stays strong, and a single
+        structure, whether the search provider's excerpt was checked or the
+        provider only attributes the claim (the counts say which).
+        Independent cross-checks carry full weight, a primary source stays
+        strong, and a single
         quality source is useful but intentionally weaker than either.
         ``needs_primary_supported`` counts the claims that need a primary
         source and have support.

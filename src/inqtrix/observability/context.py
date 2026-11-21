@@ -134,7 +134,6 @@ _MODE_TO_FEATURE = {
     "direct_llm": "research",
     "knowledge": "knowledge",
     "agent_kernel": "kernel",
-    "workspace_agent": "kernel",
     "chat": "chat",
     "editor": "editor",
     "indexing": "indexing",
@@ -302,9 +301,9 @@ def current_usage_subject() -> "UsageSubjectContext | None":
 # --------------------------------------------------------------------- #
 # Call purpose (trace attribution, NOT a metrics label)
 #
-# Every LLM, search and embedding span should say WHICH step of WHICH
-# task made the call. The provider wrappers are the one wrap point, but
-# they cannot know the call site — so the site binds its purpose here
+# Every LLM, search and embedding span should say WHICH call site made
+# the call. The provider wrappers are the one wrap point, but they cannot
+# know the call site — so the site binds its purpose here
 # (a ContextVar, like the structured-call retry sink) and the wrapper
 # reads it. Deliberately not a Prometheus label: the vocabulary is the
 # open set of node/call-site names.
@@ -314,20 +313,10 @@ def current_usage_subject() -> "UsageSubjectContext | None":
 class PurposeContext:
     """Attribution of one provider call to its call site (trace only)."""
 
-    __slots__ = ("purpose", "task_id", "task_kind", "step")
+    __slots__ = ("purpose",)
 
-    def __init__(
-        self,
-        purpose: str,
-        *,
-        task_id: str = "",
-        task_kind: str = "",
-        step: str = "",
-    ) -> None:
+    def __init__(self, purpose: str) -> None:
         self.purpose = purpose
-        self.task_id = task_id
-        self.task_kind = task_kind
-        self.step = step
 
 
 _PURPOSE: ContextVar[PurposeContext | None] = ContextVar(
@@ -336,28 +325,16 @@ _PURPOSE: ContextVar[PurposeContext | None] = ContextVar(
 
 
 @contextmanager
-def bind_purpose(
-    purpose: str,
-    *,
-    task_id: str = "",
-    task_kind: str = "",
-    step: str = "",
-):
+def bind_purpose(purpose: str):
     """Attribute every provider call inside the block to *purpose*.
 
     Nested binds override only for their block; a bind without a purpose
-    keeps the outer attribution (a task span, for example, sets task_id
-    while the structured-call helper later narrows the purpose to its
-    node name). Always a context manager, so a reused executor thread
-    can never inherit a stale purpose.
+    keeps the outer one. Always a context manager, so a reused executor
+    thread can never inherit a stale purpose.
     """
     outer = _PURPOSE.get()
     value = PurposeContext(
         str(purpose or "").strip() or (outer.purpose if outer else ""),
-        task_id=str(task_id or "").strip() or (outer.task_id if outer else ""),
-        task_kind=str(task_kind or "").strip()
-        or (outer.task_kind if outer else ""),
-        step=str(step or "").strip() or (outer.step if outer else ""),
     )
     token = _PURPOSE.set(value)
     try:

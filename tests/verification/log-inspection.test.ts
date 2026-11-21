@@ -10,6 +10,7 @@ import {
   inspectRunLogs,
   judgeServiceLogs,
   logInspectionIsMandatory,
+  logInspectionPreflight,
   maskLogMessage,
   QUIET_PROFILES,
   ServiceLogCounter,
@@ -360,6 +361,131 @@ describe('the inspection of one run', () => {
     } finally {
       await rm(repositoryRoot, { force: true, recursive: true })
     }
+  })
+
+  test('a run whose inspection cannot start is blocked before any scenario runs', async () => {
+    // The regression: the listing refused two Compose projects on one stack
+    // file only after every scenario had run and been paid for.
+    const repositoryRoot = await mkdtemp(join(tmpdir(), 'inqtrix-log-inspection-'))
+    const engine = 'chat-prompt-live'
+    let executions = 0
+    const counting: VerificationAdapter = {
+      engine,
+      profiles: ['chat-prompt'],
+      async preflight() {
+        return []
+      },
+      async execute() {
+        executions += 1
+        const now = new Date().toISOString()
+        return {
+          durationMs: 1,
+          engine,
+          exitCode: 0,
+          finishedAt: now,
+          scenarios: scenariosForProfile('chat-prompt')
+            .filter((scenario) => scenario.engine === engine)
+            .map((scenario) => ({ id: scenario.id, status: 'passed' as const })),
+          signal: null,
+          startedAt: now,
+          status: 'passed',
+        }
+      },
+    }
+    const refusing: LogSource = {
+      async list() {
+        throw new Error('Log inspection: several Compose projects use the canonical stack file.')
+      },
+      async read() {},
+    }
+    try {
+      const options = {
+        containerEngine: 'podman' as const,
+        profile: 'chat-prompt' as const,
+        repositoryRoot,
+      }
+      const blocked = await runVerification(
+        { ...options, runId: 'inqv-log-inspection-refused' },
+        [counting],
+        refusing,
+      )
+
+      assert.equal(blocked.status, 'blocked')
+      assert.equal(executions, 0)
+      assert.deepEqual(
+        blocked.preflight.filter((check) => check.id === 'log-inspection'),
+        [{
+          engine,
+          id: 'log-inspection',
+          message: 'Log inspection: several Compose projects use the canonical stack file.',
+          status: 'failed',
+        }],
+      )
+
+      const now = new Date().toISOString()
+      const readable = await runVerification(
+        { ...options, runId: 'inqv-log-inspection-readable' },
+        [counting],
+        source({ 'api-1': [line({ ts: now })], 'web-1': [line({ ts: now })] }),
+      )
+
+      assert.equal(readable.status, 'passed')
+      assert.equal(executions, 1)
+      assert.equal(
+        readable.preflight.find((check) => check.id === 'log-inspection')?.status,
+        'passed',
+      )
+    } finally {
+      await rm(repositoryRoot, { force: true, recursive: true })
+    }
+  })
+
+  test('the preflight asks only where the inspection is mandatory, and names what is missing', async () => {
+    let listed = 0
+    const counted = (ids: readonly string[]): LogSource => ({
+      async list() {
+        listed += 1
+        return ids.map((id) => ({ id, running: true, service: id.split('-')[0] ?? id }))
+      },
+      async read() {},
+    })
+    const engines = ['chat-prompt-live', 'agent-desk-live'] as const
+
+    // No container engine selected: nothing is promised, nothing is asked.
+    assert.deepEqual(
+      await logInspectionPreflight(context({ containerEngine: null }), engines, counted(['api-1', 'web-1'])),
+      [],
+    )
+    assert.equal(listed, 0)
+
+    // One check per engine: a failed check blocks its engine, and the
+    // verdict of the run depends on the inspection whatever engine ran.
+    const found = await logInspectionPreflight(context(), engines, counted(['api-1', 'web-1', 'worker-1']))
+    assert.deepEqual(found.map((check) => [check.engine, check.id, check.status]), [
+      ['chat-prompt-live', 'log-inspection', 'passed'],
+      ['agent-desk-live', 'log-inspection', 'passed'],
+    ])
+
+    // An active service without a container ends the inspection without a
+    // verdict later; the preflight says so first, and which one.
+    const missing = await logInspectionPreflight(context(), ['chat-prompt-live'], counted(['api-1', 'worker-1']))
+    assert.deepEqual(missing, [{
+      engine: 'chat-prompt-live',
+      id: 'log-inspection',
+      message: 'No web container of the canonical stack was found.',
+      status: 'failed',
+    }])
+
+    // A failure this module did not word reaches the report as its type only.
+    const broken: LogSource = {
+      async list() {
+        throw new TypeError('spawn podman ENOENT with a path and a token inside')
+      },
+      async read() {},
+    }
+    const unreadable = await logInspectionPreflight(context(), ['chat-prompt-live'], broken)
+    assert.equal(unreadable[0]?.status, 'failed')
+    assert.equal(unreadable[0]?.message, 'Listing the service containers failed: TypeError.')
   })
 })
 

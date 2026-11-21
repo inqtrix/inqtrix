@@ -28,7 +28,6 @@ from pydantic_settings import BaseSettings, NoDecode
 
 from inqtrix import aio
 from inqtrix.constants import (
-    MAX_PLAN_TASKS_DEFAULT,
     ANSWER_PROMPT_CITATIONS_MAX,
     CLAIM_EXTRACT_TIMEOUT,
     CONFIDENCE_STOP,
@@ -45,7 +44,6 @@ from inqtrix.constants import (
     SEARCH_CACHE_TTL,
     SEARCH_TIMEOUT,
 )
-from inqtrix.core.constants import AGENT_MODE_IDS
 from inqtrix.model_routing import resolve_model, validate_model_tier
 from inqtrix.report_profiles import (
     ReportProfile,
@@ -83,6 +81,9 @@ class RetiredSetting:
     replacement: str
     outcome: Literal["warn", "abort"] = "warn"
     abort_in_modes: frozenset[str] = frozenset()
+
+
+_KERNEL_LIMITS = "the agent kernel's limits (INQTRIX_AGENT_KERNEL_*)"
 
 
 RETIRED_SETTINGS: tuple[RetiredSetting, ...] = (
@@ -125,6 +126,44 @@ RETIRED_SETTINGS: tuple[RetiredSetting, ...] = (
         "AZURE_CLIENT_SECRET",
         "AZURE_OPENAI_API_KEY and AZURE_AI_PROJECT_API_KEY (keys only)",
         "warn",
+    ),
+    # Limits of the retired mission engine. No engine reads them, so
+    # ignoring one undoes no choice.
+    RetiredSetting(
+        "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN",
+        "RUN_MAX_CONCURRENT_PER_USER (child runs of a kernel batch count against it)",
+        "warn",
+    ),
+    *(
+        RetiredSetting(name, _KERNEL_LIMITS, "warn")
+        for name in (
+            "INQTRIX_AGENT_DISCOVERY_MAX_TOOL_CALLS",
+            "INQTRIX_AGENT_MAX_PLAN_TASKS",
+            "INQTRIX_AGENT_MAX_REPLAN_ROUNDS",
+            "INQTRIX_AGENT_SYNTHESIS_MAX_PARALLEL_SECTIONS",
+            "INQTRIX_AGENT_SYNTHESIS_EVIDENCE_BUDGET",
+            "INQTRIX_AGENT_SYNTHESIS_SECTION_REGISTER_BUDGET",
+            "INQTRIX_AGENT_MISSION_TIME_BUDGET_SECONDS",
+        )
+    ),
+    RetiredSetting(
+        "INQTRIX_AGENT_ALLOW_WEB_DISCOVERY_PREVIEW",
+        "the run's Stufe (agent_tier) and permission mode, which decide its web research",
+        "warn",
+    ),
+    # A set number of clarification rounds narrowed what a run may ask, and
+    # a default mode chose the mission: ignoring either would undo that
+    # choice. The check reads names only, so a default mode of agent_kernel
+    # stops the start as well.
+    RetiredSetting(
+        "INQTRIX_AGENT_MAX_CLARIFICATION_ROUNDS",
+        "the run's Stufe (agent_tier), which decides its clarification rounds",
+        "abort",
+    ),
+    RetiredSetting(
+        "INQTRIX_AGENT_DEFAULT_MODE",
+        "no setting (agent_kernel is the only agent mode)",
+        "abort",
     ),
 )
 
@@ -977,19 +1016,19 @@ class ServerSettings(BaseSettings):
             "CHILDREN). Parked/waiting runs hold no slot and are "
             "excluded; agent PARENTS are excluded too (they park "
             "immediately and must not contend against their own "
-            "children). ONE agent wave "
-            "(INQTRIX_AGENT_MAX_PARALLEL_CHILDREN) is the FLOOR, not the "
+            "children). The children of ONE kernel batch "
+            "(delegate_batch, three at most) are the FLOOR, not the "
             "target: a user may keep several Agent Desks running side by "
-            "side, and each of those trees needs its own wave — size it "
-            "at that many waves plus headroom (startup warns only when "
-            "it falls below a single wave). Approximate on Postgres under "
+            "side, and each of those trees needs its own batch — size it "
+            "at that many batches plus headroom (startup warns only when "
+            "it falls below a single batch). Approximate on Postgres under "
             "READ COMMITTED (may transiently exceed by a few); exact "
             "in-memory. Unset (default) keeps admission purely global — "
             "single-operator deployments stay byte-identical. Anonymous "
             "submissions (no subject) are never capped."
         ),
     )
-    """Optional per-principal fairness bound under the global run cap (default ``None`` = off). Counts a subject's slot-occupying native runs at admission — QUEUED+RUNNING standard runs and agent CHILDREN. Excluded: parked/waiting runs (slot-free) and agent PARENTS (they park immediately and must not contend against their own children). ``INQTRIX_AGENT_MAX_PARALLEL_CHILDREN`` — one wave — is the FLOOR, not the target: a user may keep several Agent Desks running at once, and each tree needs its own wave, so size it at that many waves plus headroom. The composition root warns at startup only when the value falls below a SINGLE wave. APPROXIMATE on the Postgres backend: under READ COMMITTED, concurrent submits by one subject can transiently exceed the cap by a few — acceptable for a fairness bound (the in-memory backend is exact). It protects OTHER users from a noisy neighbour; the monthly quota bounds the neighbour's own spend."""
+    """Optional per-principal fairness bound under the global run cap (default ``None`` = off). Counts a subject's slot-occupying native runs at admission — QUEUED+RUNNING standard runs and agent CHILDREN. Excluded: parked/waiting runs (slot-free) and agent PARENTS (they park immediately and must not contend against their own children). The children of one kernel batch (``delegate_batch``, three at most) are the FLOOR, not the target: a user may keep several Agent Desks running at once, and each tree needs its own batch, so size it at that many batches plus headroom. The composition root warns at startup only when the value falls below a SINGLE batch. APPROXIMATE on the Postgres backend: under READ COMMITTED, concurrent submits by one subject can transiently exceed the cap by a few — acceptable for a fairness bound (the in-memory backend is exact). It protects OTHER users from a noisy neighbour; the monthly quota bounds the neighbour's own spend."""
     run_queue_max_size: int = Field(
         100,
         alias="RUN_QUEUE_MAX_SIZE",
@@ -3939,11 +3978,11 @@ class CollaborationSettings(BaseSettings):
 
 
 class AgentPlatformSettings(BaseSettings):
-    """Workspace-agent platform knobs (``INQTRIX_AGENT_*``).
+    """Agent platform knobs (``INQTRIX_AGENT_*``).
 
-    Server-side limits for the ``mode=workspace_agent`` runtime:
-    everything here is enforced
-    in code, never prompted — the agent cannot talk itself past a limit.
+    Server-side limits for agent runs (``mode=agent_kernel``): everything
+    here is enforced in code, never prompted — the agent cannot talk itself
+    past a limit.
     """
 
     model_config = _SETTINGS_MODEL_CONFIG
@@ -3952,12 +3991,12 @@ class AgentPlatformSettings(BaseSettings):
         True,
         alias="INQTRIX_AGENT_ENABLED",
         description=(
-            "Master switch for the workspace-agent mode. Even when True "
-            "the algorithm only registers with a durable checkpointer "
+            "Master switch for agent runs and the Agent Desk. Even when "
+            "True they are set up only with a durable checkpointer "
             "(Postgres) or the explicit volatile escape below."
         ),
     )
-    """Master switch for the workspace-agent mode. Even when True the algorithm only registers with a durable checkpointer (Postgres backend) or the explicit volatile escape below, so degraded durability remains visible."""
+    """Master switch for agent runs and the Agent Desk (``features.agent_desk``). Even when True they are set up only with a durable checkpointer (Postgres backend) or the explicit volatile escape below, so degraded durability remains visible."""
     kernel_enabled: bool = Field(
         True,
         alias="INQTRIX_AGENT_KERNEL_ENABLED",
@@ -3968,18 +4007,7 @@ class AgentPlatformSettings(BaseSettings):
             "logs a WARNING and names itself in capabilities."
         ),
     )
-    """Switch for the ``mode=agent_kernel`` algorithm (default True). Even when True the kernel only registers when the checkpointer gate passes (same rule as ``enabled``) AND the default LLM provider reports ``supports_tool_calls()``; a gated deployment logs a WARNING and publishes the reason under ``feature_status.agent_kernel`` instead of silently missing the mode. Set it to False to run the phase machine (``workspace_agent``) instead."""
-    default_agent_mode: str = Field(
-        "agent_kernel",
-        alias="INQTRIX_AGENT_DEFAULT_MODE",
-        description=(
-            "Which algorithm the Agent Desk submits by default: "
-            "workspace_agent (phase machine) or agent_kernel. Published "
-            "via capabilities agent.default_mode; the kernel value only "
-            "takes effect when the kernel registration gate passed."
-        ),
-    )
-    """The Agent Desk's configured default ``mode`` (default ``agent_kernel``). Capabilities publish that value only after the kernel registration gate passes; otherwise they visibly fall back to ``workspace_agent`` with the missed gate's reason under ``feature_status.agent_kernel``, so the frontend never submits an unregistered mode and the fallback is never silent. Setting ``INQTRIX_AGENT_DEFAULT_MODE=workspace_agent`` retains the phase machine as an explicit deployment override."""
+    """Switch for the ``mode=agent_kernel`` algorithm (default True). Even when True the kernel only registers when the checkpointer gate passes (same rule as ``enabled``) AND the default LLM provider reports ``supports_tool_calls()``; a gated deployment logs a WARNING and publishes the reason under ``feature_status.agent_kernel`` instead of silently missing the mode. Set it to False to switch agent runs off: the Agent Desk stays visible and names ``operator_disabled`` as the reason."""
     skills_max_attached: int = Field(
         3,
         alias="INQTRIX_AGENT_SKILLS_MAX_ATTACHED",
@@ -4130,19 +4158,22 @@ class AgentPlatformSettings(BaseSettings):
         ge=1,
         alias="INQTRIX_AGENT_KERNEL_SUFFICIENCY_MIN_TOOL_CALLS",
         description=(
-            "Successful web/knowledge tool calls before the first "
-            "sufficiency judgement of a normal kernel run. Runs below "
-            "the threshold never pay a judge call."
+            "Source uses (each successful web or project-knowledge "
+            "tool call once, a citation of passages already read not "
+            "at all, a batch of subtasks once per source its subtasks "
+            "go to) before the first sufficiency judgement of a normal "
+            "kernel run. Runs below the threshold never pay a judge "
+            "call."
         ),
     )
-    """Sufficiency threshold of normal runs (default 3): the count of SUCCESSFUL source-tool calls (web + project knowledge) that arms the first advisory verdict. Guarantees cheapness — simple 0-2-tool runs never spend judge tokens."""
+    """Sufficiency threshold of normal runs (default 3): the count of source uses that arms the first advisory verdict — each successful web or project-knowledge tool call once (a citation of passages the run already read not at all), a batch of subtasks once per source its subtasks go to, whatever their results (so a mixed batch counts twice). Runs with fewer uses never spend judge tokens."""
     kernel_sufficiency_min_tool_calls_deep: int = Field(
         5,
         ge=1,
         alias="INQTRIX_AGENT_KERNEL_SUFFICIENCY_MIN_TOOL_CALLS_DEEP",
         description=(
-            "Successful web/knowledge tool calls before the first "
-            "sufficiency judgement of a deep kernel run."
+            "Source uses before the first sufficiency judgement of a "
+            "deep kernel run, counted as for normal runs."
         ),
     )
     """Sufficiency threshold of Deep runs (default 5): Deep buys more evidence work before the first advisory verdict — proportional to its doubled tool budget."""
@@ -4205,92 +4236,55 @@ class AgentPlatformSettings(BaseSettings):
         ),
     )
     """Character threshold for eager tool-result archival (default 8000, 0 = off). The full text lands in the run's ``context_archive`` artifact (readable via ``read_canvas``) and remains in the handover. Once the model has answered it, the model input may show a placeholder naming that archive part instead (stage one of the context compaction, or recovery). Explicit evidence reads use bounded continuation windows."""
-    max_parallel_children: int = Field(
-        8,
-        alias="INQTRIX_AGENT_MAX_PARALLEL_CHILDREN",
-        ge=1,
-        description=(
-            "Child research runs submitted per park round (and the "
-            "in-process tool-wave width). Defaults to the validated "
-            "plan ceiling (``MAX_PLAN_TASKS_DEFAULT``) so a plan the "
-            "validator accepts can also run in ONE wave; below it a "
-            "wave serialises. The parent parks slot-free while children "
-            "run, so an undersized worker slows a wave but can no "
-            "longer deadlock the pool."
-        ),
-    )
-    """Child research runs submitted per park round, and the width of the in-process tool wave (default 8 = the validated plan ceiling). The parent holds NO execution slot while its children run (``waiting_for_children`` park) — sizing worker capacity below one wave serialises the wave's children; it cannot starve or deadlock the pool."""
     max_parallel_queries_per_task: int = Field(
         3,
         alias="INQTRIX_AGENT_MAX_PARALLEL_QUERIES_PER_TASK",
         ge=1,
         description=(
-            "Sub-queries of ONE retrieval task run concurrently, up to "
-            "this many. They are independent by construction — each "
-            "builds its prompt from the task and its own query, and "
-            "reads nothing the siblings produce; task DEPENDENCIES live "
-            "on ``depends_on`` and stay sequenced by the wave "
-            "scheduler. Sizing: the worst case is "
-            "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN x this value "
-            "concurrent model calls from a single run, which must fit "
-            "MAX_CONCURRENT with room for other traffic (startup warns "
-            "otherwise). Past 3 the gain flattens and a wider cap only "
-            "raises contention. 1 restores the sequential loop."
+            "Window calls of ONE document analysis run concurrently, up "
+            "to this many. Windows are independent by construction — "
+            "each is prompted from its own text and reads nothing the "
+            "siblings produce. Past 3 the gain flattens and a wider cap "
+            "only raises contention. 1 restores the sequential loop."
         ),
     )
-    """Concurrent sub-queries per retrieval task (default 3, 1 = sequential). A task's queries are independent by construction; task dependencies (``depends_on``) remain sequenced by the wave scheduler. Worst case is ``max_parallel_children x`` this value concurrent model calls per run — size ``MAX_CONCURRENT`` above that (the composition root warns otherwise). The same width bounds the concurrent window calls of one document analysis."""
+    """Concurrent window calls of one document analysis (default 3, 1 = sequential). Windows are independent by construction; past 3 the gain flattens and a wider cap only raises contention."""
     document_analysis_max_documents: int = Field(
         3,
         alias="INQTRIX_AGENT_DOCUMENT_ANALYSIS_MAX_DOCUMENTS",
         ge=1,
         description=(
-            "Documents ONE file_analysis task reads completely, taken in "
-            "search order from what its queries found. Further found "
-            "documents are named on the task as not analysed."
+            "Documents ONE document analysis reads completely: one "
+            "analyze_document call of the kernel (a call naming more is "
+            "refused)."
         ),
     )
-    """Documents one file-analysis task reads completely (default 3); the rest are named, never dropped silently."""
+    """Documents one document analysis reads completely (default 3); the rest are named or refused, never dropped silently."""
     document_analysis_max_windows: int = Field(
         40,
         alias="INQTRIX_AGENT_DOCUMENT_ANALYSIS_MAX_WINDOWS",
         ge=1,
         description=(
-            "Windows of about 19,000 new characters ONE file_analysis task "
-            "analyses at most (40 = about 760,000 characters). Each window "
-            "is one model call, so "
-            "this bounds a task's cost; ranges past it are named as not "
-            "analysed."
+            "Windows of about 19,000 new characters ONE document analysis "
+            "(one analyze_document call) analyses at most (40 = about "
+            "760,000 characters). Each window "
+            "is one model call, so this bounds an analysis's cost; ranges "
+            "past it are named as not analysed."
         ),
     )
-    """Windows one file-analysis task analyses at most (default 40 ≈ 760,000 characters); the unanalysed remainder is named."""
+    """Windows one document analysis analyses at most (default 40 ≈ 760,000 characters); the unanalysed remainder is named."""
     document_analysis_max_windows_per_run: int = Field(
         80,
         alias="INQTRIX_AGENT_DOCUMENT_ANALYSIS_MAX_WINDOWS_PER_RUN",
         ge=1,
         description=(
-            "Windows ALL file_analysis tasks of one mission analyse "
-            "together, across waves, replans and parks. Bounds the cost of a "
-            "run that plans several analyses; what the budget leaves unread "
-            "is named on the task."
+            "Windows ALL document analyses of one run analyse together: the "
+            "analyze_document calls of a kernel run across its segments. "
+            "Bounds the cost of a run with several analyses; what the "
+            "budget leaves unread is named."
         ),
     )
-    """Windows all file-analysis tasks of one mission analyse together (default 80)."""
-    synthesis_max_parallel_sections: int = Field(
-        8,
-        alias="INQTRIX_AGENT_SYNTHESIS_MAX_PARALLEL_SECTIONS",
-        ge=1,
-        description=(
-            "Memo sections of ONE mission synthesis written concurrently, "
-            "up to this many. Sections are independent by construction: "
-            "each is prompted from the outline entry and its own evidence "
-            "digest and reads nothing a sibling writes; the memo is still "
-            "assembled, flushed and narrated in outline order, so the "
-            "document grows in reading order. Synthesis runs after the "
-            "task waves, so it never adds to the wave worst case above. "
-            "1 restores the sequential loop."
-        ),
-    )
-    """Concurrent memo sections per mission synthesis (default 8 = the plan-task ceiling, 1 = sequential). Sections are independent by construction and are folded, flushed and narrated in outline order; the synthesis runs after the task waves and therefore never adds to the wave worst case."""
+    """Windows all document analyses of one run analyse together (default 80)."""
     checkpointer_pool_size: int = Field(
         4,
         alias="INQTRIX_AGENT_CHECKPOINTER_POOL_SIZE",
@@ -4303,96 +4297,17 @@ class AgentPlatformSettings(BaseSettings):
         ),
     )
     """Ceiling for the agent checkpointer's own psycopg pool (default 4), process-wide and shared by every concurrent agent run in that process. One source, three displays: the pool itself, the startup connection-budget line, and the admin runtime endpoint all read this value. Raise it only when a measurement shows pool-wait under agent target load — the checkpointer speaks its own driver, so this adds to (never replaces) the engine budget."""
-    discovery_max_tool_calls: int = Field(
-        15,
-        alias="INQTRIX_AGENT_DISCOVERY_MAX_TOOL_CALLS",
-        description=(
-            "Hard probe budget for the read-only discovery phase; the "
-            "probe plan is truncated server-side, never prompted."
-        ),
-    )
-    """Hard probe budget for the read-only discovery phase (default 15). The probe plan is truncated server-side; the LLM never negotiates it."""
-    max_plan_tasks: int = Field(
-        MAX_PLAN_TASKS_DEFAULT,
-        alias="INQTRIX_AGENT_MAX_PLAN_TASKS",
-        description=(
-            "Task-count ceiling the plan validator enforces for agent "
-            "AND user-edited plans."
-        ),
-    )
-    """Task-count ceiling the deterministic plan validator enforces (default 8) — for planner output and user edits alike (one shared validator)."""
-    max_replan_rounds: int = Field(
-        2,
-        alias="INQTRIX_AGENT_MAX_REPLAN_ROUNDS",
-        description="Replan iterations before the run proceeds as-is.",
-    )
-    """Replan iterations before the run proceeds with what it has (default 2); each replan is an ADDITIVE task delta, results are never discarded. A delegated mission (kernel child) opens at most ONE critic research round regardless — the parent's deep verify is its second check."""
-    mission_time_budget_seconds: int = Field(
-        720,
-        alias="INQTRIX_AGENT_MISSION_TIME_BUDGET_SECONDS",
-        description=(
-            "Active mission seconds after which the critic opens no "
-            "further research round; the memo closes with the named "
-            "gaps (0 disables)."
-        ),
-    )
-    """Active (non-waiting) seconds a mission may spend before the critic's research route closes (default 720 = 12 min). The round cap and this budget are two ceilings on the same route: whichever is reached first ends further research visibly (``limit.reached``, kind ``mission_time_budget``) and the memo closes with the critic's remaining findings under "Offene Punkte". Gate waits are excluded — the budget bounds the work the user pays for, not how long a human took to answer. 0 disables the budget."""
-    synthesis_evidence_budget: int = Field(
-        160,
-        alias="INQTRIX_AGENT_SYNTHESIS_EVIDENCE_BUDGET",
-        description=(
-            "Reference count above which the outline/answer prompt "
-            "digest is capped to the top-ranked references "
-            "(deterministic rank_evidence; 0 disables the cap)."
-        ),
-    )
-    """Reference count above which the synthesis PROMPT digest is capped by the deterministic ``rank_evidence`` selection (default 160). The default covers a full Tief wave (up to 8 children x about 20 references), so collected evidence reaches the writer. The citation ledger itself is never truncated; 0 disables the cap entirely."""
-    synthesis_section_register_budget: int | None = Field(
-        None,
-        ge=0,
-        alias="INQTRIX_AGENT_SYNTHESIS_SECTION_REGISTER_BUDGET",
-        description=(
-            "Operator override for how many references a memo section "
-            "lists as a one-line register beyond the ones its outline "
-            "entry preselected. Unset: the run's Stufe decides (schnell "
-            "20, gruendlich 60, tief 180; 60 for a run without a Stufe). "
-            "0 disables the register."
-        ),
-    )
-    """Operator override of the register width a memo section sees beside the references its outline entry preselected; unset by default, so the run's Stufe decides (``tier_policy.resolve_section_register``: schnell 20, gruendlich 60, tief 180, and 60 for a run that names no Stufe). A section may cite anything it can see, so this bounds what it may cite: the outline's selection decides what a section leads WITH, the register decides what it may reach FOR. A number here replaces every Stufe's width and is published as such in ``/v1/capabilities``; ``0`` switches the register off, which brings back the state in which a section whose outline entry preselected nothing believed the run had no evidence. Deliberately not ``synthesis_evidence_budget``: that one bounds the full-text digest of the whole deliverable, a different question and an order of magnitude more expensive per entry."""
-    max_clarification_rounds: int = Field(
-        2,
-        alias="INQTRIX_AGENT_MAX_CLARIFICATION_ROUNDS",
-        description=(
-            "User-question rounds per run before the agent proceeds on "
-            "its best assumption (named in the transcript and the plan's "
-            "assumptions)."
-        ),
-    )
-    """User-question rounds per run (default 2) before the agent proceeds on its best assumption — named in the transcript and the plan's assumptions, never silently. A Stufe caps it tighter, never wider (``tier_policy.effective_clarification_rounds``)."""
     default_autonomy: str = Field(
         "balanced",
         alias="INQTRIX_AGENT_DEFAULT_AUTONOMY",
         description=(
-            "Permission mode when the request names none: strict "
-            "(discovery + every plan delta approved), balanced (initial "
-            "plan approved, small read-only replans auto), autonomous "
-            "(no plan interrupt; write actions ALWAYS gated)."
+            "Permission mode when the request names none: strict, "
+            "balanced or autonomous. What each gates is published under "
+            "agent.permission_modes in /v1/capabilities; write actions "
+            "are ALWAYS gated."
         ),
     )
-    """Permission mode when the request names none. ``strict`` approves discovery and every plan delta; ``balanced`` (default) approves the initial plan and auto-applies small read-only replans; ``autonomous`` skips plan interrupts entirely. Write-effect actions are gated in EVERY mode."""
-    allow_web_discovery_preview: bool = Field(
-        True,
-        alias="INQTRIX_AGENT_ALLOW_WEB_DISCOVERY_PREVIEW",
-        description=(
-            "Permit ONE instant web search during discovery so the "
-            "planner sees the external source situation. Applies only "
-            "in autonomous mode — Standard keeps all web contact "
-            "behind the plan gate — and only when the assignment needs "
-            "the web and the question is the user's own."
-        ),
-    )
-    """Permit ONE ``web.search.instant`` call during discovery (default on) so the planner sees the external source situation before committing to web tasks; off = discovery stays fully internal. The preview additionally requires ``autonomous`` mode — in Standard the approved plan (whose tasks carry their verbatim queries) is the ONLY web-search consent surface — an assignment that needs the web, and a question the user wrote: a delegated mission's question is a model's text and is never sent."""
+    """Permission mode when the request names none (``strict``, ``balanced`` (default) or ``autonomous``). The kernel tools each mode gates are published under ``agent.permission_modes`` in ``/v1/capabilities``, generated from the enforcing policy. Write-effect actions are gated in EVERY mode."""
     advanced_autonomy: bool = Field(
         False,
         alias="INQTRIX_AGENT_ADVANCED_AUTONOMY",
@@ -4416,23 +4331,22 @@ class AgentPlatformSettings(BaseSettings):
         False,
         alias="INQTRIX_AGENT_ALLOW_VOLATILE",
         description=(
-            "Development escape: register the agent WITHOUT Postgres using "
+            "Development escape: set agent runs up WITHOUT Postgres using "
             "an in-memory checkpointer. Interrupted runs then die with "
-            "the process — logged loudly, surfaced as "
-            "workspace_agent_durable=false."
+            "the process — logged loudly, surfaced as agent.durable=false."
         ),
     )
-    """Development escape: register the workspace agent WITHOUT the Postgres backend, checkpointing in memory. Interrupted runs then cannot survive a restart — the container logs a WARNING and ``/v1/capabilities`` reports ``workspace_agent_durable: false`` so the degradation is visible, never silent."""
+    """Development escape: set agent runs up WITHOUT the Postgres backend, checkpointing in memory. Interrupted runs then cannot survive a restart — the container logs a WARNING and ``/v1/capabilities`` reports ``agent.durable: false`` so the degradation is visible, never silent."""
     memory_provider: str = Field(
         "none",
         alias="INQTRIX_AGENT_MEMORY_PROVIDER",
         description=(
-            "Long-term memory provider for workspace-agent runs: none or "
+            "Long-term memory provider for agent runs: none or "
             "mem0. The provider is optional and never replaces run/session "
             "artifacts; it only backs user-approved long-term memories."
         ),
     )
-    """Long-term workspace-agent memory provider (``none`` or ``mem0``). Default ``none`` keeps existing deployments byte-identical and prevents accidental shared memory in no-auth modes."""
+    """Long-term agent memory provider (``none`` or ``mem0``). Default ``none`` keeps existing deployments byte-identical and prevents accidental shared memory in no-auth modes."""
     memory_mode: str = Field(
         "candidate_only",
         alias="INQTRIX_AGENT_MEMORY_MODE",
@@ -4472,16 +4386,6 @@ class AgentPlatformSettings(BaseSettings):
             )
         return self
 
-    @field_validator("default_agent_mode")
-    @classmethod
-    def _validate_default_agent_mode(cls, value: str) -> str:
-        normalized = value.strip()
-        if normalized not in AGENT_MODE_IDS:
-            raise ValueError(
-                "INQTRIX_AGENT_DEFAULT_MODE must be one of: "
-                + ", ".join(AGENT_MODE_IDS)
-            )
-        return normalized
 
     @field_validator("memory_provider")
     @classmethod
@@ -4526,9 +4430,7 @@ AGENT_PLATFORM_LIMIT_PURPOSE: dict[str, str] = {
     "kernel_context_trigger_fraction": LIMIT_CAPACITY,
     "kernel_context_keep_messages": LIMIT_CAPACITY,
     "kernel_context_offload_chars": LIMIT_CAPACITY,
-    "max_parallel_children": LIMIT_CAPACITY,
     "max_parallel_queries_per_task": LIMIT_CAPACITY,
-    "synthesis_max_parallel_sections": LIMIT_CAPACITY,
     "checkpointer_pool_size": LIMIT_CAPACITY,
     # -- thoroughness ------------------------------------------------------
     "kernel_max_iterations": LIMIT_THOROUGHNESS,
@@ -4547,13 +4449,6 @@ AGENT_PLATFORM_LIMIT_PURPOSE: dict[str, str] = {
     "document_analysis_max_documents": LIMIT_THOROUGHNESS,
     "document_analysis_max_windows": LIMIT_THOROUGHNESS,
     "document_analysis_max_windows_per_run": LIMIT_THOROUGHNESS,
-    "discovery_max_tool_calls": LIMIT_THOROUGHNESS,
-    "max_plan_tasks": LIMIT_THOROUGHNESS,
-    "max_replan_rounds": LIMIT_THOROUGHNESS,
-    "mission_time_budget_seconds": LIMIT_THOROUGHNESS,
-    "synthesis_evidence_budget": LIMIT_THOROUGHNESS,
-    "synthesis_section_register_budget": LIMIT_THOROUGHNESS,
-    "max_clarification_rounds": LIMIT_THOROUGHNESS,
 }
 """What every numeric limit of :class:`AgentPlatformSettings` is FOR.
 
@@ -4864,11 +4759,11 @@ class Settings(BaseSettings):
     agent_platform: AgentPlatformSettings = Field(
         default_factory=AgentPlatformSettings,
         description=(
-            "Workspace-agent platform limits (INQTRIX_AGENT_*): autonomy "
-            "default, wave/probe/replan ceilings, the volatile dev escape."
+            "Agent platform limits (INQTRIX_AGENT_*): autonomy default, "
+            "kernel budgets, the volatile dev escape."
         ),
     )
-    """Workspace-agent platform limits (``INQTRIX_AGENT_*``)."""
+    """Agent platform limits (``INQTRIX_AGENT_*``)."""
     observability: ObservabilitySettings = Field(
         default_factory=ObservabilitySettings,
         description=(

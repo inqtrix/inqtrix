@@ -37,10 +37,14 @@ def public_message_dump(message: Any) -> dict[str, Any]:
 MATERIAL_TOOLS = frozenset({
     "read_project_document", "search_project_knowledge", "cite_document_passages",
     "read_editor_document", "search_editor_document", "propose_editor_patch",
+    "delegate_batch", "analyze_document",
 })
 """The only tools whose checkpointed artifacts may enter material
 dependencies into a transcript descriptor (the receipt template: a relayed
-text, e.g. a web answer quoting an id, never becomes a dependency)."""
+text, e.g. a web answer quoting an id, never becomes a dependency). The
+batch of subtasks is one of them: the reports of its children carry text of
+the project documents behind the evidence they hand over. So is the document
+analysis: its evidence is text of the documents it opened."""
 
 
 def transcript_descriptor(deps, encoded, body, representation, checkpoint_id=""):

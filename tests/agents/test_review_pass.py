@@ -33,10 +33,9 @@ from inqtrix.agents.kernel.review_pass import (
     request_review,
     revise_outputs,
 )
-from inqtrix.agents.kernel.review_edits import FINDING_REASONS, OVERLAP_EDIT, FindingResult, label_bases
+from inqtrix.agents.kernel.review_edits import FINDING_REASONS, FindingResult, label_bases
 from inqtrix.agents.kernel.tools import ChildScope
 from inqtrix.agents.phase_models import (
-    DeepReviewFinding,
     DeepReviewVerdict,
     DeepRevisionBundle,
 )
@@ -117,7 +116,7 @@ def _subject(
 
 
 def _host(
-    llm: Any = None, *, role_available: bool = True, review_call: bool = True,
+    llm: Any = None, *, role_available: bool = True,
     children: list[dict[str, Any]] | None = None, events: list[Any] | None = None,
     tier: str = "tief", depth: str = "",
 ) -> ReviewHost:
@@ -129,7 +128,6 @@ def _host(
         stack_name="", source_policy=None, model_overrides={},
         knowledge_collection_ids=(), knowledge_scope_explicit=False, knowledge_scope=None,
         tier=tier, depth=depth or ("deep" if tier == "tief" else "normal"),
-        report_requirement="", report_rules=(),
     )
     return ReviewHost(
         scope=scope,
@@ -139,7 +137,7 @@ def _host(
         timeout=1.0,
         platform=None,
         revision_call=ModelCall("agent_synthesis", "write-model", "medium"),
-        review_call=ModelCall("agent_deep_review", "review-model", "high") if review_call else None,
+        review_call=ModelCall("agent_deep_review", "review-model", "high"),
         role_available=role_available,
     )
 
@@ -163,7 +161,7 @@ def test_material_over_the_budget_goes_to_the_role_that_reads_for_itself():
     assert choose_transport(_host(), subject) == TRANSPORT_ROLE
 
 
-def test_a_server_without_the_kernel_reviews_in_one_call_while_the_model_holds_it():
+def test_a_run_without_the_role_reviews_in_one_call_while_the_model_holds_it():
     subject = _subject(padding=" x" * (REVIEW_IN_PROMPT_BUDGET_TOKENS * 2))
     assert choose_transport(_host(role_available=False), subject) == TRANSPORT_PROMPT
 
@@ -178,10 +176,6 @@ def test_material_that_fits_no_transport_is_a_visible_state_and_never_a_pass(mon
     assert llm.calls == []
 
 
-def test_an_engine_without_a_review_call_always_uses_the_role():
-    assert choose_transport(_host(review_call=False), _subject()) == TRANSPORT_ROLE
-
-
 def test_an_existing_review_child_settles_the_transport_on_re_entry(monkeypatch):
     """The park re-enters the pass; the estimate must not orphan the child."""
     submitted: list[str] = []
@@ -192,10 +186,10 @@ def test_an_existing_review_child_settles_the_transport_on_re_entry(monkeypatch)
 
     monkeypatch.setattr(review_pass, "submit_or_find_child", find_child)
     llm = CallLLM([])
-    host = _host(llm, children=[{"origin_key": "role-review:2"}])
+    host = _host(llm, children=[{"origin_key": "role-review"}])
     with pytest.raises(AwaitingReview):
-        request_review(host, _subject(), origin_key="role-review:2")
-    assert submitted == ["role-review:2"]
+        request_review(host, _subject())
+    assert submitted == ["role-review"]
     assert llm.calls == []
 
 
@@ -318,8 +312,9 @@ def test_both_review_transports_carry_the_runs_clarifications_in_their_own_fence
         return {"run_id": "run_role", "status": "running"}
 
     monkeypatch.setattr(review_pass, "submit_or_find_child", find_child)
+    monkeypatch.setattr(review_pass, "choose_transport", lambda host, subject: TRANSPORT_ROLE)
     with pytest.raises(AwaitingReview):
-        request_review(_host(CallLLM([])), subject, transport=TRANSPORT_ROLE)
+        request_review(_host(CallLLM([])), subject)
     for prompt in (llm.calls[0]["prompt"], render_handover(handovers[0])):
         assert json.loads(_fenced(prompt, "run-clarifications")) == CLARIFICATION_RECORD
         assert _fenced(prompt, "run-assignment") == "\nFasse die Fristen zusammen.\n"
@@ -1058,6 +1053,13 @@ def test_an_exhausted_budget_is_its_own_reason_and_not_model_debris(caplog):
         replace(review, reason="failed"), "de"
     )
     assert len({activity["detail"], schema["detail"], failed["detail"]}) == 3
+    # One label heads every reason, so it claims only what all of them share:
+    # a review that reached its budget did run.
+    assert activity["label"] == schema["label"] == failed["label"]
+    assert activity["label"] == "Verifikation geschuldet, ohne verwertbares Urteil beendet"
+    assert review_pass.unavailable_activity(review, "en")["label"] == (
+        "Verification was owed and ended without a usable verdict"
+    )
 
 
 # -- what the handover says about the size of the subject ------------------- #
@@ -1109,8 +1111,9 @@ def test_the_review_role_is_priced_like_the_run_that_ordered_it():
     host = _host(children=[], tier="tief")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(review_pass, "submit_or_find_child", submit)
+        patch.setattr(review_pass, "choose_transport", lambda host, subject: TRANSPORT_ROLE)
         with pytest.raises(AwaitingReview):
-            request_review(host, _subject(), transport=TRANSPORT_ROLE)
+            request_review(host, _subject())
     assert submitted[0]["agent_overrides"] == {"agent_tier": "tief"}
 
     # A run that names no Stufe keeps the legacy depth path, and its
@@ -1119,8 +1122,9 @@ def test_the_review_role_is_priced_like_the_run_that_ordered_it():
     submitted.clear()
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(review_pass, "submit_or_find_child", submit)
+        patch.setattr(review_pass, "choose_transport", lambda host, subject: TRANSPORT_ROLE)
         with pytest.raises(AwaitingReview):
-            request_review(legacy, _subject(), transport=TRANSPORT_ROLE)
+            request_review(legacy, _subject())
     assert submitted[0]["agent_overrides"] == {"depth": "deep"}
 
 
@@ -1181,75 +1185,11 @@ def test_no_reason_lets_the_runtimes_own_language_reach_the_reader(caplog):
 
 # -- one result per finding ---------------------------------------------------- #
 
-QUOTE_CHECKS = "diagnostic:m:quote_checks"
-
-
 def _finding(quote: str, **overrides: Any) -> dict[str, Any]:
     return {
         "target": "artifact", "artifact_id": "art_memo", "kind": "output_requirement",
         "finding": "Absatz genauer fassen.", "quote": quote, "basis_ids": [], **overrides,
     }
-
-
-def _measured(memo: str, *quotes: str) -> list[DeepReviewFinding]:
-    """The server findings the mission measures on *memo*, in reverse text
-    order: each of *quotes* is unverified, anchored by its marks when it
-    occurs once and by each paragraph that holds it otherwise."""
-    from inqtrix.agents.critic_phase import unverified_web_quote_findings
-
-    findings, unanchored = unverified_web_quote_findings(
-        memo, [{"quote": quote, "verified": False} for quote in quotes],
-        target="artifact", artifact_id="art_memo", basis_id=QUOTE_CHECKS,
-        finding_text="Zitat ersetzen.",
-    )
-    assert unanchored == [], "precondition: every quote is anchored"
-    return sorted(findings, key=lambda item: memo.find(item.quote), reverse=True)
-
-
-def _with_quote_checks(memo: str) -> ReviewSubject:
-    return replace(_subject(memo=memo), diagnostic_ids={"art_memo": {QUOTE_CHECKS}})
-
-
-LONG_QUOTE = "dreißig Tage ab dem Eingang des Antrags"
-OTHER_QUOTE = "der Antrag gilt mit dem Eingang als gestellt"
-
-
-def test_server_findings_stand_last_and_lose_every_overlap():
-    """The model's finding owns the passage it quotes."""
-    memo = f"# Memo\n\nDie Frist beträgt „{LONG_QUOTE}“ [W1].\n\nFehler."
-    subject = _with_quote_checks(memo)
-    review = Review(verdict=DeepReviewVerdict.model_validate(_verdict(
-        complete=False,
-        findings=[_finding(f"Die Frist beträgt „{LONG_QUOTE}“ [W1].", kind="run_diagnostic",
-                           basis_ids=[QUOTE_CHECKS])],
-    )))
-    measured = _measured(memo, LONG_QUOTE)
-    assert [item.quote for item in measured] == [f"„{LONG_QUOTE}“"], "precondition"
-    assessment = assess_review(review, subject, measured=measured)
-    assert (
-        [item["origin"] for item in assessment.located],
-        [(r.origin, r.reason) for r in assessment.results],
-    ) == (["model"], [("server", "anchor_overlap")])
-
-
-def test_two_overlapping_server_findings_are_decided_in_text_order():
-    """The measured order must not decide which one wins; the text does.
-
-    The long quote stands twice, so each paragraph holding it is its anchor;
-    the other quote stands once, inside the second of them, anchored by its
-    marks."""
-    first = f"Einleitung: „{LONG_QUOTE}“ [W1]."
-    second = f"A sagt „{OTHER_QUOTE}“, B sagt „{LONG_QUOTE}“ [W1]."
-    memo = f"# Memo\n\n{first}\n\n{second}"
-    subject = _with_quote_checks(memo)
-    review = Review(verdict=DeepReviewVerdict.model_validate(_verdict()))
-    assessment = assess_review(
-        review, subject, measured=_measured(memo, LONG_QUOTE, OTHER_QUOTE),
-    )
-    assert (
-        [item["quote"] for item in assessment.located],
-        [(r.quote, r.reason) for r in assessment.results],
-    ) == ([first, second], [(f"„{OTHER_QUOTE}“", "anchor_overlap")])
 
 
 SOURCE_A = {"label": "K3", "url": "https://example.org/a", "title": "Quelle A",
@@ -1457,9 +1397,9 @@ def test_the_revision_reads_only_the_bases_of_located_findings():
     assert UNCITED["excerpt"] not in llm.calls[0]["prompt"]
 
 
-def _result(finding_id: str, state: str, reason: str = "", origin: str = "model") -> FindingResult:
+def _result(finding_id: str, state: str, reason: str = "") -> FindingResult:
     return FindingResult(
-        finding_id=finding_id, origin=origin, output_id="art_memo", kind="run_diagnostic",
+        finding_id=finding_id, output_id="art_memo", kind="run_diagnostic",
         criterion=None, finding="x", quote="y", state=state, reason=reason,
     )
 
@@ -1470,16 +1410,13 @@ def _result(finding_id: str, state: str, reason: str = "", origin: str = "model"
     pytest.param([_result("finding_1", "named", "anchor_missing")], "discarded", id="none-applied"),
     pytest.param([_result("finding_1", "applied"), _result("finding_2", "named", "label_moved")],
                  "partially_discarded", id="some-applied"),
-    pytest.param([_result("finding_1", "applied"),
-                  _result("finding_2", "named", "anchor_overlap", origin="server")],
-                 "unverified", id="a-server-loser-does-not-count"),
 ])
 def test_the_revision_state_counts_what_the_revision_decided(results, expected):
     assert review_pass.revision_state(results) == expected
 
 
 def _reason_literals() -> set[str]:
-    """Every reason literal the engines assign to a finding result.
+    """Every reason literal the kernel assigns to a finding result.
 
     Read from the source, not listed: a reason added at a call site without
     a sentence is exactly the case this pins. Covers the builders, a
@@ -1489,7 +1426,6 @@ def _reason_literals() -> set[str]:
     import ast
     import inspect
 
-    from inqtrix.agents import algorithm as mission
     from inqtrix.agents.kernel import algorithm as kernel
     from inqtrix.agents.kernel import review_edits
 
@@ -1498,7 +1434,7 @@ def _reason_literals() -> set[str]:
     keyword = {"FindingResult", "_result", "replace", "dataclass_replace"}
     checks = {"_locate_problem", "_edit_problem", "_composition_problem"}
     found: set[str] = set()
-    for module in (review_edits, review_pass, mission, kernel):
+    for module in (review_edits, review_pass, kernel):
         tree = ast.parse(inspect.getsource(module))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -1536,9 +1472,9 @@ def test_every_naming_reason_has_a_sentence_in_both_languages():
 
     literals = _reason_literals()
     # The scan reads what it claims to: builders, replace() and check returns.
-    assert {"research_route", "write_conflict", "anchor_overlap", "edit_unchanged",
+    assert {"write_conflict", "anchor_overlap", "edit_unchanged",
             "labels_whole_text"} <= literals
-    assert literals <= {*FINDING_REASONS, OVERLAP_EDIT}, literals - {*FINDING_REASONS, OVERLAP_EDIT}
+    assert literals <= set(FINDING_REASONS), literals - set(FINDING_REASONS)
     for code in FINDING_REASONS:
         entry = MESSAGES.get(f"review_finding_reason_{code}")
         assert entry is not None and {"de", "en"} <= set(entry), code
@@ -1773,14 +1709,12 @@ def test_the_writer_prompts_carry_no_review_fidelity_checks():
     from inqtrix.agents.prompts import (
         REVIEW_FIDELITY_CHECKS,
         agent_answer_system_prompt,
-        agent_synthesis_system_prompt,
         build_agent_kernel_system_prompt,
     )
     from inqtrix.prompts import evidence_fidelity_block
 
     writers = "".join((
         evidence_fidelity_block(),
-        agent_synthesis_system_prompt(),
         agent_answer_system_prompt(),
         build_agent_kernel_system_prompt(),
     ))
@@ -1821,7 +1755,7 @@ def _criterion_result(
     finding_id: str, criterion: int, state: str, reason: str = "", recheck: str = ""
 ) -> FindingResult:
     return FindingResult(
-        finding_id=finding_id, origin="model", output_id="art_memo",
+        finding_id=finding_id, output_id="art_memo",
         kind="output_requirement", criterion=criterion, finding="x", quote="y",
         state=state, reason=reason, recheck=recheck,
     )
@@ -1890,7 +1824,7 @@ def test_an_information_criterion_stays_open_whatever_was_applied():
     assert [entry["state"] for entry in facts["criteria_uncovered"]] == ["open"]
 
 
-@pytest.mark.parametrize("named_reason", ["research_route", "segment_without_basis_label"])
+@pytest.mark.parametrize("named_reason", ["anchor_missing", "segment_without_basis_label"])
 def test_a_criterion_with_an_unapplied_finding_stays_open(named_reason):
     results = [
         _criterion_result("finding_1", 2, "applied"),
@@ -2312,57 +2246,6 @@ def test_an_edit_the_recheck_does_not_hold_says_why(first, confirmation, expecte
     assert [(r.recheck, r.recheck_reason) for r in revision.results] == expected
 
 
-def test_without_a_review_call_every_applied_edit_says_the_check_was_unavailable():
-    subject = _checked_subject()
-    llm = CallLLM([DeepRevisionBundle(edits=[
-        {"finding_id": f"finding_{index}", "replacement": EDITS[f"finding_{index}"]}
-        for index in (1, 2)
-    ])])
-    revision = revise_outputs(
-        _host(llm, review_call=False), subject, _checked_assessment(subject, 2),
-        output_bundle="{}",
-    )
-    assert ([r.recheck_reason for r in revision.results], len(llm.calls)) == (
-        ["check_unavailable"] * 2, 1,
-    )
-
-
-# One server finding next to a model finding: the memo quotes a web source
-# whose quote the server could not verify.
-SERVER_MEMO = f"# Memo\n\nEr nennt „{LONG_QUOTE}“ [W1].\n\nFehler."
-SERVER_MODEL_CHECK = _finding_check("finding_1", _row(
-    basis=[_quote("W1", "Die Frist beträgt 30 Tage")],
-    before="change_asked",
-    finding_quote="Absatz genauer fassen",
-))
-"""The check of the model's edit beside the server finding; it holds."""
-
-
-def _with_a_server_finding(reply: Any) -> tuple[review_pass.Revision, CallLLM]:
-    """A model finding that rests on a source, so its edit can hold, beside
-    a server finding; the confirming check answers as the first."""
-    subject = _with_quote_checks(SERVER_MEMO)
-    assessment = assess_review(
-        _read_everything(
-            subject, complete=False, grounded=False,
-            findings=[_finding("Fehler.", kind="evidence_error",
-                               basis_ids=[f"source:{_reference_id(CITED)}"])],
-        ),
-        subject,
-        measured=_measured(SERVER_MEMO, LONG_QUOTE),
-    )
-    assert [item["origin"] for item in assessment.located] == ["model", "server"], "precondition"
-    llm = CallLLM([
-        DeepRevisionBundle(edits=[
-            {"finding_id": "finding_1", "replacement": "Die Frist beträgt 30 Tage [W1]."},
-            {"finding_id": "finding_2", "replacement": "die genannte Frist [W1]"},
-        ]),
-        reply,
-        reply,
-    ])
-    return revise_outputs(_host(llm), subject, assessment, output_bundle="{}"), llm
-
-
 def test_the_recheck_never_reads_the_runs_clarifications():
     """The re-check judges a replacement against its basis, never the run's
     procedure: its request stays byte for byte what it is without the
@@ -2392,26 +2275,6 @@ def test_the_recheck_never_reads_the_runs_clarifications():
         "run-clarifications" in call["prompt"] + str(call.get("system"))
         for call in clarified[1:]
     ] == [False, False]
-
-
-def test_a_server_finding_never_reaches_the_model_recheck():
-    """Only the server measures its own findings; a check of one is no
-    check at all."""
-    revision, llm = _with_a_server_finding(_checks(
-        SERVER_MODEL_CHECK, _finding_check("finding_2", _row(before="not_asked")),
-    ))
-    [server] = [r for r in revision.results if r.origin == "server"]
-    assert ("finding_2" in llm.calls[1]["prompt"], server.state) == (False, "applied")
-
-
-def test_an_applied_server_finding_keeps_the_revision_unverified():
-    """Nothing re-checks a server finding's edit, so a revision that applied
-    one is never read as verified, even when every model edit held."""
-    revision, _ = _with_a_server_finding(_checks(SERVER_MODEL_CHECK))
-    assert (
-        review_pass.revision_state(revision.results),
-        [r.recheck for r in revision.results],
-    ) == ("unverified", ["held", ""])
 
 
 def test_a_failed_recheck_leaves_every_edit_applied_unverified():
@@ -4683,7 +4546,7 @@ def test_only_a_valid_evidence_finding_marks_its_passage(kind, reason, marks):
     answer = "Der Bonus beträgt 16 Prozent. [W1]\n\nDie Förderung wurde neu geregelt. [W1]"
     assessment = _provider_assessment(answer)
     standing = FindingResult(
-        finding_id="finding_1", origin="model", output_id="chat", kind=kind, criterion=None,
+        finding_id="finding_1", output_id="chat", kind=kind, criterion=None,
         finding="Der Bonus fehlt.", quote="Der Bonus beträgt 16 Prozent.", state="named",
         reason=reason,
     )
@@ -4764,7 +4627,7 @@ def test_a_statement_the_revision_wrote_is_verified_only_when_the_recheck_held_i
     delivered = "Die Förderquote beträgt 30 Prozent der Kosten [W1]."
     assessment = _stored_assessment(reviewed)
     edit = FindingResult(
-        finding_id="finding_1", origin="model", output_id="chat", kind="evidence_error",
+        finding_id="finding_1", output_id="chat", kind="evidence_error",
         criterion=None, finding="Die Quote fehlt.", quote=reviewed, state="applied",
     )
 
@@ -4799,3 +4662,151 @@ def test_a_review_prompt_holds_the_providers_input_limit_and_otherwise_the_windo
     assert not fits("gpt-6.1-terra", 925_000)
     assert fits("claude-opus-4-8", 900_000)
     assert not fits("claude-opus-4-8", 1_000_000)
+
+
+
+# -- every negative flag is explained, by a server fact or a named point -- #
+
+
+def _assess(subject: ReviewSubject, **verdict: Any) -> review_pass.Assessment:
+    review = Review(
+        verdict=DeepReviewVerdict.model_validate(_verdict(**verdict)), transport=TRANSPORT_PROMPT,
+    )
+    return assess_review(review, subject)
+
+
+def test_provider_context_alone_explains_a_false_grounded():
+    """Only the search provider's context was cited, so nothing could
+    confirm a fact. That is a server fact, not a contradiction."""
+    assessment = _assess(_provider_subject("Die Förderung wurde neu geregelt. [W1]"), grounded=False)
+    assert (assessment.status, assessment.basis, assessment.unexplained) == (
+        "passed", "provider_context", [],
+    )
+
+
+def test_an_open_point_explains_a_false_flag_and_reads_as_not_checked():
+    assessment = _assess(
+        _provider_subject("Die Förderung wurde neu geregelt. [W1]"),
+        complete=False, not_checked=["Die Förderhöhe ab 2027 ist nicht belegt."],
+    )
+    assert assessment.status == "open"
+    lines = review_pass.open_point_lines(assessment, "de", [])
+    assert [(line.kind, line.reason) for line in lines] == [("not_checked", "not_checked")]
+
+
+def test_a_false_flag_nothing_explains_is_inconsistent_and_named():
+    assessment = _assess(_subject(), complete=False)
+    assert (assessment.status, assessment.unexplained) == ("inconsistent", ["complete"])
+
+
+def test_a_review_without_citations_has_no_provider_basis():
+    from dataclasses import replace
+
+    subject = replace(_provider_subject("Die Förderung wurde neu geregelt."), cited=[])
+    assessment = _assess(subject, grounded=False)
+    assert (assessment.basis, assessment.status, assessment.unexplained) == (
+        "evidence", "inconsistent", ["grounded"],
+    )
+
+
+def test_stored_source_text_beside_provider_context_keeps_the_evidence_basis():
+    from dataclasses import replace
+
+    base = _subject()
+    both = [dict(CITED), dict(PROVIDER)]
+    subject = replace(
+        base,
+        ledger={**base.ledger, _reference_id(PROVIDER): dict(PROVIDER)},
+        cited=both,
+        evidence=base.evidence_for(both),
+    )
+    assessment = _assess(subject, grounded=False)
+    assert (assessment.basis, assessment.status, assessment.unexplained) == (
+        "evidence", "inconsistent", ["grounded"],
+    )
+    pointed = _assess(subject, grounded=False, not_checked=["Die Frist für Altverträge ist offen."])
+    assert (pointed.basis, pointed.status) == ("evidence", "open")
+
+
+def test_an_unconfirmed_finding_explains_a_false_flag_as_before():
+    finding = {
+        "target": "artifact", "artifact_id": "art_memo", "finding": "W1 nennt keine Frist.",
+        "kind": "evidence_error", "quote": "Die Frist beträgt 30 Tage",
+        "basis_ids": [f"source:{_reference_id(CITED)}"], "remove_labels": [], "criterion_index": None,
+    }
+    assessment = _assess(_subject(), complete=False, findings=[finding])
+    assert assessment.unconfirmed, "the basis was never read, so the finding stays unconfirmed"
+    assert (assessment.status, assessment.unexplained) == ("open", [])
+
+
+def test_a_review_from_general_knowledge_is_unchanged():
+    from dataclasses import replace
+
+    subject = replace(
+        _subject(), ledger={}, cited=[], evidence={"sources": [], "run_diagnostics": []},
+        allowed_references={"art_memo": []},
+    )
+    assessment = _assess(subject, grounded=False)
+    assert (assessment.basis, assessment.status) == ("knowledge", "passed")
+
+
+def test_open_points_keep_a_review_open_even_with_every_flag_true():
+    assessment = _assess(_subject(), not_checked=["Die Frist für Altverträge ist offen."])
+    assert assessment.status == "open"
+
+
+def test_a_document_review_with_one_point_is_open():
+    assessment = _assess(_subject(), complete=False, not_checked=["Abschnitt 4 nicht gelesen."])
+    assert (assessment.status, assessment.basis) == ("open", "evidence")
+
+
+def test_a_point_left_open_says_when_a_revision_followed_it():
+    """An open point describes the draft the review read. Once an edit of
+    that review is applied, the delivered text may no longer hold what the
+    point names, so its line says the point was noted before the revision.
+    Without an applied edit the delivered text is the reviewed one, and the
+    point stands as written."""
+    assessment = _assess(_subject(), complete=False, not_checked=["Die Frist für Altverträge ist offen."])
+    plain = review_pass.open_point_lines(assessment, "de", [])
+    named = review_pass.open_point_lines(
+        assessment, "de", [_result("finding_1", "named", "anchor_missing")]
+    )
+    revised = review_pass.open_point_lines(assessment, "de", [_result("finding_1", "applied")])
+    assert [line.text for line in plain] == ["Die Frist für Altverträge ist offen."]
+    assert [line.text for line in named] == ["Die Frist für Altverträge ist offen."]
+    assert [(line.kind, line.text, line.reason) for line in revised] == [(
+        "not_checked",
+        "Vor der Überarbeitung festgestellt: Die Frist für Altverträge ist offen.",
+        "not_checked",
+    )]
+    english = review_pass.open_point_lines(assessment, "en", [_result("finding_1", "applied")])
+    assert english[0].text == "Noted before the revision: Die Frist für Altverträge ist offen."
+
+
+def test_the_reader_voice_rule_reaches_both_review_transports_once():
+    """What a review writes for a reader names no first person, no reader
+    and no user, and calls its own checking "the review": the rule stands in
+    the system prompt of the one-call review and of the review role alike."""
+    from inqtrix.agents.prompts import REVIEW_READER_VOICE
+
+    assert [prompt.count(REVIEW_READER_VOICE) for prompt in _review_prompts()] == [1, 1]
+    for phrase in (
+        "'the review', in the third person",
+        "never 'I' or 'we'",
+        "never an address to the reader",
+        "never 'the user'",
+    ):
+        assert phrase in REVIEW_READER_VOICE, phrase
+
+
+def test_the_review_report_carries_the_revision_note_into_its_open_lines():
+    """The outcome record reads its lines from the report facts: the note
+    reaches it only when the facts are built with the revision's results."""
+    assessment = _assess(_subject(), complete=False, not_checked=["Die Frist für Altverträge ist offen."])
+    results = [_result("finding_1", "applied")]
+    facts = review_pass.report_facts(
+        assessment, results, revision=review_pass.revision_state(results), language="de",
+    )
+    assert [(line["kind"], line["text"]) for line in facts["open_lines"]] == [
+        ("not_checked", "Vor der Überarbeitung festgestellt: Die Frist für Altverträge ist offen."),
+    ]

@@ -639,7 +639,7 @@ def test_web_instant_keeps_one_source_and_records_every_place_the_answer_cites_i
 
 
 @pytest.mark.parametrize("outer", [False, True])
-def test_web_instant_attributes_search_and_preserves_enclosing_task(outer):
+def test_web_instant_attributes_search_and_restores_the_enclosing_purpose(outer):
     from contextlib import nullcontext
     from inqtrix.observability.context import bind_purpose, current_purpose
 
@@ -648,19 +648,18 @@ def test_web_instant_attributes_search_and_preserves_enclosing_task(outer):
     class PurposeSearch(_StubSearch):
         def search(self, query, **kwargs):
             bound = current_purpose()
-            captured.append(None if bound is None else
-                            (bound.purpose, bound.task_id, bound.task_kind))
+            captured.append(None if bound is None else bound.purpose)
             return super().search(query, **kwargs)
 
     before = current_purpose()
-    context = bind_purpose("enclosing", task_id="task-1", task_kind="web_instant") if outer else nullcontext()
+    context = bind_purpose("enclosing") if outer else nullcontext()
     with context:
         registry = build_capability_registry(search_provider=PurposeSearch())
         asyncio.run(registry.invoke("web.search.instant", {"query": "question"}, ANON))
         if outer:
             assert current_purpose().purpose == "enclosing"
     assert current_purpose() is before
-    assert captured == [("web_instant", "task-1" if outer else "", "web_instant" if outer else "")]
+    assert captured == ["web_instant"]
 
 
 def test_web_instant_redacts_provider_credential_urls_before_output_and_bundle():
@@ -1045,6 +1044,79 @@ def test_editor_document_read_capability_rejects_stale_collaboration_projection(
     assert exc_info.value.code == "editor.collaboration_projection_unavailable"
     assert exc_info.value.http_status == 503
 
+
+def test_editor_readers_carry_the_content_mode_of_the_document_they_read():
+    """The agent learns the mode where it reads: both readers name it."""
+    from inqtrix.project.editor_memory import MemoryEditorStore
+    from inqtrix.services.collaboration_client import CollaborationProjection
+    from inqtrix.services.editor_persistence_service import (
+        EditorPersistenceService,
+    )
+
+    store = MemoryEditorStore()
+    service = EditorPersistenceService(store=store, durable=False)
+    registry = build_capability_registry(editor_service=service)
+    context = scoped_context("mode-owner")
+    document_id = "ed_mode_capability"
+    asyncio.run(
+        service.save_document(
+            id=document_id,
+            title="Mode document",
+            content_markdown="# Report\n\nOne paragraph.",
+            folder_id=None,
+            source="blank",
+            source_run_id=None,
+            revision=2,
+            diff_anchor_markdown=None,
+            diff_anchor_updated_at=None,
+            created_at=1.0,
+            updated_at=1.0,
+            caller_user_id=_user_id("mode-owner"),
+            workspace_id=None,
+            visible_to=context.visible_to,
+        )
+    )
+
+    def _read_and_search() -> tuple[str, str]:
+        read = asyncio.run(
+            registry.invoke("editor.document.read", {"document_id": document_id}, context)
+        )
+        search = asyncio.run(
+            registry.invoke(
+                "editor.document.search",
+                {"document_id": document_id, "query": "paragraph"},
+                context,
+            )
+        )
+        return read.content_mode, search.content_mode
+
+    assert _read_and_search() == ("markdown", "markdown")
+
+    document = asyncio.run(store.get_document(document_id))
+    store._documents[document_id] = replace(  # type: ignore[attr-defined]
+        document,
+        content_mode="collaboration",
+        collaboration_generation=1,
+        collaboration_schema_version=1,
+        collaboration_schema_hash="0" * 64,
+        persisted_sequence=3,
+        projection_sequence=3,
+    )
+
+    async def project(**kwargs: object) -> CollaborationProjection:
+        del kwargs
+        return CollaborationProjection(
+            generation=1,
+            sequence=3,
+            markdown="# Report\n\nOne shared paragraph.",
+            projection_hash="1" * 64,
+            schema_hash="0" * 64,
+            authoritative_sequence=3,
+        )
+
+    service.bind_collaboration_projector(project)
+
+    assert _read_and_search() == ("collaboration", "collaboration")
 
 
 def _window_document(kind, body):

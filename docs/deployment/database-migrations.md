@@ -616,6 +616,37 @@ not recorded, so the move cannot be undone. The way back to an Inqtrix
 version from before this revision is the database backup taken before the
 upgrade, as for the one-way revisions above.
 
+### Skill tool lists that named the retired mission tool (`0101_retire_mission_skill_tools`)
+
+The mission engine is out of service, and with it the agent tool
+`run_deep_mission`: the agent no longer has it, and the skill vocabulary no
+longer accepts it. A stored skill whose allowed tools named it would restrict
+its runs to a tool that no longer exists. Revision
+`0101_retire_mission_skill_tools` rewrites these lists once, in every tenant:
+
+1. `run_web_research`, the multi-step web research the agent delegates
+   instead, takes the place of `run_deep_mission` in the list; a list that
+   already allowed the research names it once.
+2. No list ends up empty, so no skill silently loses its restriction.
+3. The skill's revision and its `updated_at` stay: nobody edited the skill,
+   and runs bound to its revision keep reading it.
+
+The migration job logs the number of rewritten skills, as a `WARNING` when
+there were any:
+
+```text
+Skills whose tool list named the retired run_deep_mission now name run_web_research instead: 2.
+```
+
+Without such skills the revision changes nothing and logs the count 0 at
+`INFO`. A skill file exported before this version whose tool list names
+`run_deep_mission` is refused on import with `400` until the name is removed
+from its list.
+
+**Downgrade.** The downgrade changes nothing: which lists named the mission
+tool is not recorded, and the rewritten lists are valid for the previous
+revision too. Back up the database before the upgrade.
+
 ## Readiness and incident diagnosis
 
 Runtime readiness validates more than `SELECT 1`: the database must be at the

@@ -30,7 +30,6 @@ export type CopyLeaf = {
 // parameter names stay compatible with saved references and placeholders.
 const IDENTIFIER_KEYS = new Set([
   'id', 'collectionId', 'groupId', 'runId', 'profile', 'profileId',
-  'rag_default_profile', 'web_child_profile', 'web_child_ceiling',
 ])
 
 function isLocaleFile(file: string): boolean {

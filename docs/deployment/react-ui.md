@@ -277,11 +277,12 @@ deliberate and must survive a rebuild:
   ([`agent-platform.md`](../architecture/agent-platform.md)).
 
 Run Setup reads the server's permission and depth manifests
-([`agent-platform.md`](../architecture/agent-platform.md)). If the kernel is
-not registered, the composer states that only Mission is available instead of
-silently relabelling Mission as Automatic. The effective depth is always
-serialized, including an explicit `normal` selection when the server capability
-default is `deep`, so display and submission consume the same value.
+([`agent-platform.md`](../architecture/agent-platform.md)). Runs start only on
+the registered kernel (`features.agent_kernel`): without it the composer names
+the server's reason and sends nothing, and it never falls back to another
+engine. The effective depth is always serialized, including an explicit
+`normal` selection when the server capability default is `deep`, so display
+and submission consume the same value.
 
 The slash menu sets a visible one-shot execution directive; the field
 semantics behind `/web` and `/wissen` are in
@@ -315,7 +316,18 @@ permission, Stufe, model, effort, web and knowledge use with the searched
 knowledge boundary — read from the accepted run's execution snapshot
 (`runSettingsSummary`); nothing there is inferred, so a run without a
 snapshot shows only permission and Stufe, and a failed or cancelled turn
-carries the same line.
+carries the same line. The engine is named only where the snapshot reports
+the kernel (`effective_mode` `agent_kernel`): a stored run of the retired
+mission engine keeps its line without it, and the run overview in the
+composer then shows what the next run would do, not that run's model, depth
+or spend.
+
+The meta line above the question names the run's Stufe in every status, so
+a turn that is still working shows the Stufe it was accepted with before its
+recap exists. The meta line and the recap follow one rule (`runTierBadge`):
+the Stufe the run recorded comes first; a stored run without one that ran
+with the legacy deep depth says “Deep”, because that depth had no budgets of
+a Stufe; any other run shows none. Tief keeps the accent the deep badge had.
 
 How the run's review ended comes from its outcome record
 (`inqtrix.agent.outcome`) and nowhere else: the recap, a line under the chat
@@ -329,14 +341,18 @@ record, or only a record without a `summary`, reads “No outcome record” in
 the recap, and nothing under its answer. The line under the answer and the
 line under the canvas describe the text the run delivered: once the user
 edited that answer or document, its line disappears and the recap keeps the
-summary. A delegated mission's folded card names its counts and duration
-first and closes with the summary its projected record carries; a mission
-that ended without a record claims no review there, and a completed one
-reads “No outcome record”.
+summary. A settled delegation of a stored kernel run to the retired mission
+engine (`run_deep_mission`) keeps one line under its tool row: how the child
+ended and the summary its projected record carries. A completed child
+without a record reads “No outcome record”; one that broke off names its
+reason and claims no review.
 
 ### Agent Desk execution control centre
 
-The Agent Desk run canvas is the execution overview, not a raw tool log:
+The Agent Desk shows a run's execution as an overview, not a raw tool log.
+The run canvas holds one `run:{runId}` tab per run with the question, the
+station track, the status and the live activity line; the transcript carries
+the rest:
 
 - The inline work plan is the model's last reported plan. Its marked task is
   static; the separate live activity line follows actual run and tool events.
@@ -345,25 +361,27 @@ The Agent Desk run canvas is the execution overview, not a raw tool log:
   registered source title or search question, with a generic selection label
   for historical id-only previews. Counts describe tool invocations, not source
   quality. Failed reads and unfinished reads remain distinguishable.
-- A delegated mission keeps its compact card. Its details open the existing
-  run canvas, where a research work unit exposes its own query events. Only the
-  inspected child subscribes to a separate event channel, under caller scope;
-  closing the view aborts that channel. Child hydration never creates sessions.
-  Query start and finish events update one named row. The detail history keeps
-  its latest 100 rows and explicitly counts older hidden messages. A research
-  task's guiding questions are never used as a completed-search denominator;
-  actual query totals come from the child's metrics.
+- A delegation is one tool row. While its child works, one line under the row
+  follows the child's progress (`inqtrix.agent.child.progress` on the parent's
+  stream): what it is doing (its phase, or a role child's latest step) and, for
+  a research child, its graph node with the section it writes or the number of
+  searches its snapshot reports (`total_queries`). No child view opens, and the
+  desk subscribes to no separate child event channel.
 - The UI never fabricates a percentage or an ETA. Instant search uses an
   indeterminate one-call state, knowledge work may show a known `n/N`, and a
   real research child uses its graph phases.
-- Selecting a work unit changes the run canvas descriptor to
-  `{view: "run", runId, taskId}` while retaining the same `run:{runId}` tab and
-  a visible Back action; it does not create a second task tab.
 - Errors, fallbacks, insufficient evidence, partial result summaries, and
-  SSE-to-polling degradation stay visible and expand into sanitized details.
-- Terminal run hydration first reads the durable plan/task rows and then
-  replays the existing event page through the live reducer, so cancellation or
-  reload does not erase the execution story.
+  SSE-to-polling degradation stay visible as lines of their own.
+- Terminal run hydration replays the existing event page through the live
+  reducer, so cancellation or reload does not erase the execution story.
+- A stored run of the retired mission engine replays its plan and task events
+  as plain transcript lines: the plan's version, and each task's status, result
+  and error from its events, with its title from the event (a run stored
+  before task events carried titles is named by the task's result line, else by
+  its id), with no button, no canvas target and no plan or task request. Its
+  approval receipts and phase headings keep their words. Only a tool approval
+  or a question opens the tray above the composer; an approval of a kind the
+  desk does not know gets a plain receipt.
 
 Failed server discovery retries five seconds after the preceding attempt has
 settled, stopping on success or unmount. A visible notice explains recovery;
@@ -679,6 +697,44 @@ For isolated visual checks, the frontend test page
 backend. It accepts `theme=light|dark`, `themePreset=petrol|standard|slate|graphite|sage`,
 `contrastMode=standard|high`, `locale=en|de`, `mode=local|sso|apikey`, and `error` or
 `busy` flags. `view=setup` shows owner setup. It is a development fixture, not a production route.
+
+## Last report profile and Stufe
+
+The research composer starts with the report profile the user picked last
+(Schnell, Kompakt or Tief), together with that profile's preset for the
+confidence target, the first queries and the rounds; without a pick it starts
+on Tief as before. The Agent Desk composer starts with the Stufe the user
+picked last while the server still publishes it in `agent.tiers`, and on
+`agent.default_tier` otherwise. Only a pick in a composer menu changes the
+saved value. A Stufe picked on a page stays for that page; the research
+composer keeps the picked profile across view switches, while confidence,
+queries and rounds return to the profile's preset.
+
+With a per-user session on a server with durable persistence both picks are
+account preferences (`last_research_profile` and `last_agent_tier` in
+`account_preferences`) and follow the user to every device. Anonymous use,
+API-key use and the demo keep them in the browser. The account row arrives
+after the first paint, so a composer follows it as long as it is untouched:
+the research composer until one of its settings changes or a draft comes
+back after a sign-in, the Agent Desk until a Stufe is picked on the page.
+The row decides for its account, an empty pick included, so a pick another
+account left in the same browser does not carry over; a project file without
+a pick keeps the current one. Other tabs of the same browser take over a pick (and the
+other appearance preferences and the language), so no tab saves an older
+value back with the whole row.
+
+Research run cards name the profile a run was started with ("Profil:
+Kompakt"), read from the request the run stored; a run started without a
+profile, such as an API run, shows none.
+
+The two columns require migration `0102_account_last_tiers`. Upgrade the
+API/worker image and the web image together through the existing migration
+workflow; an API or worker of the previous release does not work against the
+new schema head. After the upgrade, reload every page that was open: a page
+loaded before it saves the preference row without the two fields, so the
+server stores no pick for them until that page is reloaded (the browser keeps
+its own pick meanwhile). A downgrade drops both columns and the saved picks,
+and both composers start on their defaults again.
 
 ## Related docs
 

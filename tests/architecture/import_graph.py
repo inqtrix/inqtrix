@@ -26,6 +26,7 @@ BASE_MODULES = (
     "prompt_language",
     "provider_failure_contract",
     "quote_limits",
+    "search_form",
     "search_result",
     "settings",
     "text",

@@ -22,8 +22,8 @@ from fastapi.testclient import TestClient
 from inqtrix.agents.prompts import (
     build_agent_kernel_system_prompt,
     build_kernel_user_message,
-    rendering_capabilities_block,
 )
+from inqtrix.prompt_language import OUTPUT_FORMAT_BLOCK
 from inqtrix.providers.base import ChatTurn, LLMProvider, ToolCallRequest
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
 from inqtrix.server.routes import create_router, register_routes
@@ -40,7 +40,7 @@ from inqtrix.settings import (
 def test_kernel_system_prompt_covers_tools_and_rendering():
     prompt = build_agent_kernel_system_prompt()
     # The rendering SSOT is embedded verbatim (the drift rule).
-    assert rendering_capabilities_block() in prompt
+    assert OUTPUT_FORMAT_BLOCK in prompt
     for tool_name in (
         "ask_user",
         "search_project_knowledge",
@@ -49,10 +49,10 @@ def test_kernel_system_prompt_covers_tools_and_rendering():
         "write_canvas",
         "propose_editor_patch",
         "run_web_research",
-        "run_deep_mission",
         "write_todos",
     ):
         assert tool_name in prompt, f"{tool_name} fehlt im Kernel-Prompt"
+    assert "run_deep_mission" not in prompt
     for rule in (
         "Output form",
         "Clarifying questions",
@@ -88,7 +88,7 @@ def test_kernel_cognition_prompt_rules_are_present():
 def test_kernel_user_message_composes_context_sections():
     message = build_kernel_user_message(
         "Ueberarbeite die Mail.",
-        history_block="Nutzer: Entwirf eine Mail.\nAgent: Erledigt.",
+        history_block="User: Entwirf eine Mail.\nAgent: Erledigt.",
         artifact_registry=(
             {
                 "artifact_id": "art_1",
@@ -931,21 +931,18 @@ def test_an_attached_requirement_is_recorded_once_per_run():
     assert plain == []
 
 
-def test_both_engines_state_the_requirement_with_the_same_words():
-    """A requirement that reads as a binding contract in one engine and
-    as a loose hint in the other is a requirement the user cannot rely
-    on. One builder, one heading, both engines."""
+def test_the_kernel_states_the_requirement_through_the_one_builder():
+    """One builder, one heading: the kernel's user message carries the
+    requirement section the builder writes."""
     from inqtrix.agents.prompts import (
-        _output_requirements_section,
         build_kernel_user_message,
         report_requirement_section,
     )
 
-    heading = report_requirement_section("X").splitlines()[0]
-    mission = _output_requirements_section(user_guidance="X")
+    section = report_requirement_section("X")
     kernel = build_kernel_user_message("Auftrag.", report_requirement="X")
-    assert heading in mission
-    assert heading in kernel
+    assert section.splitlines()[0] in kernel
+    assert section in kernel
 
 
 def test_no_requirement_adds_no_section():

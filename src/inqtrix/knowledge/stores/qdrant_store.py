@@ -207,6 +207,35 @@ async def _run_store_call(awaitable: Awaitable[_T]) -> _T:
         raise
 
 
+_PROBE_ATTEMPTS = 2
+"""Calls of one availability probe. A single failed call must not report a
+store that answers as down, so a failed call is repeated once.
+Both calls run inside the caller's bound on the whole probe
+(``_RUNTIME_PROBE_TIMEOUT_SECONDS`` in ``inqtrix.services.system_runtime``)."""
+
+
+async def _probe_collections(client: Any) -> bool:
+    """Whether Qdrant answers a read-only call, repeating one failed call.
+
+    Every failed call logs a WARNING with its exception type: the runtime
+    probe only records "unavailable", so the cause (refused, auth, TLS,
+    validation, a closed connection) is visible here or nowhere.
+    """
+    for attempt in range(1, _PROBE_ATTEMPTS + 1):
+        try:
+            await asyncio.to_thread(client.get_collections)
+            return True
+        except Exception as exc:  # noqa: BLE001 - the probe reports, never raises
+            log.warning(
+                "Qdrant availability probe failed (attempt %d of %d): %s: %s",
+                attempt,
+                _PROBE_ATTEMPTS,
+                type(exc).__name__,
+                exc,
+            )
+    return False
+
+
 def _require_qdrant():
     """Import the qdrant client + models, or raise the install hint."""
     try:
@@ -539,18 +568,7 @@ class QdrantVectorIndex:
 
     async def is_available(self) -> bool:
         """Return whether the Qdrant endpoint responds to a read-only call."""
-        try:
-            await asyncio.to_thread(self._client.get_collections)
-            return True
-        except Exception as exc:  # noqa: BLE001 - the probe reports, never raises
-            # The runtime probe only records "unavailable"; the cause
-            # (refused, auth, TLS, validation) is visible here or nowhere.
-            log.warning(
-                "Qdrant availability probe failed: %s: %s",
-                type(exc).__name__,
-                exc,
-            )
-            return False
+        return await _probe_collections(self._client)
 
     async def ensure_model(
         self, *, embedding_model: str, embedding_dim: int
@@ -1176,18 +1194,7 @@ class QdrantKnowledgeStore:
 
     async def is_available(self) -> bool:
         """Return whether the Qdrant endpoint responds to a read-only call."""
-        try:
-            await asyncio.to_thread(self._client.get_collections)
-            return True
-        except Exception as exc:  # noqa: BLE001 - the probe reports, never raises
-            # The runtime probe only records "unavailable"; the cause
-            # (refused, auth, TLS, validation) is visible here or nowhere.
-            log.warning(
-                "Qdrant availability probe failed: %s: %s",
-                type(exc).__name__,
-                exc,
-            )
-            return False
+        return await _probe_collections(self._client)
 
     # -- async port (thin wrappers over the proven sync bodies) ---------- #
 

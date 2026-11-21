@@ -55,36 +55,16 @@ def _permission_mode_entry(mode: str) -> dict[str, object]:
     """What one autonomy mode gates, derived from the ENFORCING code.
 
     Kernel tool gates come from the compiled policy config
-    (``interrupt_config_for``); the web-replan rule is probed against
-    the ACTUAL ``autonomy_auto_approves`` decision function with a
-    synthetic web task — no literal here can drift from runtime
-    behavior. ``plan_gate`` is the one graph-routing fact stated as a
-    constant (autonomous skips the plan interrupt); ``patch_gate`` is
-    invariant because ``propose_editor_patch`` is an always-gated tool
-    and therefore interrupts in every mode.
+    (``interrupt_config_for``), so no literal here can drift from runtime
+    behavior.
     """
-    from inqtrix.agents.control_ports import PlanTaskRecord
     from inqtrix.agents.kernel.policy import (
         ALWAYS_GATED_TOOLS,
         interrupt_config_for,
     )
-    from inqtrix.agents.replan import autonomy_auto_approves
 
     config = interrupt_config_for(mode) or {}
-    web_probe = PlanTaskRecord(
-        task_id="probe",
-        plan_id="probe",
-        run_id="probe",
-        ordinal=0,
-        title="probe",
-        tool_kind="web_research",
-    )
     return {
-        "plan_gate": mode != "autonomous",
-        "web_replan_regate": not autonomy_auto_approves(
-            autonomy=mode, new_tasks=[web_probe]
-        ),
-        "patch_gate": True,
         # Classification keys on ``user_conditional`` (set by the policy),
         # NOT the mere presence of a ``when`` predicate: a child-tool gate
         # carries an internal single-dispatch predicate but gates every
@@ -342,12 +322,10 @@ def build_router(container: "AppContainer") -> APIRouter:
                     container.capability_registry is not None
                     and container.capability_registry.ids()
                 ),
-                "workspace_agent": "workspace_agent"
-                in container.registry.ids(),
-                "workspace_agent_durable": bool(
-                    "workspace_agent" in container.registry.ids()
-                    and settings.storage.backend == "postgres"
-                ),
+                # The Agent Desk: agent runs are set up on this server (a
+                # checkpoint store exists). It shows where it showed before
+                # and names why it is blocked when the kernel is missing.
+                "agent_desk": getattr(container, "agent_checkpointer", None) is not None,
                 # The cognitive kernel is true only when the registration
                 # gate passed (rollout switch AND
                 # checkpointer AND native tool calling) — frontends
@@ -417,21 +395,19 @@ def build_router(container: "AppContainer") -> APIRouter:
                     ),
                 ),
             },
-            # The desk reads workspace-agent limits and vocabulary from
-            # this contract instead of hardcoding them.
+            # The desk reads agent limits and vocabulary from this
+            # contract instead of hardcoding them.
             "agent": {
                 "autonomy_modes": list(offered_autonomy_modes),
                 "default_autonomy": settings.agent_platform.default_autonomy,
-                # The effective desk default publishes the configured
-                # kernel default only once the
-                # kernel actually registered — the frontend never
-                # submits an unregistered mode.
+                # The kernel once it actually registered, otherwise none: a
+                # client that reads this field never submits a mode the server
+                # would refuse; the kernel's reason stands under
+                # feature_status.agent_kernel.
                 "default_mode": (
                     "agent_kernel"
-                    if settings.agent_platform.default_agent_mode
-                    == "agent_kernel"
-                    and "agent_kernel" in container.registry.ids()
-                    else "workspace_agent"
+                    if "agent_kernel" in container.registry.ids()
+                    else None
                 ),
                 # The composer renders the two-mode Standard/Auto presets
                 # and maps them onto the
@@ -461,18 +437,12 @@ def build_router(container: "AppContainer") -> APIRouter:
                     if settings.agent.agent_tier
                     else settings.agent.depth
                 ),
-                # Stufen (published == enforced: generated from THE
-                # policy table every consumer reads). `depth_modes`
-                # stays published for older clients; a tiers-aware
-                # composer renders the Stufe control instead.
-                "tiers": tier_capabilities_payload(
-                    max_clarification_rounds=(
-                        settings.agent_platform.max_clarification_rounds
-                    ),
-                    section_register_override=(
-                        settings.agent_platform.synthesis_section_register_budget
-                    ),
-                ),
+                # Stufen, generated from THE policy table every consumer
+                # reads (``tier_policy`` names the one field the kernel
+                # does not enforce as published). `depth_modes` stays
+                # published for older clients; a tiers-aware composer
+                # renders the Stufe control instead.
+                "tiers": tier_capabilities_payload(),
                 # The composer's default SELECTION (env AGENT_TIER wins
                 # over the vocabulary default). A request that OMITS
                 # agent_tier keeps legacy depth semantics — tiers-aware
@@ -483,18 +453,11 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "advanced_autonomy": (
                     settings.agent_platform.advanced_autonomy
                 ),
-                "max_parallel_children": (
-                    settings.agent_platform.max_parallel_children
-                ),
-                "discovery_max_tool_calls": (
-                    settings.agent_platform.discovery_max_tool_calls
-                ),
-                "max_plan_tasks": settings.agent_platform.max_plan_tasks,
                 # Result requirement: published == enforced. The
-                # composer and the plan gate both render THESE numbers
-                # instead of repeating the server's constants, so a
-                # text the surface accepts is never one the server
-                # refuses. ``max_rules`` counts distinct rules;
+                # composer renders THESE numbers instead of repeating
+                # the server's constants, so a text the surface accepts
+                # is never one the server refuses. ``max_rules`` counts
+                # distinct rules;
                 # ``max_composed_chars`` is the ceiling of the composed
                 # block, checked against each template's published
                 # ``composed_chars`` before the submit.
@@ -520,12 +483,9 @@ def build_router(container: "AppContainer") -> APIRouter:
                         key: kernel_limit_payload(values)
                         for key, values in kernel_limit_values.items()
                     },
-                    "mission": {
-                        "discovery_tool_calls": settings.agent_platform.discovery_max_tool_calls,
-                        "plan_tasks": settings.agent_platform.max_plan_tasks,
-                        "replan_rounds": settings.agent_platform.max_replan_rounds,
-                        "clarification_rounds": settings.agent_platform.max_clarification_rounds,
-                        "parallel_children": settings.agent_platform.max_parallel_children,
+                    # The bounds of every document analysis, whoever runs
+                    # it; the same settings the executor applies.
+                    "document_analysis": {
                         "documents_per_analysis": settings.agent_platform.document_analysis_max_documents,
                         "document_windows_per_analysis": settings.agent_platform.document_analysis_max_windows,
                         "document_windows_per_run": settings.agent_platform.document_analysis_max_windows_per_run,
@@ -541,10 +501,10 @@ def build_router(container: "AppContainer") -> APIRouter:
                     else []
                 ),
                 # What each permission mode actually gates — generated
-                # from the enforcing sources (kernel policy config and
-                # replan authorization rule), so published == enforced and
-                # the composer's run overview cannot drift from the
-                # runtime or promise what the runtime does not do.
+                # from the enforcing source (the kernel policy config), so
+                # published == enforced and the composer's run overview
+                # cannot drift from the runtime or promise what the runtime
+                # does not do.
                 "permission_modes": {
                     mode: _permission_mode_entry(mode)
                     for mode in offered_autonomy_modes

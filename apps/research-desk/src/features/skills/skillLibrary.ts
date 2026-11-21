@@ -65,7 +65,6 @@ export const SKILL_ALLOWED_TOOL_OPTIONS = [
   'read_project_document',
   'web_instant',
   'run_web_research',
-  'run_deep_mission',
   'write_canvas',
   'read_editor_document',
   'search_editor_document',
@@ -183,6 +182,16 @@ export function payloadFromSkill(skill: SkillInfo): SkillPayload {
 export function canEditSkill(skill: SkillInfo | null): boolean {
   if (!skill) return true
   return skill.access.mode !== 'shared' || skill.access.permission !== 'view'
+}
+
+/**
+ * Who may activate a skill stays the owner's choice: the owner's model
+ * activates a `model_allowed` skill on its own, so a recipient who edits
+ * the text must not be the one who switches that on. The server refuses a
+ * recipient's change of `invocation`; the editor does not offer it.
+ */
+export function canChangeSkillInvocation(skill: SkillInfo | null): boolean {
+  return skill == null || skill.access.mode !== 'shared'
 }
 
 /** Deletion stays owner-only (shares never delete). */

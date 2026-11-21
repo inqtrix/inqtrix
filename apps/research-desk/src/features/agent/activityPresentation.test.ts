@@ -4,9 +4,7 @@ import { translations } from '@/i18n/translations'
 import {
   agentActivityIconKind,
   activityDisplayText,
-  discoveryProbeDisplay,
   normalizeAgentOperation,
-  terminalActivityErrorIndex,
   activityStepDisplayText,
   kernelToolLabel,
 } from './activityPresentation'
@@ -58,18 +56,7 @@ describe('agent activity presentation', () => {
     )
   })
 
-  it('uses one semantic presenter for discovery approvals', () => {
-    expect(discoveryProbeDisplay({
-      kind: 'web.search.instant',
-      query: 'Welche Marktprognosen widersprechen sich?',
-    }, de)).toEqual({
-      detail: 'Welche Marktprognosen widersprechen sich?',
-      title: 'Führt eine Instant-Websuche aus',
-    })
-  })
-
   it('leaves an unknown operation visible', () => {
-    expect(discoveryProbeDisplay({ kind: 'custom.read' }, de).title).toBe('custom.read')
     expect(activityDisplayText({
       detail: '',
       kind: 'working',
@@ -179,16 +166,6 @@ describe('agent activity presentation', () => {
     expect(partial).toBe('Dokument nur teilweise ausgewertet · KI-Verordnung · 4/32 · Fehlgeschlagen')
     expect(activityDisplayText({ ...reading, status: 'failed' }, translations.en))
       .toBe('Document only partly analysed · KI-Verordnung · 4/32 · Failed')
-  })
-
-  it('suppresses only the latest activity copy of a terminal task error', () => {
-    const history = [
-      { error: 'Provider timeout', status: 'failed' },
-      { error: 'Recovered', status: 'completed' },
-      { error: 'Provider timeout', status: 'failed' },
-    ]
-    expect(terminalActivityErrorIndex(history, 'Provider timeout')).toBe(2)
-    expect(terminalActivityErrorIndex(history, 'Different error')).toBe(-1)
   })
 })
 

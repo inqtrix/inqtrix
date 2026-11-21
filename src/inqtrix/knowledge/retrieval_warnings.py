@@ -7,10 +7,11 @@ those to stable search codes, and the single registry of what each code
 says:
 
 * the English API message, read by the synchronous search route, the Agent
-  capability, the kernel's search tool and the discovery digest;
-* the reader wording (i18n stem, both languages), read by the mission's task
-  answer, the memo and review notes and the reading record of a review
-  diagnostic.
+  capability and the kernel's search tool;
+* the reader wording (i18n stem, both languages), read by the review
+  diagnostics (the reading record of a document analysis, the diagnostic
+  of a stored mission task) and the report of a knowledge child in the
+  agent's batch of subtasks.
 
 A caller never spells a message or picks a wording of its own. Aggregating
 the entries of several searches into :class:`SearchNotice` values happens
@@ -316,6 +317,23 @@ def _entry(value: Any) -> tuple[str, int, bool | None, tuple[int, int] | None]:
             return "", 0, None, None
         return code, count or 0, complete, (returned, requested)
     return code, count or 0, None, None
+
+
+def knowledge_run_entries(retrieval: Any) -> list[Any]:
+    """The raw warnings of one knowledge run, as the notice contract reads them.
+
+    *retrieval* is the ``knowledge_retrieval`` state of a knowledge run's
+    result. Its degradations name their code ``reason``, its warnings name
+    it ``code``; the notice contract reads one ``code`` for every entry.
+    Anything unreadable passes on as it is and becomes a visible unreadable
+    notice, never a silent drop.
+    """
+    if not isinstance(retrieval, Mapping):
+        return []
+    return [
+        {**entry, "code": entry.get("reason")} if isinstance(entry, Mapping) else entry
+        for entry in retrieval.get("degradations") or []
+    ] + list(retrieval.get("warnings") or [])
 
 
 def collect_search_notices(per_search: Iterable[Iterable[Any]]) -> list[SearchNotice]:

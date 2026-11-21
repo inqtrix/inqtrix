@@ -107,7 +107,6 @@ FINDING_REASONS: tuple[str, ...] = (
     "revision_empty",
     "write_conflict",
     "store_error",
-    "research_route",
     "cancelled",
     "revision_error",
 )
@@ -116,10 +115,6 @@ FINDING_REASONS: tuple[str, ...] = (
 Each reason has the reader sentence ``review_finding_reason_<code>``
 (:mod:`inqtrix.i18n`); a reason without one is a defect, not a case to fall
 through, and :class:`FindingResult` refuses any code outside this set."""
-
-OVERLAP_EDIT = "overlap_edit"
-"""The one reason an APPLIED result carries: a server finding that lost its
-overlap and whose quote the winning edit removed; that edit carried the fix."""
 
 PROVIDER_CONTEXT_ONLY = "provider_context_only"
 """The reason of a finding that marks its passage instead of revising it: an
@@ -170,15 +165,11 @@ review's revisions ended between 0.82 and 1.32 of their draft, while the one
 that deleted section after section kept 0.10."""
 
 
-def is_counted(origin: str, reason: str) -> bool:
+def is_counted(reason: str) -> bool:
     """Whether a result counts as a revision decision: every result but a
-    server finding that lost its overlap (``anchor_overlap``,
-    :data:`OVERLAP_EDIT`), whose fix, if any, was another finding's edit, and
-    a marked passage (:data:`PROVIDER_CONTEXT_ONLY`), which never reached a
+    marked passage (:data:`PROVIDER_CONTEXT_ONLY`), which never reached a
     revision."""
-    if reason == PROVIDER_CONTEXT_ONLY:
-        return False
-    return not (origin == "server" and reason in ("anchor_overlap", OVERLAP_EDIT))
+    return reason != PROVIDER_CONTEXT_ONLY
 
 
 @dataclass(frozen=True)
@@ -186,8 +177,6 @@ class FindingResult:
     """What became of one confirmed finding: applied, or named with its reason."""
 
     finding_id: str
-    origin: str
-    """``model`` (the review's verdict) or ``server`` (a measured finding)."""
     output_id: str
     kind: str
     criterion: int | None
@@ -204,13 +193,13 @@ class FindingResult:
     not held both times, or not applied."""
     recheck_reason: str = ""
     """Why the re-check left this applied edit unverified, one of
-    :data:`RECHECK_REASONS`; ``""`` when it held, was rejected, never
-    reached the re-check (a server finding) or was not applied."""
+    :data:`RECHECK_REASONS`; ``""`` when it held, was rejected or was not
+    applied."""
 
     def __post_init__(self) -> None:
         allowed = (
             FINDING_REASONS if self.state == "named"
-            else ("", OVERLAP_EDIT) if self.state == "applied"
+            else ("",) if self.state == "applied"
             else ()
         )
         if self.reason not in allowed:
@@ -245,7 +234,6 @@ class FindingResult:
         """The machine record of this result, without the finding's prose."""
         return {
             "finding_id": self.finding_id,
-            "origin": self.origin,
             "target": self.output_id,
             "kind": self.kind,
             "criterion": self.criterion,
@@ -269,7 +257,6 @@ def applied_result(item: Mapping[str, Any], reason: str = "") -> FindingResult:
 def _result(item: Mapping[str, Any], state: str, reason: str) -> FindingResult:
     return FindingResult(
         finding_id=str(item["finding_id"]),
-        origin=str(item["origin"]),
         output_id=str(item["output_id"]),
         kind=str(item["kind"]),
         criterion=item.get("criterion"),
@@ -384,7 +371,7 @@ def label_bases(references: Sequence[Mapping[str, Any]]) -> dict[str, str]:
 
 
 def locate_findings(
-    findings: Sequence[tuple[str, DeepReviewFinding]],
+    findings: Sequence[DeepReviewFinding],
     outputs: Mapping[str, str],
     *,
     source_basis_ids: Mapping[str, set[str]],
@@ -396,13 +383,12 @@ def locate_findings(
 ) -> tuple[list[dict[str, Any]], list[FindingResult]]:
     """Resolve every finding against the same unmodified output snapshot.
 
-    *findings* are ``(origin, finding)`` in verdict order, the model's first
-    and the server's last; ids are ``finding_{n}`` over that list, so an id
-    never shifts when an earlier finding is named. The first failing check
-    names a finding, in this order: target or wording invalid; a basis
-    outside the output's bases, or missing for the kind (a source for
-    ``evidence_error`` and ``missing_information``, a diagnostic for
-    ``run_diagnostic``); a source basis without an unambiguous label in the
+    *findings* are in verdict order; ids are ``finding_{n}`` over that list,
+    so an id never shifts when an earlier finding is named. The first
+    failing check names a finding, in this order: target or wording
+    invalid; a basis outside the output's bases, or missing for the kind (a
+    source for ``evidence_error`` and ``missing_information``, a diagnostic
+    for ``run_diagnostic``); a source basis without an unambiguous label in the
     target output (:func:`basis_label`; a ``run_diagnostic`` cites none); an
     invalid ``remove_labels`` entry; a missing or ambiguous anchor; an
     anchor that overlaps a finding located before it in the same output.
@@ -438,7 +424,7 @@ def locate_findings(
     located: list[dict[str, Any]] = []
     named: list[FindingResult] = []
     claimed: list[tuple[str, int, int]] = []
-    for index, (origin, finding) in enumerate(findings, start=1):
+    for index, finding in enumerate(findings, start=1):
         finding_id = f"finding_{index}"
         target = finding.artifact_id if finding.target == "artifact" else "chat"
         raw = finding.criterion_index
@@ -467,7 +453,6 @@ def locate_findings(
             **finding.model_dump(),
             "quote": passage,
             "finding_id": finding_id,
-            "origin": origin,
             "output_id": target,
             "start": start,
             "end": end,

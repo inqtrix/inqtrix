@@ -17,6 +17,15 @@ export type ChatModelTier = 'high' | 'mid' | 'fast'
  * and this module imports nothing. */
 export type ModelTierPreference = '' | ChatModelTier
 
+/** The report profile last picked in the research composer, where `''` means
+ * no pick yet and the composer starts on its default. Lives here for the same
+ * reason as {@link ModelTierPreference}. */
+export type LastResearchProfile = '' | NonNullable<AgentOverrides['reportProfile']>
+
+/** The Stufe last picked in the Agent Desk composer, where `''` means no pick
+ * yet and the composer starts on the published default. */
+export type LastAgentTier = '' | AgentTierId
+
 export type ChatModelOption = NodeModelResolution & {
   tier: ChatModelTier | string
 }
@@ -298,12 +307,6 @@ export type AgentToolManifestEntry = {
  * enforced) — the composer's run overview renders this verbatim and
  * never re-derives gating semantics client-side. */
 export type AgentPermissionModeEntry = {
-  /** The initial plan parks for approval. */
-  plan_gate: boolean
-  /** A replan that adds web queries parks again for renewed consent. */
-  web_replan_regate: boolean
-  /** Editor patches always park — invariant across modes. */
-  patch_gate: boolean
   /** Kernel tools that unconditionally gate in this mode. */
   kernel_gated_tools: string[]
   /** Kernel tools that gate conditionally (e.g. only UN-scoped search). */
@@ -401,10 +404,9 @@ export type InqtrixCapabilities = {
   agent?: {
     autonomy_modes: string[]
     default_autonomy: string
-    /** The effective desk algorithm: `workspace_agent`
-     * (phase machine) or `agent_kernel`; absent on older servers ->
-     * workspace_agent. */
-    default_mode?: string
+    /** The desk's mode: `agent_kernel` once the kernel registered, `null`
+     * when it did not (the reason is `feature_status.agent_kernel`). */
+    default_mode?: string | null
     /** Two-mode UI presets: the composer
      * shows Standard/Auto mapped onto the unchanged wire vocabulary.
      * Absent on older servers -> legacy three-way control. */
@@ -419,15 +421,11 @@ export type InqtrixCapabilities = {
     default_tier?: AgentTierId
     /** True republishes the legacy three-way control (incl. strict). */
     advanced_autonomy?: boolean
-    max_parallel_children: number
-    discovery_max_tool_calls: number
-    max_plan_tasks: number
     /** Result requirement limits: published == enforced, so the
-     * composer and the plan gate render the server's own numbers instead
-     * of a second copy that can drift out of agreement with it. Absent
-     * on older servers -> the shared fallback constants. */
+     * composer renders the server's own numbers instead of a second copy
+     * that can drift out of agreement with it. Absent on older servers ->
+     * no pre-check, and the composer says so. */
     report_requirement?: {
-      max_chars: number
       /** Counts DISTINCT rules. */
       max_rules: number
       /** Ceiling of the composed requirement, checked before the submit
@@ -481,16 +479,6 @@ export type AgentLimitCapabilities = {
     steps: number
     steps_ceiling: number
   }>
-  mission: {
-    discovery_tool_calls: number
-    plan_tasks: number
-    replan_rounds: number
-    clarification_rounds: number
-    parallel_children: number
-  }
-  research: {
-    rounds: number
-  }
 }
 
 export type KnowledgeCollectionInfo = {
@@ -522,14 +510,7 @@ export type AgentTierId = 'schnell' | 'gruendlich' | 'tief'
 export type AgentTierCapability = {
   id: AgentTierId
   clarification_rounds: number
-  plan_gate: 'per_autonomy' | 'skip_unless_strict'
-  web_research: boolean
-  web_child_profile: string | null
-  web_child_ceiling: string | null
-  mission: boolean
-  rag_default_profile: string
   verify: string
-  response_form: 'auto' | 'chat' | 'canvas'
 }
 
 export type AgentOverrides = {
@@ -562,8 +543,8 @@ export type CreateResearchRunRequest = {
   agentOverrides?: AgentOverrides
   /** Retrieval scope + profile; only meaningful with `mode: 'knowledge'`. */
   knowledgeFilters?: KnowledgeChatFilters
-  /** Approval policy for `mode: 'workspace_agent'` (server default when
-   * omitted; vocabulary from `capabilities.agent.autonomy_modes`). */
+  /** Approval policy of an agent run (server default when omitted;
+   * vocabulary from `capabilities.agent.autonomy_modes`). */
   autonomy?: string
   /** Saved Agent or Knowledge session that owns this run. */
   sessionId?: string
@@ -577,9 +558,9 @@ export type CreateResearchRunRequest = {
   /** Target editor document for a patch assignment; the agent
    * proposes always-gated edits against it instead of only a memo. */
   documentId?: string
-  /** Output-form override for `mode: 'workspace_agent'`:
-   * `chat` forces the inline answer, `canvas` the memo; `auto` (or
-   * omitted) lets the agent's intake decide. */
+  /** Output-form override of an agent run: `chat` forces the inline
+   * answer, `canvas` a canvas document; `auto` (or omitted) leaves it to
+   * the agent and the tier's default. */
   responseForm?: 'auto' | 'chat' | 'canvas'
   /** Explicitly attached skill chips; the server
    * admits them (visibility + count cap). Agent modes only. */
@@ -637,7 +618,8 @@ export type ResearchRunSnapshot = {
   done?: boolean
   progress_estimate?: number
   last_message?: string
-  /** A delegated MISSION reports its phase here; research runs do not. */
+  /** A delegated kernel run reports its phase here (a stored run's
+   * delegated mission did, too); research runs do not. */
   phase?: string
   /** The section a research run's writer is on, counted in write order
    * (k of n); present only while it writes. */
@@ -666,6 +648,9 @@ export type ResearchRunSnapshot = {
      * research reports its own (`executed_queries`). Absent on older
      * servers. */
     web_searches?: number
+    /** Searches of the knowledge base the run executed itself; null for a
+     * mission, which records none. Absent on older servers. */
+    knowledge_searches?: number | null
     limits?: Record<string, {
       used?: number | null
       limit: number
@@ -720,7 +705,6 @@ export type ResearchRunSummary = {
   snapshot: ResearchRunSnapshot
   error: InqtrixError | null
   events_url: string
-  result_url: string
   access: ResearchRunAccess
   /** Emitted only as `true` while a cancel of a still-running run is
    * pending (the status stays `running` until the worker stops). */
@@ -730,9 +714,6 @@ export type ResearchRunSummary = {
   parent_run_id?: string
   root_run_id?: string
   session_id?: string
-  children_url?: string
-  plan_url?: string
-  artifacts_url?: string
 }
 
 export type ResearchRunEvent = {
@@ -790,7 +771,7 @@ export type ReportReference = {
   revision_id?: string | null
   generation_id?: string | null
   provenance_status?: string | null
-  /** Statements the research ties to this source: status, and whether this source's own text was checked. Absent on older payloads. */
+  /** Statements the research ties to this source: status, and whether the search provider's excerpt of this source was checked. Absent on older payloads. */
   statements?: Array<{ text: string; status: string; checked: boolean }>
 }
 
@@ -816,17 +797,34 @@ export type ClaimMetrics = {
   quality_score: number
 }
 
+/** The research result's metrics. The optional fields explain the evidence
+ * contract; a result stored before the server recorded them lacks them, and
+ * a reader then shows that they were not recorded instead of a guess. */
 export type ResearchMetrics = {
   answer_bound_claims_count: number
   aspect_coverage: number
+  /** References flagged as cited. */
+  cited_reference_count?: number
   claims: ClaimMetrics
   completion_tokens: number
   confidence: number
+  /** The ceiling the evidence contract put on `confidence` (3, 4 or 6), or null. */
+  confidence_cap?: number | null
+  /** Why the ceiling applied, as server reason codes (`no_cross_checked_claims`, ...). */
+  confidence_cap_reasons?: string[]
   elapsed_seconds: number
+  /** `provider_context`, `evidence`, `none`, or `unknown` for a result stored before the field. */
+  evidence_basis?: string
   evidence_consistency: number
+  /** What holds the contract at `needs_review` (`unknown_citation`, ...). */
+  evidence_contract_causes?: string[]
   evidence_contract_status: string
+  /** Why the evidence-depth gap was active. */
+  evidence_depth_gap_reasons?: string[]
   evidence_sufficiency: number
   prompt_tokens: number
+  /** Cited references that carry only what the search provider returned. */
+  provider_only_reference_count?: number
   rounds: number
   sources: SourceMetrics
   total_citations: number

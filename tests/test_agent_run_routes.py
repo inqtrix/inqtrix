@@ -1,4 +1,4 @@
-"""HTTP tests for the agent control routes (/v1/runs/{id}/plan|approvals|
+"""HTTP tests for the agent control routes (/v1/runs/{id}/approvals|
 clarifications|artifacts) and the agent-sessions clone.
 
 Uses the oidc-header sharing harness from ``tests/test_runs_sharing.py``:
@@ -11,17 +11,14 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import Any, Callable
+from typing import Callable
 
 import pytest
 
 from inqtrix.agents.control_ports import (
     ApprovalRecord,
     ClarificationRecord,
-    PlanRecord,
-    PlanTaskRecord,
 )
-from inqtrix.agents.scheduler import TaskOutcome, task_result_payload
 from inqtrix.services.agent_sessions_service import AgentSessionsService
 from tests.test_runs_sharing import (
     OWNER,
@@ -81,231 +78,27 @@ def _parked_agent_run(client, *, sub: str = OWNER) -> str:
     return run_id
 
 
-def _create_approval(client, run_id: str) -> str:
+def _create_approval(client, run_id: str, *, kind: str = "tool") -> str:
+    """A pending approval of *kind*; by default the kernel's tool gate with
+    the one action it asks about."""
+    actions = [
+        {
+            "tool": "web_instant",
+            "args": {"query": "EU AI Act Fristen"},
+            "summary": "Websuche",
+        }
+    ]
     approval = asyncio.run(
         client.agent_control.store.create_approval(
             ApprovalRecord(
                 approval_id=f"apr_{uuid.uuid4().hex[:8]}",
                 run_id=run_id,
-                kind="plan",
+                kind=kind,
+                payload={"actions": actions} if kind == "tool" else {},
             )
         )
     )
     return approval.approval_id
-
-
-def _plan_body() -> dict[str, Any]:
-    return {
-        "summary_markdown": "Ueberarbeiteter Plan",
-        "tasks": [
-            {
-                "id": "t1",
-                "title": "Interne Suche",
-                "tool_kind": "rag_query",
-                "queries": ["Welche internen Berichte sind relevant?"],
-            },
-            {
-                "id": "s",
-                "title": "Synthese",
-                "tool_kind": "synthesis",
-                "depends_on": ["t1"],
-            },
-        ],
-    }
-
-
-def test_plan_route_serves_versions_and_404s(monkeypatch):
-    client = make_sharing_client(monkeypatch)
-    with client:
-        run_id = _parked_agent_run(client)
-
-        empty = client.get(
-            f"/v1/runs/{run_id}/plan", headers={SUB_HEADER: OWNER}
-        )
-        assert empty.status_code == 404
-        assert empty.json()["error"]["message"] == "No plan available yet"
-
-        approval_id = _create_approval(client, run_id)
-        decided = client.post(
-            f"/v1/runs/{run_id}/approvals/{approval_id}",
-            json={"decision": "edit", "plan": _plan_body()},
-            headers={SUB_HEADER: OWNER},
-        )
-        assert decided.status_code == 200
-        assert decided.json()["status"] == "edited"
-        assert decided.json()["run"]["status"] in {
-            "queued",
-            "running",
-            "completed",
-        }
-
-        plan = client.get(
-            f"/v1/runs/{run_id}/plan", headers={SUB_HEADER: OWNER}
-        ).json()
-        assert plan["version"] == 1
-        assert plan["created_by"] == "user"
-        assert [task["task_id"] for task in plan["tasks"]] == ["t1", "s"]
-        assert len(plan["versions"]) == 1
-
-        bad_version = client.get(
-            f"/v1/runs/{run_id}/plan?version=abc",
-            headers={SUB_HEADER: OWNER},
-        )
-        assert bad_version.status_code == 400
-        missing_version = client.get(
-            f"/v1/runs/{run_id}/plan?version=9",
-            headers={SUB_HEADER: OWNER},
-        )
-        assert missing_version.status_code == 404
-
-        stranger = client.get(
-            f"/v1/runs/{run_id}/plan", headers={SUB_HEADER: STRANGER}
-        )
-        assert stranger.status_code == 404
-
-
-def test_task_result_route_loads_complete_markdown_lazily(monkeypatch):
-    client = make_sharing_client(monkeypatch)
-    with client:
-        run_id = _parked_agent_run(client)
-        store = client.agent_control.store
-        plan = PlanRecord(
-            plan_id="plan-full-result",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        )
-        task = PlanTaskRecord(
-            task_id="task-full-result",
-            plan_id=plan.plan_id,
-            run_id=run_id,
-            ordinal=0,
-            title="Complete result",
-            tool_kind="web_instant",
-        )
-        asyncio.run(store.save_plan(run_id=run_id, plan=plan, tasks=[task]))
-        asyncio.run(
-            store.transition_plan_task(
-                run_id=run_id,
-                plan_id=plan.plan_id,
-                task_id=task.task_id,
-                status="running",
-            )
-        )
-        complete_markdown = "# Full result\n\n" + "evidence " * 500
-        outcome = TaskOutcome(
-            status="completed",
-            summary="Compact overview.",
-            answer_markdown=complete_markdown,
-            evidence=[
-                {
-                    "label": "W1",
-                    "url": "https://example.test/report",
-                    "title": "Report",
-                    "grounded_support": "Supported statement.",
-                }
-            ],
-        )
-        asyncio.run(
-            store.transition_plan_task(
-                run_id=run_id,
-                plan_id=plan.plan_id,
-                task_id=task.task_id,
-                status="completed",
-                result_summary=outcome.summary,
-                result_payload=task_result_payload(
-                    outcome, persisted_summary=outcome.summary
-                ),
-            )
-        )
-
-        overview = client.get(
-            f"/v1/runs/{run_id}/plan", headers={SUB_HEADER: OWNER}
-        ).json()
-        assert "answer_markdown" not in overview["tasks"][0]
-
-        response = client.get(
-            f"/v1/runs/{run_id}/tasks/{task.task_id}/result",
-            headers={SUB_HEADER: OWNER},
-        )
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["answer_markdown"] == complete_markdown
-        assert payload["result_summary"] == "Compact overview."
-        assert payload["references"][0]["grounded_support"] == (
-            "Supported statement."
-        )
-        assert payload["legacy_summary_only"] is False
-
-        stranger = client.get(
-            f"/v1/runs/{run_id}/tasks/{task.task_id}/result",
-            headers={SUB_HEADER: STRANGER},
-        )
-        assert stranger.status_code == 404
-
-
-def test_task_cancel_route_preserves_run_and_is_idempotent(monkeypatch):
-    client = make_sharing_client(monkeypatch)
-    with client:
-        run_id = _parked_agent_run(client)
-        store = client.agent_control.store
-        plan = PlanRecord(
-            plan_id="plan-task-cancel-route",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        )
-        tasks = [
-            PlanTaskRecord(
-                task_id="pending",
-                plan_id=plan.plan_id,
-                run_id=run_id,
-                ordinal=0,
-                title="Pending search",
-                tool_kind="web_instant",
-            ),
-            PlanTaskRecord(
-                task_id="s",
-                plan_id=plan.plan_id,
-                run_id=run_id,
-                ordinal=1,
-                title="Synthesis",
-                tool_kind="synthesis",
-                depends_on=("pending",),
-            ),
-        ]
-        asyncio.run(store.save_plan(run_id=run_id, plan=plan, tasks=tasks))
-
-        cancelled = client.post(
-            f"/v1/runs/{run_id}/tasks/pending/cancel",
-            headers={SUB_HEADER: OWNER},
-        )
-        assert cancelled.status_code == 200
-        assert cancelled.json()["status"] == "cancelled"
-        replay = client.post(
-            f"/v1/runs/{run_id}/tasks/pending/cancel",
-            headers={SUB_HEADER: OWNER},
-        )
-        assert replay.status_code == 200
-        assert replay.json() == cancelled.json()
-        assert client.get(
-            f"/v1/runs/{run_id}", headers={SUB_HEADER: OWNER}
-        ).json()["status"] == "waiting_for_approval"
-
-        synthesis = client.post(
-            f"/v1/runs/{run_id}/tasks/s/cancel",
-            headers={SUB_HEADER: OWNER},
-        )
-        assert synthesis.status_code == 409
-        assert synthesis.json()["error"]["type"] == "task_cancel_conflict"
-
-        stranger = client.post(
-            f"/v1/runs/{run_id}/tasks/pending/cancel",
-            headers={SUB_HEADER: STRANGER},
-        )
-        assert stranger.status_code == 404
 
 
 def test_approval_decide_gates_on_edit_share(monkeypatch):
@@ -330,6 +123,15 @@ def test_approval_decide_gates_on_edit_share(monkeypatch):
             headers={SUB_HEADER: RECIPIENT},
         )
         assert denied.status_code == 404
+        # The route denies before it reads the body: a malformed decision
+        # from a view share is the same 404, never the 400 that would tell
+        # the viewer a decision was possible.
+        malformed = client.post(
+            f"/v1/runs/{run_id}/approvals/{approval_id}",
+            json={},
+            headers={SUB_HEADER: RECIPIENT},
+        )
+        assert malformed.status_code == 404
         still_pending = client.get(
             f"/v1/runs/{run_id}/approvals", headers={SUB_HEADER: OWNER}
         ).json()["data"][0]
@@ -390,6 +192,45 @@ def test_approval_decide_allowed_with_edit_share(monkeypatch):
         )
         assert decided.status_code == 200
         assert decided.json()["status"] == "approved"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("plan", {"summary_markdown": "Plan", "tasks": []}),
+        ("edited_tasks", []),
+        ("report_guidance", "Bitte knapp."),
+        ("report_guidance", None),
+        ("report_rule_ids", ["pt_knapp"]),
+    ],
+)
+def test_approval_decide_refuses_a_field_of_the_retired_plan_gate_by_name(
+    monkeypatch, field, value
+):
+    """A field only the mission's plan gate read is refused, never ignored:
+    the client learns that it has no effect, and nothing is decided."""
+    client = make_sharing_client(monkeypatch)
+    with client:
+        run_id = _parked_agent_run(client)
+        approval_id = _create_approval(client, run_id)
+
+        refused = client.post(
+            f"/v1/runs/{run_id}/approvals/{approval_id}",
+            json={"decision": "approve", field: value},
+            headers={SUB_HEADER: OWNER},
+        )
+        still_pending = client.get(
+            f"/v1/runs/{run_id}/approvals", headers={SUB_HEADER: OWNER}
+        ).json()["data"][0]
+
+    assert refused.status_code == 400, refused.text
+    error = refused.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["message"] == (
+        f"{field} is not part of an approval decision; send decision, note, "
+        "actions or approval_scope."
+    )
+    assert still_pending["status"] == "pending"
 
 
 def test_clarification_route_answers_and_validates(monkeypatch):
@@ -559,6 +400,42 @@ def test_artifact_routes_serve_conflict_matrix_and_export(monkeypatch):
             headers={SUB_HEADER: OWNER},
         )
         assert bad_target.status_code == 400
+
+
+def test_artifact_export_body_may_be_left_out_but_must_be_an_object(monkeypatch):
+    """Every export field is optional: no body exports, a broken one is refused."""
+    client = make_sharing_client(monkeypatch)
+    with client:
+        run_id = _parked_agent_run(client)
+        asyncio.run(client.agent_control.store.upsert_artifact(
+            run_id=run_id,
+            kind="memo",
+            session_id="sess-1",
+            title="Memo",
+            status="ready",
+            content_markdown="# V1",
+            payload={},
+            refs=[],
+            updated_by="agent",
+            artifact_id="art_memo",
+        ))
+        path = f"/v1/runs/{run_id}/artifacts/art_memo/export"
+        json_headers = {SUB_HEADER: OWNER, "Content-Type": "application/json"}
+
+        without_body = client.post(path, headers={SUB_HEADER: OWNER})
+        not_an_object = client.post(path, content=b"[]", headers=json_headers)
+        malformed = client.post(path, content=b"{not json", headers=json_headers)
+
+    assert without_body.status_code == 201, without_body.text
+    assert without_body.json()["source_run_id"] == run_id
+    for refused in (not_an_object, malformed):
+        assert refused.status_code == 400, refused.text
+        assert refused.json() == {
+            "error": {
+                "message": "Invalid JSON body",
+                "type": "invalid_request_error",
+            }
+        }
 
 
 def test_session_artifacts_listing_is_anchor_independent(monkeypatch):

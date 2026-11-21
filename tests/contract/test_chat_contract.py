@@ -193,6 +193,39 @@ def test_streaming_without_progress_skips_progress_and_separator(monkeypatch):
     assert not any(content.startswith("> `") for content in contents)
 
 
+def test_streamed_chat_without_search_shows_no_run_markers():
+    """A real chat without web search marks its start and its end for
+    programs; the stream shows only steps for a reader and the answer."""
+    from fastapi.testclient import TestClient
+
+    from inqtrix.providers.base import ProviderContext
+    from inqtrix.server.app import create_app
+    from inqtrix.settings import ModelSettings, Settings, StorageSettings
+    from tests._fake_providers import FakeLLM
+    from tests.contract._app import StubSearch
+
+    settings = Settings(
+        models=ModelSettings(),
+        agent=AgentSettings(skip_search=True),
+        server=ServerSettings(),
+        storage=StorageSettings(backend="memory", database_url=""),
+    )
+    providers = ProviderContext(llm=FakeLLM(answer_override="Direkte Antwort."), search=StubSearch())
+    with TestClient(create_app(settings=settings, providers=providers)) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "Was ist ein Satz?"}], "stream": True},
+        ) as response:
+            assert response.status_code == 200
+            body = response.read().decode("utf-8")
+
+    chunks = [json.loads(data) for _, data in parse_sse_frames(body) if data != "[DONE]"]
+    contents = [chunk["choices"][0]["delta"].get("content", "") for chunk in chunks]
+    assert "".join(contents).endswith("Direkte Antwort.")
+    assert not [content for content in contents if "chat_only" in content]
+
+
 # ------------------------------------------------------------------ #
 # Error envelopes
 # ------------------------------------------------------------------ #

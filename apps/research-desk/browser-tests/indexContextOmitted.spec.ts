@@ -107,9 +107,10 @@ async function serve(page: Page, server: Server) {
 }
 
 test('an indexed document names its chunks without context after a reload', async ({ page }) => {
-  // The page loads with a and b indexed; the server recorded three chunks of
-  // a without context. The row says so, b's row stays plain, and the view
-  // lists the collection once.
+  // The page loads with a and b indexed and c still pending; the server
+  // recorded three chunks of a without context. The workspace reads the
+  // collection once when it loads, to settle the pending member, and the view
+  // reads it once more when it opens. The row says so, b's row stays plain.
   const server: Server = {
     documents: {
       kc_fix: () => [
@@ -122,19 +123,22 @@ test('an indexed document names its chunks without context after a reload', asyn
   }
   await serve(page, server)
   await page.goto(`${fixturePath}?embedded=file-a,file-b`)
+  await expect.poll(() => server.listings.length).toBe(1)
   await page.getByRole('button', { name: 'Verträge 3' }).click()
 
   await expect(page.getByText('3 without context')).toBeVisible()
   await expect(page.getByText('without context')).toHaveCount(1)
   await page.getByText('3 without context').hover()
   await expect(page.getByRole('tooltip')).toContainText('content filter')
-  expect(server.listings).toEqual(['kc_fix'])
+  // The check on load and the opening of the view; never one per render.
+  expect(server.listings).toEqual(['kc_fix', 'kc_fix'])
 })
 
 test('a run that leaves chunks without context names them when it ends', async ({ page }) => {
   // c is indexed in this run and the server records two chunks without
-  // context. The view lists the collection when it opens and again when the
-  // run ends, never in between; c's row then names the count.
+  // context. The workspace reads the collection once when it loads, because
+  // the index has pending members; the view lists it when it opens and again
+  // when the run ends, never in between; c's row then names the count.
   const server: Server = {
     documents: {
       kc_fix: () => (
@@ -152,16 +156,17 @@ test('a run that leaves chunks without context names them when it ends', async (
   }
   await serve(page, server)
   await page.goto(fixturePath)
-  await page.getByRole('button', { name: 'Verträge 3' }).click()
   await expect.poll(() => server.listings.length).toBe(1)
+  await page.getByRole('button', { name: 'Verträge 3' }).click()
+  await expect.poll(() => server.listings.length).toBe(2)
 
   await page.getByRole('button', { exact: true, name: 'Index 3' }).click()
 
   await expect(page.getByText('2 without context')).toBeVisible()
   await expect(page.getByText('without context')).toHaveCount(1)
-  // Opening the view, the run's own check for documents already on the
-  // server, and the end of the run.
-  expect(server.listings).toEqual(['kc_fix', 'kc_fix', 'kc_fix'])
+  // The check on load, opening the view, the run's own check for documents
+  // already on the server, and the end of the run.
+  expect(server.listings).toEqual(['kc_fix', 'kc_fix', 'kc_fix', 'kc_fix'])
 })
 
 test('a shared collection names the chunks a document holds without context', async ({ page }) => {

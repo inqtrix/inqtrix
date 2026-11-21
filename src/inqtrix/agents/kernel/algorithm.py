@@ -1,11 +1,10 @@
 """The cognitive kernel algorithm.
 
-``mode=agent_kernel`` is a SECOND registered ``AgentAlgorithm`` next to
-the deterministic phase machine: an LLM tool-calling loop
-on LangChain's agent loop, executed strictly through the platform seams — same
-RunService -> queue -> worker path, park/resume against control rows,
-sync ``graph.stream`` only, shared checkpointer with
-``thread_id=run_id``.
+``mode=agent_kernel`` is the registered agent ``AgentAlgorithm``: an LLM
+tool-calling loop on LangChain's agent loop, executed strictly through the
+platform seams — same RunService -> queue -> worker path, park/resume
+against control rows, sync ``graph.stream`` only, the agent checkpointer
+with ``thread_id=run_id``.
 
 Tool surface: the ``ask_user`` tool with a full park/resume round trip,
 read tools, policy gates (compiled ``interrupt_on`` variants), canvas
@@ -40,6 +39,12 @@ from inqtrix.agents.kernel.chat_bridge import (
     REJECTED_TOOL_ARGUMENTS_FLAG,
     build_tool_chat_model,
     counted_usage_of_message,
+)
+from inqtrix.agents.document_table import (
+    ANALYSIS_TOOL_NAME,
+    analysed_documents,
+    records_of,
+    windows_granted,
 )
 from inqtrix.agents.context_sources import (
     SourceCoverageLedger,
@@ -81,7 +86,6 @@ from inqtrix.agents.kernel.tools import (
     kernel_child_scope,
 )
 from inqtrix.agents.kernel.work_profiles import (
-    RELEASED_SOURCE_KINDS,
     REVIEW_NODE,
     WORK_RESULT_BUDGET_EXHAUSTED,
     WORK_RESULT_COMPLETED,
@@ -104,6 +108,7 @@ from inqtrix.agents.limit_contract import (
     disproportionate_budget,
     effective_extended_limit,
     effective_tool_grants,
+    knowledge_batch_granted,
     latest_terminal_limit_choice,
     next_extended_limit,
 )
@@ -136,11 +141,17 @@ from inqtrix.i18n import detect_ui_language, t, t_count
 from inqtrix.model_routing import (
     describe_resolution,
     describe_unresolved_resolution,
+    prose_verbosity,
 )
 from inqtrix.observability.context import bind_purpose, current_purpose
 from inqtrix.providers.attempts import observe_retries
-from inqtrix.providers.base import provider_attempt_timeout, provider_cancel_scope
+from inqtrix.providers.base import (
+    provider_attempt_timeout,
+    provider_cancel_scope,
+    verbosity_kwargs,
+)
 from inqtrix.urls import normalize_url, scrub_credential_urls
+from inqtrix.untrusted_content import neutralize_fence_delimiters
 from inqtrix.harness.contracts.events import (
     ACTIVITY_EVENT,
     ANSWER_DRAFT_EVENT,
@@ -170,7 +181,7 @@ log = logging.getLogger(__name__)
 
 #: Tools whose approval card names the run's knowledge boundary.
 _KNOWLEDGE_SCOPED_TOOLS = frozenset(
-    {"search_project_knowledge", "read_project_document"}
+    {"search_project_knowledge", "read_project_document", "analyze_document"}
 )
 
 
@@ -182,10 +193,18 @@ def _knowledge_scope_names(
 
     Returns ``None`` when the gate has nothing to do with knowledge,
     or when the catalog cannot be read — an unreadable catalog omits
-    the line rather than inventing a name.
+    the line rather than inventing a name. A batch of subtasks with a
+    knowledge assignment is a knowledge gate: its children search the
+    same boundary.
     """
+    from inqtrix.agents.source_policy import BATCH_TOOL_NAME, batch_reaches_knowledge
+
     if not any(
         action.get("tool") in _KNOWLEDGE_SCOPED_TOOLS
+        or (
+            action.get("tool") == BATCH_TOOL_NAME
+            and batch_reaches_knowledge(action.get("args"))
+        )
         for action in actions
     ):
         return None
@@ -272,8 +291,8 @@ def _args_preview(args: dict[str, Any]) -> str:
     it has to survive the length cap AS PROSE. Serialising first and
     clipping afterwards produced a truncated JSON dump — unreadable for
     the reader, and unparseable for the surface, which then rendered the
-    rubble verbatim. Only ``web_instant`` escaped it, because it alone
-    takes a single argument named ``query``.
+    rubble verbatim. Only a call whose one argument was a short ``query``
+    escaped it, as ``web_instant`` then made it.
 
     So the intent argument is chosen BEFORE the cut: the clip lands on a
     sentence, never on a serialization. A call without such an argument
@@ -506,7 +525,7 @@ class _DepsChatProvider:
             # the review stays findable (and billed) as the review it is.
             else deps.work_profile.routing_node
             if deps.work_profile is not None
-            else "agent_kernel"
+            else _KERNEL_NODE
         )
         with observe_retries(
             "model",
@@ -520,6 +539,12 @@ class _DepsChatProvider:
                 model=deps.model,
                 reasoning_effort=deps.reasoning_effort,
                 timeout=provider_attempt_timeout(deps.timeout),
+                # A turn of the agent itself is prose for a reader; a role and
+                # a compaction summary run under their own purpose and ask
+                # for nothing.
+                **verbosity_kwargs(
+                    deps.llm, prose_verbosity(purpose, deps.model), model=deps.model
+                ),
                 **kwargs,
             )
 
@@ -560,14 +585,13 @@ def _kernel_review_report(
 ) -> dict[str, Any]:
     """This segment's review in the review-report shape the record reads.
 
-    The mission's shape (``critic`` beside ``last_review``), built by the
-    same :func:`~inqtrix.agents.kernel.review_pass.report_facts`, so both
-    engines count their open points alike; a kernel run reviews once and
-    has no research limits and no prospect. A located finding no revision
-    decided is named by the exit that stopped it: ``cancelled`` when a
-    cancel did (*by_cancel*), ``revision_error`` when an error did. The
-    statements are counted on the texts the segment delivers
-    (``facts["outputs"]``).
+    The shape :func:`~inqtrix.agents.run_outcome.build_outcome` reads
+    (``critic`` beside ``last_review``), built by
+    :func:`~inqtrix.agents.kernel.review_pass.report_facts`; a kernel run
+    reviews once. A located finding no revision decided is named by the exit
+    that stopped it: ``cancelled`` when a cancel did (*by_cancel*),
+    ``revision_error`` when an error did. The statements are counted on the texts the segment
+    delivers (``facts["outputs"]``).
     """
     assessment = facts.get("assessment")
     if assessment is None:
@@ -583,8 +607,6 @@ def _kernel_review_report(
     return {
         "critic": {
             "round": 1,
-            "research_limits": [],
-            "prospect_codes": [],
             **report_facts(
                 assessment,
                 results,
@@ -638,6 +660,13 @@ def _send_kernel_outcome(
     )
 
 
+def _catalog_text(text: str) -> str:
+    """*text* as one stretch of a skill's catalog line: every run of
+    whitespace, line breaks included, becomes one space, and no fence
+    delimiter survives."""
+    return neutralize_fence_delimiters(" ".join(text.split()))
+
+
 def _answer_language(deps: KernelDeps) -> str:
     """The language of the run's answer: the one its review narration and
     its outcome record speak."""
@@ -679,16 +708,16 @@ class KernelAgentAlgorithm:
             segment (the agent's tools see exactly what its OWNER
             sees); ``None`` keeps the historical unscoped view of the
             anonymous/static modes.
-        run_service: Child-run submission seam (research fan-out +
-            deep-mission delegation); ``None`` degrades the child tools
-            to a visible not-available result.
+        run_service: Child-run submission seam (research and knowledge
+            children, roles); ``None`` degrades the child tools to a
+            visible not-available result.
         resolver: Builds child ``ResolvedAgentContext``s; required
             together with *run_service*.
     """
 
     id = "agent_kernel"
     display_name = "Agent-Kernel"
-    contract_version = 3
+    contract_version = 7
 
     def __init__(
         self,
@@ -713,8 +742,8 @@ class KernelAgentAlgorithm:
         self._resolver = resolver
         self._skill_service = skill_service
         self._sources = source_service
-        # The SAME long-term memory service the mission engine uses:
-        # one memory stack, opt-in per user, never evidentiary.
+        # The platform's ONE long-term memory service: one memory stack,
+        # opt-in per user, never evidentiary.
         self._memory = agent_memory_service
         # One compiled graph per policy: interrupt_on is compile-time
         # and the policy is fixed per run.
@@ -817,9 +846,9 @@ class KernelAgentAlgorithm:
         deps.autonomy = autonomy
         deps.skill_service = self._skill_service
         deps.stack_name = getattr(context, "stack_name", "") or ""
-        # Long-term memory: the mission engine's service + opt-in
-        # semantics — resolved once per segment; a preference-read error
-        # degrades to False inside opt_in_enabled (never silently on).
+        # Long-term memory: the memory service + its opt-in semantics —
+        # resolved once per segment; a preference-read error degrades to
+        # False inside opt_in_enabled (never silently on).
         deps.memory = self._memory
         if self._memory is not None and context.principal is not None:
             deps.memory_opt_in = run_coro(
@@ -837,7 +866,6 @@ class KernelAgentAlgorithm:
         tier = getattr(context.agent_settings, "agent_tier", "") or ""
         research_policy = derive_web_research_policy(
             depth=depth,
-            admitted_directive="web_research" in request.tool_directives,
             tier=tier or None,
         )
         deps.tier = tier
@@ -861,6 +889,7 @@ class KernelAgentAlgorithm:
         )
         for record in skill_records:
             deps.activate_skill(record)
+        deps.attached_skills = tuple(skill_records)
         if autonomy == "autonomous" and (
             strictest_requires_plan(deps.skills) == "always"
         ):
@@ -920,6 +949,9 @@ class KernelAgentAlgorithm:
             if autonomy == "balanced"
             else frozenset()
         )
+        deps.knowledge_batch_granted = autonomy == "balanced" and knowledge_batch_granted(
+            self._control, run_id=run_id, run_async=run_coro
+        )
         graph = self._compiled_graph(
             autonomy,
             source_policy=deps.source_policy,
@@ -939,7 +971,9 @@ class KernelAgentAlgorithm:
         deps.prior_usage = _checkpointed_usage(existing)
         deps.tool_use_counts = _checkpointed_tool_use_counts(existing)
         deps.web_searches = _checkpointed_web_searches(existing)
+        deps.knowledge_searches = _checkpointed_knowledge_searches(existing)
         deps.source_coverage = _checkpointed_source_coverage(existing)
+        _hydrate_document_analyses(deps, existing)
         deps.tool_calls_used = _checkpointed_tool_call_count(
             existing, uncounted=result_calls
         )
@@ -1317,8 +1351,7 @@ class KernelAgentAlgorithm:
             # review state to be guessed from an absence, in the activity
             # and in the outcome record. A request without a Stufe skips
             # the review by its legacy depth rule: no Stufe waived it, so
-            # its record reads ``not_run`` (the mission records ``waived``
-            # under the same condition).
+            # its record reads ``not_run``.
             if deps.tier:
                 deps.review_facts = {"last_review": {"status": "waived", "round": 0}}
             deps.emit(
@@ -1372,7 +1405,7 @@ class KernelAgentAlgorithm:
         report_references = _result_references(
             answer,
             list(deps.evidence_refs.values()),
-            basis_fallback=deps.gathered_sources,
+            basis=deps.gathered_reference_ids,
         )
         return AgentResult(
             answer=answer,
@@ -1576,7 +1609,7 @@ class KernelAgentAlgorithm:
         references = _result_references(
             answer,
             list(deps.evidence_refs.values()),
-            basis_fallback=deps.gathered_sources,
+            basis=deps.gathered_reference_ids,
         )
         return AgentResult(
             answer=answer,
@@ -1641,10 +1674,12 @@ class KernelAgentAlgorithm:
             consent_reason=consent_reason,
             tool_use_counts=deps.tool_use_counts,
             web_searches=deps.web_searches,
+            knowledge_searches=deps.knowledge_searches,
             limits=limits,
             tool_grants=deps.tool_grants,
             source_coverage=deps.source_coverage.entries(),
             work_profile=request.work_profile,
+            document_analyses=analysed_documents(deps.document_analyses),
             **knowledge_boundary_payload(request.knowledge_filters),
         )
 
@@ -1746,10 +1781,9 @@ class KernelAgentAlgorithm:
     def _current_run_canvases(self, deps: KernelDeps) -> list[Any]:
         """Load every document this run's work produced or updated.
 
-        Its own canvases, plus the memo a delegated mission child wrote
-        into the session: that memo is the deliverable of a Tief run, so
-        the verification pass reviews and revises it instead of a second
-        copy the kernel would otherwise write.
+        Its own canvases, plus the memos it wrote or continued: a follow-up
+        in a session continues the session memo under this run, so the
+        verification pass reviews that memo instead of a second copy.
         """
         from inqtrix.pagination import decode_cursor
 
@@ -1774,17 +1808,10 @@ class KernelAgentAlgorithm:
 
         canvases: list[Any] = _list(deps.run_id, "deliverable")
         seen = {item.artifact_id for item in canvases}
-        child_runs = [
-            str(child.get("run_id") or "")
-            for child in deps.run_service.run_store.children(deps.run_id)
-            if child.get("mode") == "workspace_agent"
-            and child.get("status") == "completed"
-        ]
-        for run_id in (deps.run_id, *child_runs):
-            for memo in _list(run_id, "memo"):
-                if memo.artifact_id not in seen:
-                    canvases.append(memo)
-                    seen.add(memo.artifact_id)
+        for memo in _list(deps.run_id, "memo"):
+            if memo.artifact_id not in seen:
+                canvases.append(memo)
+                seen.add(memo.artifact_id)
         return canvases
 
     def _deep_verify(
@@ -1806,7 +1833,8 @@ class KernelAgentAlgorithm:
         from inqtrix.agents.kernel.evidence_read import (
             build_review_evidence,
             own_reading_outputs,
-            run_reading_diagnostics,
+            own_review_diagnostics,
+            review_released_sources,
         )
         from inqtrix.agents.report_quality import cited_references
         from inqtrix.core.results import HandoverOutput, ReleasedSource
@@ -1891,10 +1919,6 @@ class KernelAgentAlgorithm:
             ref for output_id, body in outputs.items()
             for ref in cited_references(body, allowed_references[output_id])
         ]
-        mission_run_ids = list(dict.fromkeys(
-            item.run_id for item in canvases if getattr(item, "run_id", None)
-        ))
-
         answer_language = resolve_answer_language(deps.question).code or ""
         source_titles = {
             document_id: title
@@ -1907,17 +1931,14 @@ class KernelAgentAlgorithm:
         })
         # What this run read itself: a server record the review may rely on
         # for what the run's own outputs claim to have read.
-        own_reading = run_reading_diagnostics(
-            deps.run_id, deps.source_coverage.entries(),
-            titles=source_titles, language=answer_language,
+        own_reading = own_review_diagnostics(
+            deps, titles=source_titles, language=answer_language,
         )
         own_reading_ids = {item["basis_id"] for item in own_reading}
 
         def evidence_for(references: list[dict[str, Any]]) -> dict[str, Any]:
             built = build_review_evidence(
-                deps, references,
-                mission_run_ids=mission_run_ids,
-                language=answer_language,
+                deps, references, language=answer_language,
             )
             built["run_diagnostics"] = [*built["run_diagnostics"], *own_reading]
             return built
@@ -1981,15 +2002,11 @@ class KernelAgentAlgorithm:
             # The coverage ledger counts characters and knows no titles, so
             # the title comes from the run's own evidence ledger — the one
             # place a document id and its title already meet.
+            # An analysed document counts as read: the server read it for
+            # the run.
             released_sources=tuple(
-                ReleasedSource(
-                    kind=entry["kind"],
-                    source_id=entry["source_id"],
-                    version=str(entry["version"] or ""),
-                    title=source_titles.get(entry["source_id"], ""),
-                )
-                for entry in deps.source_coverage.entries()
-                if entry["kind"] in RELEASED_SOURCE_KINDS and entry["read_units"] > 0
+                ReleasedSource(**source)
+                for source in review_released_sources(deps, titles=source_titles)
             ),
             user_text=deps.user_text(),
             evidence_run_id=deps.run_id,
@@ -2025,8 +2042,8 @@ class KernelAgentAlgorithm:
                 review.usage["prompt_tokens"], review.usage["completion_tokens"]
             )
         if review.verdict is None:
-            # What the outcome record reports; the mission's words for a
-            # review that was owed and produced no usable verdict.
+            # What the outcome record reports for a review that was owed
+            # and produced no usable verdict.
             deps.review_facts = {
                 "last_review": {"status": "unavailable", "round": 1, "reason": review.reason},
             }
@@ -2048,18 +2065,28 @@ class KernelAgentAlgorithm:
                 t(_review_words, f"kernel_review_{review.reason}"), final=True
             )
             return answer
-        from inqtrix.observability.trace_scores import record_deep_review_scores
+        from inqtrix.observability.trace_scores import (
+            record_deep_review_scores,
+            record_review_reading,
+        )
 
         record_deep_review_scores(review.verdict)
         assessment = assess_review(review, subject)
+        record_review_reading(assessment)
         located = assessment.located
         language = _review_words["language"] or ""
-        # A verdict that names nothing is no usable review, as for a
-        # mission; any other verdict is reported with the findings settled
-        # so far, and a located one the revision never decides is named by
-        # the exit that stopped it (``_kernel_review_report``).
+        # A verdict that names nothing is no usable review; any other
+        # verdict is reported with the findings settled so far, and a
+        # located one the revision never decides is named by the exit that
+        # stopped it (``_kernel_review_report``).
         deps.review_facts = (
-            {"last_review": {"status": "unavailable", "round": 1, "reason": "inconsistent"}}
+            {"last_review": {
+                "status": "unavailable", "round": 1, "reason": "inconsistent",
+                "unexplained": list(assessment.unexplained),
+                # The verdict was assessed: the record names the basis the
+                # server decided, as the trace does.
+                "basis": assessment.basis,
+            }}
             if assessment.status == "inconsistent"
             else {
                 "last_review": {"status": "completed", "round": 1},
@@ -2337,9 +2364,9 @@ class KernelAgentAlgorithm:
     ) -> list[Any]:
         """Load the router-admitted attached skills (loud, never partial).
 
-        Same trust model as the phase machine: the router admitted the
-        ids with the caller's grants, the segment executes what was
-        admitted (``get_admitted``). Loading is separate from
+        Trust model: the router admitted the ids with the caller's
+        grants, the segment executes what was admitted
+        (``get_admitted``). Loading is separate from
         activation so the skill model pins can inform the deps
         BEFORE the model resolution.
         """
@@ -2501,12 +2528,17 @@ class KernelAgentAlgorithm:
             used = 0
             dropped = 0
             for record in candidates:
+                # The user's own skill texts stay outside the fence as
+                # instructions, neutralized so none can open or
+                # close a fence, and folded so each skill is ONE line: a
+                # line break in a description would put free lines under
+                # the list. Labels in English (language policy).
                 line = (
-                    f"- /{record.label} ({record.id}): "
-                    f"{record.description or record.title}"
+                    f"- /{_catalog_text(record.label)} ({record.id}): "
+                    f"{_catalog_text(record.description or record.title)}"
                     + (
-                        f" — Wann: {record.when_to_use}"
-                        if record.when_to_use
+                        f" — When: {_catalog_text(record.when_to_use)}"
+                        if record.when_to_use.strip()
                         else ""
                     )
                 )
@@ -2665,8 +2697,7 @@ class KernelAgentAlgorithm:
 
         Context rides the user message because the compiled graph (and
         its system prompt) is shared across runs. An explicit
-        ``request.history`` (API callers) wins over the builder, same
-        precedence as the phase machine.
+        ``request.history`` (API callers) wins over the builder.
         """
         from inqtrix.agents.prompts import (
             build_canvas_context_section,
@@ -2679,7 +2710,10 @@ class KernelAgentAlgorithm:
         registry = deps.artifact_registry
         last_form = deps.last_response_form
         prior_evidence_count = deps.prior_evidence_count
-        from inqtrix.agents.skills_runtime import build_tool_directives_line
+        from inqtrix.agents.skills_runtime import (
+            build_tool_directives_line,
+            skill_output_form,
+        )
 
         answer_language = resolve_answer_language(deps.question)
         log.info(
@@ -2713,6 +2747,10 @@ class KernelAgentAlgorithm:
             attached_reports=list(request.attached_reports or ()),
             collection_catalog=deps.collection_catalog,
             context_sources_available=deps.context_sources_available,
+            # The attached skills, never the ones loaded mid-run: the review
+            # rebuilds this message after the loop and must judge against
+            # the rule the writer read.
+            skill_form=skill_output_form(deps.attached_skills),
         )
         return message
 
@@ -2741,6 +2779,7 @@ class KernelAgentAlgorithm:
                     deps.capability_context, "visible_to", None
                 ),
                 current_run_id=deps.run_id,
+                cite_questions=deps.context_sources_available,
             )
             if not history_block:
                 history_block = pack.history_block
@@ -2755,7 +2794,11 @@ class KernelAgentAlgorithm:
                 # instead of seeing it marked unsupported — and it need
                 # not search again for what the session already holds.
                 # Idempotent on resume: the merge is by reference id.
-                deps.register_references(list(pack.prior_references))
+                # Handed to the run, not gathered by it: an answer without
+                # a citation lists none of them as its sources.
+                deps.register_references(
+                    list(pack.prior_references), gathered=False
+                )
         deps.session_history = history_block
         deps.artifact_registry = registry
         deps.last_response_form = last_form
@@ -2765,12 +2808,10 @@ class KernelAgentAlgorithm:
     def _hydrate_collection_catalog(self, deps: KernelDeps) -> None:
         """List the run's knowledge collections for the model.
 
-        The kernel had no catalog at all: it searched blind, and its
-        tool docstring even promised a project-wide sweep that the run's
-        pinned boundary contradicts. The mission engine has listed its
-        collections since day one — this puts the kernel on the same
-        footing. Latched like the memory briefing: the deep-verify
-        rebuild calls the message builder a second time.
+        Without the catalog the model would search blind, against a
+        project-wide sweep the run's pinned boundary contradicts. Latched
+        like the memory briefing: the deep-verify rebuild calls the
+        message builder a second time.
 
         ``None`` when the catalog cannot be read, so the block is
         OMITTED rather than asserting an empty knowledge base.
@@ -2812,13 +2853,12 @@ class KernelAgentAlgorithm:
     def _recall_memory_briefing(
         self, request: "RunRequest", deps: KernelDeps
     ) -> None:
-        """Load the non-evidentiary memory briefing (mission parity).
+        """Load the non-evidentiary memory briefing.
 
-        Same gates as ``_load_memory_briefing`` in the mission engine:
-        service wired, principal present, per-user opt-in (privacy
+        Gates: service wired, principal present, per-user opt-in (privacy
         default OFF), provider available and eligible. Every outcome is
-        visible — ``deps.memory_status`` mirrors the mission vocabulary
-        and a recall failure narrates instead of silently disabling.
+        visible — ``deps.memory_status`` names it and a recall failure
+        narrates instead of silently disabling.
         """
         if deps.memory_recalled:
             # Once per segment: _hydrate_session_context runs again for
@@ -3323,7 +3363,7 @@ def _partial_limit_answer(
             [
                 t(words, "kernel_partial_documents_heading"),
                 "",
-                *(f"- {title}" for title in titles),
+                *(f"- {neutralize_fence_delimiters(title)}" for title in titles),
                 "",
             ]
         )
@@ -3349,7 +3389,7 @@ def _partial_limit_answer(
             labels_by_title.setdefault(title, []).append(label)
         for title, labels in labels_by_title.items():
             marks = " ".join(f"[{label}]" for label in labels)
-            lines.append(f"- {marks} {title}")
+            lines.append(f"- {marks} {neutralize_fence_delimiters(title)}")
         omitted = len(references) - 30
         if omitted > 0:
             lines.append(
@@ -3419,10 +3459,9 @@ def resolve_context_trigger_tokens(
 def _stage_kernel_memory(deps: KernelDeps, answer: str) -> None:
     """Stage candidate-only long-term memories after a successful run.
 
-    Mission parity (``_stage_memory_candidates``): candidates only —
-    nothing is written to memory without the user's later review. The
-    kernel's substrate is its final answer (it has no memo); the shared
-    ``run_memory_reflection`` + ``stage_candidates`` path is reused, so
+    Candidates only — nothing is written to memory without the user's
+    later review. The substrate is the run's final answer; the one
+    ``run_memory_reflection`` + ``stage_candidates`` path does the work, so
     there is exactly ONE reflection/staging implementation. Optional by
     contract: every failure logs and returns, it can never fail a run
     that already has its answer.
@@ -3464,8 +3503,6 @@ def _stage_kernel_memory(deps: KernelDeps, answer: str) -> None:
             deps.llm,
             question=deps.question,
             memo_markdown=answer,
-            critic_digest="",
-            task_digest="",
             model=model,
             reasoning_effort=effort,
             timeout=deps.timeout,
@@ -3475,8 +3512,8 @@ def _stage_kernel_memory(deps: KernelDeps, answer: str) -> None:
             "Kernel memory reflection failed (error_type=%s).",
             type(exc).__name__,
         )
-        # Mission parity: the failure is an EVENT, not just a log line
-        # (_stage_memory_candidates emits the same activity kind).
+        # The failure is an EVENT, not just a log line: the reader sees
+        # that no memory candidates were staged.
         _memory_words = {
             "language": resolve_answer_language(deps.question).code
         }
@@ -3541,23 +3578,25 @@ def _result_references(
     answer: str,
     ledger: list[dict[str, Any]],
     *,
-    basis_fallback: bool = True,
+    basis: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """References the final answer surfaces: cited-only when it cites.
 
     An answer that carries ``[K#]/[W#]`` labels lists EXACTLY the cited
-    subset (no read-everything reference dumps). An answer without
-    citation labels keeps the full trusted ledger — those sources were
-    the basis of the work, and an empty list would hide them (quick and
-    conversational answers rarely cite inline) — but ONLY when this run
-    gathered sources itself (``basis_fallback``, the kernel passes
-    ``deps.gathered_sources``). A run that merely read a document whose
-    references registered in the ledger, or only wrote a file, surfaces
-    no sources: a status-like answer with "21 Quellen" misattributes.
-    One helper for both the answer artifact and
-    ``result_state.report_references`` so the run result and the rendered
-    artifact can never disagree.  Any presence of unknown inline labels
-    disables the uncited-answer basis fallback: mixed answers retain only
+    subset (no read-everything reference dumps), whoever gathered it: a
+    follow-up may cite a source of the turn before it. An answer without
+    citation labels lists the basis of its work, and an empty list would
+    hide it (quick and conversational answers rarely cite inline): the
+    references this run's own source tools gathered (*basis*, the ledger
+    ids in ``KernelDeps.gathered_reference_ids``), in ledger order. The
+    ledger holds more than that: the references of earlier turns and of
+    documents the run read are registered so that their labels stay
+    citable. They are never listed for an uncited answer; a status-like
+    answer with "21 Quellen", or a follow-up that lists the sources of the
+    turn before it, misattributes. One helper for both the answer artifact
+    and ``result_state.report_references`` so the run result and the
+    rendered artifact can never disagree.  Any presence of unknown inline
+    labels disables the uncited-answer basis: mixed answers retain only
     their known cited subset, and unknown-only answers surface no falsely
     attributed references.
     """
@@ -3592,9 +3631,9 @@ def _result_references(
             for item in ledger
             if normalize_url(str(item.get("url") or "")) in linked_urls
         ]
-    if cited or not basis_fallback:
+    if cited:
         return cited
-    return [dict(item) for item in ledger]
+    return [dict(item) for item in ledger if KernelDeps.ledger_id(item) in basis]
 
 
 def _mark_unresolved_citation_labels(
@@ -3631,7 +3670,8 @@ def _validate_kernel_answer_citations(
 
     Canvas writes return a citation error to the bounded kernel loop, giving
     the model one chance to correct the tool call.  A tool-free final chat
-    answer has no next loop turn, so it uses the shared synthesis repair once.
+    answer has no next loop turn, so it uses the bounded citation repair of
+    ``report_quality.validate_and_repair_citations`` once.
     If that call fails or still invents labels, only the unsupported citation
     syntax is replaced with a visible ``unbelegt`` marker; valid labels and
     prose remain unchanged. Internal identifiers this answer INTRODUCED use
@@ -3814,10 +3854,10 @@ def _request_user_text(request: "RunRequest") -> str:
     the payload is rebuilt from storage for every attempt, while the
     context pack is built only where a segment composes a user message.
     The canvas comment carries the passage the user selected AND what they
-    wrote about it - both are their text, and an id may stand in either. On
-    a SHARED canvas the commenter may be a colleague rather than the run's
-    own user; the guard's question is whether a person wrote the id, not
-    which person, so a collaborator's comment counts like the user's own.
+    wrote about it - both are their text, and an id may stand in either. The
+    comments are the notes the submitting user queued in the composer and
+    sent with this request, so they are the run's own user's words also on
+    a canvas other people edit.
 
     ``history`` is a transcript of both voices and is projected to its user
     lines; everything else here is wholly user-written.
@@ -4141,7 +4181,7 @@ def _checkpointed_usage(snapshot: Any) -> dict[str, int]:
 
 
 def _reactivate_editor_read_receipts(deps: KernelDeps, snapshot: Any) -> None:
-    """Rebuild editor read receipts from checkpointed ToolMessages.
+    """Rebuild editor read receipts and read modes from checkpointed ToolMessages.
 
     Same trust template as ``_reactivate_loaded_skills``: only the
     PRODUCING TOOLS mint receipts — a marker-shaped line relayed by any
@@ -4149,6 +4189,16 @@ def _reactivate_editor_read_receipts(deps: KernelDeps, snapshot: Any) -> None:
     must never count as a read. Unlike a lost skill RESTRICTION, a lost
     receipt is only a lost PERMISSION: a corrupt marker is skipped with
     a warning and the model simply has to read again — no abort.
+
+    The content mode of a read comes only from the producing tool's own
+    record in the artifact of the same message (``EDITOR_READ_RECORD``),
+    and only when that record names the document and revision of the
+    message's marker; the result text, which carries document content,
+    never counts. The last read wins, as for the receipt: a read without
+    such a record (one stored before reads recorded the mode) leaves the
+    mode unknown, and a proposal to that document asks for approval as
+    before. A resumed segment so judges a proposal the way the segment
+    that read did.
     """
     from inqtrix.agents.kernel.tools import (
         EDITOR_READ_MARKER,
@@ -4175,6 +4225,42 @@ def _reactivate_editor_read_receipts(deps: KernelDeps, snapshot: Any) -> None:
             )
             continue
         deps.editor_read_receipts[document_id] = int(revision)
+        content_mode = _recorded_read_mode(message, document_id, int(revision))
+        if content_mode is None:
+            deps.editor_read_modes.pop(document_id, None)
+        else:
+            deps.editor_read_modes[document_id] = content_mode
+
+
+def _recorded_read_mode(message: Any, document_id: str, revision: int) -> str | None:
+    """The content mode a read tool recorded for its own read, or ``None``.
+
+    ``None`` when the message carries no record, and when the record does
+    not name the marker's document and revision; the latter is logged,
+    because only the read tools write that record.
+    """
+    from inqtrix.agents.kernel.tools import EDITOR_READ_RECORD
+
+    artifact = getattr(message, "artifact", None)
+    record = artifact.get(EDITOR_READ_RECORD) if isinstance(artifact, dict) else None
+    if record is None:
+        return None
+    if isinstance(record, dict):
+        content_mode = record.get("content_mode")
+        recorded_revision = record.get("revision")
+        if (
+            record.get("document_id") == document_id
+            and type(recorded_revision) is int
+            and recorded_revision == revision
+            and isinstance(content_mode, str)
+            and content_mode
+        ):
+            return content_mode
+    log.warning(
+        "Editor read record does not match its checkpoint marker; the read's "
+        "content mode is not reconstructed."
+    )
+    return None
 
 
 def _checkpointed_steps(snapshot: Any) -> int:
@@ -4248,23 +4334,49 @@ def _checkpointed_tool_use_counts(snapshot: Any) -> dict[str, int]:
     SUCCESS-only, mirroring the live counter (which increments after a
     successful invoke): failed calls persist as visible failure texts
     (``SOURCE_TOOL_FAILURE_PREFIXES``) or error-status ToolMessages and
-    must not consume budgets or arm the sufficiency judge on resume.
+    must not count as a use of the source or arm the sufficiency judge on
+    resume. A tier's search caps read their own counters
+    (:func:`_checkpointed_web_searches`,
+    :func:`_checkpointed_knowledge_searches`), not this one.
     """
     from inqtrix.agents.source_policy import (
+        BATCH_TOOL_NAME,
         KNOWLEDGE_TOOL_NAMES,
         UNCOUNTED_SOURCE_TOOLS,
         WEB_TOOL_NAMES,
     )
 
     counts = {"web": 0, "knowledge": 0}
-    for name in _succeeded_tool_names(snapshot):
+    for message in _succeeded_tool_messages(snapshot):
+        name = str(getattr(message, "name", "") or "")
         if name in UNCOUNTED_SOURCE_TOOLS:
             continue
-        if name in WEB_TOOL_NAMES:
+        if name == BATCH_TOOL_NAME:
+            for source in _batch_source_uses(message):
+                counts[source] += 1
+        elif name in WEB_TOOL_NAMES:
             counts["web"] += 1
         elif name in KNOWLEDGE_TOOL_NAMES:
             counts["knowledge"] += 1
     return counts
+
+
+def _batch_source_uses(message: Any) -> list[str]:
+    """The sources a stored batch of subtasks reached, each once.
+
+    The running batch names them in the artifact of its tool message
+    (:data:`~inqtrix.agents.kernel.tools.SOURCE_USES`) and records each
+    once, so a resumed run reads the same counters from there. A batch
+    stored before it named its sources counts as it always did: one use of
+    the web.
+    """
+    from inqtrix.agents.kernel.tools import SOURCE_USES
+
+    artifact = getattr(message, "artifact", None)
+    uses = artifact.get(SOURCE_USES) if isinstance(artifact, dict) else None
+    if not isinstance(uses, list):
+        return ["web"]
+    return [source for source in ("web", "knowledge") if source in uses]
 
 
 def _checkpointed_web_searches(snapshot: Any) -> int:
@@ -4277,13 +4389,32 @@ def _checkpointed_web_searches(snapshot: Any) -> int:
     return sum(1 for name in _succeeded_tool_names(snapshot) if name == "web_instant")
 
 
-def _succeeded_tool_names(snapshot: Any) -> Iterator[str]:
-    """The names of the checkpointed tool calls that succeeded, in order."""
+def _checkpointed_knowledge_searches(snapshot: Any) -> int:
+    """Rehydrate the knowledge-base searches this run executed itself.
+
+    The live counter's rule (:attr:`KernelDeps.knowledge_searches`): one per
+    successful ``search_project_knowledge``. A document read or a citation
+    uses the knowledge source and is no search.
+    """
+    return sum(
+        1 for name in _succeeded_tool_names(snapshot)
+        if name == "search_project_knowledge"
+    )
+
+
+def _succeeded_tool_messages(snapshot: Any) -> Iterator[Any]:
+    """The checkpointed tool messages of the calls that succeeded, in order."""
     if snapshot is None or not snapshot.values:
         return
     for message in snapshot.values.get("messages") or []:
         if getattr(message, "type", "") != "tool" or failed_tool_message(message):
             continue
+        yield message
+
+
+def _succeeded_tool_names(snapshot: Any) -> Iterator[str]:
+    """The names of the checkpointed tool calls that succeeded, in order."""
+    for message in _succeeded_tool_messages(snapshot):
         yield str(getattr(message, "name", "") or "")
 
 
@@ -4306,6 +4437,31 @@ def _checkpointed_source_coverage(snapshot: Any) -> SourceCoverageLedger:
             coverage_records_from_artifact(getattr(message, "artifact", None))
         )
     return ledger
+
+
+def _hydrate_document_analyses(deps: KernelDeps, snapshot: Any) -> None:
+    """Give a segment the reading records of the run's stored analyses and
+    the windows they claimed, so the run's window budget spans segments."""
+    deps.document_analyses = _checkpointed_document_analyses(snapshot)
+    deps.document_windows_used = windows_granted(deps.document_analyses)
+
+
+def _checkpointed_document_analyses(snapshot: Any) -> list[dict[str, Any]]:
+    """Rebuild the reading records of the run's document analyses.
+
+    Only the producing tool's checkpointed artifact counts, as for the
+    coverage ledger: a record another tool relays is no reading of this
+    run. A failed analysis counts too, because the windows it claimed
+    stay claimed.
+    """
+    if snapshot is None or not snapshot.values:
+        return []
+    return records_of(
+        getattr(message, "artifact", None)
+        for message in snapshot.values.get("messages") or []
+        if getattr(message, "type", "") == "tool"
+        and getattr(message, "name", "") == ANALYSIS_TOOL_NAME
+    )
 
 
 def _recover_clarified_answers(deps: KernelDeps, snapshot: Any) -> None:

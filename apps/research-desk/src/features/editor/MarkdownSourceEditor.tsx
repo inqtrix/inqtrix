@@ -33,6 +33,7 @@ import {
   type MarkdownTableModel,
   type MarkdownTableSelection,
 } from './markdownSourceFormatting'
+import { hostTextTransaction } from './sourceHostText'
 
 type MarkdownSourceEditorLabels = {
   addColumn: string
@@ -56,7 +57,10 @@ type MarkdownSourceEditorLabels = {
 
 type MarkdownSourceEditorProps = {
   labels: MarkdownSourceEditorLabels
-  onChange: (value: string) => void
+  /** A new text of the user's, with the `value` the editor showed when it
+   * was made: the one it started with, the last one it took over, or the
+   * last one it handed over. */
+  onChange: (value: string, baseValue: string) => void
   value: string
 }
 
@@ -152,15 +156,23 @@ const markdownHighlightStyle = HighlightStyle.define([
   { tag: tags.punctuation, color: 'var(--muted-foreground)' },
 ])
 
+/** The attributes of the editable text: its accessible name and no spell
+ * check on Markdown syntax. */
+function sourceContentAttributes(label: string) {
+  return EditorView.contentAttributes.of({ 'aria-label': label, spellcheck: 'false' })
+}
+
 export function MarkdownSourceEditor({ labels, onChange, value }: MarkdownSourceEditorProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const editorRef = useRef<EditorView | null>(null)
-  const initialValueRef = useRef(value)
+  const editorLabelRef = useRef(labels.editor)
   const onChangeRef = useRef(onChange)
   const activeTableRef = useRef<MarkdownTableSelection | null>(null)
   const lastActiveTableRangeRef = useRef<string | null>(null)
   const isApplyingExternalValueRef = useRef(false)
+  const shownValueRef = useRef(value)
   const lineWrapCompartment = useMemo(() => new Compartment(), [])
+  const labelCompartment = useMemo(() => new Compartment(), [])
   const [activeTable, setActiveTable] = useState<MarkdownTableSelection | null>(null)
   const [isTableEditorOpen, setIsTableEditorOpen] = useState(false)
   const [isLineWrapEnabled, setIsLineWrapEnabled] = useState(true)
@@ -194,21 +206,25 @@ export function MarkdownSourceEditor({ labels, onChange, value }: MarkdownSource
     const parent = containerRef.current
     if (!parent) return
 
+    // Built once, with the text it shows by now. A new label (a language
+    // switch) is reconfigured below: a new view would start from an older
+    // text, and the next keystroke would hand that text over, and it would
+    // lose the undo history.
     const editor = new EditorView({
-      doc: initialValueRef.current,
+      doc: shownValueRef.current,
       extensions: [
         basicSetup,
         markdown(),
         markdownSourceTheme,
         syntaxHighlighting(markdownHighlightStyle),
         lineWrapCompartment.of(EditorView.lineWrapping),
-        EditorView.contentAttributes.of({
-          'aria-label': labels.editor,
-          spellcheck: 'false',
-        }),
+        labelCompartment.of(sourceContentAttributes(editorLabelRef.current)),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && !isApplyingExternalValueRef.current) {
-            onChangeRef.current(update.state.doc.toString())
+            const text = update.state.doc.toString()
+            const baseValue = shownValueRef.current
+            shownValueRef.current = text
+            onChangeRef.current(text, baseValue)
           }
           if (update.docChanged || update.selectionSet) {
             updateActiveTable(update.view)
@@ -224,19 +240,29 @@ export function MarkdownSourceEditor({ labels, onChange, value }: MarkdownSource
       editor.destroy()
       editorRef.current = null
     }
-  }, [labels.editor, lineWrapCompartment, updateActiveTable])
+  }, [labelCompartment, lineWrapCompartment, updateActiveTable])
 
   useEffect(() => {
+    editorLabelRef.current = labels.editor
+    editorRef.current?.dispatch({
+      effects: labelCompartment.reconfigure(sourceContentAttributes(labels.editor)),
+    })
+  }, [labelCompartment, labels.editor])
+
+  // The record's text reaches the view in the commit that brought it, so no
+  // keystroke falls between rendering that text and showing it. Text another
+  // writer made (a merge, an accepted agent proposal) replaces only the range
+  // that differs, keeps the selection on its characters and stays out of the
+  // undo history: undo takes back the user's own edits only.
+  useLayoutEffect(() => {
     const editor = editorRef.current
     if (!editor) return
-    const currentValue = editor.state.doc.toString()
-    if (currentValue === value) return
+    shownValueRef.current = value
+    const transaction = hostTextTransaction(editor.state, value)
+    if (!transaction) return
 
     isApplyingExternalValueRef.current = true
-    editor.dispatch({
-      changes: { from: 0, insert: value, to: currentValue.length },
-      selection: { anchor: Math.min(editor.state.selection.main.anchor, value.length) },
-    })
+    editor.dispatch(transaction)
     isApplyingExternalValueRef.current = false
     updateActiveTable(editor)
   }, [updateActiveTable, value])

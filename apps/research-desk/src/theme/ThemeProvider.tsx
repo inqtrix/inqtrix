@@ -8,7 +8,15 @@ import {
   type ReactNode,
 } from 'react'
 
-import type { ModelTierPreference } from '@/features/researchRuns/types'
+import {
+  lastAgentTierOf,
+  lastResearchProfileOf,
+} from '@/features/account/accountPreferencesSync'
+import type {
+  LastAgentTier,
+  LastResearchProfile,
+  ModelTierPreference,
+} from '@/features/researchRuns/types'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 export type ThemePreset = 'petrol' | 'standard' | 'slate' | 'graphite' | 'sage'
@@ -28,12 +36,19 @@ type ThemeContextValue = {
   agentModelTier: ModelTierPreference
   chatModelTier: ModelTierPreference
   contrastMode: ContrastMode
+  // The last Stufe and report profile picked in the two composers that start
+  // with one; they ride the same bag so each composer starts with the user's
+  // habit on any device. `''` means no pick yet.
+  lastAgentTier: LastAgentTier
+  lastResearchProfile: LastResearchProfile
   preset: ThemePreset
   resolvedTheme: 'light' | 'dark'
   setAgentMemoryEnabled: (enabled: boolean) => void
   setAgentModelTier: (tier: ModelTierPreference) => void
   setChatModelTier: (tier: ModelTierPreference) => void
   setContrastMode: (mode: ContrastMode) => void
+  setLastAgentTier: (tier: LastAgentTier) => void
+  setLastResearchProfile: (profile: LastResearchProfile) => void
   setPreset: (preset: ThemePreset) => void
   setTheme: (theme: ThemeMode) => void
   setUserBubbleTone: (tone: UserBubbleTone) => void
@@ -48,8 +63,22 @@ const USER_BUBBLE_TONE_STORAGE_KEY = 'inqtrix.researchDesk.userBubbleTone'
 const AGENT_MEMORY_ENABLED_STORAGE_KEY = 'inqtrix.researchDesk.agentMemoryEnabled'
 const CHAT_MODEL_TIER_STORAGE_KEY = 'inqtrix.researchDesk.chatModelTier'
 const AGENT_MODEL_TIER_STORAGE_KEY = 'inqtrix.researchDesk.agentModelTier'
+const LAST_RESEARCH_PROFILE_STORAGE_KEY = 'inqtrix.researchDesk.lastResearchProfile'
+const LAST_AGENT_TIER_STORAGE_KEY = 'inqtrix.researchDesk.lastAgentTier'
 const THEME_TRANSITION_SUPPRESSION_ATTR = 'data-theme-transition-suppressed'
 const ThemeContext = createContext<ThemeContextValue | null>(null)
+
+/** One preference another tab of this browser saved, already checked. */
+export type ThemePreferenceChange =
+  | { field: 'agentMemoryEnabled'; value: boolean }
+  | { field: 'agentModelTier'; value: ModelTierPreference }
+  | { field: 'chatModelTier'; value: ModelTierPreference }
+  | { field: 'contrastMode'; value: ContrastMode }
+  | { field: 'lastAgentTier'; value: LastAgentTier }
+  | { field: 'lastResearchProfile'; value: LastResearchProfile }
+  | { field: 'preset'; value: ThemePreset }
+  | { field: 'theme'; value: ThemeMode }
+  | { field: 'userBubbleTone'; value: UserBubbleTone }
 
 type ThemeProviderProps = {
   children: ReactNode
@@ -73,6 +102,12 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   const [agentModelTier, setAgentModelTierState] = useState<ModelTierPreference>(() =>
     readStoredModelTier(AGENT_MODEL_TIER_STORAGE_KEY),
   )
+  const [lastResearchProfile, setLastResearchProfileState] = useState<LastResearchProfile>(() =>
+    lastResearchProfileOf(readStoredValue(LAST_RESEARCH_PROFILE_STORAGE_KEY)),
+  )
+  const [lastAgentTier, setLastAgentTierState] = useState<LastAgentTier>(() =>
+    lastAgentTierOf(readStoredValue(LAST_AGENT_TIER_STORAGE_KEY)),
+  )
   const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>(() =>
     getSystemTheme(),
   )
@@ -90,6 +125,34 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     return () => mediaQuery.removeEventListener('change', handleChange)
   }, [])
 
+  // Another tab of this browser saved a preference: take it over, so this
+  // tab never sends an older value back with the whole row it saves next.
+  useEffect(() => {
+    const followers: {
+      [Field in ThemePreferenceChange['field']]: (
+        value: Extract<ThemePreferenceChange, { field: Field }>['value'],
+      ) => void
+    } = {
+      agentMemoryEnabled: setAgentMemoryEnabledState,
+      agentModelTier: setAgentModelTierState,
+      chatModelTier: setChatModelTierState,
+      contrastMode: setContrastModeState,
+      lastAgentTier: setLastAgentTierState,
+      lastResearchProfile: setLastResearchProfileState,
+      preset: setPresetState,
+      theme: setThemeState,
+      userBubbleTone: setUserBubbleToneState,
+    }
+    const follow = (event: StorageEvent) => {
+      const change = preferenceChangeFromStorage(event.key, event.newValue)
+      if (!change) return
+      const apply = followers[change.field] as (value: ThemePreferenceChange['value']) => void
+      apply(change.value)
+    }
+    window.addEventListener('storage', follow)
+    return () => window.removeEventListener('storage', follow)
+  }, [])
+
   useLayoutEffect(() => {
     const root = document.documentElement
     root.setAttribute(THEME_TRANSITION_SUPPRESSION_ATTR, '')
@@ -104,44 +167,54 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     return scheduleThemeTransitionRestore(root)
   }, [contrastMode, preset, resolvedTheme, userBubbleTone])
 
+  // Each setter applies the choice first and remembers it on the device
+  // afterwards: a storage that refuses to keep it (private mode, blocked site
+  // data, a full quota) costs only that memory, never the choice.
   const value = useMemo<ThemeContextValue>(
     () => ({
       agentMemoryEnabled,
       agentModelTier,
       chatModelTier,
       contrastMode,
+      lastAgentTier,
+      lastResearchProfile,
       preset,
       resolvedTheme,
       setAgentMemoryEnabled(nextEnabled) {
-        localStorage.setItem(
-          AGENT_MEMORY_ENABLED_STORAGE_KEY,
-          nextEnabled ? 'true' : 'false',
-        )
         setAgentMemoryEnabledState(nextEnabled)
+        rememberStoredValue(AGENT_MEMORY_ENABLED_STORAGE_KEY, nextEnabled ? 'true' : 'false')
       },
       setAgentModelTier(nextTier) {
-        localStorage.setItem(AGENT_MODEL_TIER_STORAGE_KEY, nextTier)
         setAgentModelTierState(nextTier)
+        rememberStoredValue(AGENT_MODEL_TIER_STORAGE_KEY, nextTier)
       },
       setChatModelTier(nextTier) {
-        localStorage.setItem(CHAT_MODEL_TIER_STORAGE_KEY, nextTier)
         setChatModelTierState(nextTier)
+        rememberStoredValue(CHAT_MODEL_TIER_STORAGE_KEY, nextTier)
       },
       setContrastMode(nextMode) {
-        localStorage.setItem(CONTRAST_MODE_STORAGE_KEY, nextMode)
         setContrastModeState(nextMode)
+        rememberStoredValue(CONTRAST_MODE_STORAGE_KEY, nextMode)
+      },
+      setLastAgentTier(nextTier) {
+        setLastAgentTierState(nextTier)
+        rememberStoredValue(LAST_AGENT_TIER_STORAGE_KEY, nextTier)
+      },
+      setLastResearchProfile(nextProfile) {
+        setLastResearchProfileState(nextProfile)
+        rememberStoredValue(LAST_RESEARCH_PROFILE_STORAGE_KEY, nextProfile)
       },
       setPreset(nextPreset) {
-        localStorage.setItem(THEME_PRESET_STORAGE_KEY, nextPreset)
         setPresetState(nextPreset)
+        rememberStoredValue(THEME_PRESET_STORAGE_KEY, nextPreset)
       },
       setTheme(nextTheme) {
-        localStorage.setItem(THEME_STORAGE_KEY, nextTheme)
         setThemeState(nextTheme)
+        rememberStoredValue(THEME_STORAGE_KEY, nextTheme)
       },
       setUserBubbleTone(nextTone) {
-        localStorage.setItem(USER_BUBBLE_TONE_STORAGE_KEY, nextTone)
         setUserBubbleToneState(nextTone)
+        rememberStoredValue(USER_BUBBLE_TONE_STORAGE_KEY, nextTone)
       },
       theme,
       userBubbleTone,
@@ -151,6 +224,8 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       agentModelTier,
       chatModelTier,
       contrastMode,
+      lastAgentTier,
+      lastResearchProfile,
       preset,
       resolvedTheme,
       theme,
@@ -169,65 +244,139 @@ export function useTheme() {
   return context
 }
 
-function readStoredTheme(): ThemeMode {
-  if (typeof localStorage === 'undefined') return 'system'
-  const stored = localStorage.getItem(THEME_STORAGE_KEY)
-  if (stored === 'light' || stored === 'dark' || stored === 'system') {
-    return stored
+/** The preference another tab saved under `key`, checked like a stored value,
+ * or null for a key this provider does not own and for a value it would not
+ * read. A last pick is never taken back to no pick: `''` changes nothing. */
+export function preferenceChangeFromStorage(
+  key: string | null,
+  value: string | null,
+): ThemePreferenceChange | null {
+  switch (key) {
+    case THEME_STORAGE_KEY: {
+      const theme = themeOf(value)
+      return theme ? { field: 'theme', value: theme } : null
+    }
+    case THEME_PRESET_STORAGE_KEY: {
+      const preset = presetOf(value)
+      return preset ? { field: 'preset', value: preset } : null
+    }
+    case CONTRAST_MODE_STORAGE_KEY: {
+      const mode = contrastModeOf(value)
+      return mode ? { field: 'contrastMode', value: mode } : null
+    }
+    case USER_BUBBLE_TONE_STORAGE_KEY: {
+      const tone = userBubbleToneOf(value)
+      return tone ? { field: 'userBubbleTone', value: tone } : null
+    }
+    case AGENT_MEMORY_ENABLED_STORAGE_KEY: {
+      const enabled = agentMemoryEnabledOf(value)
+      return enabled === null ? null : { field: 'agentMemoryEnabled', value: enabled }
+    }
+    case CHAT_MODEL_TIER_STORAGE_KEY: {
+      const tier = modelTierOf(value)
+      return tier === null ? null : { field: 'chatModelTier', value: tier }
+    }
+    case AGENT_MODEL_TIER_STORAGE_KEY: {
+      const tier = modelTierOf(value)
+      return tier === null ? null : { field: 'agentModelTier', value: tier }
+    }
+    case LAST_RESEARCH_PROFILE_STORAGE_KEY: {
+      const profile = lastResearchProfileOf(value)
+      return profile ? { field: 'lastResearchProfile', value: profile } : null
+    }
+    case LAST_AGENT_TIER_STORAGE_KEY: {
+      const tier = lastAgentTierOf(value)
+      return tier ? { field: 'lastAgentTier', value: tier } : null
+    }
+    default:
+      return null
   }
-  return 'system'
+}
+
+/** A value this device stored, or null when there is none or the storage
+ * refuses access (private mode, blocked site data). */
+function readStoredValue(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function rememberStoredValue(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // The choice holds on this page; only this device's memory of it is lost.
+  }
+}
+
+function themeOf(value: string | null): ThemeMode | null {
+  return value === 'light' || value === 'dark' || value === 'system' ? value : null
+}
+
+function presetOf(value: string | null): ThemePreset | null {
+  return value === 'petrol'
+    || value === 'standard'
+    || value === 'slate'
+    || value === 'graphite'
+    || value === 'sage'
+    ? value
+    : null
+}
+
+function contrastModeOf(value: string | null): ContrastMode | null {
+  return value === 'standard' || value === 'high' ? value : null
+}
+
+function userBubbleToneOf(value: string | null): UserBubbleTone | null {
+  return value === 'gray'
+    || value === 'mint'
+    || value === 'orange'
+    || value === 'sky'
+    || value === 'violet'
+    || value === 'ink'
+    ? value
+    : null
+}
+
+function agentMemoryEnabledOf(value: string | null): boolean | null {
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return null
+}
+
+/** `''` is a value of its own here: no preference, the deployment default. */
+function modelTierOf(value: string | null): ModelTierPreference | null {
+  return value === '' || value === 'high' || value === 'mid' || value === 'fast' ? value : null
+}
+
+function readStoredTheme(): ThemeMode {
+  return themeOf(readStoredValue(THEME_STORAGE_KEY)) ?? 'system'
 }
 
 function readStoredPreset(): ThemePreset {
-  if (typeof localStorage === 'undefined') return 'petrol'
-  const stored = localStorage.getItem(THEME_PRESET_STORAGE_KEY)
-  if (
-    stored === 'petrol'
-    || stored === 'standard'
-    || stored === 'slate'
-    || stored === 'graphite'
-    || stored === 'sage'
-  ) {
-    return stored
-  }
-  return 'petrol'
+  return presetOf(readStoredValue(THEME_PRESET_STORAGE_KEY)) ?? 'petrol'
 }
 
 function readStoredContrastMode(): ContrastMode {
-  if (typeof localStorage === 'undefined') return 'standard'
-  const stored = localStorage.getItem(CONTRAST_MODE_STORAGE_KEY)
-  return stored === 'high' ? stored : 'standard'
+  return contrastModeOf(readStoredValue(CONTRAST_MODE_STORAGE_KEY)) ?? 'standard'
 }
 
 /** Device cache for a model-tier preference; the account row still wins on
  * login. An unreadable or unknown value resolves to `''` (no preference), so
  * the deployment default applies rather than an invented tier. */
 function readStoredModelTier(key: string): ModelTierPreference {
-  if (typeof localStorage === 'undefined') return ''
-  const stored = localStorage.getItem(key)
-  return stored === 'high' || stored === 'mid' || stored === 'fast' ? stored : ''
+  return modelTierOf(readStoredValue(key)) ?? ''
 }
 
 function readStoredUserBubbleTone(): UserBubbleTone {
-  if (typeof localStorage === 'undefined') return 'gray'
-  const stored = localStorage.getItem(USER_BUBBLE_TONE_STORAGE_KEY)
-  if (
-    stored === 'gray'
-    || stored === 'mint'
-    || stored === 'orange'
-    || stored === 'sky'
-    || stored === 'violet'
-    || stored === 'ink'
-  ) {
-    return stored
-  }
-  return 'gray'
+  return userBubbleToneOf(readStoredValue(USER_BUBBLE_TONE_STORAGE_KEY)) ?? 'gray'
 }
 
 function readStoredAgentMemoryEnabled(): boolean {
   // Privacy default OFF; the server row wins on login (account-preferences sync).
-  if (typeof localStorage === 'undefined') return false
-  return localStorage.getItem(AGENT_MEMORY_ENABLED_STORAGE_KEY) === 'true'
+  return agentMemoryEnabledOf(readStoredValue(AGENT_MEMORY_ENABLED_STORAGE_KEY)) ?? false
 }
 
 function getSystemTheme(): 'light' | 'dark' {

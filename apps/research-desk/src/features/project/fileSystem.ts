@@ -38,6 +38,10 @@ import { EMPTY_CANVAS_STATE } from '@/features/canvas/types'
 import { normalizePanelLayout } from './panelLayout'
 import { buildZip } from './zip'
 import { readerError } from '@/api/requestErrorText'
+import {
+  lastAgentTierOf,
+  lastResearchProfileOf,
+} from '@/features/account/accountPreferencesSync'
 
 type DirectoryPickerMode = 'read' | 'readwrite'
 
@@ -571,7 +575,6 @@ function buildProjectStateFromFiles({
     agentSessions: {},
     selectedAgentSessionId: null,
     agentCanvas: EMPTY_CANVAS_STATE,
-    agentPlanDrafts: {},
     dirty: false,
     editorComments: filteredEditorComments,
     editorDocumentOrder,
@@ -1497,6 +1500,10 @@ function preferencesOrDefault(value: unknown): ProjectState['preferences'] {
     agentModelTier: modelTierPreferenceOrDefault(preferences.agentModelTier),
     chatModelTier: modelTierPreferenceOrDefault(preferences.chatModelTier),
     contrastMode: contrastModeOrDefault(preferences.contrastMode),
+    // An older file carries no last picks; loading it keeps the current ones
+    // (`preferencesWithLastChoicesKept`).
+    lastAgentTier: lastAgentTierOf(preferences.lastAgentTier),
+    lastResearchProfile: lastResearchProfileOf(preferences.lastResearchProfile),
     locale: localeOrDefault(preferences.locale),
     theme: themeOrDefault(preferences.theme),
     themePreset: themePresetOrDefault(preferences.themePreset),

@@ -20,61 +20,6 @@ class BoundaryException:
 
 BOUNDARY_EXCEPTIONS: tuple[BoundaryException, ...] = (
     BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.capabilities",
-        "product code still reaches the capability catalog directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.capabilities.contracts",
-        "product code still reaches the capability catalog directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.capabilities.registry",
-        "product code still reaches the capability catalog directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.core.context",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.core.results",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.execution_authority",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.project.editor_patch_ports",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.project.editor_ports",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.services.agent_context",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.services.editor_persistence_service",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "inqtrix.services.run_service",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
         "inqtrix.agents.checkpoint_guard",
         "inqtrix.runs.ports",
         "product code still reaches infrastructure directly",
@@ -88,11 +33,6 @@ BOUNDARY_EXCEPTIONS: tuple[BoundaryException, ...] = (
         "inqtrix.agents.clarification",
         "inqtrix.core.results",
         "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.discovery",
-        "inqtrix.capabilities",
-        "product code still reaches the capability catalog directly",
     ),
     BoundaryException(
         "inqtrix.agents.document_analysis",
@@ -210,26 +150,6 @@ BOUNDARY_EXCEPTIONS: tuple[BoundaryException, ...] = (
         "product code still reaches infrastructure directly",
     ),
     BoundaryException(
-        "inqtrix.agents.patch_phase",
-        "inqtrix.server.editor_instructions",
-        "product code still reaches the composition layer",
-    ),
-    BoundaryException(
-        "inqtrix.agents.patch_phase",
-        "inqtrix.server.reference_documents",
-        "product code still reaches the composition layer",
-    ),
-    BoundaryException(
-        "inqtrix.agents.patch_phase",
-        "inqtrix.services.editor_assist_service",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.plan_models",
-        "inqtrix.core.results",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
         "inqtrix.agents.prompts",
         "inqtrix.core.results",
         "product code still reaches application code directly",
@@ -252,11 +172,6 @@ BOUNDARY_EXCEPTIONS: tuple[BoundaryException, ...] = (
     BoundaryException(
         "inqtrix.agents.source_policy",
         "inqtrix.execution_authority",
-        "product code still reaches application code directly",
-    ),
-    BoundaryException(
-        "inqtrix.agents.synthesis",
-        "inqtrix.core.results",
         "product code still reaches application code directly",
     ),
     BoundaryException(
@@ -521,11 +436,6 @@ BOUNDARY_EXCEPTIONS: tuple[BoundaryException, ...] = (
     ),
     BoundaryException(
         "inqtrix.settings",
-        "inqtrix.core.constants",
-        "a base module still reaches application code",
-    ),
-    BoundaryException(
-        "inqtrix.settings",
         "inqtrix.report_profiles",
         "a base module still reaches an engine",
     ),
@@ -548,16 +458,6 @@ BOUNDARY_EXCEPTIONS: tuple[BoundaryException, ...] = (
         "inqtrix.storage.agent_control_postgres",
         "inqtrix.execution_authority",
         "infrastructure still reaches application code",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "langgraph.graph",
-        "the framework stays behind the runtime adapter once it exists",
-    ),
-    BoundaryException(
-        "inqtrix.agents.algorithm",
-        "langgraph.types",
-        "the framework stays behind the runtime adapter once it exists",
     ),
     BoundaryException(
         "inqtrix.agents.checkpointing",

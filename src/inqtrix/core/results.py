@@ -211,7 +211,7 @@ class WorkHandover(BaseModel):
     )
     """The clarifying questions of the run under work and what came of each, oldest first: the server's record of a step the assignment may order (ask first), rendered in a fence of its own after the assignment. Empty when the run asked nothing."""
     brief: str = Field("", description="The runtime-built work order of a producing role.")
-    """The work order of a role that PRODUCES a part of its parent's output (a memo section) rather than judging it: built by the runtime from the same builder the parent's single call uses, so the two transports of one piece of work carry one text. Empty for a judging role, whose assignment is a requirement to check against instead."""
+    """The work order of a role that PRODUCES a part of its parent's output rather than judging it, rendered under its own heading when set. Empty for a judging role, whose assignment is a requirement to check against instead; the one built-in profile (``review``) judges, so no server code sets it."""
     outputs: tuple[HandoverOutput, ...] = Field(default=(), description="Outputs of the parent run under work.")
     """Outputs of the parent run under work."""
     evidence_run_id: str = Field("", description="Run whose evidence ledger the role re-reads.")
@@ -327,36 +327,36 @@ class RunRequest(BaseModel):
     autonomy: str = Field(
         default="",
         description=(
-            "Workspace-agent permission mode (strict/balanced/autonomous); "
+            "Agent permission mode (strict/balanced/autonomous); "
             "empty for every other mode."
         ),
     )
-    """Workspace-agent permission mode (``strict``/``balanced``/``autonomous``); empty for every other mode. The route validates the vocabulary, the agent algorithm consumes it — inert everywhere else."""
+    """Agent permission mode (``strict``/``balanced``/``autonomous``); empty for every other mode. The route validates the vocabulary, the agent algorithm consumes it — inert everywhere else."""
     session_id: str = Field(
         default="",
         description=(
             "Agent-desk session the run belongs to; empty when sessionless."
         ),
     )
-    """Agent-desk session the run belongs to; empty when the run is sessionless. Mirrors the run row's ``session_id`` so the agent algorithm can anchor the session memo without a store read."""
+    """Agent-desk session the run belongs to; empty when the run is sessionless. Mirrors the run row's ``session_id`` so the agent algorithm can anchor its session-scoped canvases without a store read."""
     document_id: str = Field(
         default="",
         description=(
-            "Target editor document for a workspace-agent patch assignment "
-            "and empty when the run has no edit target."
+            "Target editor document of an agent run: the agent's editor "
+            "tools refuse every other document. Empty leaves the agent every "
+            "document it has read."
         ),
     )
-    """Target editor document for a workspace-agent patch assignment. When set, the agent proposes an ``editor_patch`` against this document after synthesis and parks for the patch approval, which is gated in every autonomy mode; the agent never applies the patch itself. Empty (the default) skips the patch phase entirely — inert for every other mode."""
+    """Target editor document of an agent run. When set, the kernel's editor tools refuse every other document. ``propose_editor_patch`` asks for approval in every autonomy mode, except for a document the run's read found in collaboration mode: such a document accepts no agent proposal, and the tool refuses it without asking. The agent never applies a patch itself. Empty (the default) leaves the model every document it has read — inert for every other mode."""
     response_form: str = Field(
         default="",
         description=(
-            "Workspace-agent output-form override: ``chat`` "
-            "forces the inline chat answer, ``canvas`` the session memo; "
-            "empty lets the intake profile decide. Inert for every "
-            "other mode."
+            "Agent output-form choice: ``chat`` asks for the answer in "
+            "the chat, ``canvas`` for a canvas document; empty leaves the "
+            "form to the tier and the agent. Inert for every other mode."
         ),
     )
-    """Workspace-agent output-form override. ``chat`` forces the run-local inline answer artifact, ``canvas`` the session memo canvas; empty (the default, wire value ``auto``) delegates the decision to the intake profile's ``response_form``. A patch assignment (``document_id`` set) always uses canvas — the patch pipeline consumes the memo as source material. Inert for every other mode."""
+    """Agent output-form choice. ``chat`` asks for the answer in the chat, ``canvas`` for a canvas document: the kernel's first message states the choice as its one form rule, ahead of the Stufe's default (the kernel is prompt-driven, so the delivered form is read from its result). Empty (the default, wire value ``auto``) leaves the form to the Stufe and the model. Inert for every other mode."""
     skill_ids: tuple[str, ...] = Field(
         default=(),
         description=(
@@ -381,7 +381,7 @@ class RunRequest(BaseModel):
             "``/``-menu functions group, for example web_research."
         ),
     )
-    """Hard tool hints from the composer's ``/``-functions (``web_research``, ``rag_query``) telling the planner/kernel the user explicitly asked for this tool family. Whitelisted at the runs router (unknown directive = 400). Inert for every non-agent mode."""
+    """Hard tool hints from the composer's ``/``-functions (``web_research``, ``rag_query``) telling the kernel the user explicitly asked for this tool family. Whitelisted at the runs router (unknown directive = 400). Inert for every non-agent mode."""
     source_policy: SourcePolicy = Field(
         default_factory=SourcePolicy,
         description=(
@@ -418,7 +418,7 @@ class RunRequest(BaseModel):
             "attached library rules. Empty when the user set none."
         ),
     )
-    """Result requirement set at submit time, composed server-side (free text + attached library rules, each with its origin marker); the HTTP route refuses a client value for it. The only way to state one for runs that never reach a plan gate — ``autonomous``, the speed tier, and the kernel, which has no plan gate at all. A later plan-gate decision REPLACES it; an approval that says nothing leaves it standing. Inherited, together with ``report_rules``, by exactly one kind of child: the single mission a kernel run starts with ``run_deep_mission``, whose memo is that run's deliverable. Research children, the mission strands of ``delegate_batch`` and role runs never inherit it."""
+    """Result requirement set at submit time, composed server-side (free text + attached library rules, each with its origin marker); the HTTP route refuses a client value for it. The only way to state one for a run. No child inherits it: research and knowledge children and role runs deliver to the run that holds the requirement."""
     report_rules: tuple[dict[str, Any], ...] = Field(
         default=(),
         description=(
@@ -428,7 +428,7 @@ class RunRequest(BaseModel):
             "Server-set only; empty when no rule was attached."
         ),
     )
-    """Library rules the submit-time ``report_requirement`` was composed from, one ``{template_id, label, title, revision}`` per distinct rule in attachment order. Resolved at submission and frozen with the run: a template edited afterwards changes nothing here, and resume never re-resolves. The kernel binds its transcripts to these revisions so another run can read them only while the rules are unchanged and still visible. Server-set only — the HTTP route refuses a client value. Travels to a child only with ``report_requirement`` (the single ``run_deep_mission`` child); empty everywhere else."""
+    """Library rules the submit-time ``report_requirement`` was composed from, one ``{template_id, label, title, revision}`` per distinct rule in attachment order. Resolved at submission and frozen with the run: a template edited afterwards changes nothing here, and resume never re-resolves. The kernel binds its transcripts to these revisions so another run can read them only while the rules are unchanged and still visible. Server-set only — the HTTP route refuses a client value. Never travels to a child; empty everywhere else."""
     attached_reports: tuple[dict[str, Any], ...] = Field(
         default=(),
         description=(

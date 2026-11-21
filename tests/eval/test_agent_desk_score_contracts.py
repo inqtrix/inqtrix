@@ -65,13 +65,6 @@ CASES = [
             "omitted_evidence_records": 0,
         },
     ),
-    (
-        "mission",
-        "workspace_agent",
-        "Erstelle aus einer Sachrecherche ein Memo mit zwei Abschnitten.",
-        {"critic_report": {"verdict": "revise"}},
-        {"critic_verdict": "revise"},
-    ),
 ]
 
 

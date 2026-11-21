@@ -1,10 +1,8 @@
 """Resolution of a result requirement against the caller's own catalog.
 
-The requirement can be set in two places — at submit time, before the run
-starts, and at the plan gate — and both must resolve attached library
-rules the SAME way. Two copies of this logic would drift, and the drift
-would be a security one: the whole point of resolving server-side is that
-a client sends ids and nothing else.
+The requirement is set at submit time, before the run starts, and this is
+the one place that resolves attached library rules: the whole point of
+resolving server-side is that a client sends ids and nothing else.
 
 The caller supplies free text and template ids; label, revision and body
 come from the caller's own visible templates. A client-supplied body
@@ -17,6 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from inqtrix.auth.permissions import AccessMode
 from inqtrix.agents.report_requirement import (
     MAX_COMPOSED_REQUIREMENT_CHARS,
     REPORT_RULE_IDS_MAX,
@@ -27,7 +26,7 @@ from inqtrix.agents.report_requirement import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from inqtrix.auth.context import UserContext
 
@@ -54,15 +53,16 @@ class ResolvedRule(NamedTuple):
     """The display title on one line; ``""`` when the template has none."""
     revision: int
     body: str
+    shared: bool = False
+    """Whether another user shared it with the caller (its access mode)."""
 
 
 def distinct_rule_ids(template_ids: "Sequence[str]") -> list[str]:
     """The attached rule ids, trimmed and deduplicated in attachment order.
 
     The same rule attached twice is ONE rule. Deduplicating here, in the
-    resolution both entry points share, keeps the submit path and the
-    plan gate in agreement: a duplicate never counts twice against the
-    rule cap or the composed ceiling, and never reaches the writer twice.
+    one resolution, means a duplicate never counts twice against the rule
+    cap or the composed ceiling, and never reaches the writer twice.
     """
     return list(
         dict.fromkeys(
@@ -97,6 +97,9 @@ async def resolve_report_rules(
         tenant_id=tenant_id, visible_to=visible_to
     )
     by_id = {str(record.id): record for record, _access in visible}
+    shared_ids = {
+        str(record.id) for record, access in visible if access.mode is AccessMode.SHARED
+    }
     missing = [item for item in wanted if item not in by_id]
     if missing:
         raise ReportRequirementError(
@@ -111,6 +114,7 @@ async def resolve_report_rules(
             title=" ".join(str(by_id[item].title or "").split()),
             revision=int(by_id[item].revision),
             body=str(by_id[item].content_markdown),
+            shared=item in shared_ids,
         )
         for item in wanted
     ]
@@ -122,17 +126,8 @@ async def resolve_report_requirement(
     template_ids: "Sequence[str]",
     prompt_templates: Any,
     visible_to: "UserContext | None",
-    frozen_rules: "Mapping[str, tuple[Mapping[str, Any], str]] | None" = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """The composed requirement plus the parts it was composed from.
-
-    Args:
-        frozen_rules: Rules the run is already frozen under, by template
-            id: ``(part, block)`` with the stored part and the composed
-            block the run works under. A plan gate passes them so that a
-            rule the user keeps stays that text at that revision — also
-            after the template was edited or deleted — and only a rule the
-            selection adds reads the catalog. The submit path passes none.
 
     Returns:
         ``(composed, parts)`` — ``composed`` is what the writing prompts
@@ -146,31 +141,24 @@ async def resolve_report_requirement(
     """
     wanted = distinct_rule_ids(template_ids)
     if len(wanted) > REPORT_RULE_IDS_MAX:
-        # Counted after deduplication, at the one place both entry points
-        # share — a cap counted on the raw list would refuse a request
-        # that attaches three rules, one of them twice.
+        # Counted after deduplication — a cap counted on the raw list
+        # would refuse a request that attaches three rules, one of them
+        # twice.
         raise ReportRequirementError(
             [
                 f'At most {REPORT_RULE_IDS_MAX} rules can be attached to one result requirement ({len(wanted)} distinct rules attached).'
             ]
         )
-    frozen = dict(frozen_rules or {})
     resolved = {
-        rule.template_id: (rule_part(rule._asdict()), rule_requirement_block(rule.label, rule.body))
+        rule.template_id: (
+            rule_part(rule._asdict()),
+            rule_requirement_block(rule.label, rule.body, shared=rule.shared),
+        )
         for rule in await resolve_report_rules(
-            [item for item in wanted if item not in frozen],
-            prompt_templates=prompt_templates,
-            visible_to=visible_to,
+            wanted, prompt_templates=prompt_templates, visible_to=visible_to,
         )
     }
-    # A kept rule stays the part it was frozen as, its title included (or
-    # its absence, for a part stored before titles were kept).
-    chosen = [
-        ({**rule_part(frozen[item][0]), "template_id": item}, frozen[item][1])
-        if item in frozen
-        else resolved[item]
-        for item in wanted
-    ]
+    chosen = [resolved[item] for item in wanted]
     composed = compose_requirement_blocks(
         [block for _part, block in chosen], free_text
     )

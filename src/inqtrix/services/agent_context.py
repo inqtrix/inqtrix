@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from inqtrix.execution_authority import requested_knowledge_scope
+from inqtrix.harness.contracts.binding import RETIRED_WORKFLOWS
 from inqtrix.knowledge.profiles import EVIDENCE_K_MAX, parse_knowledge_profile
 from inqtrix.services.overrides import (
     AgentOverridesRequest,
@@ -183,14 +184,29 @@ class AgentContextResolver:
         )
 
     def _parse_mode_payload(self, body: dict[str, Any]) -> str | None:
-        """Validate the optional top-level run mode against the registry."""
+        """Validate the optional top-level run mode against the registry.
+
+        A retired mode is refused before the registry decides, with the
+        reason ``workflow_retired``: the client learns that the mode was
+        taken out on purpose, not that this server lacks it. A value that is
+        not text names no mode and is refused like an unknown one.
+        """
         raw_mode = body.get("mode")
         if raw_mode is None:
             return None
         registered = self._registry.ids()
+        listing = " or ".join(f"'{mode_id}'" for mode_id in registered)
+        if isinstance(raw_mode, str) and raw_mode in RETIRED_WORKFLOWS:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {
+                    "message": f"mode '{raw_mode}' is retired; mode must be {listing}",
+                    "type": "invalid_request_error",
+                    "reason": "workflow_retired",
+                }},
+            )
         if raw_mode in registered:
             return raw_mode
-        listing = " or ".join(f"'{mode_id}'" for mode_id in registered)
         raise HTTPException(
             status_code=400,
             detail={"error": {

@@ -120,7 +120,7 @@ describe('the gateway mode', () => {
 // One row per kind of answer of the session start: each shows exactly its
 // state and offers exactly its action.
 const GATEWAY_TABLE: ReadonlyArray<[string, GatewayAnswer, GatewayState, GatewayAction]> = [
-  ['no assertion (S1)', { kind: 'unauthenticated', reason: 'assertion_missing' }, 'noGatewaySignIn', 'reload'],
+  ['no assertion', { kind: 'unauthenticated', reason: 'assertion_missing' }, 'noGatewaySignIn', 'reload'],
   ['an answer that is not from Inqtrix', { kind: 'foreign' }, 'renewGatewaySignIn', 'reload'],
   ['a logout without a gateway sign-out URL', { kind: 'signedOut', atGateway: false }, 'signedOut', 'signInAgain'],
   ['a logout that went on to the gateway sign-out', { kind: 'signedOut', atGateway: true }, 'signedOutAtGateway', 'signInAgain'],

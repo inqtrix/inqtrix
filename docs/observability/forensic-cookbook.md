@@ -362,7 +362,7 @@ Section events make the final composition step auditable without storing raw pro
 - `source_only_binding` -- the URL is cited in this segment, but no claim that shares the URL plausibly carries the segment text. Lineage is preserved without false-positive matches.
 - `citation_without_claim` -- the URL is cited in this segment and no consolidated claim references the URL at all (legacy, manually injected, or post-claim-extraction citation).
 
-The binding is computed against the **answer body only**, captured before the appendix sections (references / further reading) are appended. Reference-link URLs in the appendix do not produce bindings.
+The binding is computed against the **answer body only**, captured before the appendix sections (references, further examined sources) are appended. Reference-link URLs in the appendix do not produce bindings.
 
 ### `run_end`
 
@@ -592,7 +592,7 @@ These fields are the high-signal fields to inspect when reviewing stop and answe
 - `evidence.evidence_depth_gap` -- the full dict, see [Stop criteria](../architecture/websearch/stopping.md#evidence-depth-gap) for fields and triggers.
 - `claims.quality_score`, `evidence.cross_checked_claim_count`, `evidence.evidence_depth_gap.single_source_count` -- claim-quality view.
 - `evaluate.evidence_sufficiency`
-- `answer.evidence_contract_status` -- one of `clean` / `needs_review` / `source_context_only` / `algorithm_failed` / `unknown` (see [AnswerEvidenceBinding](../architecture/websearch/evidence.md#answerevidencebinding)).
+- `answer.evidence_contract_status` -- one of `clean` / `needs_review` / `source_context_only` / `algorithm_failed` / `unknown` (see [AnswerEvidenceBinding](../architecture/websearch/evidence.md#answerevidencebinding)). An active evidence-depth gap alone does not make it `needs_review`: such a run reads `clean` and carries the ceiling of 6 in `confidence_cap`. Up to v0.2.0.12 the same run read `needs_review`, so the status, and the `evidence_contract_status` trace score, do not compare across that version.
 
 For where each of these signals is produced, updated and consumed, see the
 [signal map](../architecture/websearch/stopping.md#signal-map-where-metrics-are-produced-and-consumed).
@@ -603,19 +603,26 @@ guardrails.
 ### Progress and footer
 
 The user-facing progress stream reports found references separately from the
-evidence records built out of them. The report-eligible subset is not part of
-the three summary lines `search` emits -- read it from
-`evidence.report_eligible_evidence_count` in the snapshot. It does reach the
-stream in one case: when the report-evidence floor suppresses an early stop,
-`evaluate` emits `Evidenzlage noch zu duenn (N/M report-faehige Records);
-weitere Recherche.` After folding in a round's results, `search` emits these
-three summary lines, in this order:
+evidence records built out of them, in the language of the question. The
+report-eligible subset is not part of the three summary lines `search` emits
+-- read it from `evidence.report_eligible_evidence_count` in the snapshot. It
+does reach the stream in one case: when the report-evidence floor suppresses
+an early stop, `evaluate` emits `Evidence still too thin (report-ready
+evidence records: N, at least M needed); continuing research.` (`Beleglage
+noch zu dünn (berichtsfähige Belege: N, nötig sind mindestens M); weitere
+Recherche.` in German runs). After folding in a round's results, `search`
+emits these three summary lines, in this order:
 
 ```text
 5 search answers processed, 31 references collected, 12 evidence records created
-Source mix: 5 primary, 3 mainstream, 4 stakeholder, 18 unknown, 1 low; quality 0.50
-Claim status: 1 verified, 1 cross-checked, 5 unverified, aspect coverage 67%
+Source mix: 5 primary, 3 established media, 4 interest groups, 18 unclassified, 1 low quality; source quality 0.50
+Statement status: 1 verified, 2 attributed by the search provider, 5 unverified; cross-checked regardless of status: 1
 ```
+
+The last line counts every statement whose basis is cross-checked, whatever
+its status; the stats footer under the report counts only verified ones
+among them. Sub-question coverage is the evaluator's judgement and stands in
+the `evaluate` summary line (open sub-questions), not here.
 
 ## Debugging runs
 
@@ -641,8 +648,8 @@ continue to book totals, without a tokenizer or additional model call.
 tracing lifecycle. Use Langfuse's Scores view or trace-score filters for
 `final_confidence`, `claim_quality_score`, `source_quality_score`,
 `aspect_coverage`, `evidence_contract_status`, `stop_reason`,
-`omitted_evidence_records`, `answer_contract`, `critic_verdict` and the
-`deep_review_*` fields. Missing values are not zero. Parent scores belong to the
+`omitted_evidence_records`, `answer_contract` and the `deep_review_*`
+fields. Missing values are not zero. Parent scores belong to the
 trace; child scores belong to the child's execution observation. These signals
 are not an independent evaluation of content accuracy.
 
@@ -705,16 +712,16 @@ a claim came from, how long each provider call took, and where a retry chain
 started.
 
 What every call span carries, independent of the engine: `inqtrix.purpose`
-(the call site — `agent_plan`, `agent_synthesis`, `agent_deep_review`,
-`agent_deep_review`, `agent_kernel`, `direct_chat` (the web-free chat answer),
+(the call site — `agent_kernel`, `agent_deep_review`, `agent_sufficiency`,
+`agent_file_analysis`, `direct_chat` (the web-free chat answer),
 `classify`, `plan`, `claim_extract`, `evaluate`, `answer`, and the Knowledge
 calls `knowledge_gate`, `knowledge_decompose`, `knowledge_contextualize` (ingestion
-and follow-up rewrite), `knowledge_rerank`, `knowledge_answer`, …), `inqtrix.run_id`, and for mission tasks
-`inqtrix.task_id` / `inqtrix.task_kind`; the purpose is mirrored into the
-filterable Langfuse metadata (`metadata.purpose`), so "which step burned the
-tokens" is a filter, not a dump. Mission tasks open one `agent.task` span
-each, research runs one span per graph node (`inqtrix.node`,
-`inqtrix.round`). The node spans export the node's decision as attributes:
+and follow-up rewrite), `knowledge_rerank`, `knowledge_answer`, …) and `inqtrix.run_id`; spans of
+older mission runs also carry their plan task (`inqtrix.task_id` /
+`inqtrix.task_kind`, one `agent.task` span per task). The purpose is mirrored
+into the filterable Langfuse metadata (`metadata.purpose`), so "which step
+burned the tokens" is a filter, not a dump. Research runs open one span per
+graph node (`inqtrix.node`, `inqtrix.round`). The node spans export the node's decision as attributes:
 the numeric snapshot keys, the count dicts flattened
 (`inqtrix.claim_status_counts.attributed`, `inqtrix.source_tier_counts.unknown`),
 `inqtrix.stop_reason`, `inqtrix.answer_contract`,
@@ -894,7 +901,7 @@ The four research nodes — `classify`, `plan`, `search` and `evaluate` — call
 | Layer | Env variable | Default | Purpose |
 |-------|--------------|---------|---------|
 | Active research run | `MAX_TOTAL_SECONDS` | 3600s | Outer wall-clock budget checked at graph boundaries and passed into provider calls. Time parked for Agent Desk approval/input is not active research time. |
-| LLM reasoning | `REASONING_TIMEOUT` | 600s | Logical-operation budget for every non-editor reasoning call, including retries and backoff: classify/plan/evaluate/answer, direct chat, the Knowledge gate/decomposition/contextualisation/answer calls, and Agent Desk mission and Kernel calls. The same value is also handed to the embedding client, the reranker, and the ingestion contextualiser as their configured client timeout. |
+| LLM reasoning | `REASONING_TIMEOUT` | 600s | Logical-operation budget for every non-editor reasoning call, including retries and backoff: classify/plan/evaluate/answer, direct chat, the Knowledge gate/decomposition/contextualisation/answer calls, and the Agent Desk's kernel calls. The same value is also handed to the embedding client, the reranker, and the ingestion contextualiser as their configured client timeout. |
 | Editor assistant | `EDITOR_ASSISTANT_TIMEOUT` | 600s | Logical-operation budget for editor suggest/instruct calls. |
 | Perplexity / other search | `SEARCH_TIMEOUT` | 600s | Logical-operation budget for one `search()`, including retries and backoff. |
 | Claim extraction | `CLAIM_EXTRACT_TIMEOUT` | 600s | Logical-operation budget for one extraction, including retries and backoff. |
@@ -918,10 +925,10 @@ Each provider raises its own dedicated error type. `AzureOpenAIAPIError`, `Azure
 - **classify fails** — heuristic type inference; single sub-question = question verbatim.
 - **plan fails** — fallback to `[question]` as single query.
 - **search fails for a query** — skip that query, continue with others.
-- **claim extraction fails for a source** — keep the search result and summary, but mark the source-level extraction as `ALGO-FAIL claim_extraction` via progress, warning, and iteration-log fields.
-- **claim extraction fails for the whole run** — in forensic/deep runs, block normal report synthesis and return a short diagnostic report instead of a normal hard-fact report.
+- **claim extraction fails for a source** — keep the search result and summary; a warning progress line counts the failed statement extractions, and the warning log and iteration-log fields mark the source-level extraction as `ALGO-FAIL claim_extraction`.
+- **claim extraction fails for the whole run** — in forensic/deep runs, block normal report synthesis and return a short diagnostic report instead of a normal report.
 - **evaluate fails** — the confidence is clamped into a conservative band (`min(max(previous_confidence, 5), confidence_stop - 2)`, which is a fixed 5 under `compact`, 4 under `schnell` and 5 or 6 under `deep`), and the conservative gap note is written only when no gaps have been recorded yet; iteration-log marker `_evaluate_fallback`.
-- **answer fails** — return raw context without synthesis; the fallback answer is a German notice.
+- **answer fails** — return raw context without synthesis; the fallback answer opens with a warning in the answer language.
 
 The invariant across all of them: a partial result is always returned to the caller. The agent never terminates without producing either an answer string or a typed exception.
 
@@ -938,9 +945,9 @@ Every retry emits a warning log and a live progress/activity event. Research
 search retries include the parallel query position (for example
 `Websuche 2/6`); Agent Desk instant-search retries carry the task/query,
 attempt `n/3`, delay, error code, and configured/effective timeout in the
-existing `inqtrix.agent.activity` stream. Mission phase calls and Kernel model
-calls use that same stream with a human-readable phase purpose; no separate
-model-progress channel is created.
+existing `inqtrix.agent.activity` stream. Kernel model calls use that same
+stream with a human-readable phase purpose; no separate model-progress
+channel is created.
 
 ### Deadline interaction with retries
 

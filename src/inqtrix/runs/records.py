@@ -161,8 +161,8 @@ class RunRecord:
     agent_overrides: dict[str, Any] = field(default_factory=dict)
     kind: str = "standard"
     """Run role in an agent tree: ``standard`` (every historical run),
-    ``agent`` (a workspace-agent root) or ``agent_child`` (a research
-    run spawned by an agent task). Summaries omit the default."""
+    ``agent`` (an agent root) or ``agent_child`` (a research, knowledge or
+    role run an agent run spawned). Summaries omit the default."""
     parent_run_id: str | None = None
     """The spawning agent run for ``agent_child`` rows; ``None`` else."""
     root_run_id: str | None = None
@@ -179,9 +179,10 @@ class RunRecord:
     already-submitted child by this key instead of spawning a second
     one. Summaries expose it only when set."""
     parent_task_id: str | None = None
-    """Internal plan-task correlation copied from the durable replay body.
+    """Internal correlation key of an agent child in its parent (the
+    submitting call's origin key), copied from the durable replay body.
     It is never part of the public run summary; the store uses it only to
-    project child progress onto the parent run's task card."""
+    project child progress onto the parent run's row."""
     parent_task_attempt: int | None = None
     """Logical parent-task attempt; independent of run claim fencing."""
     status: RunStatus = RunStatus.QUEUED

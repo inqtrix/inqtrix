@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, get_args
 
+from inqtrix.model_cards import resolve_model_card
+
 if TYPE_CHECKING:
     from inqtrix.settings import ModelSettings
 
@@ -54,34 +56,21 @@ NODE_TIER_ASSIGNMENT: dict[str, str] = {
     "knowledge_contextualize": "fast",
     "knowledge_decompose": "fast",
     "knowledge_rerank": "fast",
-    # Workspace-agent phases use inexpensive models for assembly-line
-    # steps and stronger models only where the leverage is material.
-    "agent_intake": "fast",
-    "agent_discovery_analyst": "mid",
-    "agent_plan": "high",
-    "agent_contradiction": "mid",
+    # Agent calls beside the kernel loop: inexpensive models for
+    # assembly-line steps, stronger ones only where the leverage is material.
     "agent_sufficiency": "fast",
-    "agent_synthesis": "high",
-    # The user-facing chat deliverable stays on the high tier; the LIGHT
-    # variant is the deterministic auto-downgrade the
-    # algorithm picks DETERMINISTICALLY when no web evidence is in play
-    # (purely internal conversational answers) — auditable per run via
-    # the model_resolution events.
-    "agent_answer": "high",
-    "agent_answer_light": "mid",
     "agent_file_analysis": "mid",
-    "agent_patch": "mid",
     # The cognitive kernel has ONE node id for the tool loop: the kernel
     # is the brain and intelligence lives here. Tool/child calls
     # keep their own node tiers; the kernel never inherits downward.
     "agent_kernel": "high",
-    # The review of both agent engines judges the assignment and the
-    # substance of the evidence. It follows the selected model and effort;
+    # The review of an agent run judges the assignment and the substance
+    # of the evidence. It follows the selected model and effort;
     # the kernel's automatic Deep effort increase remains local to the
     # reasoning loop and revision.
     "agent_deep_review": "high",
     # Skill clarification-point checks use one inexpensive extraction
-    # call per attached skill at intake.
+    # call per skill before its instructions activate.
     "agent_skill_point_check": "fast",
 }
 """Maps each LLM call site to its default tier.
@@ -94,6 +83,37 @@ field-name prefixes on :class:`~inqtrix.settings.ModelSettings`.
 
 _DEFAULT_TIER = "mid"
 """Fallback tier for an unknown node name (defensive; all real nodes are mapped)."""
+
+PROSE_NODES: frozenset[str] = frozenset({"answer", "agent_kernel"})
+"""The call sites that write prose for a reader and ask for their model's prose
+verbosity: the sections of a research report and the turns of the agent.
+
+A node stands here once its answers were compared with and without the
+parameter. Classifiers, planners, judges, reviewers and structured calls never
+do: a longer answer there costs more and helps nobody. The same holds for a
+compaction summary, which runs under its own purpose inside the agent's loop.
+"""
+
+
+def prose_verbosity(node: str, model: str | None) -> str:
+    """The ``verbosity`` the call site *node* asks for when it runs on *model*; ``""`` for none.
+
+    Args:
+        node: Call-site name (see :data:`NODE_TIER_ASSIGNMENT`), or the purpose
+            a call inside the agent's loop runs under.
+        model: The model the call runs on, in any spelling a model card
+            resolves; ``None`` or empty when the provider's default applies.
+
+    Returns:
+        The level the model's card names (``OpenAIRules.prose_verbosity``) when
+        *node* is one of :data:`PROSE_NODES`; otherwise ``""``, which means the
+        request carries no field and the API applies its default.
+    """
+    if node not in PROSE_NODES or not model:
+        return ""
+    card = resolve_model_card(model)
+    rules = card.openai if card is not None else None
+    return (rules.prose_verbosity or "") if rules is not None else ""
 
 
 def validate_model_tier(value: str) -> str:
@@ -164,7 +184,7 @@ def describe_resolution(
     requested_model: str = "",
     requested_effort: str = "",
 ) -> dict[str, str]:
-    """Resolve a call site's model and effort, and name where each came from.
+    """Resolve a call site's model, effort and prose verbosity, and name where model and effort came from.
 
     The single resolution function in this module: :func:`resolve_model` and
     :func:`resolve_effort` are thin wrappers over it, and every visibility
@@ -191,6 +211,11 @@ def describe_resolution(
     overrides the effort the same way. This is how a directly-selected model
     reaches the wire while staying visible in the forensic log.
 
+    ``verbosity`` is what :func:`prose_verbosity` gives for the node and the
+    resolved model: the level a writing call site asks for, ``""`` everywhere
+    else. It says what the call site asks for; a provider that cannot send the
+    parameter is not handed it, and a trace shows what a request carried.
+
     Args:
         node: Call-site name (e.g. ``"answer"``); see
             :data:`NODE_TIER_ASSIGNMENT`.
@@ -206,7 +231,8 @@ def describe_resolution(
 
     Returns:
         A mapping with string values for ``node``, ``model``, ``tier``,
-        ``effort``, ``model_source``, ``effort_source`` and ``requested_tier``.
+        ``effort``, ``verbosity``, ``model_source``, ``effort_source`` and
+        ``requested_tier``.
         ``model="" `` only when ``reasoning_model`` itself is empty; callers
         that treat that as "no model resolved" surface it as a loud warning.
     """
@@ -218,6 +244,7 @@ def describe_resolution(
             "model": explicit_model,
             "tier": resolve_tier(node, requested_tier),
             "effort": explicit_effort,
+            "verbosity": prose_verbosity(node, explicit_model),
             "model_source": "explicit_request",
             "effort_source": (
                 "explicit_request" if explicit_effort else "provider_default"
@@ -250,6 +277,7 @@ def describe_resolution(
         "model": model,
         "tier": tier,
         "effort": effort,
+        "verbosity": prose_verbosity(node, model),
         "model_source": model_source,
         "effort_source": effort_source,
         "requested_tier": requested_tier or "",
@@ -284,6 +312,7 @@ def describe_unresolved_resolution(
         "model": "",
         "tier": resolve_tier(node, requested_tier),
         "effort": "",
+        "verbosity": "",
         "model_source": reason,
         "effort_source": "provider_default_unseen",
         "requested_tier": requested_tier or "",

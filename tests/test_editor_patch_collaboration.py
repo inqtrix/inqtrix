@@ -347,13 +347,229 @@ async def test_collaboration_proposal_uses_uuid_and_principal_attribution() -> N
     """A collaboration proposal records stable CRDT coordinates and its author."""
     harness = _Harness(actor_id=SUGGESTER_ID, permission=SharePermission.SUGGEST)
 
-    patch = await harness.propose(source="agent")
+    patch = await harness.propose(source="instruct")
 
     assert str(uuid.UUID(patch.patch_id)) == patch.patch_id
     assert patch.created_by_user_id == SUGGESTER_ID
     assert patch.collaboration_generation == 4
     assert patch.base_sequence == 19
     assert harness.documents.ai_reads == [SharePermission.SUGGEST]
+
+
+class _Audit:
+    """Audit sink that keeps what it is given."""
+
+    def __init__(self) -> None:
+        self.entries: list[Any] = []
+
+    async def record(self, entry: Any) -> None:
+        self.entries.append(entry)
+
+
+def _markdown(document: EditorDocument) -> EditorDocument:
+    """The same document as it stood before collaboration was switched on."""
+    return replace(
+        document,
+        content_mode="markdown",
+        collaboration_generation=0,
+        collaboration_schema_version=None,
+        collaboration_schema_hash=None,
+        persisted_sequence=0,
+        projection_sequence=0,
+    )
+
+
+class _ConvertedBetweenReads(_Documents):
+    """The access read still finds Markdown; the AI read finds collaboration."""
+
+    async def get_document(
+        self,
+        document_id: str,
+        *,
+        visible_to: UserContext | None,
+        minimum: SharePermission = SharePermission.VIEW,
+    ) -> EditorDocument:
+        document = await super().get_document(
+            document_id, visible_to=visible_to, minimum=minimum
+        )
+        return _markdown(document)
+
+
+class _ProjectionFails(_Documents):
+    """A Markdown access read, then a projection barrier that cannot answer."""
+
+    async def get_document(
+        self,
+        document_id: str,
+        *,
+        visible_to: UserContext | None,
+        minimum: SharePermission = SharePermission.VIEW,
+    ) -> EditorDocument:
+        document = await super().get_document(
+            document_id, visible_to=visible_to, minimum=minimum
+        )
+        return _markdown(document)
+
+    async def get_document_for_ai(
+        self,
+        document_id: str,
+        *,
+        visible_to: UserContext | None,
+        minimum: SharePermission = SharePermission.VIEW,
+    ) -> EditorDocument:
+        from inqtrix.services.editor_persistence_service import (
+            CollaborationProjectionUnavailable,
+        )
+
+        self.ai_reads.append(minimum)
+        raise CollaborationProjectionUnavailable(document_id)
+
+
+def _service(harness: _Harness, documents: _Documents, audit: _Audit) -> EditorPatchService:
+    return EditorPatchService(
+        store=harness.store,
+        editor_persistence=documents,  # type: ignore[arg-type]
+        collaboration=harness.collaboration,  # type: ignore[arg-type]
+        audit=audit,
+        durable=True,
+    )
+
+
+async def _propose_as_agent(harness: _Harness, service: EditorPatchService) -> EditorPatchRecord:
+    return await service.propose(
+        document_id=DOCUMENT_ID,
+        run_id="run_agent",
+        source="agent",
+        edits=_edits(),
+        summary="Improve the paragraph.",
+        warnings=[],
+        created_by_user_id=harness.actor_id,
+        visible_to=harness.context,
+        principal=harness.principal,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_proposal_to_a_collaboration_document_is_refused_before_any_ai_read() -> None:
+    """The refusal needs no projection: no AI read, no row, no audit."""
+    from inqtrix.services.editor_patch_service import (
+        CollaborationDocumentProposalRefused,
+    )
+
+    harness = _Harness(actor_id=SUGGESTER_ID, permission=SharePermission.SUGGEST)
+    audit = _Audit()
+    service = _service(harness, harness.documents, audit)
+
+    with pytest.raises(CollaborationDocumentProposalRefused):
+        await _propose_as_agent(harness, service)
+
+    assert harness.documents.reads == [SharePermission.SUGGEST]
+    assert harness.documents.ai_reads == []
+    assert harness.store.records == {}
+    assert audit.entries == []
+
+
+@pytest.mark.asyncio
+async def test_agent_proposal_without_suggest_access_stays_an_indistinct_absence() -> None:
+    """Access is decided first: a reader without SUGGEST learns nothing new."""
+    harness = _Harness(actor_id=SUGGESTER_ID, permission=SharePermission.VIEW)
+    audit = _Audit()
+    service = _service(harness, harness.documents, audit)
+
+    with pytest.raises(DocumentNotFound):
+        await _propose_as_agent(harness, service)
+
+    assert harness.documents.reads == [SharePermission.SUGGEST]
+    assert harness.documents.ai_reads == []
+    assert harness.store.records == {}
+    assert audit.entries == []
+
+
+@pytest.mark.asyncio
+async def test_agent_proposal_is_refused_when_the_document_turns_collaborative_between_reads() -> None:
+    """The document the AI read returns is checked again before any row."""
+    from inqtrix.services.editor_patch_service import (
+        CollaborationDocumentProposalRefused,
+    )
+
+    harness = _Harness(actor_id=SUGGESTER_ID, permission=SharePermission.SUGGEST)
+    documents = _ConvertedBetweenReads(
+        _document(), {SUGGESTER_ID: SharePermission.SUGGEST}
+    )
+    audit = _Audit()
+    service = _service(harness, documents, audit)
+
+    with pytest.raises(CollaborationDocumentProposalRefused):
+        await _propose_as_agent(harness, service)
+
+    assert documents.ai_reads == [SharePermission.SUGGEST]
+    assert harness.store.records == {}
+    assert audit.entries == []
+
+
+@pytest.mark.asyncio
+async def test_patch_capability_names_the_collaboration_refusal() -> None:
+    """The agent's capability answers with the one code and the one text."""
+    from inqtrix.capabilities import (
+        CapabilityContext,
+        CapabilityError,
+        build_capability_registry,
+    )
+
+    harness = _Harness(actor_id=SUGGESTER_ID, permission=SharePermission.SUGGEST)
+    registry = build_capability_registry(editor_patch_service=harness.service)
+    context = CapabilityContext(
+        principal=harness.principal, visible_to=harness.context, run_id="run_agent"
+    )
+
+    with pytest.raises(CapabilityError) as refused:
+        await registry.invoke(
+            "editor.patch.propose",
+            {"document_id": DOCUMENT_ID, "edits": _edits()},
+            context,
+        )
+
+    assert refused.value.code == "editor.collaboration_document"
+    assert refused.value.message == (
+        "Documents in collaboration mode do not accept agent proposals; "
+        "describe the change in your answer instead."
+    )
+    assert refused.value.http_status == 409
+    assert harness.documents.ai_reads == []
+    assert harness.store.records == {}
+
+
+@pytest.mark.asyncio
+async def test_patch_capability_names_an_unavailable_projection() -> None:
+    """A projection the barrier cannot confirm is a visible capability failure."""
+    from inqtrix.capabilities import (
+        CapabilityContext,
+        CapabilityError,
+        build_capability_registry,
+    )
+
+    harness = _Harness(actor_id=SUGGESTER_ID, permission=SharePermission.SUGGEST)
+    documents = _ProjectionFails(_document(), {SUGGESTER_ID: SharePermission.SUGGEST})
+    registry = build_capability_registry(
+        editor_patch_service=_service(harness, documents, _Audit())
+    )
+    context = CapabilityContext(
+        principal=harness.principal, visible_to=harness.context, run_id="run_agent"
+    )
+
+    with pytest.raises(CapabilityError) as failed:
+        await registry.invoke(
+            "editor.patch.propose",
+            {"document_id": DOCUMENT_ID, "edits": _edits()},
+            context,
+        )
+
+    assert failed.value.code == "editor.collaboration_projection_unavailable"
+    assert failed.value.message == (
+        "The current collaboration state could not be persisted."
+    )
+    assert failed.value.http_status == 503
+    assert harness.store.records == {}
 
 
 @pytest.mark.asyncio

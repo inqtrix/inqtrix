@@ -50,6 +50,8 @@ from inqtrix.runtime_logging import log_run_end, log_run_start
 from inqtrix.scoring import claim_assessments
 from inqtrix.settings import AgentSettings
 from inqtrix.state import (
+    CHAT_ONLY_DONE_MARKER,
+    CHAT_ONLY_START_MARKER,
     AgentState,
     build_run_snapshot,
     check_cancel_event,
@@ -400,8 +402,9 @@ def _run_direct_chat(
 ) -> dict[str, Any]:
     """Execute the skip-search short-circuit: LLM-only, no graph.
 
-    Emits two progress markers (``chat_only.start`` / ``chat_only.done``)
-    so a progress UI still has something to show. The
+    Emits two run markers (``chat_only.start`` / ``chat_only.done``) with
+    the run's snapshot, which no stream shows a reader
+    (:func:`~inqtrix.state.is_reader_step`). The
     returned ``result_state`` mimics the shape of the research path so
     downstream callers behave identically, minus the research-specific
     fields.
@@ -427,7 +430,7 @@ def _run_direct_chat(
     )
 
     state["_current_node"] = "direct_llm"
-    emit_progress(state, "chat_only.start")
+    emit_progress(state, CHAT_ONLY_START_MARKER)
     t0 = time.monotonic()
 
     answer_language = resolve_answer_language(question)
@@ -490,7 +493,7 @@ def _run_direct_chat(
         }
     except AgentRateLimited as exc:
         state = _reached_state(state, exc)
-        emit_progress(state, t(state, "run_aborted", exc=exc))
+        emit_progress(state, t(state, "run_aborted", exc=exc), severity="warning")
         log.error(
             "ABORT (chat-only, error_type=%s)",
             type(exc).__name__,
@@ -517,7 +520,7 @@ def _run_direct_chat(
         }
     except Exception as exc:
         state = _reached_state(state, exc)
-        emit_progress(state, t(state, "chat_mode_failed", exc=exc))
+        emit_progress(state, t(state, "chat_mode_failed", exc=exc), severity="warning")
         log_run_end(
             run_id=state.get("_run_id"),
             run_mode="run_chat_only",
@@ -538,7 +541,7 @@ def _run_direct_chat(
     answer_text = normalize_agent_markdown(answer_text)
     state["answer"] = answer_text
     state["done"] = True
-    emit_progress(state, "chat_only.done")
+    emit_progress(state, CHAT_ONLY_DONE_MARKER)
 
     elapsed = time.monotonic() - t0
     log.info("Chat-only finished in %.2fs", elapsed)
@@ -727,7 +730,7 @@ def _run(
         }
     except AgentRateLimited as exc:
         state = _reached_state(state, exc)
-        emit_progress(state, t(state, "run_rate_limited"))
+        emit_progress(state, t(state, "run_rate_limited"), severity="warning")
         log.error("ABORT (error_type=%s)", type(exc).__name__)
         state["_terminal_failure"] = {
             "type": "rate_limited",
@@ -751,7 +754,7 @@ def _run(
         }
     except Exception as exc:
         state = _reached_state(state, exc)
-        emit_progress(state, t(state, "run_failed", exc=exc))
+        emit_progress(state, t(state, "run_failed", exc=exc), severity="warning")
         log_run_end(
             run_id=state.get("_run_id"),
             run_mode="run",

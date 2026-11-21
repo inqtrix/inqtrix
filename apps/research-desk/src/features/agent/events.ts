@@ -3,7 +3,7 @@
  * pattern): `(record, event) -> record`, no i18n, no clocks, no fetches —
  * fully unit-testable. Control-row payloads are NOT copied from events
  * (rows are the truth); events only flip the `*Stale` flags the
- * run hook turns into refetches, and carry the live task/phase state.
+ * run hook turns into refetches, and carry the live phase and transcript.
  */
 
 import type {
@@ -14,7 +14,6 @@ import type {
   AgentRunOutcomeLine,
   AgentRunRecord,
   AgentStepEntry,
-  AgentTaskLiveState,
   AgentTouchedArtifact,
 } from './model'
 import {
@@ -22,7 +21,6 @@ import {
   isGateAgentRun,
   MAX_REVIEW_FINDINGS,
   MAX_STEP_LOG,
-  TERMINAL_AGENT_TASK_STATUSES,
 } from './model'
 import type {
   ResearchRunEvent,
@@ -32,74 +30,30 @@ import type {
 import { asFiniteNumber, asString, asStringArray } from '@/lib/coerce'
 import { isoFromUnixSeconds, unixSecondsFromIso } from '@/lib/time'
 import { normalizeAgentOperation } from './activityPresentation'
-import { CHILD_DECISION_KINDS, stripTaskTitle } from './childMission'
 import { mergeResearchSnapshot } from './taskProgress'
 
-/** Apply the durable cancellation acknowledgement immediately.
- *
- * The HTTP response is authoritative even when SSE is degraded. Keeping this
- * projection beside the event reducer prevents a second, subtly different
- * task-state transition in the control hook.
+/**
+ * Event types only the retired mission engine sent. Its stored runs still
+ * replay them, and each keeps what it always showed: a plan line, a task's
+ * start or outcome as a plain transcript line, and for `patch.proposed`
+ * the artifact refetch it signalled. A type outside this list is unknown
+ * and adds no line, so a type that leaves it takes those lines from every
+ * stored mission run.
  */
-export function acknowledgeAgentTaskCancellation(
-  record: AgentRunRecord,
-  taskId: string,
-  status: 'cancel_requested' | 'cancelled',
-  childRunId: string | null,
-): AgentRunRecord {
-  const previous = record.taskStates[taskId]
-  return {
-    ...record,
-    planStale: true,
-    taskStates: {
-      ...record.taskStates,
-      [taskId]: taskCancellationState(previous, status, childRunId),
-    },
-  }
-}
-
-
-function taskCancellationState(
-  previous: AgentTaskLiveState | undefined,
-  status: 'cancel_requested' | 'cancelled',
-  childRunId: string | null,
-  finishedAt?: number,
-): AgentTaskLiveState {
-  const nextStatus = monotonicTaskStatus(previous?.status, status)
-  if (previous && nextStatus === previous.status) return previous
-  return {
-    ...(previous ?? { attempt: 1, status: 'running' }),
-    status: nextStatus,
-    childRunId: childRunId ?? previous?.childRunId,
-    ...(status === 'cancelled' && finishedAt !== undefined
-      ? { finishedAt }
-      : {}),
-  }
-}
-
-function monotonicTaskStatus(
-  current: AgentTaskLiveState['status'] | undefined,
-  incoming: AgentTaskLiveState['status'],
-  currentAttempt = 1,
-  incomingAttempt = currentAttempt,
-): AgentTaskLiveState['status'] {
-  if (!current) return incoming
-  if (
-    current === 'failed'
-    && incoming === 'running'
-    && incomingAttempt > currentAttempt
-  ) return incoming
-  if (TERMINAL_AGENT_TASK_STATUSES.has(current)) return current
-  if (current === 'cancel_requested' && incoming !== 'cancelled') {
-    return current
-  }
-  return incoming
-}
+export const RETIRED_AGENT_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'inqtrix.agent.plan.proposed',
+  'inqtrix.agent.plan.revised',
+  'inqtrix.agent.task.started',
+  'inqtrix.agent.task.cancel_requested',
+  'inqtrix.agent.task.finished',
+  'inqtrix.agent.task.failed',
+  'inqtrix.agent.patch.proposed',
+])
 
 /** Operation codes of the evidence-limit notes. Events stored by earlier
  * versions marked them with ``fallback: true``; the reducer reads that
- * stored flag as the evidence limit it stood for, so a reopened run keeps
- * a completed task in its own status group. */
+ * stored flag as the evidence limit it stood for, so a reopened run shows
+ * the note as a note, not as a fallback. */
 const EVIDENCE_LIMIT_OPERATION_CODES: ReadonlySet<string> = new Set([
   'task.evidence_needs_review',
   'task.evidence_partial',
@@ -210,22 +164,6 @@ export function applyAgentRunEvent(
       return next
     }
 
-    case 'inqtrix.agent.plan.proposed':
-    case 'inqtrix.agent.plan.revised': {
-      next.planStale = true
-      const version = numberField(data, 'version')
-      // A revised plan can arrive auto-approved (balanced replans) — the
-      // timeline shows that as a note instead of an approval card.
-      const autoApproved =
-        event.type === 'inqtrix.agent.plan.revised'
-        && Boolean(data.auto_approved)
-      if (autoApproved && version !== undefined) {
-        next.lastAutoApprovedVersion = version
-      }
-      appendStep(next, { autoApproved, kind: 'plan', version })
-      return next
-    }
-
     case 'inqtrix.agent.approval.requested': {
       next.approvalsStale = true
       // The transcript remembers WHAT was asked, not only the decision —
@@ -266,15 +204,6 @@ export function applyAgentRunEvent(
           item.approvalId === approvalId && item.status === 'pending'
             ? { ...item, decidedAt: event.created_at, status: decidedStatus }
             : item)
-      }
-      const approvalKind =
-        stringField(data, 'kind')
-        || stringField(data, 'approval_kind')
-        || record.approvals.find(
-          (approval) => approval.approvalId === approvalId,
-        )?.kind
-      if (approvalKind === 'plan' || approvalKind === 'replan') {
-        next.planStale = true
       }
       // Decision marker for the transcript; the rows carry the content.
       appendStep(next, {
@@ -341,142 +270,6 @@ export function applyAgentRunEvent(
       return next
     }
 
-    case 'inqtrix.agent.task.started': {
-      const taskId = stringField(data, 'task_id')
-      if (!taskId) return next
-      const previous = record.taskStates[taskId]
-      const incomingAttempt = numberField(data, 'attempt') ?? 1
-      const status = monotonicTaskStatus(
-        previous?.status,
-        'running',
-        previous?.attempt ?? 1,
-        incomingAttempt,
-      )
-      const state: AgentTaskLiveState = {
-        ...(previous ?? {}),
-        status,
-        attempt: Math.max(
-          previous?.attempt ?? 1,
-          incomingAttempt,
-        ),
-        childRunId:
-          stringField(data, 'child_run_id')
-          || previous?.childRunId,
-        activity: previous?.activity,
-        activityHistory: previous?.activityHistory,
-        fallback: previous?.fallback,
-        metrics: previous?.metrics,
-        resultSummary: previous?.resultSummary,
-        startedAt: previous?.startedAt ?? event.created_at,
-        ...(status === 'running' ? { finishedAt: undefined } : {}),
-      }
-      next.taskStates = { ...record.taskStates, [taskId]: state }
-      appendStep(next, { kind: 'task_started', taskId })
-      return next
-    }
-    case 'inqtrix.agent.task.cancel_requested': {
-      const taskId = stringField(data, 'task_id')
-      if (!taskId) return next
-      const status = stringField(data, 'status')
-      const previous = record.taskStates[taskId]
-      next.taskStates = {
-        ...record.taskStates,
-        [taskId]: taskCancellationState(
-          previous,
-          status === 'cancelled' ? 'cancelled' : 'cancel_requested',
-          stringField(data, 'child_run_id') || null,
-          event.created_at,
-        ),
-      }
-      next.planStale = true
-      return next
-    }
-    case 'inqtrix.agent.task.finished':
-    case 'inqtrix.agent.task.failed': {
-      const taskId = stringField(data, 'task_id')
-      if (!taskId) return next
-      const outcome = stringField(data, 'status')
-      const parsedError = errorInfo(data.error)
-      const failed =
-        event.type === 'inqtrix.agent.task.failed' || outcome === 'failed'
-      const insufficient = outcome === 'insufficient_evidence'
-      const cancelled = outcome === 'cancelled'
-      const previousTask = record.taskStates[taskId]
-      const incomingStatus: AgentTaskLiveState['status'] = cancelled
-          ? 'cancelled'
-          : insufficient
-          ? 'insufficient_evidence'
-          : failed
-            ? 'failed'
-            : 'completed'
-      const status = monotonicTaskStatus(
-        previousTask?.status,
-        incomingStatus,
-      )
-      const lifecycleAccepted = status === incomingStatus
-      const state: AgentTaskLiveState = {
-        status,
-        outcome: lifecycleAccepted
-          ? outcome || (failed ? 'failed' : 'completed')
-          : previousTask?.outcome,
-        attempt: previousTask?.attempt ?? 1,
-        childRunId:
-          stringField(data, 'child_run_id') ||
-          previousTask?.childRunId,
-        error: lifecycleAccepted ? parsedError.message : previousTask?.error,
-        errorCode: lifecycleAccepted ? parsedError.code : previousTask?.errorCode,
-        activity: previousTask?.activity,
-        activityHistory: previousTask?.activityHistory,
-        metrics: recordField(data, 'metrics') ?? previousTask?.metrics,
-        resultSummary:
-          lifecycleAccepted
-            ? stringField(data, 'result_summary') || previousTask?.resultSummary
-            : previousTask?.resultSummary,
-        fallback: previousTask?.fallback,
-        evidenceLimit: previousTask?.evidenceLimit,
-        startedAt: previousTask?.startedAt,
-        finishedAt: lifecycleAccepted
-          ? previousTask?.finishedAt ?? event.created_at
-          : previousTask?.finishedAt,
-      }
-      next.taskStates = { ...record.taskStates, [taskId]: state }
-      if (lifecycleAccepted) {
-        // Settle any still-open activity rows of the task: a retry
-        // notice or hard-aborted invocation must not stay "running"
-        // forever in the protocol once the task itself concluded.
-        const settled = status === 'completed' ? 'completed' : 'failed'
-        const openRows = record.stepLog.some(
-          (item) =>
-            item.kind === 'activity'
-            && item.taskId === taskId
-            && item.status !== 'completed'
-            && item.status !== 'failed',
-        )
-        if (openRows) {
-          next.stepLog = (
-            next.stepLog === record.stepLog
-              ? [...record.stepLog]
-              : next.stepLog
-          ).map((item) =>
-            item.kind === 'activity'
-            && item.taskId === taskId
-            && item.status !== 'completed'
-            && item.status !== 'failed'
-              ? { ...item, status: settled }
-              : item,
-          )
-        }
-      }
-      // Task outcomes update the plan rows (status/result_summary) too.
-      next.planStale = true
-      appendStep(next, {
-        error: state.error,
-        kind: failed || insufficient ? 'task_failed' : 'task_finished',
-        taskId,
-      })
-      return next
-    }
-
     case 'inqtrix.agent.child.progress': {
       const childRunId = stringField(data, 'child_run_id')
       const taskId = stringField(data, 'task_id')
@@ -495,115 +288,13 @@ export function applyAgentRunEvent(
       const metrics = recordField(data, 'metrics') ?? previousChild?.metrics
       const attempt = numberField(data, 'attempt') ?? previousChild?.attempt
       const updatedAt = numberField(data, 'updated_at') ?? event.created_at
-      // Which unit of work a delegated MISSION is on. The status comes
-      // from the EVENT, not from the payload's carried-forward value: a
-      // task that just started must not inherit the previous task's
-      // `completed`, which would freeze the line on a finished step.
-      // Which units of work a delegated MISSION has open. A mission
-      // starts its whole parallel wave in ONE burst — five tasks in the
-      // same millisecond, in the run that motivated this — so a single
-      // "current ordinal" named one of five and read as if the other
-      // four did not exist. The SET is the honest answer.
       const childEvent = stringField(data, 'event_type')
-      const ordinal = numberField(data, 'ordinal')
-      const openTasks = nextOpenChildTasks(
-        previousChild?.openTasks,
-        childEvent,
-        ordinal,
-      )
-      const failedTasks = nextFailedChildTasks(
-        previousChild?.failedTasks,
-        childEvent,
-        ordinal,
-      )
-      const taskTitle = stringField(data, 'title')
-      const taskTitles = childEvent === 'inqtrix.agent.task.started'
-        && ordinal !== undefined && taskTitle
-        ? { ...(previousChild?.taskTitles ?? {}), [ordinal]: taskTitle }
-        : previousChild?.taskTitles
-      // A task's searches cross as bracketed activity (started ->
-      // completed): the line shows the latest query and counts the
-      // completed ones — the number that moves during a long wave.
-      const operation = stringField(data, 'operation')
-      const isChildSearch = childEvent === 'inqtrix.agent.activity'
-        && (operation === 'web.search.instant' || operation === 'knowledge.search')
-      const activityStatus = isChildSearch ? stringField(data, 'status') : ''
-      const lastQuery = isChildSearch && activityStatus === 'started'
-        ? (stringField(data, 'query') || previousChild?.lastQuery)
-        : previousChild?.lastQuery
-      const searchesDone = (previousChild?.searchesDone ?? 0)
-        + (isChildSearch && activityStatus === 'completed' ? 1 : 0)
-      // Only the DERIVED synthesis lines cross (outline, section done);
-      // the reducer mirrors the server gate so a stray kind never lands.
-      const section = childEvent === 'inqtrix.agent.narration'
-        && stringField(data, 'kind') === 'synthesis'
-        ? (stringField(data, 'text') || previousChild?.section)
-        : previousChild?.section
-      const sectionsDone = (previousChild?.sectionsDone ?? 0)
-        + (childEvent === 'inqtrix.agent.narration'
-          && stringField(data, 'narration_id').startsWith('n-section-') ? 1 : 0)
       const childStartedAt = previousChild?.startedAt ?? event.created_at
-      // The card's per-task facts, joined by the child's own plan-task id
-      // (`child_task_id` on task events and searches, `n-task-<id>` on the
-      // result line). Timestamps are the projection's arrival.
-      const childTaskId = stringField(data, 'child_task_id')
-      const isTaskStart = childEvent === 'inqtrix.agent.task.started'
-      const isTaskSettled = childEvent === 'inqtrix.agent.task.finished'
-        || childEvent === 'inqtrix.agent.task.failed'
-      const taskIds = isTaskStart && ordinal !== undefined && childTaskId
-        ? { ...(previousChild?.taskIds ?? {}), [childTaskId]: ordinal }
-        : previousChild?.taskIds
-      const taskStartedAt = isTaskStart && ordinal !== undefined
-        ? { ...(previousChild?.taskStartedAt ?? {}), [ordinal]: event.created_at }
-        : previousChild?.taskStartedAt
-      const taskKind = stringField(data, 'tool_kind')
-      const taskKinds = isTaskStart && ordinal !== undefined && taskKind
-        ? { ...(previousChild?.taskKinds ?? {}), [ordinal]: taskKind }
-        : previousChild?.taskKinds
-      const taskSettledAt = isTaskSettled && ordinal !== undefined
-        ? { ...(previousChild?.taskSettledAt ?? {}), [ordinal]: event.created_at }
-        : previousChild?.taskSettledAt
-      const searchTask = isChildSearch && childTaskId ? taskIds?.[childTaskId] : undefined
-      const taskSearches = searchTask !== undefined && activityStatus === 'completed'
-        ? {
-          ...(previousChild?.taskSearches ?? {}),
-          [searchTask]: (previousChild?.taskSearches?.[searchTask] ?? 0) + 1,
-        }
-        : previousChild?.taskSearches
-      const lastQueryTask = isChildSearch && activityStatus === 'started' && searchTask !== undefined
-        ? searchTask
-        : previousChild?.lastQueryTask
-      const narrationKind = childEvent === 'inqtrix.agent.narration' ? stringField(data, 'kind') : ''
-      const narrationId = stringField(data, 'narration_id')
-      const narrationText = stringField(data, 'text')
-      const resultTask = narrationKind === 'task' && narrationId.startsWith('n-task-')
-        ? taskIds?.[narrationId.slice('n-task-'.length)]
-        : undefined
-      const taskResults = resultTask !== undefined && narrationText
-        ? {
-          ...(previousChild?.taskResults ?? {}),
-          [resultTask]: stripTaskTitle(narrationText, taskTitles?.[resultTask]),
-        }
-        : previousChild?.taskResults
-      const planLine = narrationKind === 'plan' && narrationText
-        ? narrationText
-        : previousChild?.planLine
-      const decisionKind = childEvent === 'inqtrix.agent.activity' ? stringField(data, 'kind') : ''
-      const decisionDetail = stringField(data, 'detail')
-      const decision = CHILD_DECISION_KINDS.has(decisionKind)
-        ? {
-          kind: decisionKind,
-          label: stringField(data, 'label') || stringField(data, 'message'),
-          ...(decisionDetail ? { detail: decisionDetail } : {}),
-          at: event.created_at,
-        }
-        : previousChild?.decision
-      const researchRounds = (previousChild?.researchRounds ?? 0)
-        + (decisionKind === 'critic_research' ? 1 : 0)
+      // A delegated child's outcome record: how its review ended, in the
+      // server's bounded summary.
       const outcome = childEvent === 'inqtrix.agent.outcome'
         ? childOutcome(data) ?? previousChild?.outcome
         : previousChild?.outcome
-      const taskToolKind = stringField(data, 'tool_kind') || previousChild?.taskToolKind
       // A grounded knowledge answer is the child's unit of visible
       // progress: one arrives every 20-60 s during execution. Counting
       // them turns "the same line for twenty minutes" into a number
@@ -631,28 +322,10 @@ export function applyAgentRunEvent(
           ...(message ? { message } : {}),
           ...(metrics ? { metrics } : {}),
           ...(attempt !== undefined ? { attempt } : {}),
-          ...(openTasks ? { openTasks } : {}),
-          ...(failedTasks ? { failedTasks } : {}),
-          ...(taskTitles ? { taskTitles } : {}),
-          ...(lastQuery ? { lastQuery } : {}),
-          ...(searchesDone > 0 ? { searchesDone } : {}),
           ...(lastTool ? { lastTool } : {}),
           ...(toolCalls !== undefined ? { toolCalls } : {}),
-          ...(section ? { section } : {}),
-          ...(sectionsDone > 0 ? { sectionsDone } : {}),
           startedAt: childStartedAt,
-          ...(taskIds ? { taskIds } : {}),
-          ...(taskStartedAt ? { taskStartedAt } : {}),
-          ...(taskSettledAt ? { taskSettledAt } : {}),
-          ...(taskSearches ? { taskSearches } : {}),
-          ...(taskKinds ? { taskKinds } : {}),
-          ...(lastQueryTask !== undefined ? { lastQueryTask } : {}),
-          ...(taskResults ? { taskResults } : {}),
-          ...(planLine ? { planLine } : {}),
-          ...(decision ? { decision } : {}),
-          ...(researchRounds > 0 ? { researchRounds } : {}),
           ...(outcome ? { outcome } : {}),
-          ...(taskToolKind ? { taskToolKind } : {}),
           ...(checkedAnswers > 0 ? { checkedAnswers } : {}),
           ...(error ? { error } : {}),
           ...(errorCode ? { errorCode } : {}),
@@ -677,37 +350,6 @@ export function applyAgentRunEvent(
             clarifications: gates?.clarifications ?? [],
             ...(gates?.question ? { question: gates.question } : {}),
             stale: true,
-          },
-        }
-      }
-      if (taskId) {
-        const previousTask = record.taskStates[taskId]
-        const projectedStatus = monotonicTaskStatus(
-          previousTask?.status,
-          childTaskStatus(runStatus, previousTask?.status),
-          previousTask?.attempt ?? 1,
-          attempt ?? previousTask?.attempt ?? 1,
-        )
-        const childTerminal =
-          projectedStatus === 'completed'
-          || projectedStatus === 'failed'
-          || projectedStatus === 'insufficient_evidence'
-        next.taskStates = {
-          ...next.taskStates,
-          [taskId]: {
-            ...(previousTask ?? { status: 'running', attempt: 1 }),
-            status: projectedStatus,
-            childRunId,
-            attempt:
-              attempt
-              ?? previousTask?.attempt
-              ?? 1,
-            ...(error ? { error } : {}),
-            ...(errorCode ? { errorCode } : {}),
-            startedAt: previousTask?.startedAt ?? event.created_at,
-            ...(childTerminal
-              ? { finishedAt: previousTask?.finishedAt ?? updatedAt }
-              : { finishedAt: undefined }),
           },
         }
       }
@@ -978,16 +620,6 @@ export function applyAgentRunEvent(
       return next
     }
 
-    case 'inqtrix.agent.patch.proposed': {
-      const patchId = stringField(data, 'patch_id')
-      if (patchId) {
-        next.patchId = patchId
-        next.patchStale = true
-      }
-      next.artifactsStale = true
-      return next
-    }
-
     case 'inqtrix.agent.activity': {
       const rawProbe = stringField(data, 'probe')
       const operationCode = stringField(data, 'operation') || rawProbe
@@ -1014,17 +646,22 @@ export function applyAgentRunEvent(
         stringField(data, 'detail')
         || stringField(data, 'query')
         || (operation ? '' : rawProbe)
+      // A status update without a detail of its own (a retry notice of a
+      // stored mission task) takes the detail of the task's latest activity
+      // row when that row is of the same operation, so it settles that
+      // invocation's row.
       const previousTaskActivity = taskId
-        ? record.taskStates[taskId]?.activity
+        ? latestTaskActivity(record.stepLog, taskId)
         : undefined
       const effectiveDetail = detail || (
         status !== undefined
+        && previousTaskActivity !== undefined
         && (
           (operation !== undefined
-            && previousTaskActivity?.operation === operation)
-          || previousTaskActivity?.operationCode === operationCode
+            && previousTaskActivity.activityOperation === operation)
+          || previousTaskActivity.activityOperationCode === operationCode
         )
-          ? previousTaskActivity.detail
+          ? previousTaskActivity.detail ?? ''
           : ''
       )
       // The transcript is an append-only protocol. Contract per event
@@ -1078,39 +715,6 @@ export function applyAgentRunEvent(
         fallback,
         evidenceLimit,
         at: event.created_at,
-      }
-      if (taskId) {
-        const previousTask = record.taskStates[taskId]
-        const activityHistory = updateTaskActivityHistory(
-          previousTask?.activityHistory,
-          next.activity,
-        )
-        const activityTerminal = status === 'completed' || status === 'failed'
-        const lifecycleLocked = previousTask !== undefined && (
-          TERMINAL_AGENT_TASK_STATUSES.has(previousTask.status)
-          || previousTask.status === 'cancel_requested'
-        )
-        next.taskStates = {
-          ...next.taskStates,
-          [taskId]: {
-            ...(previousTask ?? { status: 'running', attempt: 1 }),
-            activity: next.activity,
-            activityHistory,
-            ...(parsedError.message
-              ? { error: parsedError.message }
-              : {}),
-            ...(parsedError.code ? { errorCode: parsedError.code } : {}),
-            ...(fallback ? { fallback: true } : {}),
-            ...(evidenceLimit ? { evidenceLimit: true } : {}),
-            startedAt: previousTask?.startedAt ?? event.created_at,
-            ...(activityTerminal && !lifecycleLocked
-              ? { finishedAt: event.created_at }
-              : {}),
-            ...(status === 'started' && !lifecycleLocked
-              ? { finishedAt: undefined }
-              : {}),
-          },
-        }
       }
       appendActivityStep(next, {
         activityKey,
@@ -1296,15 +900,101 @@ export function applyAgentRunEvent(
     }
 
     default:
+      if (RETIRED_AGENT_EVENT_TYPES.has(event.type)) applyRetiredEvent(next)
       return next
+  }
+
+  /** A retired mission event of a stored run: the plain line it shows.
+   * The plan and task rows behind it are no longer read, so every line
+   * carries what its event said. */
+  function applyRetiredEvent(target: AgentRunRecord): void {
+    switch (event.type) {
+      case 'inqtrix.agent.plan.proposed':
+      case 'inqtrix.agent.plan.revised':
+        appendStep(target, {
+          // A revised plan could arrive auto-approved; the line says so.
+          autoApproved:
+            event.type === 'inqtrix.agent.plan.revised'
+            && Boolean(data.auto_approved),
+          kind: 'plan',
+          version: numberField(data, 'version'),
+        })
+        return
+      case 'inqtrix.agent.task.started': {
+        const taskId = stringField(data, 'task_id')
+        if (!taskId) return
+        const title = stringField(data, 'title')
+        appendStep(target, { kind: 'task_started', taskId, ...(title ? { title } : {}) })
+        return
+      }
+      case 'inqtrix.agent.task.cancel_requested': {
+        // The request lands on the task's start line; its outcome line
+        // follows once the task settled.
+        const taskId = stringField(data, 'task_id')
+        const log = target.stepLog === record.stepLog
+          ? [...record.stepLog]
+          : target.stepLog
+        const index = log.findLastIndex(
+          (item) => item.kind === 'task_started' && item.taskId === taskId,
+        )
+        if (!taskId || index === -1) return
+        log[index] = {
+          ...log[index],
+          status: stringField(data, 'status') === 'cancelled' ? 'cancelled' : 'cancel_requested',
+        }
+        target.stepLog = log
+        return
+      }
+      case 'inqtrix.agent.task.finished':
+      case 'inqtrix.agent.task.failed': {
+        const taskId = stringField(data, 'task_id')
+        if (!taskId) return
+        const failed =
+          event.type === 'inqtrix.agent.task.failed'
+          || stringField(data, 'status') === 'failed'
+        // The task's own outcome, never a blanket "done": skipped,
+        // cancelled and insufficient evidence each say what happened.
+        const status = stringField(data, 'status') || (failed ? 'failed' : 'completed')
+        // Settle any still-open activity rows of the task: a retry notice
+        // or a hard-aborted invocation must not stay "running" forever in
+        // the protocol once the task itself concluded.
+        const settled = status === 'completed' || status === 'skipped' ? 'completed' : 'failed'
+        const isOpenRow = (item: AgentStepEntry) =>
+          item.kind === 'activity'
+          && item.taskId === taskId
+          && item.status !== 'completed'
+          && item.status !== 'failed'
+        if (target.stepLog.some(isOpenRow)) {
+          target.stepLog = target.stepLog.map((item) =>
+            isOpenRow(item) ? { ...item, status: settled } : item)
+        }
+        const title = stringField(data, 'title')
+        const result = stringField(data, 'result_summary')
+        appendStep(target, {
+          error: errorInfo(data.error).message,
+          kind: failed ? 'task_failed' : 'task_finished',
+          status,
+          taskId,
+          ...(title ? { title } : {}),
+          ...(result ? { result } : {}),
+        })
+        return
+      }
+      case 'inqtrix.agent.patch.proposed':
+        // The run's artifacts are read again; the patch itself has no
+        // surface any more.
+        target.artifactsStale = true
+        return
+    }
   }
 
   /** Bounded ordered append with narration UPSERT: a line carrying a
    * ``narrationId`` already in the log replaces that entry in place
    * (keeping its position and React key) rather than appending a
-   * duplicate — the backend re-emits stable narration ids on node
-   * re-execution (critic replan loop) with fresh sequences, which the
-   * sequence guard does not suppress. seq/at ride the event envelope. */
+   * duplicate — the backend re-emits a stable narration id while it
+   * updates the line (a `final: false` line and its final text) with fresh
+   * sequences, which the sequence guard does not suppress. seq/at ride the
+   * event envelope. */
   function appendStep(
     target: AgentRunRecord,
     entry: Omit<AgentStepEntry, 'at' | 'seq'>,
@@ -1345,8 +1035,9 @@ export function applyAgentRunEvent(
   }
 
   /** Consecutive probes/calls of the same semantic operation update one
-   * transcript row. The plan retains every literal query; the timeline stays
-   * a readable status story rather than four identical capability ids. */
+   * transcript row. The run's event history keeps every literal query; the
+   * timeline stays a readable status story rather than four identical
+   * capability ids. */
   function appendActivityStep(
     target: AgentRunRecord,
     entry: Omit<AgentStepEntry, 'at' | 'seq'>,
@@ -1549,7 +1240,7 @@ function runOutcome(data: Record<string, unknown>): AgentRunOutcome | undefined 
   }
 }
 
-/** The projection of a delegated mission's outcome record, or nothing —
+/** The projection of a delegated child's outcome record, or nothing —
  * read by the same rule as a run's own record. */
 function childOutcome(data: Record<string, unknown>): AgentChildOutcome | undefined {
   const summary = asString(data.summary)
@@ -1568,48 +1259,6 @@ function numberField(
   key: string,
 ): number | undefined {
   return asFiniteNumber(data[key])
-}
-
-/**
- * The ordinals a delegated mission currently has open.
- *
- * A mission starts its whole parallel wave in one burst, so "the current
- * task" is not a single number. Keeping the SET means the surface can
- * say how many run at once instead of naming one of five as if it were
- * the only one. A `finished` event closes exactly its own ordinal, so a
- * straggler stays visible after its siblings settle — which is the case
- * a reader most needs to see.
- */
-export function nextOpenChildTasks(
-  current: readonly number[] | undefined,
-  eventType: string,
-  ordinal: number | undefined,
-): number[] | undefined {
-  if (ordinal === undefined) return current ? [...current] : undefined
-  const open = new Set(current ?? [])
-  if (eventType === 'inqtrix.agent.task.started') open.add(ordinal)
-  else if (
-    eventType === 'inqtrix.agent.task.finished'
-    || eventType === 'inqtrix.agent.task.failed'
-  ) open.delete(ordinal)
-  else return current ? [...current] : undefined
-  return [...open].sort((left, right) => left - right)
-}
-
-/** Ordinals of a delegated mission's FAILED tasks: a failure settles a
- * task (it leaves `openTasks`) and is counted here, so the line can say
- * "2 Aufgaben fehlgeschlagen" instead of pretending they still run. */
-export function nextFailedChildTasks(
-  current: readonly number[] | undefined,
-  eventType: string,
-  ordinal: number | undefined,
-): number[] | undefined {
-  if (eventType !== 'inqtrix.agent.task.failed' || ordinal === undefined) {
-    return current ? [...current] : undefined
-  }
-  const failed = new Set(current ?? [])
-  failed.add(ordinal)
-  return [...failed].sort((left, right) => left - right)
 }
 
 /** A list of non-empty strings from an event payload, else undefined. */
@@ -1669,75 +1318,17 @@ function errorInfo(value: unknown): { code?: string; message?: string } {
   }
 }
 
-const MAX_TASK_ACTIVITY_HISTORY = 100
-
-function updateTaskActivityHistory(
-  current: AgentTaskLiveState['activityHistory'],
-  activity: NonNullable<AgentTaskLiveState['activity']>,
-): NonNullable<AgentTaskLiveState['activityHistory']> {
-  const history = [...(current ?? [])]
-  const updatesInvocation =
-    activity.status !== undefined && activity.status !== 'started'
-  let index = -1
-  if (updatesInvocation) {
-    if (activity.activityId) {
-      index = history.findIndex(
-        (item) => item.activityId === activity.activityId,
-      )
-    }
-    if (index === -1) {
-      for (let cursor = history.length - 1; cursor >= 0; cursor -= 1) {
-        const item = history[cursor]
-        if (
-          item.operation === activity.operation
-          && item.kind === activity.kind
-          && item.status !== 'completed'
-          && item.status !== 'failed'
-          && item.status !== 'fallback'
-        ) {
-          index = cursor
-          break
-        }
-      }
-    }
+/** The task's most recently updated activity row: the row whose `at` (the
+ * time of its last update) is newest, the later row of the log winning a
+ * tie. */
+function latestTaskActivity(
+  stepLog: readonly AgentStepEntry[],
+  taskId: string,
+): AgentStepEntry | undefined {
+  let latest: AgentStepEntry | undefined
+  for (const item of stepLog) {
+    if (item.kind !== 'activity' || item.taskId !== taskId) continue
+    if (!latest || item.at >= latest.at) latest = item
   }
-  if (index === -1) history.push(activity)
-  else {
-    history[index] = {
-      ...history[index],
-      ...activity,
-      detail: activity.detail || history[index].detail,
-      label: activity.label ?? history[index].label,
-      operation: activity.operation ?? history[index].operation,
-      operationCode: activity.operationCode ?? history[index].operationCode,
-      purpose: activity.purpose ?? history[index].purpose,
-      metrics: activity.metrics ?? history[index].metrics,
-      attempt: activity.attempt ?? history[index].attempt,
-    }
-  }
-  return history.length > MAX_TASK_ACTIVITY_HISTORY
-    ? history.slice(history.length - MAX_TASK_ACTIVITY_HISTORY)
-    : history
-}
-
-function childTaskStatus(
-  runStatus: string | undefined,
-  current: AgentTaskLiveState['status'] | undefined,
-): AgentTaskLiveState['status'] {
-  if (runStatus === 'cancelled' && current === 'cancel_requested') {
-    return 'cancel_requested'
-  }
-  if (runStatus === 'failed' || runStatus === 'cancelled') {
-    return 'failed'
-  }
-  if (runStatus === 'completed') return 'completed'
-  if (runStatus === 'insufficient_evidence') return 'insufficient_evidence'
-  if (
-    runStatus === 'queued'
-    || runStatus === 'running'
-    || runStatus === 'waiting_for_approval'
-    || runStatus === 'waiting_for_children'
-    || runStatus === 'waiting_for_input'
-  ) return 'running'
-  return current ?? 'running'
+  return latest
 }

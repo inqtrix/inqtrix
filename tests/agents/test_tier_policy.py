@@ -1,64 +1,33 @@
 """Contracts of the Stufen ladder (tier_policy + its consumers).
 
-What these tests pin: the policy table drives web budgets and plan
-validation deterministically (published == enforced), the legacy
+What these tests pin: the policy table drives the web budgets and the
+kernel's blocked tools deterministically (published == enforced), the legacy
 ``tier=None`` path stays byte-identical, and the override seam bridges
 tier -> depth without ever touching model selection.
 """
 
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 from fastapi import HTTPException
 
-from inqtrix.agents.plan_models import (
-    ExecutionPlanModel,
-    WEB_RESEARCH_PROFILES,
-)
-from inqtrix.agents.plan_validation import validate_plan
 from inqtrix.agents.tier_policy import (
     AGENT_TIERS,
     TIER_POLICIES,
     VERIFY_LEVELS,
-    effective_clarification_rounds,
     resolve_tier_policy,
     resolve_verify_level,
     review_required,
     tier_capabilities_payload,
 )
-from inqtrix.agents.web_execution_policy import derive_web_research_policy
+from inqtrix.agents.web_execution_policy import ResearchProfile, derive_web_research_policy
 from inqtrix.services.overrides import (
     apply_overrides,
     parse_overrides_payload,
 )
 from inqtrix.settings import AgentSettings
-
-
-def _plan(profile: str | None) -> ExecutionPlanModel:
-    return ExecutionPlanModel.model_validate(
-        {
-            "summary_markdown": "Plan",
-            "tasks": [
-                {
-                    "id": "t1",
-                    "title": "Recherche",
-                    "tool_kind": "web_research",
-                    "queries": ["Frage eins"],
-                    **(
-                        {"params": {"profile": profile}}
-                        if profile is not None
-                        else {}
-                    ),
-                },
-                {
-                    "id": "s",
-                    "title": "Synthese",
-                    "tool_kind": "synthesis",
-                    "depends_on": ["t1"],
-                },
-            ],
-        }
-    )
 
 
 def test_web_policy_per_tier_matches_the_table():
@@ -69,52 +38,19 @@ def test_web_policy_per_tier_matches_the_table():
     gruendlich = derive_web_research_policy(depth="normal", tier="gruendlich")
     assert gruendlich.allowed is True
     assert gruendlich.profile == "schnell"
-    assert gruendlich.max_profile == "compact"
 
     tief = derive_web_research_policy(depth="deep", tier="tief")
     assert tief.allowed is True
     assert tief.profile == "compact"
-    assert tief.max_profile == "deep"
 
 
 def test_web_policy_without_tier_keeps_depth_profiles():
     assert derive_web_research_policy(depth="deep") == (
         derive_web_research_policy(depth="deep", tier=None)
     )
-    legacy = derive_web_research_policy(depth="normal", admitted_directive=True)
-    assert legacy.allowed is True
-    assert legacy.profile == "compact"
-    assert legacy.max_profile is None
     normal = derive_web_research_policy(depth="normal")
     assert normal.allowed is True
     assert normal.profile == "compact"
-
-
-def test_validate_plan_enforces_the_tier_ceiling():
-    over = validate_plan(
-        _plan("deep"),
-        web_research_allowed=True,
-        web_research_profile_ceiling="compact",
-    )
-    assert any("exceeds the search depth" in e for e in over)
-    within = validate_plan(
-        _plan("schnell"),
-        web_research_allowed=True,
-        web_research_profile_ceiling="compact",
-    )
-    assert within == []
-    # Missing profile is fine — the server default applies at execution.
-    defaulted = validate_plan(
-        _plan(None),
-        web_research_allowed=True,
-        web_research_profile_ceiling="compact",
-    )
-    assert defaulted == []
-
-
-def test_validate_plan_rejects_research_when_the_tier_forbids_it():
-    errors = validate_plan(_plan("schnell"), web_research_allowed=False)
-    assert any("web_instant" in e for e in errors)
 
 
 def test_overrides_bridge_tier_into_depth_and_reject_contradictions():
@@ -145,9 +81,9 @@ def test_capabilities_payload_mirrors_the_policy_table():
     assert [entry["id"] for entry in payload] == list(AGENT_TIERS)
     for entry in payload:
         policy = TIER_POLICIES[entry["id"]]  # type: ignore[index]
-        assert entry["plan_gate"] == policy.plan_gate
+        # The rounds are the table's: the kernel enforces only a zero.
+        assert entry["clarification_rounds"] == policy.clarification_rounds
         assert entry["response_form"] == policy.response_form
-        assert entry["web_child_ceiling"] == policy.web_child_ceiling
         assert entry["web_instant_budget"] == policy.web_instant_budget
         assert entry["knowledge_search_budget"] == policy.knowledge_search_budget
         # No human-readable display text in the manifest: the server
@@ -156,7 +92,7 @@ def test_capabilities_payload_mirrors_the_policy_table():
         # Tier wording belongs to the surface's own translations.
         assert "latency_hint" not in entry
         if entry["web_child_profile"] is not None:
-            assert entry["web_child_profile"] in WEB_RESEARCH_PROFILES
+            assert entry["web_child_profile"] in get_args(ResearchProfile)
 
 
 def test_schnell_caps_both_source_searches_at_one():
@@ -175,90 +111,18 @@ def test_unknown_tier_fails_loudly():
         resolve_tier_policy("extrem")
 
 
-def test_schnell_instant_budget_is_validator_enforced():
-    """The published 'exactly one web_instant' budget is never
-    prompt-only: a second instant task is a repairable violation."""
-    from inqtrix.agents.plan_models import ExecutionPlanModel
-    from inqtrix.agents.plan_validation import validate_plan
-    from inqtrix.agents.web_execution_policy import derive_web_research_policy
-
-    policy = derive_web_research_policy(depth="normal", tier="schnell")
-    assert policy.max_instant_tasks == 1
-    plan = ExecutionPlanModel.model_validate({
-        "summary_markdown": "s",
-        "assumptions": [],
-        "success_criteria": [],
-        "tasks": [
-            {
-                "id": "t1",
-                "title": "Frage eins beantworten",
-                "tool_kind": "web_instant",
-                "objective": "",
-                "queries": ["Frage eins"],
-                "gap_ids": [],
-                "depends_on": [],
-                "budget": {},
-                "params": {},
-                "expected_output": "",
-            },
-            {
-                "id": "t2",
-                "title": "Frage zwei beantworten",
-                "tool_kind": "web_instant",
-                "objective": "",
-                "queries": ["Frage zwei"],
-                "gap_ids": [],
-                "depends_on": [],
-                "budget": {},
-                "params": {},
-                "expected_output": "",
-            },
-            {
-                "id": "s",
-                "title": "Memo",
-                "tool_kind": "synthesis",
-                "objective": "",
-                "queries": [],
-                "gap_ids": [],
-                "depends_on": ["t1", "t2"],
-                "budget": {},
-                "params": {},
-                "expected_output": "",
-            },
-        ],
-    })
-    errors = validate_plan(
-        plan,
-        web_research_allowed=False,
-        max_web_instant_tasks=policy.max_instant_tasks,
-    )
-    assert any("at most 1 web_instant" in error for error in errors)
-    assert any("t1, t2" in error for error in errors)
-
-
-def test_mission_column_makes_the_middle_rung_deterministic():
-    """The ladder is one search, one research child, one mission: only
-    ``tief`` may delegate a mission, and the kernel tools a Stufe removes
+def test_the_kernel_tools_a_stufe_removes_are_derived_from_the_table():
+    """The ladder is one search, then research children: ``schnell`` starts
+    no child at all, a batch included, and the kernel tools a Stufe removes
     are DERIVED from the table — never a second list. ``write_canvas`` is
     never removed: a document on request is possible in every Stufe."""
     from inqtrix.agents.tier_policy import blocked_kernel_tools
 
-    assert [TIER_POLICIES[t].mission for t in AGENT_TIERS] == [
-        False,
-        False,
-        True,
-    ]
-    assert [e["mission"] for e in tier_capabilities_payload()] == [
-        False,
-        False,
-        True,
-    ]
+    assert all("mission" not in entry for entry in tier_capabilities_payload())
     assert blocked_kernel_tools(TIER_POLICIES["schnell"]) == frozenset(
-        {"ask_user", "run_web_research", "run_deep_mission", "delegate_batch"}
+        {"ask_user", "run_web_research", "delegate_batch", "analyze_document"}
     )
-    assert blocked_kernel_tools(TIER_POLICIES["gruendlich"]) == frozenset(
-        {"run_deep_mission"}
-    )
+    assert blocked_kernel_tools(TIER_POLICIES["gruendlich"]) == frozenset()
     assert blocked_kernel_tools(TIER_POLICIES["tief"]) == frozenset()
     assert all(
         "write_canvas" not in blocked_kernel_tools(TIER_POLICIES[t])
@@ -267,7 +131,7 @@ def test_mission_column_makes_the_middle_rung_deterministic():
 
 
 def test_the_review_promise_of_a_stufe_comes_from_the_published_table():
-    """One predicate answers "does this run verify?", for both engines.
+    """One predicate answers "does this run verify?".
 
     Derived from the table rather than from a second list: a Stufe whose
     published ``verify`` level says it reviews must actually review, or the
@@ -297,112 +161,3 @@ def test_a_run_without_a_stufe_keeps_the_caller_s_legacy_level():
     assert resolve_verify_level("schnell", legacy="escalating") == "labels"
 
 
-def test_how_far_a_section_may_reach_is_published_as_it_is_enforced():
-    """The register width comes from the table and reaches the manifest.
-
-    One source for both, so the width the composer can read is the width
-    the sections are written with - and a deeper Stufe reaches further.
-    """
-    from inqtrix.agents.tier_policy import resolve_section_register
-
-    payload = {entry["id"]: entry for entry in tier_capabilities_payload()}
-    widths = []
-    for tier in AGENT_TIERS:
-        width = TIER_POLICIES[tier].section_register
-        assert resolve_section_register(tier) == width
-        assert payload[tier]["section_register"] == width
-        widths.append(width)
-    assert widths == sorted(widths) and len(set(widths)) == len(widths)
-
-
-def test_a_run_without_a_stufe_keeps_the_register_it_had_before_the_ladder():
-    """A request that names no Stufe sees the width the register shipped with.
-
-    Stated as the number itself, not as the constant that holds it: a test
-    that compares a value with its own definition cannot notice the value
-    moving.
-    """
-    from inqtrix.agents.tier_policy import resolve_section_register
-
-    assert resolve_section_register("") == 60
-    assert resolve_section_register(None) == 60
-
-
-def test_an_operator_register_width_is_published_as_the_one_it_enforces():
-    """An override replaces every Stufe's width - in the manifest too.
-
-    Otherwise the manifest would publish the table while the sections are
-    written with the operator's number.
-    """
-    for override in (0, 7):
-        payload = tier_capabilities_payload(section_register_override=override)
-        assert {entry["section_register"] for entry in payload} == {override}
-
-
-def test_the_manifest_publishes_the_register_width_the_operator_set():
-    """The router hands the operator's number to the manifest.
-
-    The payload function can publish an override only if the router passes
-    it; without that hand-over the manifest would show the table while the
-    sections are written with the operator's width.
-    """
-    from fastapi.testclient import TestClient
-
-    from inqtrix.providers.base import ProviderContext
-    from inqtrix.search_result import GroundedSearchResult
-    from inqtrix.server.app import create_app
-    from inqtrix.settings import (
-        AgentPlatformSettings,
-        AgentSettings,
-        ModelSettings,
-        ServerSettings,
-        Settings,
-    )
-
-    class _LLM:
-        def is_available(self) -> bool:
-            return True
-
-    class _Search:
-        def search(self, *args: object, **kwargs: object) -> GroundedSearchResult:
-            return GroundedSearchResult()
-
-    def published(platform: AgentPlatformSettings) -> set[object]:
-        settings = Settings(
-            models=ModelSettings(), agent=AgentSettings(), server=ServerSettings()
-        )
-        settings.agent_platform = platform
-        app = create_app(
-            settings=settings,
-            providers=ProviderContext(llm=_LLM(), search=_Search()),
-        )
-        tiers = TestClient(app).get("/v1/capabilities").json()["agent"]["tiers"]
-        return {entry["section_register"] for entry in tiers}
-
-    table = {TIER_POLICIES[tier].section_register for tier in AGENT_TIERS}
-    assert published(AgentPlatformSettings(INQTRIX_AGENT_ALLOW_VOLATILE=True)) == table
-    assert published(
-        AgentPlatformSettings(
-            INQTRIX_AGENT_ALLOW_VOLATILE=True,
-            INQTRIX_AGENT_SYNTHESIS_SECTION_REGISTER_BUDGET=11,
-        )
-    ) == {11}
-
-
-def test_the_clarification_cap_is_the_tighter_of_operator_and_tier():
-    """One min for the node, the snapshot and the manifest: the tier caps
-    tighter, never wider, and a run without a tier keeps the operator cap."""
-    gruendlich = TIER_POLICIES["gruendlich"]
-    assert effective_clarification_rounds(2, gruendlich) == 1
-    assert effective_clarification_rounds(0, gruendlich) == 0
-    assert effective_clarification_rounds(2, TIER_POLICIES["tief"]) == 2
-    assert effective_clarification_rounds(1, TIER_POLICIES["tief"]) == 1
-    assert effective_clarification_rounds(3, None) == 3
-    assert effective_clarification_rounds(None, TIER_POLICIES["schnell"]) == 0
-    payload = {
-        entry["id"]: entry["clarification_rounds"]
-        for entry in tier_capabilities_payload(max_clarification_rounds=1)
-    }
-    assert payload == {"schnell": 0, "gruendlich": 1, "tief": 1}
-    with pytest.raises(ValueError):
-        effective_clarification_rounds(None, None)

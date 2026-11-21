@@ -28,6 +28,7 @@ import { useRunningDuration } from '@/features/researchRuns/useRunningDuration'
 import { appMotion } from '@/motion/transitions'
 import { runFailureText } from '@/lib/runFailure'
 import { localizedText, phaseOrder, type JobPhase, type ResearchJob } from '../types'
+import { reportProfileLabel } from './Composer'
 import {
   phaseLabel,
   queuedPhaseIcon,
@@ -95,6 +96,11 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
       },
     ]
 
+    if (job.reportProfile) {
+      metadata.push({
+        text: `${t.runCard.reportProfile}: ${reportProfileLabel(job.reportProfile, t)}`,
+      })
+    }
     if (job.duration) {
       metadata.push({ text: `${t.runCard.duration}: ${job.duration}` })
     }

@@ -394,22 +394,17 @@ def build_work_result(
     }
 
 
-SECTION_WRITER = "section_writer"
-"""Profile of the role that writes one memo section from evidence it reads."""
-
 REVIEW_NODE = "agent_deep_review"
-"""Routing node of the shared review pass — both engines, both transports.
+"""Routing node of the review pass — both transports.
 
 The node decides the model and effort of a review call (see
-``model_routing``), so the single call and the role must name the SAME one:
-a review that reads a run's work must not silently follow the model of
-whichever engine happened to host it.
+``model_routing``), so the single call and the role must name the SAME one.
 """
 
 
 def _register_builtin_profiles() -> None:
-    from inqtrix.agents.phase_models import DeepReviewVerdict, SectionText
-    from inqtrix.agents.prompts import DEEP_REVIEW_RUBRIC, SECTION_WRITER_ROLE
+    from inqtrix.agents.phase_models import DeepReviewVerdict
+    from inqtrix.agents.prompts import DEEP_REVIEW_RUBRIC
 
     register_work_profile(
         WorkProfile(
@@ -428,20 +423,6 @@ def _register_builtin_profiles() -> None:
             role_prompt=DEEP_REVIEW_RUBRIC,
             routing_node=REVIEW_NODE,
             operation="review_role",
-        )
-    )
-    register_work_profile(
-        WorkProfile(
-            name=SECTION_WRITER,
-            # It reads the evidence of the memo it writes for, nothing else:
-            # the brief names every source by its reference id.
-            allowed_tools=frozenset({"read_evidence"}),
-            result_model=SectionText,
-            role_prompt=SECTION_WRITER_ROLE,
-            # The node that writes a section in one call writes it here too,
-            # so the transport never changes which model writes the prose.
-            routing_node="agent_synthesis",
-            operation="section_role",
         )
     )
 

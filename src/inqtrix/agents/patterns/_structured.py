@@ -1,6 +1,8 @@
 """One structured-LLM-call helper shared by the agent patterns.
 
-Workspace-agent phases produce Pydantic-validated objects from a single LLM call.
+The agent's structured calls (document-analysis windows, the sufficiency
+judge, the review and its re-check, memory reflection, citation repair)
+produce Pydantic-validated objects from a single LLM call.
 This is the ONE place that does it: native ``complete_structured`` when
 the provider supports it, otherwise a prompt-JSON call parsed with a
 LOUD fallback marker (the same visible-degradation shape as
@@ -51,12 +53,12 @@ _STRUCTURED_RETRY_SINK: contextvars.ContextVar[_StructuredRetrySink | None] = (
 def observe_structured_retries(
     sink: _StructuredRetrySink | None,
 ) -> Iterator[None]:
-    """Bind one Agent retry sink across all structured phase calls.
+    """Bind one Agent retry sink across all structured calls of a segment.
 
-    The phase machine owns the event sink while this helper owns the only
+    The kernel segment owns the event sink while this helper owns the only
     structured-provider call boundary. Keeping the binding in a ContextVar
     preserves the shared compiled graph without adding callback parameters to
-    every phase function.
+    every structured call.
     """
     token = _STRUCTURED_RETRY_SINK.set(sink)
     try:

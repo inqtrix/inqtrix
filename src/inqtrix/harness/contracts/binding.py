@@ -85,8 +85,9 @@ class WorkflowUnavailable(RuntimeError):
         self.registered = registered
 
 
-RETIRED_WORKFLOWS: frozenset[str] = frozenset()
-"""Modes taken out of the product on purpose. Their runs end visibly; a mode
+RETIRED_WORKFLOWS: frozenset[str] = frozenset({"workspace_agent"})
+"""Modes taken out of the product on purpose. Their runs end visibly, and a
+submission naming one is refused with the reason ``workflow_retired``; a mode
 that is only missing on a worker is a configuration fault and never lands
 here."""
 

@@ -371,17 +371,18 @@ def _currency(value: ClaimValue) -> str:
 
 
 def page_states_claim(claim_text: str, page_text: str) -> bool:
-    """Whether a source's own text states a claim, as far as words can tell.
+    """Whether the search provider's excerpt of a source states a claim, as
+    far as words can tell.
 
-    *page_text* is text of the cited page itself: a snippet the search
-    provider returned from the page, never the provider's own answer. The
-    claim must have a key value (a date, a percentage, an amount or an
-    identity number), every key value must stand in the page text with the
+    *page_text* is the excerpt the search provider returned for the cited
+    source, never the provider's own answer; Inqtrix reads no page itself.
+    The claim must have a key value (a date, a percentage, an amount or an
+    identity number), every key value must stand in the excerpt with the
     same normalized value (a year does not stand for a day in it, a rounded
     figure not for another), and at least half of the claim's other content
     words must occur there too, two at least when the claim has two. A claim
     without a key value is never checked this way: shared words do not show
-    that a page states a sentence.
+    that an excerpt states a sentence.
     """
     if not (page_text or "").strip():
         return False

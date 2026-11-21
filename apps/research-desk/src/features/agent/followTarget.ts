@@ -21,8 +21,8 @@ export type FollowTarget = {
 }
 
 /** The most recent artifact of a kind (one lookup idiom for every
- * document-shaped target: mission memos and kernel `write_canvas`
- * deliverables both open as the document view). */
+ * document-shaped target: kernel `write_canvas` deliverables and the memos
+ * of stored mission runs both open as the document view). */
 function latestArtifactOfKind(
   run: AgentRunRecord,
   kind: 'memo' | 'deliverable',
@@ -37,9 +37,10 @@ function latestArtifactOfKind(
 export function routeAgentRunToView(
   run: AgentRunRecord,
 ): FollowTarget | null {
-  // A document-shaped deliverable (mission memo or kernel canvas) being
-  // written (or finished) is the strongest target: the ONE allowed auto-open.
-  // Memo precedence is preserved for mission runs; kernel runs have no memo.
+  // A document-shaped deliverable (kernel canvas, or a stored mission's
+  // memo) being written (or finished) is the strongest target: the ONE
+  // allowed auto-open. Kernel runs have no memo, so memo precedence only
+  // decides for a stored mission run.
   const document =
     latestArtifactOfKind(run, 'memo')
     ?? latestArtifactOfKind(run, 'deliverable')
@@ -57,8 +58,8 @@ export function routeAgentRunToView(
     }
   }
 
-  // Execution follows the control-room overview. Task details are an explicit
-  // user drill-down; auto-entering one parallel task hides the other work.
+  // Execution follows the control-room overview, also while a gate of
+  // the run waits; it never opens a closed canvas.
   if (run.phase === 'execution') {
     return {
       descriptor: { view: 'run', runId: run.runId },
@@ -66,37 +67,28 @@ export function routeAgentRunToView(
     }
   }
 
-  // A pending PATCH gate shows the proposed edits, not the plan — the
-  // decision the user owes is about the patch.
-  if (
-    run.status === 'waiting_for_approval'
-    && run.patchId
-    && run.approvals.some(
-      (approval) =>
-        approval.status === 'pending' && approval.kind === 'patch',
-    )
-  ) {
-    return {
-      descriptor: {
-        view: 'patch',
-        runId: run.runId,
-        patchId: run.patchId,
-      },
-      urgency: 'open-only',
-    }
-  }
-
-  // Plan negotiation: show the plan — but never auto-open for it
-  // (plan.proposed/approval.requested route only into an OPEN canvas).
-  if (
-    run.status === 'waiting_for_approval'
-    || run.phase === 'planning'
-  ) {
-    return {
-      descriptor: { view: 'plan', runId: run.runId },
-      urgency: 'open-only',
-    }
-  }
-
   return null
+}
+
+/** The view the canvas opens on when no tab is left: the run's document
+ * (a stored mission's memo first, else the latest kernel deliverable), else
+ * the run view; `null` for a session without a run. */
+export function fallbackCanvasDescriptor(
+  run: AgentRunRecord | undefined,
+): CanvasViewDescriptor | null {
+  if (!run) return null
+  const documentId =
+    run.artifactOrder.find(
+      (artifactId) => run.artifacts[artifactId]?.kind === 'memo',
+    )
+    ?? [...run.artifactOrder]
+      .reverse()
+      .find(
+        (artifactId) =>
+          run.artifacts[artifactId]?.kind === 'deliverable',
+      )
+  if (documentId) {
+    return { view: 'document', runId: run.runId, artifactId: documentId }
+  }
+  return { view: 'run', runId: run.runId }
 }

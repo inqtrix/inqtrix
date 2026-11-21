@@ -7,8 +7,9 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import Collaboration from '@tiptap/extension-collaboration'
-import type { Extensions } from '@tiptap/core'
+import { createDocument, type Extensions } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import type { EditorState, Transaction } from '@tiptap/pm/state'
 import { EditorContent, useEditor, type Editor } from '@tiptap/react'
 import { BubbleMenu, type BubbleMenuProps } from '@tiptap/react/menus'
 import { EDITOR_YJS_FRAGMENT } from '@inqtrix/editor-schema'
@@ -88,7 +89,10 @@ export type MarkdownEditorSurfaceProps = {
   embedded?: boolean
   isDiffVisible: boolean
   mode: ProjectState['editorUi']['viewMode']
-  onChange: (contentMarkdown: string) => void
+  /** A new body of the user's, with the host's body the surface showed
+   * when it was made: the body it loaded, the last one it took over from
+   * the host, or the last one it handed the host. */
+  onChange: (contentMarkdown: string, baseContentMarkdown: string) => void
   onCreateComment: (comment: EditorCommentThreadRecord) => void
   /** When set, the bubble menu's comment button hands the MATERIALIZED
    * anchor and the selection's viewport position to the host instead of
@@ -312,6 +316,56 @@ export function editorBodyFromHost(
   return { own: true, state: { ...state, ownBodies: state.ownBodies.slice(index) } }
 }
 
+/**
+ * Shows *markdown*, a body the host holds already, without handing it back
+ * (no update) and out of the undo history: `changed` replaces only the
+ * range that differs ({@link editorBodyChangeTransaction}), `whole` the
+ * whole document (another document).
+ */
+function showHostBody(editor: Editor, markdown: string, scope: 'changed' | 'whole'): void {
+  const parser = editor.markdown
+  if (!parser) throw new Error('The editor has no Markdown parser.')
+  const next = createDocument(parser.parse(markdown), editor.schema, {}, {
+    errorOnInvalidContent: editor.options.enableContentCheck,
+  })
+  const transaction = scope === 'whole'
+    ? editor.state.tr
+      .replaceWith(0, editor.state.doc.content.size, next.content)
+      .setMeta('addToHistory', false)
+    : editorBodyChangeTransaction(editor.state, next)
+  if (transaction) editor.view.dispatch(transaction.setMeta('preventUpdate', true))
+}
+
+/**
+ * The transaction that turns the editor's document into *next*, a body
+ * another writer made: it replaces only the range where the two differ, so
+ * the common start and end stay and a selection there keeps its place (the
+ * transaction maps it). It stays out of the undo history, so undo takes
+ * back the user's own edits only. A structure the narrow range cannot hold
+ * is replaced as a whole. `null` when the editor shows *next* already.
+ */
+export function editorBodyChangeTransaction(
+  state: EditorState,
+  next: ProseMirrorNode,
+): Transaction | null {
+  const start = state.doc.content.findDiffStart(next.content)
+  const end = state.doc.content.findDiffEnd(next.content)
+  if (start === null || !end) return null
+  let endBefore = end.a
+  let endAfter = end.b
+  // A repeated stretch can make both ends overlap the start: move them past it.
+  const overlap = start - Math.min(endBefore, endAfter)
+  if (overlap > 0) {
+    endBefore += overlap
+    endAfter += overlap
+  }
+  const narrow = state.tr.replace(start, endBefore, next.slice(start, endAfter))
+  const replaced = narrow.doc.eq(next)
+    ? narrow
+    : state.tr.replaceWith(0, state.doc.content.size, next.content)
+  return replaced.setMeta('addToHistory', false)
+}
+
 export function configureEditorExtensionsForCollaboration(
   extensions: Extensions,
   collaboration: ReadyCollaborationBinding | null,
@@ -451,6 +505,10 @@ export function MarkdownEditorSurface({
   const documentIdRef = useRef(document.id)
   const editorInstanceRef = useRef<Editor | null>(null)
   const bodyChangeRef = useRef<EditorBodyChangeState>(loadedEditorBody(document.contentMarkdown))
+  // The host's body the editor showed last: loaded, taken over, or handed
+  // to the host. A new body is made on it, and the host merges a body made
+  // on an older one instead of dropping what reached it since.
+  const shownBodyRef = useRef(document.contentMarkdown)
   const onAcceptSuggestionRef = useRef(onAcceptSuggestion)
   const onCollaborationSuggestionUndoRef = useRef(onCollaborationSuggestionUndo)
   const onEditSuggestionRef = useRef(onEditSuggestion)
@@ -647,7 +705,11 @@ export function MarkdownEditorSurface({
         () => serializeEditorMarkdown(currentEditor),
       )
       bodyChangeRef.current = decision.state
-      if (decision.emit !== null) onChange(decision.emit)
+      if (decision.emit !== null) {
+        const baseContentMarkdown = shownBodyRef.current
+        shownBodyRef.current = decision.emit
+        onChange(decision.emit, baseContentMarkdown)
+      }
     },
   }, [editorLifecycleKey])
 
@@ -666,25 +728,35 @@ export function MarkdownEditorSurface({
     return () => observer.disconnect()
   }, [copy.scrollableTable, editor])
 
-  useEffect(() => {
+  // The host's body reaches the editor in the commit that brought it: no
+  // keystroke can fall between the render with that body and the editor
+  // showing it, so a body the editor hands back is always made on what it
+  // showed.
+  useLayoutEffect(() => {
     if (!editor || editor.isDestroyed || documentIdRef.current === document.id) return
     documentIdRef.current = document.id
     if (!lifecyclePolicy.applyExternalContent) return
-    editor.commands.setContent(tiptapContentMarkdown, {
-      contentType: 'markdown',
-      emitUpdate: false,
-    })
+    // Another document: replaced as a whole, out of the undo history, so
+    // undo never brings back the document before.
+    showHostBody(editor, tiptapContentMarkdown, 'whole')
     bodyChangeRef.current = loadedEditorBody(document.contentMarkdown)
+    shownBodyRef.current = document.contentMarkdown
   }, [document.id, editor, lifecyclePolicy.applyExternalContent, tiptapContentMarkdown])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editor || editor.isDestroyed) return
     const previousMode = previousModeRef.current
     previousModeRef.current = mode
     if (!lifecyclePolicy.applyExternalContent) return
     if (mode !== 'live') return
-    const shouldReparseMarkdown = previousMode === 'source'
-    if (!shouldReparseMarkdown) {
+    if (previousMode === 'source') {
+      // Back from the source view: the user's own edits there, one step in
+      // the undo history.
+      editor.commands.setContent(tiptapContentMarkdown, {
+        contentType: 'markdown',
+        emitUpdate: false,
+      })
+    } else {
       // A body of this surface's own (the stored bytes it loaded or one it
       // emitted, however old) is already in the editor, maybe with the
       // user's newer edits on top: replacing it would drop them and move the
@@ -693,13 +765,17 @@ export function MarkdownEditorSurface({
       // see that.
       const fromHost = editorBodyFromHost(bodyChangeRef.current, document.contentMarkdown)
       bodyChangeRef.current = fromHost.state
-      if (fromHost.own || serializeEditorMarkdown(editor) === tiptapContentMarkdown) return
+      if (fromHost.own) return
+      if (serializeEditorMarkdown(editor) === tiptapContentMarkdown) {
+        shownBodyRef.current = document.contentMarkdown
+        return
+      }
+      // Another writer's body (a merge, an accepted agent patch): only the
+      // range that changed, out of the undo history.
+      showHostBody(editor, tiptapContentMarkdown, 'changed')
     }
-    editor.commands.setContent(tiptapContentMarkdown, {
-      contentType: 'markdown',
-      emitUpdate: false,
-    })
     bodyChangeRef.current = loadedEditorBody(document.contentMarkdown)
+    shownBodyRef.current = document.contentMarkdown
   }, [document.contentMarkdown, editor, lifecyclePolicy.applyExternalContent, mode, tiptapContentMarkdown])
 
   useEffect(() => {

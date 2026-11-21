@@ -77,6 +77,11 @@ const FORBIDDEN_SOURCE_MARKERS = [
   },
 ] as const
 
+// Names of the product that have the shape of a short tag: the labels of
+// knowledge and web sources, and technical names of at most three letters and
+// a number.
+const PRODUCT_NAMES_OF_TAG_SHAPE = '(?:[KW]\\d{1,3}|S3|SHA-\\d{1,3}|UTF-8)'
+
 // Identifiers a working process gives its own stages, runs, findings and
 // decisions. They mean nothing to a reader of the versioned source, so a
 // comment, docstring or test name states the behaviour instead. Each
@@ -157,6 +162,43 @@ const WORK_STAGE_IDENTIFIERS = [
     label: 'internal work-stage identifier: work-package id',
     pattern: new RegExp('\\b' + 'WP-' + '[A-Z]-[A-Z]\\b'),
   },
+  {
+    label: 'internal work-stage identifier: operator decision id',
+    pattern: new RegExp('\\b' + 'O-' + '\\d{1,3}\\b'),
+  },
+  {
+    label: 'internal work-stage identifier: plan phase id',
+    pattern: new RegExp('\\b' + 'AU-' + '\\d{1,2}[a-z]?\\b'),
+  },
+  {
+    // Tags a design or architecture text gives its invariants, proposals and
+    // cases. A short tag without a hyphen (a letter and a number) is left to
+    // the reader: it shares its form with evidence labels.
+    label: 'internal work-stage identifier: design tag',
+    pattern: new RegExp(
+      '\\b' + '(?:I-P?|VK-|Z-|S-|WO-|RZ-K|E-|EV-|SD-)' + '\\d+\\b'
+      + '|\\b' + 'GW' + '\\d+\\b'
+      + '|(?<![\\w-])' + 'ÄP-' + '\\d+\\b'
+      // One or two digits only: a longer number after these letters is a
+      // contract or standard number in product text.
+      + '|\\b' + 'RV-' + '\\d{1,2}\\b(?!-)',
+    ),
+  },
+  {
+    // A docstring or a comment that opens with such a tag and a colon names
+    // what it was written for, not what the code does. A comment is one that
+    // follows whitespace (its own line or after code), in any of the comment
+    // forms of the tracked languages; a heading or a list item starts at the
+    // line's first column and is left alone. A label the product gives its
+    // own sources, or a technical name of the same shape, is no such tag.
+    label: 'internal work-stage identifier: leading tag',
+    pattern: new RegExp(
+      '(?:"""|\\s#\\s|//\\s|^\\s+\\*\\s|/\\*+\\s)'
+      + '(?!' + PRODUCT_NAMES_OF_TAG_SHAPE + ':)'
+      + '[A-Z]{1,3}-?\\d{1,3}[a-z]?'
+      + '(?:[,/]\\s?[A-Z]{1,3}-?\\d{1,3}[a-z]?)*' + ':\\s',
+    ),
+  },
 ] as const
 
 // Notes about how a behaviour was observed, which instruction someone gave,
@@ -201,6 +243,16 @@ const WORK_NOTE_FORMS = [
     ),
   },
   {
+    // A measurement told with the day it was taken belongs to the work, not
+    // to the text: the day says nothing a reader can use.
+    label: 'internal work note: dated measurement',
+    pattern: new RegExp(
+      '\\b' + '(?:replayed|re-?ran|measured|counted|recounted)' + '\\s+(?:on|against|over|across|with)\\b'
+      + '[^.]{0,120}?\\b' + '(?:\\d{1,2}\\.\\d{1,2}\\.20\\d{2}|20\\d{2}-\\d{2}-\\d{2})' + '\\b',
+      'i',
+    ),
+  },
+  {
     label: 'internal work note: change reference',
     pattern: new RegExp(
       '\\b' + 'this change' + '\\s+(?:fixed|introduced|added|removed)\\b'
@@ -221,6 +273,36 @@ function markerLabels(line: string): string[] {
   return SOURCE_MARKERS
     .filter((marker) => marker.pattern.test(line))
     .map((marker) => marker.label)
+}
+
+const DOCSTRING_QUOTES = '"""'
+const DOCSTRING_QUOTES_ALONE = new RegExp('^\\s*[rRbBuU]{0,2}' + DOCSTRING_QUOTES + '\\s*$')
+
+// Every marked line of one file. A Python docstring may start its text on
+// the line after the opening quotes; that line is read as if it followed the
+// quotes directly, so a tag that opens the docstring is found there too.
+function sourceViolations(relativePath: string, source: string): string[] {
+  const violations: string[] = []
+  const lines = source.split(/\r?\n/)
+  const python = relativePath.endsWith('.py')
+  let insideDocstring = false
+  for (const [index, line] of lines.entries()) {
+    for (const label of markerLabels(line)) {
+      violations.push(`${relativePath}:${index + 1}: ${label}: ${line.trim()}`)
+    }
+    const next = lines[index + 1]
+    if (python && !insideDocstring && next !== undefined && DOCSTRING_QUOTES_ALONE.test(line)) {
+      for (const label of markerLabels(DOCSTRING_QUOTES + next.trimStart())) {
+        if (!markerLabels(next).includes(label)) {
+          violations.push(`${relativePath}:${index + 2}: ${label}: ${next.trim()}`)
+        }
+      }
+    }
+    if (python && (line.split(DOCSTRING_QUOTES).length - 1) % 2 === 1) {
+      insideDocstring = !insideDocstring
+    }
+  }
+  return violations
 }
 
 describe('repository version-control boundary', () => {
@@ -264,13 +346,7 @@ describe('timeless versioned source', () => {
     const violations: string[] = []
     for (const relativePath of trackedTextPaths()) {
       const source = readFileSync(resolve(REPOSITORY_ROOT, relativePath), 'utf8')
-      for (const [index, line] of source.split(/\r?\n/).entries()) {
-        for (const label of markerLabels(line)) {
-          violations.push(
-            `${relativePath}:${index + 1}: ${label}: ${line.trim()}`,
-          )
-        }
-      }
+      violations.push(...sourceViolations(relativePath, source))
     }
     assert.deepEqual(
       violations,
@@ -373,6 +449,42 @@ describe('internal work-stage identifier patterns', () => {
       planted('"""', 'WP-', 'Q-R', ': archive retention routes."""'),
       planted('# ', 'WP-', 'X-Y', '/Z: quota headers'),
     ],
+    'operator decision id': [
+      planted('kept as decided (', 'O-', '412', ').'),
+      planted('# ', 'O-', '7', ': the cap stays at two'),
+    ],
+    'plan phase id': [
+      planted('moves to the runtime package with ', 'AU-', '41', '.'),
+      planted('the fixture seam of ', 'AU-', '09', 'b'),
+    ],
+    'design tag': [
+      planted('Always visible (', 'I-', '31', ').'),
+      planted('the same reading as ', 'I-P', '7'),
+      planted('per line (', 'VK-', '9', '): the source'),
+      planted('"""', 'Z-', '14', ' holds for the point check."""'),
+      planted('names the flag (', 'S-', '6', ')'),
+      planted('assigned by ', 'WO-', '22'),
+      planted('the case ', 'GW', '17', ' restores the fence'),
+      planted('consistency note ', 'RZ-K', '3'),
+      planted('as the proposal ', 'E-', '12', ' has it'),
+      planted('keeps the excerpt (', 'EV-', '4', ')'),
+      planted('the surface rule ', 'SD-', '2'),
+      planted('the change point ', 'ÄP-', '7', ' moved'),
+      planted('closes the review finding ', 'RV-', '12'),
+    ],
+    'leading tag': [
+      planted('    """', 'G', '4', ': a primary source with no text.'),
+      planted('"""', 'F', '4', '/', 'I', '3', ': whatever the evidence layer ties to a source'),
+      planted('"""', 'VK', '5', ', ', 'I', '10', ': the cut is visible everywhere'),
+      planted('    # ', 'I', '3', ': every statement the evidence layer ties to a source'),
+      planted('    // ', 'I', '3', ': every statement the evidence layer ties to a source'),
+      planted(' * ', 'VK', '5', ': the cut is visible everywhere'),
+      planted('  /* ', 'G', '4', ': a primary source with no text. */'),
+      planted('  /** ', 'G', '4', ': a primary source with no text.'),
+      planted('return rows  # ', 'I', '10', ': the cut is visible everywhere'),
+      planted('const kept = rows  // ', 'F', '4', ': tied to a source'),
+      planted('    # ', 'K', '1', ', ', 'I', '3', ': a source label next to a tag'),
+    ],
   }
 
   // Product text that shares a surface with the forms above and must pass.
@@ -400,6 +512,26 @@ describe('internal work-stage identifier patterns', () => {
     'The contract in one place: every finding is applied or named.',
     'https://example.org/wp-content/uploads/2026/05/report.pdf',
     'Section WP-7 of the tender lists two lots.',
+    'Timestamps follow ISO-8601; the transport needs TLS-1.3.',
+    'a relative tolerance of 1E-10, a delay of 2.5e-05 seconds',
+    'region us-east-1, the PKCE method S256 and the curve P-256',
+    'Pumpe P-01 und Vertrag RV-2024-117',
+    '<div className="relative z-10 gap-2" />',
+    '# K1: Quelle aus der Wissenssammlung',
+    '* W2: second web source of the answer',
+    '    """Return the label K3: the third knowledge source."""',
+    'headers=token(U2))',
+    '    # K1: Quelle aus der Wissenssammlung',
+    '        # W12: the web source the sentence cites',
+    '    """K2: the second knowledge source of the answer."""',
+    '  // K1: first knowledge source of the fixture',
+    '    # S3: bucket and prefix of the object store',
+    'digest = sha256(blob)  # SHA-256: 32 bytes, hex encoded',
+    ' * UTF-8: the only encoding the export writes',
+    '  K1: {',
+    "      R6: { kind: 'knowledge_document', label: 'knowledge original' },",
+    'E-Mail, E-Bike und E-Scooter',
+    'SD-Karte, EV-Batterie und die Verträge RV-2024-117-A und RV-24-117',
   ]
 
   test('flags each form of an internal work-stage identifier', () => {
@@ -412,6 +544,43 @@ describe('internal work-stage identifier patterns', () => {
 
   test('lets legitimate product text pass', () => {
     assertNothingFlagged(LEGITIMATE_LINES)
+  })
+
+  test('finds a tag that opens a docstring on the line after the quotes', () => {
+    const quotes = planted('"', '"', '"')
+    const tagged = planted('    ', 'I', '3', ': every statement is tied to a source.')
+    const source = [
+      'def cut(rows):',
+      `    ${quotes}`,
+      tagged,
+      `    ${quotes}`,
+      '    return rows',
+    ].join('\n')
+    assert.deepEqual(sourceViolations('sample.py', source), [
+      `sample.py:3: internal work-stage identifier: leading tag: ${tagged.trim()}`,
+    ])
+    // The same text in another language is no docstring.
+    assert.deepEqual(sourceViolations('sample.ts', source), [])
+    // A form the line carries on its own is reported once, on that line.
+    const listed = planted('    listed as ', 'R-', '417', ' in the backlog')
+    assert.deepEqual(
+      sourceViolations('sample.py', ['def cut(rows):', `    ${quotes}`, listed, `    ${quotes}`].join('\n')),
+      [`sample.py:3: internal work-stage identifier: register id: ${listed.trim()}`],
+    )
+  })
+
+  test('leaves a constant of the same shape after closing quotes alone', () => {
+    const quotes = planted('"', '"', '"')
+    const source = [
+      'class Limits:',
+      `    ${quotes}`,
+      '    Limits of one run.',
+      `    ${quotes}`,
+      '    T1: int = 1',
+      `    ${quotes}Second docstring on one line.${quotes}`,
+      '    P2: int = 2',
+    ].join('\n')
+    assert.deepEqual(sourceViolations('sample.py', source), [])
   })
 })
 
@@ -442,6 +611,11 @@ describe('internal work note patterns', () => {
       planted('', 'Measured against', ' the live', ' table it matched 2 of 9 rows.'),
       planted('// ', 'Measured on', ' a real', ' completed run: the list read 1/4.'),
     ],
+    'dated measurement': [
+      planted('', 'Replayed on', ' the extraction inputs of six runs of ', '17.10.', '2026', ': 300 of 393 placeable.'),
+      planted('', 'Measured over', ' the stored runs of ', '2026-', '10-17', ', the guard held.'),
+      planted('# ', 'counted against', ' the trace store on ', '3.11.', '2026'),
+    ],
     'change reference': [
       planted('the very defect ', 'this change', ' fixed', '.'),
       planted('', 'Before this', ' fix', ' the list double-counted.'),
@@ -469,6 +643,9 @@ describe('internal work note patterns', () => {
     'Applying this patch removes the paragraph.',
     'The text before this change is kept as a revision.',
     '// Synchronous first application, before this commit paints.',
+    'Usage is counted across all runs of a month.',
+    'Tokens are counted with the tokenizer of the model. Prices as listed on 2026-10-01.',
+    'Replayed on the next start, the journal restores every pending write.',
   ]
 
   test('flags each form of an internal work note', () => {

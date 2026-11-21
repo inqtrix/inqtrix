@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from inqtrix.auth.principal import Principal, UserContext
@@ -40,7 +40,9 @@ from inqtrix.runs.deletion_operations import (
     DeletionTargetKind,
 )
 from inqtrix.services.request_parsing import (
+    boolean_field,
     error_response,
+    read_json_object,
     workspace_id_for_write,
     workspace_id_from_request,
 )
@@ -150,8 +152,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if not isinstance(body, dict) or not _require_numbers(body):
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
+        if not _require_numbers(body):
             return error_response(400, "Invalid body", "invalid_request_error")
         try:
             workspace_id = await workspace_id_for_write(req, principal, users)
@@ -217,8 +221,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if not isinstance(body, dict) or not _require_numbers(body):
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
+        if not _require_numbers(body):
             return error_response(400, "Invalid body", "invalid_request_error")
         section_id = body.get("section_id")
         if not isinstance(section_id, str) or not section_id:
@@ -293,8 +299,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        asset_ids = body.get("asset_ids") if isinstance(body, dict) else None
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
+        asset_ids = body.get("asset_ids")
         if not isinstance(asset_ids, list) or not all(
             isinstance(item, str) and item for item in asset_ids
         ):
@@ -407,8 +415,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         changing its target or reusing a deleted id is a visible conflict.
         """
 
-        body = await _json_object(req)
-        if not isinstance(body, dict) or not _require_numbers(body):
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
+        if not _require_numbers(body):
             return error_response(400, "Invalid body", "invalid_request_error")
         section_id = body.get("section_id")
         if not isinstance(section_id, str) or not section_id:
@@ -434,6 +444,10 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "size_bytes must be a non-negative integer", "invalid_request_error"
             )
+        try:
+            text_truncated = boolean_field(body, "text_truncated", False)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
         workspace_id = await workspace_id_for_write(req, principal, users)
         try:
             await deletion_service.assert_upload_allowed(
@@ -458,7 +472,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                     if body.get("parse_warning") is not None
                     else None
                 ),
-                text_truncated=bool(body.get("text_truncated", False)),
+                text_truncated=text_truncated,
                 size_bytes=size_bytes,
                 parser_id=(
                     str(body["parser_id"])
@@ -495,8 +509,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        body = await _json_object(req)
-        if not isinstance(body, dict) or not _require_numbers(body):
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
+        if not _require_numbers(body):
             return error_response(400, "Invalid body", "invalid_request_error")
         section_id = body.get("section_id")
         if not isinstance(section_id, str) or not section_id:
@@ -507,6 +523,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         page_count = body.get("page_count")
         if page_count is not None and not isinstance(page_count, int):
             return error_response(400, "page_count must be an integer or null", "invalid_request_error")
+        try:
+            text_truncated = boolean_field(body, "text_truncated", False)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
         try:
             workspace_id = await workspace_id_for_write(req, principal, users)
             await deletion_service.assert_upload_allowed(
@@ -523,7 +543,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 origin=str(body.get("origin", "library")), page_count=page_count,
                 parse_status=str(body.get("parse_status", "parsed")),
                 parse_warning=(str(body["parse_warning"]) if body.get("parse_warning") is not None else None),
-                text_truncated=bool(body.get("text_truncated", False)),
+                text_truncated=text_truncated,
                 size_bytes=int(body.get("size_bytes", 0)),
                 server_file_id=(str(body["server_file_id"]) if body.get("server_file_id") is not None else None),
                 parser_id=(str(body["parser_id"]) if body.get("parser_id") is not None else None),
@@ -578,10 +598,3 @@ def build_router(container: "AppContainer") -> APIRouter:
         return JSONResponse(status_code=202, content=summary)
 
     return router
-
-
-async def _json_object(req: Request) -> Any:
-    try:
-        return await req.json()
-    except Exception:
-        return None

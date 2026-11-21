@@ -28,7 +28,6 @@ function summary(): ResearchRunSummary {
     snapshot: { current_node: 'agent_kernel', last_message: '' },
     error: null,
     events_url: '/v1/runs/run_k1/events',
-    result_url: '/v1/runs/run_k1/result',
   }
 }
 
@@ -223,13 +222,6 @@ describe('kernel transparency events', () => {
       }),
     )
     expect(odd.approvals[0].status).toBe('pending')
-  })
-
-  it('seeds no plan fetch for the plan-less kernel engine', () => {
-    expect(agentRunFromSummary(summary()).planStale).toBe(false)
-    expect(
-      agentRunFromSummary({ ...summary(), mode: 'workspace_agent' }).planStale,
-    ).toBe(true)
   })
 
   it('labels kernel wire tool ids and keeps unknown ids verbatim', () => {

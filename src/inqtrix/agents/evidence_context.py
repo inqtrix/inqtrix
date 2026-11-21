@@ -10,8 +10,7 @@ from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any
 
-from inqtrix.evidence import attach_web_search_lineage
-from inqtrix.untrusted_content import untrusted_fence
+from inqtrix.evidence import attach_web_search_lineage, reference_material_kind
 from inqtrix.urls import normalize_url
 
 NO_EVIDENCE = "(no evidence)"
@@ -72,14 +71,12 @@ def _ids(record: dict[str, Any], singular: str, plural: str) -> list[str]:
     ))
 
 
-
 def reference_origins(references: list[dict[str, Any]]) -> list[str]:
     """Retained source origins, without guessing from the artifact writer."""
     return list(dict.fromkeys(
         run_id for ref in references
         for run_id in _ids(ref, "source_run_id", "source_run_ids")
     ))
-
 
 
 def project_evidence_context(
@@ -138,11 +135,7 @@ def project_evidence_context(
             # reading aid of that report; an agent reads the stored texts
             # themselves, and the list would only repeat them in its prompt.
             "reference": {key: value for key, value in ref.items() if key != "statements"},
-            "material_kind": (
-                "retained_source_excerpt" if original
-                else "provider_context" if matches or ref.get("grounded_support")
-                else "source_metadata_only"
-            ),
+            "material_kind": reference_material_kind(ref, search_context=bool(matches)),
             "source_excerpt": original,
             "provider_context": str(ref.get("grounded_support") or ""),
             "citation_contexts": matches,
@@ -155,50 +148,3 @@ def project_evidence_context(
     })
 
 
-def synthesis_evidence(
-    references: list[dict[str, Any]], ledger: dict[str, Any],
-) -> str:
-    """Render selected source passages and each retained search answer once.
-
-    Reference selection belongs to the caller's existing evidence budget or
-    section outline. Source passages remain distinct from provider synthesis;
-    a citation-near summary cannot replace the full retained query context.
-    """
-    context = project_evidence_context(references, ledger)
-    lines: list[str] = []
-    query_labels: dict[str, list[str]] = {}
-    for source in context["sources"]:
-        ref = source["reference"]
-        label = str(ref["label"])
-        if is_internal_reference(ref):
-            lines.append(f"[{label}] {internal_reference_name(ref)}")
-        else:
-            url = str(ref.get("url") or "")
-            lines.append(f"[{label}] {ref.get('title') or url}")
-            if url:
-                lines.append(f"Source: {url}")
-        if source["source_excerpt"]:
-            lines.append(f"Stored source excerpt:\n{source['source_excerpt']}")
-        if ref.get("provider_snippet"):
-            lines.append(f"Search provider snippet:\n{ref['provider_snippet']}")
-        if source["search_context_status"] == "unavailable" and source["provider_context"]:
-            lines.append(
-                "Grounded answer context (no source excerpt; complete "
-                f"search answer not available):\n{source['provider_context']}"
-            )
-        for citation in source["citation_contexts"]:
-            labels = query_labels.setdefault(citation["query_id"], [])
-            if label not in labels:
-                labels.append(label)
-    for query_id, search in context["searches"].items():
-        labels = ", ".join(f"[{label}]" for label in query_labels[query_id])
-        lines.append(
-            f"Stored search answer for {labels} (no original source excerpt):\n"
-            f"Search question: {search.get('query') or ''}\n"
-            f"{search.get('provider_answer') or '(no provider answer stored)'}"
-        )
-    if not lines:
-        return NO_EVIDENCE
-    # Every line above came from a source or a search provider: material
-    # for the writer, never instructions to it.
-    return untrusted_fence("\n\n".join(lines), "evidence")

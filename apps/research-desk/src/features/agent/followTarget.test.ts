@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { routeAgentRunToView } from './followTarget'
+import { fallbackCanvasDescriptor, routeAgentRunToView } from './followTarget'
 import type { AgentArtifactRecord, AgentRunRecord } from './model'
 
 function run(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
@@ -13,7 +13,6 @@ function run(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     station: 'intake',
     createdAt: '2026-07-02T10:00:00.000Z',
     lastSequence: 0,
-    planStale: false,
     approvals: [],
     approvalsStale: false,
     clarifications: [],
@@ -21,12 +20,10 @@ function run(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     artifactOrder: [],
     artifacts: {},
     artifactsStale: false,
-    taskStates: {},
     children: {},
     childGates: {},
     stepLog: [],
     touchedArtifacts: [],
-    patchStale: false,
     ...overrides,
   }
 }
@@ -60,50 +57,29 @@ function deliverable(status: 'writing' | 'ready'): AgentArtifactRecord {
 }
 
 describe('routeAgentRunToView', () => {
-  it('routes nothing during intake/discovery (no file target without ids)', () => {
+  it('routes nothing during intake (no file target without ids)', () => {
     expect(routeAgentRunToView(run())).toBeNull()
-    expect(routeAgentRunToView(run({ phase: 'discovery', station: 'discovery' }))).toBeNull()
   })
 
-  it('targets the plan while planning or waiting for approval, open-only', () => {
-    const planning = routeAgentRunToView(run({ phase: 'planning', station: 'planning' }))
-    expect(planning).toEqual({
-      descriptor: { view: 'plan', runId: 'run_agent_1' },
-      urgency: 'open-only',
-    })
-    const waiting = routeAgentRunToView(run({ status: 'waiting_for_approval', phase: 'planning', station: 'planning' }))
-    expect(waiting?.urgency).toBe('open-only')
+  it('routes nothing for a waiting run off the kernel line', () => {
+    // A parked run of the retired mission engine had a plan view to show;
+    // no such view exists any more.
+    expect(routeAgentRunToView(run({ status: 'waiting_for_approval', phase: 'planning' }))).toBeNull()
   })
 
-  it('keeps execution on the control-room overview', () => {
-    const record = run({
-      phase: 'execution',
-      station: 'execution',
-      taskStates: {
-        t2: { status: 'running', attempt: 1 },
-        t1: { status: 'running', attempt: 1 },
-      },
-      plan: {
-        planId: 'p1', version: 1, status: 'approved', createdBy: 'agent',
-        reason: '', createdAt: 1, summaryMarkdown: '', assumptions: [],
-        successCriteria: [], versions: [],
-        tasks: [
-          { taskId: 't1', ordinal: 0, title: 'A', toolKind: 'web_research', objective: '', queries: [], gapIds: [], dependsOn: [], budget: {}, params: {}, expectedOutput: '', status: '', childRunId: null, resultSummary: '' },
-          { taskId: 't2', ordinal: 1, title: 'B', toolKind: 'rag_query', objective: '', queries: [], gapIds: [], dependsOn: [], budget: {}, params: {}, expectedOutput: '', status: '', childRunId: null, resultSummary: '' },
-        ],
-      },
-    })
-    expect(routeAgentRunToView(record)).toEqual({
-      descriptor: { view: 'run', runId: 'run_agent_1' },
-      urgency: 'open-only',
-    })
+  it('keeps execution on the control-room overview, also while a gate waits', () => {
+    for (const status of ['running', 'waiting_for_approval'] as const) {
+      expect(routeAgentRunToView(run({ phase: 'execution', station: 'execution', status }))).toEqual({
+        descriptor: { view: 'run', runId: 'run_agent_1' },
+        urgency: 'open-only',
+      })
+    }
   })
 
   it('the streaming memo wins against everything with synthesis urgency', () => {
     const record = run({
       phase: 'execution',
       station: 'execution',
-      taskStates: { t1: { status: 'running', attempt: 1 } },
       artifactOrder: ['memo1'],
       artifacts: { memo1: memo('writing') },
     })
@@ -113,36 +89,11 @@ describe('routeAgentRunToView', () => {
     })
   })
 
-  it('a pending PATCH gate targets the patch view, not the plan', () => {
-    const record = run({
-      status: 'waiting_for_approval',
-      phase: 'patch',
-      station: 'critic',
-      patchId: 'pch_1',
-      approvals: [{
-        approvalId: 'apr_1',
-        kind: 'patch',
-        status: 'pending',
-        subjectType: 'editor_patch',
-        subjectId: 'pch_1',
-        payload: {},
-        decision: '',
-        note: '',
-        createdAt: 1,
-        decidedAt: null,
-      }],
-    })
-    expect(routeAgentRunToView(record)).toEqual({
-      descriptor: { view: 'patch', runId: 'run_agent_1', patchId: 'pch_1' },
-      urgency: 'open-only',
-    })
-  })
-
   it('a completed run targets the memo with auto-open urgency', () => {
     const record = run({
       status: 'completed',
       phase: 'done',
-      station: 'critic',
+      station: 'execution',
       artifactOrder: ['memo1'],
       artifacts: { memo1: memo('ready') },
     })
@@ -156,7 +107,7 @@ describe('routeAgentRunToView', () => {
     const record = run({
       status: 'completed',
       phase: 'done',
-      station: 'critic',
+      station: 'execution',
       artifactOrder: ['deliverable1'],
       artifacts: { deliverable1: deliverable('ready') },
     })
@@ -170,12 +121,37 @@ describe('routeAgentRunToView', () => {
     const record = run({
       status: 'completed',
       phase: 'done',
-      station: 'critic',
+      station: 'execution',
       artifactOrder: ['deliverable1', 'memo1'],
       artifacts: { deliverable1: deliverable('ready'), memo1: memo('ready') },
     })
     expect(routeAgentRunToView(record)?.descriptor).toEqual({
       view: 'document', runId: 'run_agent_1', artifactId: 'memo1',
     })
+  })
+})
+
+describe('the view the canvas opens on without a tab', () => {
+  it('leaves a session without a run to the empty canvas', () => {
+    expect(fallbackCanvasDescriptor(undefined)).toBeNull()
+  })
+
+  it('opens a settled run without a document on its run view', () => {
+    // No view of the retired plan stands behind a settled run any more.
+    expect(fallbackCanvasDescriptor(run({ phase: 'done', status: 'completed' })))
+      .toEqual({ runId: 'run_agent_1', view: 'run' })
+  })
+
+  it('opens the document of a run, the memo of a stored mission run first', () => {
+    expect(fallbackCanvasDescriptor(run({
+      artifactOrder: ['deliverable1'],
+      artifacts: { deliverable1: deliverable('ready') },
+      status: 'completed',
+    }))).toEqual({ artifactId: 'deliverable1', runId: 'run_agent_1', view: 'document' })
+    expect(fallbackCanvasDescriptor(run({
+      artifactOrder: ['deliverable1', 'memo1'],
+      artifacts: { deliverable1: deliverable('ready'), memo1: memo('ready') },
+      status: 'completed',
+    }))).toEqual({ artifactId: 'memo1', runId: 'run_agent_1', view: 'document' })
   })
 })

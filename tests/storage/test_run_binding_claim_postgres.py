@@ -16,7 +16,6 @@ import uuid
 import pytest
 from sqlalchemy import select, update
 
-from inqtrix.harness.contracts import binding as binding_module
 from inqtrix.harness.contracts.binding import RunBindingNewer, WorkflowUnavailable
 from inqtrix.runs.postgres_store import PostgresRunStore
 from inqtrix.storage.db import build_engine
@@ -70,11 +69,19 @@ def cleaned():
 
 
 @pytest.fixture()
-def store(cleaned):
-    def cleanup(run_id: str, mode: str) -> None:
+def unclaimed():
+    """Runs the cleanup was told never ran, so it needed no checkpoint store."""
+    return []
+
+
+@pytest.fixture()
+def store(cleaned, unclaimed):
+    def cleanup(run_id: str, mode: str, *, never_claimed: bool = False) -> None:
         # Runs on a thread once the claim has ended the run; the shared test
         # database may hand it other tests' runs, which the assertions skip.
         cleaned.append((run_id, mode, _committed_status(run_id)))
+        if never_claimed:
+            unclaimed.append(run_id)
 
     store = PostgresRunStore(
         engine=build_engine(TEST_DATABASE_URL),
@@ -237,10 +244,7 @@ def test_a_mode_the_worker_has_not_registered_keeps_its_run_and_checkpoint(
     assert _cleaned_for(cleaned, run_id) == []
 
 
-def test_a_retired_mode_ends_its_run_visibly(store, cleaned, monkeypatch):
-    monkeypatch.setattr(
-        binding_module, "RETIRED_WORKFLOWS", frozenset({"workspace_agent"})
-    )
+def test_a_retired_mode_ends_its_run_visibly(store, cleaned, unclaimed):
     run_id = _submit(store, "workspace_agent", 1, attempt=1)
 
     assert _claim(store, run_id, {"agent_kernel": 1}) is None
@@ -255,6 +259,19 @@ def test_a_retired_mode_ends_its_run_visibly(store, cleaned, monkeypatch):
         },
     )
     assert _cleaned_for(cleaned, run_id) == [(run_id, "workspace_agent", "cancelled")]
+    assert run_id not in unclaimed
+
+
+def test_a_queued_mission_that_never_ran_ends_without_its_thread(store, cleaned, unclaimed):
+    """A mission still queued at the deploy has no thread to delete."""
+    run_id = _submit(store, "workspace_agent", 1, attempt=0)
+
+    assert _claim(store, run_id, {"agent_kernel": 1}) is None
+
+    assert _row(store, run_id)["status"] == "cancelled"
+    assert _last_event(store, run_id)[1]["reason"] == "workflow_retired"
+    assert _cleaned_for(cleaned, run_id) == [(run_id, "workspace_agent", "cancelled")]
+    assert run_id in unclaimed
 
 
 def test_a_duplicate_dispatch_of_a_run_running_elsewhere_is_left_alone(store, cleaned):

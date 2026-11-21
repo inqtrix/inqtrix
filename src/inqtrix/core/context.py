@@ -88,7 +88,7 @@ class RunContext:
         park: Optional park hook (``park(status: str) -> None``) — the
             run-store handle's ``wait`` threaded in by
             ``execute_run_request``. A segmented algorithm
-            (workspace_agent) calls it to park the run in a waiting
+            (agent_kernel) calls it to park the run in a waiting
             status and then RETURNS a parked result; ``None`` on
             surfaces that cannot park (chat completions), where an
             algorithm that needs interrupts must fail loudly instead of

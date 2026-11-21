@@ -1,11 +1,11 @@
-"""Editor capabilities: document context (read) and patch lifecycle (write).
+"""Editor capabilities: document context (read) and patch proposal (write).
 
-The read capability bundles a document with its comments; the
-write pair (``editor.patch.propose`` / ``editor.patch.apply``) are THIN
-wrappers over
+The read capability bundles a document with its comments; the write
+capability (``editor.patch.propose``) is a THIN wrapper over
 :class:`~inqtrix.services.editor_patch_service.EditorPatchService` —
 proposals created through the capability always carry ``source='agent'``
-and the run attribution from the injected context.
+and the run attribution from the injected context. A proposal is applied
+by the user in the editor, never through a capability.
 """
 
 from __future__ import annotations
@@ -25,15 +25,20 @@ from inqtrix.capabilities.contracts import (
     CapabilityError,
     Effect,
 )
-from inqtrix.project.editor_patch_ports import (
-    PatchAlreadyDecided,
-    PatchNotFound,
-    PatchRevisionConflict,
+from inqtrix.project.editor_patch_ports import PatchRevisionConflict
+from inqtrix.project.editor_ports import (
+    COLLABORATION_DOCUMENT_CODE,
+    COLLABORATION_DOCUMENT_NOTICE,
+    EDITOR_CONTEXT_COMMENT_PAGE_SIZE,
+    DocumentNotFound,
 )
-from inqtrix.project.editor_ports import EDITOR_CONTEXT_COMMENT_PAGE_SIZE, DocumentNotFound
 from inqtrix.project.editor_search import EDITOR_SEARCH_MAX_MATCHES, EDITOR_SEARCH_QUERY_MAX, find_editor_anchors
-from inqtrix.services.editor_patch_service import EditorPatchValidationError
+from inqtrix.services.editor_patch_service import (
+    CollaborationDocumentProposalRefused,
+    EditorPatchValidationError,
+)
 from inqtrix.services.editor_persistence_service import (
+    COLLABORATION_PROJECTION_UNAVAILABLE_TEXT,
     CollaborationProjectionUnavailable,
 )
 
@@ -42,6 +47,11 @@ if TYPE_CHECKING:
     from inqtrix.services.editor_persistence_service import (
         EditorPersistenceService,
     )
+
+_PROJECTION_UNAVAILABLE_CODE = "editor.collaboration_projection_unavailable"
+"""Failure code of an editor capability whose document has no current
+collaboration projection (:class:`CollaborationProjectionUnavailable`)."""
+
 
 class DocumentContextInput(MaterialReadInput):
     document_id: str = Field(..., min_length=1)
@@ -62,6 +72,7 @@ class DocumentContextOutput(MaterialReadOutput):
     title: str
     content_markdown: str
     revision: int
+    content_mode: str
     comments: list[EditorCommentView]
     comments_included: bool
     next_comments: dict | None
@@ -82,6 +93,7 @@ class EditorDocumentSearchOutput(BaseModel):
     id: str
     title: str
     revision: int
+    content_mode: str
     version: str
     content_hash: str
     matches: list[dict]
@@ -128,8 +140,8 @@ def build_editor_capabilities(
             ) from exc
         except CollaborationProjectionUnavailable as exc:
             raise CapabilityError(
-                "editor.collaboration_projection_unavailable",
-                "The current collaboration state could not be persisted.",
+                _PROJECTION_UNAVAILABLE_CODE,
+                COLLABORATION_PROJECTION_UNAVAILABLE_TEXT,
                 http_status=503,
             ) from exc
         text, window = read_material_window(
@@ -145,6 +157,7 @@ def build_editor_capabilities(
             title=document.title,
             content_markdown=text,
             revision=document.revision,
+            content_mode=document.content_mode,
             comments=[
                 EditorCommentView(
                     id=comment.id,
@@ -173,13 +186,14 @@ def build_editor_capabilities(
         except DocumentNotFound as exc:
             raise CapabilityError("editor.document_not_found", "Document not found.", http_status=404) from exc
         except CollaborationProjectionUnavailable as exc:
-            raise CapabilityError("editor.collaboration_projection_unavailable", "The current collaboration state could not be persisted.", http_status=503) from exc
+            raise CapabilityError(_PROJECTION_UNAVAILABLE_CODE, COLLABORATION_PROJECTION_UNAVAILABLE_TEXT, http_status=503) from exc
         _, window = read_material_window(document.content_markdown, _editor_version_prefix(document), MaterialReadInput(
             offset=payload.offset, version=payload.version, content_hash=payload.content_hash, max_chars=1,
         ))
         matches, total = find_editor_anchors(document.content_markdown, payload.query, offset=payload.offset, limit=payload.max_matches)
         result = EditorDocumentSearchOutput(
             id=document.id, title=document.title, revision=document.revision,
+            content_mode=document.content_mode,
             version=window.version, content_hash=window.content_hash,
             matches=matches, total=total, offset=payload.offset,
             end=len(document.content_markdown), total_chars=len(document.content_markdown),
@@ -249,19 +263,6 @@ class PatchProposeOutput(BaseModel):
     revision_before: int
 
 
-class PatchApplyInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    patch_id: str = Field(..., min_length=1)
-    expected_revision: int
-
-
-class PatchApplyOutput(BaseModel):
-    document_id: str
-    revision: int
-    applied_edit_ids: list[str]
-
-
 def _capability_user_id(context: CapabilityContext) -> uuid.UUID | None:
     """Return the canonical caller ID used by scoped persistence surfaces."""
     principal = context.principal
@@ -273,11 +274,11 @@ def _capability_user_id(context: CapabilityContext) -> uuid.UUID | None:
 def build_editor_patch_capabilities(
     service: "EditorPatchService",
 ) -> list[CapabilityDefinition]:
-    """Build the patch write capabilities bound to *service*.
+    """Build the patch write capability bound to *service*.
 
-    Thin wrappers only: the visibility rule, the revision snapshot, and
-    the CAS apply live in the service. Registered exclusively when the
-    patch service is wired (conditional-registration pattern).
+    A thin wrapper only: the visibility rule and the revision snapshot live
+    in the service. Registered exclusively when the patch service is wired
+    (conditional-registration pattern).
     """
 
     async def _propose(
@@ -302,6 +303,18 @@ def build_editor_patch_capabilities(
                 "Document not found.",
                 http_status=404,
             ) from exc
+        except CollaborationDocumentProposalRefused as exc:
+            raise CapabilityError(
+                COLLABORATION_DOCUMENT_CODE,
+                COLLABORATION_DOCUMENT_NOTICE,
+                http_status=409,
+            ) from exc
+        except CollaborationProjectionUnavailable as exc:
+            raise CapabilityError(
+                _PROJECTION_UNAVAILABLE_CODE,
+                COLLABORATION_PROJECTION_UNAVAILABLE_TEXT,
+                http_status=503,
+            ) from exc
         except EditorPatchValidationError as exc:
             raise CapabilityError(
                 "editor.patch_invalid",
@@ -309,9 +322,8 @@ def build_editor_patch_capabilities(
                 http_status=400,
             ) from exc
         except PatchRevisionConflict as exc:
-            # Same conflict vocabulary as apply: a proposal pinned to a
-            # stale read must fail loudly, never anchor against text the
-            # proposer has not seen.
+            # A proposal pinned to a stale read must fail loudly, never
+            # anchor against text the proposer has not seen.
             raise CapabilityError(
                 "editor.patch_revision_conflict",
                 f'The document changed in the meantime (current revision {exc.current_revision}). Read it again before proposing changes.',
@@ -325,40 +337,6 @@ def build_editor_patch_capabilities(
             revision_before=patch.revision_before,
         )
 
-    async def _apply(
-        payload: PatchApplyInput, context: CapabilityContext
-    ) -> PatchApplyOutput:
-        try:
-            patch = await service.apply(
-                payload.patch_id,
-                expected_revision=payload.expected_revision,
-                visible_to=context.visible_to,
-                principal=context.principal,
-            )
-        except PatchNotFound as exc:
-            raise CapabilityError(
-                "editor.patch_not_found",
-                "Patch not found.",
-                http_status=404,
-            ) from exc
-        except PatchRevisionConflict as exc:
-            raise CapabilityError(
-                "editor.patch_revision_conflict",
-                f'The document changed in the meantime (current revision {exc.current_revision}).',
-                http_status=409,
-            ) from exc
-        except PatchAlreadyDecided as exc:
-            raise CapabilityError(
-                "editor.patch_already_decided",
-                "The patch already has a different decision.",
-                http_status=409,
-            ) from exc
-        return PatchApplyOutput(
-            document_id=patch.document_id,
-            revision=patch.applied_revision or 0,
-            applied_edit_ids=list(patch.applied_edit_ids or ()),
-        )
-
     return [
         CapabilityDefinition(
             id="editor.patch.propose",
@@ -368,14 +346,5 @@ def build_editor_patch_capabilities(
             effect=Effect.WRITE,
             idempotent=False,
             handler=_propose,
-        ),
-        CapabilityDefinition(
-            id="editor.patch.apply",
-            summary="Apply a pending editor patch at an expected document revision.",
-            input_model=PatchApplyInput,
-            output_model=PatchApplyOutput,
-            effect=Effect.WRITE,
-            idempotent=True,
-            handler=_apply,
         ),
     ]

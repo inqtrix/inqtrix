@@ -64,6 +64,6 @@ def test_a_binding_names_a_contract_of_at_least_one() -> None:
         RunBinding(mode="research", workflow_contract=0)
 
 
-def test_no_mode_is_retired_yet() -> None:
+def test_the_mission_engine_is_the_one_retired_mode() -> None:
     """A mode listed here ends its runs visibly; one only missing on a worker never does."""
-    assert RETIRED_WORKFLOWS == frozenset()
+    assert RETIRED_WORKFLOWS == frozenset({"workspace_agent"})

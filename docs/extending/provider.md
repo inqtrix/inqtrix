@@ -81,6 +81,43 @@ class MySearch(SearchProvider):
         )
 ```
 
+### The answer form is asked only of a provider that names it
+
+The hints above count as accepted when a provider names none of them. `answer_form` is the other way round: the agent's
+quick web search may ask for a `table` or a `timeline`, and that choice is handed only to a provider that lists
+`answer_form` among its `supported_search_parameters` (or in `search_capabilities`). A provider that does not list it never
+receives the keyword, so a `search` written against the signature above keeps running unchanged; the search then runs as
+usual, the agent is told in the first line of the tool result that the provider takes no answer form, the record of the
+search keeps that the form was not handed on, and the log says so. A type checker still compares an override of `search`
+with the signature of `SearchProvider`, which carries the keyword.
+
+This form of a search answer is how one search lays out what it found. It is not the answer contract of a research run,
+which decides the sections of a report.
+
+The two statements are read apart. In `supported_search_parameters`, every name other than `answer_form` makes the list the
+hints the provider accepts, known or not: a list that names nothing besides `answer_form` accepts every hint, as before.
+A misspelt name matches no hint, so a list whose other names are all misspelt leaves the provider without any.
+`answer_form` is accepted only when it is listed, and listing
+it says nothing about the hints. A provider that lists `answer_form` alone therefore keeps every hint, and one that lists
+`answer_form` beside `recency_filter` accepts that one hint and the form. A `SearchProviderCapabilities` object is read as
+it is written: it accepts exactly the names in it.
+
+To take part, list the name and accept the keyword. The value is `table` or `timeline`; the default form `overview` is never
+handed on. `answer_form_brief` returns the fixed text for a form, and `None` for anything that is no form, so a provider
+never sends a text of the caller's own:
+
+```python
+from inqtrix.search_form import answer_form_brief
+
+
+class CustomWebSearch(SearchProvider):
+    supported_search_parameters = frozenset({"recency_filter", "answer_form"})
+
+    def search(self, query: str, *, answer_form: str | None = None, **hints) -> GroundedSearchResult:
+        brief = answer_form_brief(answer_form)  # None: search as usual
+        ...
+```
+
 ### Add a `search_model` property
 
 `SearchProvider.search_model` has a loud default (`"<ClassName>(unknown)"`) so `/health` and `/v1/stacks` stay useful even for external subclasses. Override it to name the backend (see the built-in providers in [Providers overview](../configuration/providers.md)):
@@ -162,6 +199,21 @@ agent = ResearchAgent(AgentConfig(llm=MyLLM()))
 Every call method has an async twin with the same arguments, result and errors: `acomplete`, `acomplete_with_metadata`, `acomplete_structured` and `achat` on `LLMProvider`, `asearch` on `SearchProvider`. Async callers use them.
 
 A provider that implements only the sync methods, like `MyLLM` above, keeps working. Its async twins run the sync method on the provider lane of the process loop, a thread held for the whole call, and the first such call names the class once in a `WARNING` (`CONFIG: MyLLM has no async complete; ...`). Keyword arguments left at `None` are not passed to the sync method, so a `complete` that predates a parameter such as `reasoning_effort` still serves its twin. To run on the event loop without a thread, implement the async methods yourself; the sync methods stay what sync callers use.
+
+### Optional: verbosity
+
+The sections of a research report and the turns of the agent kernel ask for the `verbosity` the card of their model names (see [Model cards](../configuration/model-cards.md)). A provider is handed the keyword `verbosity` in `complete`, `complete_with_metadata` and `chat` only when it says it sends one:
+
+```python
+class MyLLM(LLMProvider):
+    def supports_verbosity(self, *, model: str | None = None) -> bool:
+        return True
+
+    def complete(self, prompt: str, *, verbosity: str | None = None, **kwargs) -> str:
+        ...  # put verbosity into the request when it is set
+```
+
+The default answer is `False`, so a provider written without the parameter, like the first `MyLLM` above, is never called with it. `complete_structured` has no such parameter.
 
 ### Exposing a `.models` property
 

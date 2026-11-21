@@ -15,7 +15,6 @@ function summary(): ResearchRunSummary {
     mode: 'research',
     question: 'Imported question',
     queue_position: null,
-    result_url: '/v1/runs/external-run/result',
     run_id: 'external-run',
     snapshot: {},
     stack: 'web',

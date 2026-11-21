@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 SUPPORTED_STATUSES: tuple[str, ...] = ("verified", "attributed")
-"""The statuses of a claim with affirmed support. ``verified``: a source's
-own text was checked and states it. ``attributed``: the search provider's
-answer attributes it to its sources, and no source text was checked. The
+"""The statuses of a claim with affirmed support. ``verified``: the search
+provider's excerpts that state it carry its support on their own.
+``attributed``: it is supported only together with the search provider's
+answer, which attributes it to its sources. The
 research loop (stopping, depth, cross-check planning, selection) reads
 support, both alike; what a report or a count shows says which."""
 

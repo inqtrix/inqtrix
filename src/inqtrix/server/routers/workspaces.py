@@ -32,7 +32,7 @@ from inqtrix.auth.invitations import (
 )
 from inqtrix.auth.permissions import WorkspaceNotFound, WorkspaceRole
 from inqtrix.server.routers._admin_guard import require_instance_admin
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import error_response, read_json_object
 from inqtrix.services.workspace_administration import (
     WorkspaceNameError,
     create_workspace_for_admin,
@@ -95,17 +95,14 @@ def build_router(container: "AppContainer") -> APIRouter:
         if error is not None:
             return error
         principal, _session, _mirror = resolved
-        try:
-            body = await request.json()
-        except Exception:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
         try:
             workspace_id, created_name = await create_workspace_for_admin(
                 workspace_admin,
                 principal=principal,
-                name=(body or {}).get("name", ""),
+                name=body.get("name", ""),
             )
         except WorkspaceNameError as exc:
             return error_response(400, str(exc), "invalid_request_error")
@@ -158,20 +155,17 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal, error = await _owner_workspace(request, workspace_id)
         if error is not None:
             return error
-        try:
-            body = await request.json()
-        except Exception:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
-        email = str((body or {}).get("email", "")).strip()
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
+        email = str(body.get("email", "")).strip()
         if "@" not in email or len(email) > 320:
             return error_response(
                 400,
                 "Field 'email' must be an email address",
                 "invalid_request_error",
             )
-        raw_role = str((body or {}).get("role", "")).strip()
+        raw_role = str(body.get("role", "")).strip()
         try:
             role = WorkspaceRole(raw_role)
         except ValueError:
@@ -181,7 +175,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 f"Field 'role' must be one of {valid}",
                 "invalid_request_error",
             )
-        expires_in_days = (body or {}).get("expires_in_days")
+        expires_in_days = body.get("expires_in_days")
         if expires_in_days is None:
             expires_in_days = DEFAULT_INVITATION_TTL_DAYS
         if not isinstance(expires_in_days, int) or expires_in_days < 1:

@@ -89,6 +89,13 @@ class CollaborationProjectionUnavailable(RuntimeError):
     """Raised instead of silently serving stale Markdown to AI consumers."""
 
 
+COLLABORATION_PROJECTION_UNAVAILABLE_TEXT = (
+    "The current collaboration state could not be persisted."
+)
+"""The public text of :class:`CollaborationProjectionUnavailable`, one wording
+for the editor capabilities and the shared collaboration error mapping."""
+
+
 class EditorValidationError(ValueError):
     """Raised for client-payload problems (maps to HTTP 400).
 

@@ -20,7 +20,6 @@ from inqtrix.agents.memory_ports import (
     AgentMemoryRecord,
     AgentMemoryUnavailable,
 )
-from inqtrix.agents.algorithm import _load_memory_briefing
 from inqtrix.auth.principal import (
     ANONYMOUS_PRINCIPAL,
     STATIC_PRINCIPAL,
@@ -167,118 +166,6 @@ def test_anonymous_and_static_principals_cannot_use_long_term_memory() -> None:
         asyncio.run(service.list_memories(principal=STATIC_PRINCIPAL))
 
 
-def test_agent_intake_gates_recall_on_status_and_emits_degradation() -> None:
-    provider = FakeMemoryProvider()
-    service = _service(provider)
-    events: list[tuple[str, dict[str, Any]]] = []
-
-    deps = SimpleNamespace(
-        memory=service,
-        agent_memory_opt_in=True,
-        context=SimpleNamespace(principal=STATIC_PRINCIPAL),
-        emit=lambda event_type, payload: events.append((event_type, payload)),
-    )
-    state: dict[str, Any] = {"question": "Use my project memory."}
-
-    _load_memory_briefing(deps, state)  # type: ignore[arg-type]
-
-    assert state["memory_status"] == "disabled"
-    assert provider.recall_queries == []
-    assert events == []
-
-    provider.fail_recall = True
-    deps.context.principal = OWNER
-    state = {"question": "Use my project memory."}
-
-    _load_memory_briefing(deps, state)  # type: ignore[arg-type]
-
-    assert state["memory_status"] == "unavailable"
-    assert events[-1][0] == "inqtrix.agent.activity"
-    assert events[-1][1]["kind"] == "memory_unavailable"
-
-
-def test_agent_intake_injects_used_memory_briefing() -> None:
-    provider = FakeMemoryProvider()
-    service = _service(provider)
-    asyncio.run(
-        provider.retain(
-            namespace=service._namespace_for(OWNER),  # type: ignore[attr-defined]
-            content="Prefer concise vendor comparison tables.",
-            scope="user",
-            category="preference",
-            confidence=0.9,
-            source_run_id="run_seed",
-        )
-    )
-    events: list[tuple[str, dict[str, Any]]] = []
-    deps = SimpleNamespace(
-        memory=service,
-        agent_memory_opt_in=True,
-        context=SimpleNamespace(principal=OWNER),
-        emit=lambda event_type, payload: events.append((event_type, payload)),
-    )
-    state: dict[str, Any] = {"question": "How should I present vendors?"}
-
-    _load_memory_briefing(deps, state)  # type: ignore[arg-type]
-
-    assert state["memory_status"] == "used"
-    assert (
-        "Prefer concise vendor comparison tables." in state["memory_briefing"]
-    )
-    assert events[-1][0] == "inqtrix.agent.activity"
-    assert events[-1][1]["kind"] == "memory"
-    assert events[-1][1]["status"] == "used"
-    assert (
-        provider.recall_queries[-1]["namespace"]
-        == service._namespace_for(OWNER)  # type: ignore[attr-defined]
-    )
-
-
-def test_agent_memory_read_and_write_require_user_opt_in() -> None:
-    # An eligible, infra-available principal who did NOT opt in gets no recall
-    # and no candidate staging — the privacy default is OFF (both gates).
-    from inqtrix.agents.algorithm import _stage_memory_candidates
-
-    provider = FakeMemoryProvider()
-    service = _service(provider)
-    asyncio.run(
-        provider.retain(
-            namespace=service._namespace_for(OWNER),  # type: ignore[attr-defined]
-            content="Prefer concise vendor comparison tables.",
-            scope="user",
-            category="preference",
-            confidence=0.9,
-            source_run_id="run_seed",
-        )
-    )
-    deps = SimpleNamespace(
-        memory=service,
-        agent_memory_opt_in=False,
-        context=SimpleNamespace(principal=OWNER, run_id="run_optout"),
-        emit=lambda event_type, payload: None,
-        resolved=lambda node: (None, None),
-        llm=None,
-        timeout=5.0,
-    )
-
-    read_state: dict[str, Any] = {"question": "How should I present vendors?"}
-    _load_memory_briefing(deps, read_state)  # type: ignore[arg-type]
-    assert read_state["memory_status"] == "disabled"
-    assert provider.recall_queries == []
-
-    write_state: dict[str, Any] = {
-        "question": "Plan the migration.",
-        "memo_markdown": "# Memo\n\nErgebnis [W1].",
-        "usage": {},
-    }
-    _stage_memory_candidates(deps, write_state)  # type: ignore[arg-type]
-    assert "memory_candidates" not in write_state
-    assert (
-        asyncio.run(service.list_candidates(principal=OWNER, status="pending"))
-        == []
-    )
-
-
 def test_stage_candidates_is_idempotent_per_source_run() -> None:
     """A redelivered terminal segment must not DUPLICATE a run's memory
     candidates — both engines stage from the terminal write, which can
@@ -339,104 +226,6 @@ def test_opt_in_enabled_reads_account_preference_default_off() -> None:
         )
     )
     assert asyncio.run(service.opt_in_enabled(OWNER)) is True
-
-
-def test_shared_run_recipient_cannot_read_owner_memory() -> None:
-    provider = FakeMemoryProvider()
-    service = _service(provider)
-    asyncio.run(
-        provider.retain(
-            namespace=service._namespace_for(OWNER),  # type: ignore[attr-defined]
-            content="OWNER private project context.",
-            scope="user",
-            category="project_fact",
-            confidence=0.9,
-            source_run_id="run_owner",
-        )
-    )
-    # A recipient of OWNER's SHARED run executes under THEIR OWN principal;
-    # the briefing must resolve to the recipient's namespace, never OWNER's.
-    deps = SimpleNamespace(
-        memory=service,
-        agent_memory_opt_in=True,
-        context=SimpleNamespace(principal=OTHER),
-        emit=lambda event_type, payload: None,
-    )
-    state: dict[str, Any] = {"question": "Summarize the shared run."}
-
-    _load_memory_briefing(deps, state)  # type: ignore[arg-type]
-
-    assert "OWNER private project context." not in state.get(
-        "memory_briefing", ""
-    )
-    assert state["memory_status"] == "empty"
-    assert (
-        provider.recall_queries[-1]["namespace"]
-        == service._namespace_for(OTHER)  # type: ignore[attr-defined]
-    )
-    assert service._namespace_for(OTHER) != service._namespace_for(  # type: ignore[attr-defined]
-        OWNER
-    )
-
-
-def test_finalize_stages_candidates_without_auto_retain(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inqtrix.agents import memory_reflection
-    from inqtrix.agents.algorithm import _stage_memory_candidates
-    from inqtrix.agents.phase_models import (
-        MemoryCandidateModel,
-        MemoryReflection,
-    )
-
-    provider = FakeMemoryProvider()
-    service = _service(provider)
-    reflection = MemoryReflection(
-        candidates=[
-            MemoryCandidateModel(
-                scope="user",
-                category="preference",
-                content="Prefer concise implementation plans.",
-                reason="The user corrected verbosity in this run.",
-                confidence=0.8,
-            )
-        ]
-    )
-    monkeypatch.setattr(
-        memory_reflection,
-        "run_memory_reflection",
-        lambda *args, **kwargs: SimpleNamespace(value=reflection, usage={}),
-    )
-    events: list[tuple[str, dict[str, Any]]] = []
-    deps = SimpleNamespace(
-        memory=service,
-        agent_memory_opt_in=True,
-        context=SimpleNamespace(principal=OWNER, run_id="run_finalize"),
-        emit=lambda event_type, payload: events.append((event_type, payload)),
-        resolved=lambda node: (None, None),
-        llm=None,
-        timeout=5.0,
-    )
-    state: dict[str, Any] = {
-        "question": "Plan the migration.",
-        "memo_markdown": "# Memo\n\nErgebnis [W1].",
-        "usage": {},
-    }
-
-    _stage_memory_candidates(deps, state)  # type: ignore[arg-type]
-
-    assert state["memory_status"] == "candidate_created"
-    assert [item["content"] for item in state["memory_candidates"]] == [
-        "Prefer concise implementation plans."
-    ]
-    # Candidate is PENDING for review — never auto-retained to the provider.
-    assert provider.rows == {}
-    pending = asyncio.run(
-        service.list_candidates(principal=OWNER, status="pending")
-    )
-    assert len(pending) == 1
-    assert events[-1][0] == "inqtrix.agent.activity"
-    assert events[-1][1]["kind"] == "memory_candidate"
 
 
 def test_memory_ids_are_scoped_to_principal_namespace() -> None:
@@ -733,9 +522,13 @@ def _memory_client(service: AgentMemoryService) -> TestClient:
 
 
 def _kernel_algo_and_deps(
-    service: AgentMemoryService, *, opt_in: bool
+    service: AgentMemoryService, *, opt_in: bool, principal: Principal = OWNER
 ) -> tuple[Any, Any, list[tuple[str, dict[str, Any]]]]:
-    """Minimal kernel algorithm + deps pair for the memory seams."""
+    """Minimal kernel algorithm + deps pair for the memory seams.
+
+    *principal* is the one the segment executes under: the run's owner, or
+    the recipient of a shared run.
+    """
     pytest.importorskip("langchain")
     from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
     from inqtrix.agents.kernel.deps import KernelDeps
@@ -761,7 +554,7 @@ def _kernel_algo_and_deps(
     )
     deps.memory = service
     deps.memory_opt_in = opt_in
-    deps.principal = OWNER
+    deps.principal = principal
     deps.question = "Wie praesentiere ich Anbieter?"
     return algo, deps, events
 
@@ -800,6 +593,41 @@ def test_kernel_recall_injects_the_memory_briefing() -> None:
     assert "NEVER cite it as evidence" in message
     # Without a briefing the memory section must not render at all.
     assert "long-term memory" not in build_kernel_user_message("Frage")
+
+
+def test_shared_run_recipient_cannot_read_owner_memory() -> None:
+    provider = FakeMemoryProvider()
+    service = _service(provider)
+    asyncio.run(
+        provider.retain(
+            namespace=service._namespace_for(OWNER),  # type: ignore[attr-defined]
+            content="OWNER private project context.",
+            scope="user",
+            category="project_fact",
+            confidence=0.9,
+            source_run_id="run_owner",
+        )
+    )
+    # A recipient of OWNER's SHARED run executes under THEIR OWN principal;
+    # the briefing must resolve to the recipient's namespace, never OWNER's.
+    algo, deps, _events = _kernel_algo_and_deps(
+        service, opt_in=True, principal=OTHER
+    )
+    request = SimpleNamespace(
+        question="Summarize the shared run.", history="", session_id=""
+    )
+
+    algo._recall_memory_briefing(request, deps)
+
+    assert "OWNER private project context." not in deps.memory_briefing
+    assert deps.memory_status == "empty"
+    assert (
+        provider.recall_queries[-1]["namespace"]
+        == service._namespace_for(OTHER)  # type: ignore[attr-defined]
+    )
+    assert service._namespace_for(OTHER) != service._namespace_for(  # type: ignore[attr-defined]
+        OWNER
+    )
 
 
 def test_kernel_recall_respects_opt_out_and_narrates_unavailable() -> None:

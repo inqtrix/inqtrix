@@ -29,6 +29,8 @@ _MUTABLE = [
     "enable_agent_memory",
     "chat_model_tier",
     "agent_model_tier",
+    "last_research_profile",
+    "last_agent_tier",
     "updated_at",
 ]
 """Every column the upsert may overwrite. A column missing here is written by
@@ -66,6 +68,8 @@ class PostgresAccountPreferencesStore(BaseSessionStore):
         enable_agent_memory=False,
         chat_model_tier="",
         agent_model_tier="",
+        last_research_profile="",
+        last_agent_tier="",
     ) -> AccountPreferences:
         stmt = pg_insert(account_preferences).values(
             tenant_id=_DEFAULT_TENANT, user_id=user_id, contrast_mode=contrast_mode,
@@ -74,6 +78,8 @@ class PostgresAccountPreferencesStore(BaseSessionStore):
             enable_agent_memory=enable_agent_memory,
             chat_model_tier=chat_model_tier,
             agent_model_tier=agent_model_tier,
+            last_research_profile=last_research_profile,
+            last_agent_tier=last_agent_tier,
             updated_at=updated_at,
         )
         stmt = stmt.on_conflict_do_update(
@@ -93,6 +99,8 @@ class PostgresAccountPreferencesStore(BaseSessionStore):
             enable_agent_memory=row.enable_agent_memory,
             chat_model_tier=row.chat_model_tier,
             agent_model_tier=row.agent_model_tier,
+            last_research_profile=row.last_research_profile,
+            last_agent_tier=row.last_agent_tier,
             updated_at=row.updated_at,
             tenant_id=row.tenant_id,
         )

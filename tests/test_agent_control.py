@@ -14,7 +14,6 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
@@ -22,17 +21,11 @@ import pytest
 from inqtrix.agents.control_memory import MemoryAgentControlStore
 from inqtrix.agents.control_ports import (
     ApprovalAlreadyDecided,
-    session_memo_artifact_id,
     ApprovalRecord,
     ArtifactLocked,
     ArtifactNotFound,
     ArtifactRevisionConflict,
     ClarificationRecord,
-    PlanNotFound,
-    PlanRecord,
-    PlanTaskCancellationConflict,
-    PlanTaskRecord,
-    settle_terminal_plan_tasks,
 )
 from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
@@ -56,25 +49,6 @@ PRINCIPAL = Principal(
     role="member",
 )
 VISIBLE = UserContext(principal=PRINCIPAL)
-
-
-async def _request_task_cancel_unscoped(
-    store: MemoryAgentControlStore,
-    *,
-    run_id: str,
-    plan_id: str,
-    task_id: str,
-) -> PlanTaskRecord:
-    async def _authorize(control_write: Any) -> Any:
-        return control_write(None, lambda _child_run_id: "cancelled")
-
-    task, _child_status = await store.request_plan_task_cancel(
-        run_id=run_id,
-        plan_id=plan_id,
-        task_id=task_id,
-        authorize=_authorize,
-    )
-    return task
 
 
 def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
@@ -194,7 +168,27 @@ def _parked_agent_run(
     return run_id
 
 
-def _approval(run_id: str, *, kind: str = "plan") -> ApprovalRecord:
+def _tool_approval(run_id: str) -> ApprovalRecord:
+    return ApprovalRecord(
+        approval_id=f"apr_{uuid.uuid4().hex[:8]}",
+        run_id=run_id,
+        kind="tool",
+        payload={
+            "actions": [
+                {
+                    "tool": "web_instant",
+                    "args": {"query": "EU AI Act Fristen"},
+                    "summary": "Websuche",
+                }
+            ]
+        },
+    )
+
+
+def _approval(run_id: str, *, kind: str = "tool") -> ApprovalRecord:
+    """A pending approval of *kind*; by default the kernel's tool gate."""
+    if kind == "tool":
+        return _tool_approval(run_id)
     return ApprovalRecord(
         approval_id=f"apr_{uuid.uuid4().hex[:8]}",
         run_id=run_id,
@@ -202,29 +196,29 @@ def _approval(run_id: str, *, kind: str = "plan") -> ApprovalRecord:
     )
 
 
-def _plan_body() -> dict[str, Any]:
-    return {
-        "summary_markdown": "Ueberarbeiteter Plan",
-        "tasks": [
-            {
-                "id": "t1",
-                "title": "Interne Suche",
-                "tool_kind": "rag_query",
-                "queries": ["Welche internen Berichte sind relevant?"],
-                "params": {"profile": "standard"},
-            },
-            {
-                "id": "s",
-                "title": "Synthese",
-                "tool_kind": "synthesis",
-                "depends_on": ["t1"],
-            },
-        ],
-        "success_criteria": ["Alle Kernfragen belegt."],
-    }
-
-
 # -- approval decision state machine ------------------------------------- #
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["discovery", "plan", "patch", "replan"])
+async def test_only_a_tool_approval_is_created(kind: str) -> None:
+    """The kernel's tool gate is the one approval a run still asks for; a
+    stored approval of the retired kinds is read, never created anew."""
+    store = MemoryAgentControlStore()
+
+    with pytest.raises(ValueError) as refused:
+        await store.create_approval(
+            ApprovalRecord(approval_id="apr_retired", run_id="run-kinds", kind=kind)
+        )
+    created = await store.create_approval(_approval("run-kinds"))
+
+    assert str(refused.value) == (
+        f"An approval of kind {kind} is not created any more; a run asks only for "
+        "tool approvals."
+    )
+    assert [row.approval_id for row in await store.list_approvals("run-kinds")] == [
+        created.approval_id
+    ]
 
 
 @pytest.mark.asyncio
@@ -296,7 +290,6 @@ async def test_disabled_actor_cannot_commit_memory_decision_or_resume(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
         )
@@ -325,7 +318,6 @@ async def test_approve_decision_resumes_run_and_audits(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="approve",
-            plan_body=None,
             note="passt",
             principal=PRINCIPAL,
         )
@@ -380,7 +372,6 @@ async def test_replay_of_same_decision_is_idempotent(
         run_id=run_id,
         approval_id=approval.approval_id,
         decision="reject",
-        plan_body=None,
         note="",
         principal=PRINCIPAL,
     )
@@ -389,7 +380,6 @@ async def test_replay_of_same_decision_is_idempotent(
         run_id=run_id,
         approval_id=approval.approval_id,
         decision="reject",
-        plan_body=None,
         note="",
         principal=PRINCIPAL,
     )
@@ -402,7 +392,6 @@ async def test_replay_of_same_decision_is_idempotent(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
         )
@@ -434,7 +423,6 @@ async def test_decision_on_non_waiting_run_rolls_back(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
         )
@@ -451,1212 +439,7 @@ async def test_decision_on_non_waiting_run_rolls_back(
         subscription.close()
 
 
-@pytest.mark.asyncio
-async def test_edit_decision_appends_approved_plan_version(
-    service: AgentControlService, run_store: RunStore
-) -> None:
-    run_id = _parked_agent_run(run_store)
-    initial = PlanRecord(
-        plan_id="plan_v1",
-        run_id=run_id,
-        version=1,
-        status="proposed",
-        created_by="agent",
-    )
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=initial,
-        tasks=[
-            PlanTaskRecord(
-                task_id="t1",
-                plan_id="plan_v1",
-                run_id=run_id,
-                ordinal=0,
-                title="Alt",
-                tool_kind="rag_query",
-            )
-        ],
-    )
-    approval = await service.store.create_approval(_approval(run_id))
-
-    decided, _summary, _replayed = await service.decide_approval(
-        run_id=run_id,
-        approval_id=approval.approval_id,
-        decision="edit",
-        plan_body=_plan_body(),
-        note="",
-        principal=PRINCIPAL,
-    )
-
-    assert decided.status == "edited"
-    assert decided.decision_payload["plan"]["summary_markdown"] == (
-        "Ueberarbeiteter Plan"
-    )
-    plan, tasks, versions = await service.get_plan(run_id)
-    assert plan.version == 2
-    assert plan.status == "approved"
-    assert plan.created_by == "user"
-    assert plan.reason == "user_edit"
-    assert [task.task_id for task in tasks] == ["t1", "s"]
-    assert [(v.version, v.status) for v in versions] == [
-        (2, "approved"),
-        (1, "superseded"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_edit_decision_validates_through_the_plan_validator(
-    service: AgentControlService, run_store: RunStore
-) -> None:
-    run_id = _parked_agent_run(run_store)
-    approval = await service.store.create_approval(_approval(run_id))
-    broken = _plan_body()
-    broken["tasks"][1]["depends_on"] = []  # synthesis no longer covers t1
-
-    with pytest.raises(AgentControlValidationError) as exc_info:
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=approval.approval_id,
-            decision="edit",
-            plan_body=broken,
-            note="",
-            principal=PRINCIPAL,
-        )
-
-    assert any("synthesis" in error for error in exc_info.value.errors)
-    stored = await service.store.get_approval(run_id, approval.approval_id)
-    assert stored.status == "pending"
-    with pytest.raises(PlanNotFound):
-        await service.store.get_plan(run_id)
-
-
-@pytest.mark.asyncio
-async def test_task_transitions_follow_retry_and_terminal_contract(
-    service: AgentControlService,
-) -> None:
-    await service.store.save_plan(
-        run_id="run-task",
-        plan=PlanRecord(
-            plan_id="plan-task",
-            run_id="run-task",
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="t1",
-                plan_id="plan-task",
-                run_id="run-task",
-                ordinal=0,
-                title="Research",
-                tool_kind="web_research",
-            )
-        ],
-    )
-
-    first = await service.store.transition_plan_task(
-        run_id="run-task",
-        plan_id="plan-task",
-        task_id="t1",
-        status="running",
-        child_run_id="run-child-1",
-    )
-    assert first.child_run_id == "run-child-1"
-    retry = await service.store.transition_plan_task(
-        run_id="run-task",
-        plan_id="plan-task",
-        task_id="t1",
-        status="running",
-        child_run_id="run-child-2",
-    )
-    assert retry.child_run_id == "run-child-2"
-    terminal = await service.store.transition_plan_task(
-        run_id="run-task",
-        plan_id="plan-task",
-        task_id="t1",
-        status="insufficient_evidence",
-        child_run_id="run-child-2",
-        result_summary="Only one independent source was available.",
-        result_payload={
-            "evidence": [{"url": "https://example.test/source"}],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
-        },
-    )
-    assert terminal.status == "insufficient_evidence"
-    assert terminal.result_payload["usage"]["prompt_tokens"] == 3
-    replay = await service.store.transition_plan_task(
-        run_id="run-task",
-        plan_id="plan-task",
-        task_id="t1",
-        status="insufficient_evidence",
-        child_run_id="run-child-2",
-        result_summary="Only one independent source was available.",
-        result_payload=terminal.result_payload,
-    )
-    assert replay == terminal
-    with pytest.raises(ValueError):
-        await service.store.transition_plan_task(
-            run_id="run-task",
-            plan_id="plan-task",
-            task_id="t1",
-            status="completed",
-        )
-    with pytest.raises(ValueError):
-        await service.store.transition_plan_task(
-            run_id="run-task",
-            plan_id="plan-task",
-            task_id="t1",
-            status="insufficient_evidence",
-            child_run_id="run-child-3",
-        )
-    with pytest.raises(ValueError):
-        await service.store.transition_plan_task(
-            run_id="run-task",
-            plan_id="plan-task",
-            task_id="t1",
-            status="insufficient_evidence",
-            result_summary="A different terminal result.",
-        )
-    with pytest.raises(ValueError):
-        await service.store.transition_plan_task(
-            run_id="run-task",
-            plan_id="plan-task",
-            task_id="t1",
-            status="insufficient_evidence",
-            result_payload={"claims": [{"text": "different"}]},
-        )
-
-
-@pytest.mark.asyncio
-async def test_task_transition_rejects_metadata_before_its_lifecycle_stage(
-    service: AgentControlService,
-) -> None:
-    await service.store.save_plan(
-        run_id="run-task-metadata",
-        plan=PlanRecord(
-            plan_id="plan-task-metadata",
-            run_id="run-task-metadata",
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="t1",
-                plan_id="plan-task-metadata",
-                run_id="run-task-metadata",
-                ordinal=0,
-                title="Research",
-                tool_kind="web_research",
-            )
-        ],
-    )
-
-    with pytest.raises(ValueError, match="before running"):
-        await service.store.transition_plan_task(
-            run_id="run-task-metadata",
-            plan_id="plan-task-metadata",
-            task_id="t1",
-            status="skipped",
-            child_run_id="run-child-early",
-        )
-    with pytest.raises(ValueError, match="terminal status"):
-        await service.store.transition_plan_task(
-            run_id="run-task-metadata",
-            plan_id="plan-task-metadata",
-            task_id="t1",
-            status="running",
-            result_summary="Too early.",
-        )
-
-
-@pytest.mark.asyncio
-async def test_task_cancellation_is_atomic_idempotent_and_source_only(
-    service: AgentControlService,
-) -> None:
-    plan = PlanRecord(
-        plan_id="plan-task-cancel",
-        run_id="run-task-cancel",
-        version=1,
-        status="approved",
-        created_by="agent",
-    )
-    tasks = [
-        PlanTaskRecord(
-            task_id="pending",
-            plan_id=plan.plan_id,
-            run_id=plan.run_id,
-            ordinal=0,
-            title="Pending",
-            tool_kind="web_instant",
-        ),
-        PlanTaskRecord(
-            task_id="running",
-            plan_id=plan.plan_id,
-            run_id=plan.run_id,
-            ordinal=1,
-            title="Running",
-            tool_kind="web_instant",
-        ),
-        PlanTaskRecord(
-            task_id="s",
-            plan_id=plan.plan_id,
-            run_id=plan.run_id,
-            ordinal=2,
-            title="Synthesis",
-            tool_kind="synthesis",
-        ),
-    ]
-    await service.store.save_plan(run_id=plan.run_id, plan=plan, tasks=tasks)
-    await service.store.transition_plan_task(
-        run_id=plan.run_id,
-        plan_id=plan.plan_id,
-        task_id="running",
-        status="running",
-    )
-
-    pending = await _request_task_cancel_unscoped(
-        service.store,
-        run_id=plan.run_id,
-        plan_id=plan.plan_id,
-        task_id="pending",
-    )
-    assert pending.status == "cancelled"
-    assert pending.result_payload["failure_code"] == "task_cancelled"
-    assert (
-        await _request_task_cancel_unscoped(
-            service.store,
-            run_id=plan.run_id,
-            plan_id=plan.plan_id,
-            task_id="pending",
-        )
-    ) == pending
-
-    running = await _request_task_cancel_unscoped(
-        service.store,
-        run_id=plan.run_id,
-        plan_id=plan.plan_id,
-        task_id="running",
-    )
-    assert running.status == "cancel_requested"
-    await settle_terminal_plan_tasks(
-        service.store,
-        plan.run_id,
-        status="cancelled",
-    )
-    _settled_plan, settled_tasks = await service.store.get_plan(plan.run_id)
-    cancelled = next(task for task in settled_tasks if task.task_id == "running")
-    assert cancelled.status == "cancelled"
-    assert cancelled.result_payload == {
-        "failure_code": "task_cancelled",
-        "failure_reason": "user_requested_task_cancel",
-    }
-
-    with pytest.raises(PlanTaskCancellationConflict):
-        await _request_task_cancel_unscoped(
-            service.store,
-            run_id=plan.run_id,
-            plan_id=plan.plan_id,
-            task_id="s",
-        )
-
-
-@pytest.mark.asyncio
-async def test_settlement_summaries_follow_the_run_language(
-    service: AgentControlService,
-):
-    """What a user reads after pressing Stop is in the run's language.
-
-    The graph holds the language and passes it. The HTTP recovery boundary
-    for a run cancelled while waiting holds only a run id, omits it, and
-    gets ENGLISH -- the product's fallback everywhere -- never a silent
-    German default.
-    """
-    for index, (language, expected) in enumerate(
-        (
-            ("de", "Wegen Abbruch nicht ausgeführt."),
-            ("en", "Not executed because the run was cancelled."),
-            (None, "Not executed because the run was cancelled."),
-        )
-    ):
-        plan = PlanRecord(
-            plan_id=f"plan-lang-{index}",
-            run_id=f"run-lang-{index}",
-            version=1,
-            status="approved",
-            created_by="agent",
-        )
-        await service.store.save_plan(
-            run_id=plan.run_id,
-            plan=plan,
-            tasks=[
-                PlanTaskRecord(
-                    task_id="pending",
-                    plan_id=plan.plan_id,
-                    run_id=plan.run_id,
-                    ordinal=0,
-                    title="Pending",
-                    tool_kind="web_instant",
-                )
-            ],
-        )
-        await settle_terminal_plan_tasks(
-            service.store,
-            plan.run_id,
-            status="cancelled",
-            language=language,
-        )
-        _p, tasks = await service.store.get_plan(plan.run_id)
-        pending = next(t for t in tasks if t.task_id == "pending")
-        assert pending.status == "skipped"
-        assert pending.result_summary == expected
-
-
-@pytest.mark.asyncio
-async def test_shared_editor_task_cancel_reaches_the_running_child(
-    service: AgentControlService,
-    run_store: RunStore,
-    identity: MemoryIdentityStore,
-) -> None:
-    """The caller's root edit grant governs the child cancel atomically."""
-    run_store.bind_authorization(
-        share_lookup=identity.permission_for_sync,
-        share_workspace_check=identity.share_workspace_sync,
-        resource_access_guard=identity.resource_access_guard_sync,
-        restrict_to_workspace_members=False,
-    )
-    run_id = _parked_agent_run(run_store)
-    child_started = threading.Event()
-    child_release = threading.Event()
-
-    def child_work(handle: RunHandle) -> None:
-        child_started.set()
-        assert child_release.wait(timeout=5.0)
-        if handle.cancel_event.is_set():
-            handle.cancel("task_cancelled")
-        else:
-            handle.complete({"answer": "late"})
-
-    child = run_store.submit(
-        mode="research",
-        workflow_contract=1,
-        question="Child research",
-        stack_name="default",
-        work=child_work,
-        kind="agent_child",
-        parent_run_id=run_id,
-        root_run_id=run_id,
-        request_payload={
-            "body": {
-                "parent_task_id": "research",
-                "parent_task_attempt": 1,
-            }
-        },
-        created_by_user_id=PRINCIPAL.user_id,
-        created_by_tenant_id=PRINCIPAL.tenant_id,
-    )
-    assert child_started.wait(timeout=2.0)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-shared-child-cancel",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="research",
-                plan_id="plan-shared-child-cancel",
-                run_id=run_id,
-                ordinal=0,
-                title="Research",
-                tool_kind="web_research",
-                status="running",
-                child_run_id=child["run_id"],
-            )
-        ],
-    )
-    recipient_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
-    recipient_principal = Principal(
-        user_id=recipient_id,
-        kind="oidc_session",
-        tenant_id="default",
-        role="member",
-    )
-    recipient = UserContext(principal=recipient_principal)
-    users = MemoryUserDirectory()
-    await users.record_login(
-        tenant_id="default",
-        issuer="https://issuer.example",
-        subject="owner",
-        email="owner@example.com",
-        email_verified=True,
-        display_name="Owner",
-        canonical_user_id=PRINCIPAL.user_id,
-    )
-    await users.record_login(
-        tenant_id="default",
-        issuer="https://issuer.example",
-        subject="editor",
-        email="editor@example.com",
-        email_verified=True,
-        display_name="Editor",
-        canonical_user_id=recipient_id,
-    )
-    authority = MemoryAuthorityCoordinator()
-    authority.bind_users(users)
-    identity.bind_authority_coordinator(authority)
-    run_store.bind_authority_coordinator(authority)
-    identity.add_share(
-        recipient_user_id=recipient_id,
-        resource_type="run",
-        resource_id=run_id,
-        permission=SharePermission.EDIT,
-        granted_by_user_id=PRINCIPAL.user_id,
-    )
-
-    try:
-        task = await service.request_task_cancel(
-            run_id,
-            "research",
-            workspace_id=None,
-            principal=recipient_principal,
-            visible_to=recipient,
-        )
-        assert task.status == "cancel_requested"
-        child_release.set()
-        _wait_until(
-            lambda: run_store.get(child["run_id"], visible_to=VISIBLE)["status"]
-            == "cancelled"
-        )
-    finally:
-        child_release.set()
-
-
-@pytest.mark.asyncio
-async def test_task_cancel_missing_child_rolls_back_the_control_row(
-    service: AgentControlService,
-    run_store: RunStore,
-) -> None:
-    run_id = _parked_agent_run(run_store)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-missing-child",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="research",
-                plan_id="plan-missing-child",
-                run_id=run_id,
-                ordinal=0,
-                title="Research",
-                tool_kind="web_research",
-                status="running",
-                child_run_id="run-missing-child",
-            )
-        ],
-    )
-
-    with pytest.raises(RunNotFound):
-        await service.request_task_cancel(
-            run_id,
-            "research",
-            workspace_id=None,
-            principal=PRINCIPAL,
-            visible_to=VISIBLE,
-        )
-
-    _plan, tasks = await service.store.get_plan(run_id)
-    assert tasks[0].status == "running"
-
-
-@pytest.mark.asyncio
-async def test_cancel_settlement_folds_child_completed_before_parent_cancel(
-    service: AgentControlService,
-    run_store: RunStore,
-) -> None:
-    """The synchronous waiting-run cancel cannot downgrade a finished child."""
-    run_id = _parked_agent_run(run_store)
-    child = run_store.submit(
-        mode="research",
-        workflow_contract=1,
-        question="Child research",
-        stack_name="default",
-        work=lambda handle: handle.complete(
-            {
-                "answer": "Belegte Antwort",
-                "references": [{"url": "https://example.test/source"}],
-                "top_claims": [],
-            }
-        ),
-        kind="agent_child",
-        parent_run_id=run_id,
-        root_run_id=run_id,
-        request_payload={
-            "body": {"parent_task_id": "r", "parent_task_attempt": 1}
-        },
-        created_by_user_id=PRINCIPAL.user_id,
-        created_by_tenant_id=PRINCIPAL.tenant_id,
-    )
-    child_id = child["run_id"]
-    _wait_until(
-        lambda: run_store.get(child_id, visible_to=VISIBLE)["status"]
-        == "completed"
-    )
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-cancel-child",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="r",
-                plan_id="plan-cancel-child",
-                run_id=run_id,
-                ordinal=0,
-                title="Research",
-                tool_kind="web_research",
-                status="running",
-                child_run_id=child_id,
-            ),
-            PlanTaskRecord(
-                task_id="s",
-                plan_id="plan-cancel-child",
-                run_id=run_id,
-                ordinal=1,
-                title="Synthesis",
-                tool_kind="synthesis",
-                depends_on=("r",),
-            ),
-        ],
-    )
-
-    assert run_store.cancel(run_id, visible_to=VISIBLE)["status"] == "cancelled"
-    await service.settle_cancelled_tasks(run_id)
-
-    _plan, tasks, _versions = await service.get_plan(run_id)
-    assert tasks[0].status == "completed"
-    assert tasks[0].result_payload["evidence"] == [
-        {"url": "https://example.test/source"}
-    ]
-    assert tasks[1].status == "skipped"
-
-
-@pytest.mark.asyncio
-async def test_cancel_settles_a_running_task_whose_child_is_gone(
-    service: AgentControlService,
-    run_store: RunStore,
-) -> None:
-    """A retained task with a deleted child row ends as failed, not as a 500."""
-    run_id = _parked_agent_run(run_store)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-cancel-missing-child",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="r",
-                plan_id="plan-cancel-missing-child",
-                run_id=run_id,
-                ordinal=0,
-                title="Research",
-                tool_kind="web_research",
-                status="running",
-                child_run_id="run_child_row_is_gone",
-            ),
-        ],
-    )
-
-    assert run_store.cancel(run_id, visible_to=VISIBLE)["status"] == "cancelled"
-    await service.settle_cancelled_tasks(run_id)
-
-    _plan, tasks, _versions = await service.get_plan(run_id)
-    assert tasks[0].status == "failed"
-    assert tasks[0].result_payload["failure_code"] == "child_row_missing"
-
-
-@pytest.mark.asyncio
-async def test_tree_cancel_reconciles_nested_agent_plan_rows(
-    service: AgentControlService,
-    run_store: RunStore,
-) -> None:
-    """Immediate child cancellation cannot leave its own plan in progress."""
-    root_id = _parked_agent_run(run_store)
-
-    def parked_child(handle: RunHandle) -> None:
-        handle.wait("waiting_for_input")
-
-    child = run_store.submit(
-        mode="research",
-        workflow_contract=1,
-        question="Nested mission",
-        stack_name="default",
-        work=parked_child,
-        kind="agent_child",
-        parent_run_id=root_id,
-        root_run_id=root_id,
-        request_payload={"body": {"mode": "workspace_agent"}},
-        created_by_user_id=PRINCIPAL.user_id,
-        created_by_tenant_id=PRINCIPAL.tenant_id,
-    )
-    child_id = child["run_id"]
-    _wait_until(
-        lambda: run_store.get(child_id, visible_to=VISIBLE)["status"]
-        == "waiting_for_input"
-    )
-    await service.store.save_plan(
-        run_id=child_id,
-        plan=PlanRecord(
-            plan_id="plan-nested-cancel",
-            run_id=child_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="running",
-                plan_id="plan-nested-cancel",
-                run_id=child_id,
-                ordinal=0,
-                title="Begonnen",
-                tool_kind="web_instant",
-                status="running",
-            ),
-            PlanTaskRecord(
-                task_id="pending",
-                plan_id="plan-nested-cancel",
-                run_id=child_id,
-                ordinal=1,
-                title="Ausstehend",
-                tool_kind="synthesis",
-            ),
-        ],
-    )
-
-    summary, affected = run_store.cancel_tree(root_id, visible_to=VISIBLE)
-    assert summary["status"] == "cancelled"
-    assert child_id in affected
-    await service.reconcile_terminal_run_tree(affected)
-
-    _plan, tasks = await service.store.get_plan(child_id)
-    assert [task.status for task in tasks] == ["failed", "skipped"]
-
-
-@pytest.mark.asyncio
-async def test_plan_read_repairs_cancelled_run_after_post_commit_gap(
-    service: AgentControlService,
-    run_store: RunStore,
-) -> None:
-    """Reload is the durable recovery when cancel committed before settle."""
-    run_id = _parked_agent_run(run_store)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-read-recovery",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="pending",
-                plan_id="plan-read-recovery",
-                run_id=run_id,
-                ordinal=0,
-                title="Ausstehend",
-                tool_kind="synthesis",
-            )
-        ],
-    )
-    assert run_store.cancel(run_id, visible_to=VISIBLE)["status"] == "cancelled"
-    _raw_plan, raw_tasks = await service.store.get_plan(run_id)
-    assert raw_tasks[0].status == "pending"
-
-    _plan, repaired, _versions = await service.get_plan(run_id)
-    assert repaired[0].status == "skipped"
-
-
-@pytest.mark.asyncio
-async def test_plan_approval_rejects_subject_from_another_run() -> None:
-    store = MemoryAgentControlStore()
-    await store.save_plan(
-        run_id="run-a",
-        plan=PlanRecord(
-            plan_id="plan-a", run_id="run-a", version=1,
-            status="proposed", created_by="agent",
-        ),
-        tasks=[],
-    )
-    await store.save_plan(
-        run_id="run-b",
-        plan=PlanRecord(
-            plan_id="plan-b", run_id="run-b", version=1,
-            status="proposed", created_by="agent",
-        ),
-        tasks=[],
-    )
-
-    with pytest.raises(PlanNotFound):
-        await store.create_approval(
-            ApprovalRecord(
-                approval_id="apr-cross-run",
-                run_id="run-a",
-                kind="plan",
-                subject_type="plan",
-                subject_id="plan-b",
-            )
-        )
-
-    assert await store.list_approvals("run-a") == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("decision", "expected_status"),
-    [("approve", "approved"), ("reject", "rejected")],
-)
-async def test_plan_decision_updates_approval_and_plan_together(
-    service: AgentControlService,
-    run_store: RunStore,
-    decision: str,
-    expected_status: str,
-) -> None:
-    run_id = _parked_agent_run(run_store)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-v1",
-            run_id=run_id,
-            version=1,
-            status="proposed",
-            created_by="agent",
-        ),
-        tasks=[],
-    )
-    approval = await service.store.create_approval(
-        ApprovalRecord(
-            approval_id=f"apr-{decision}",
-            run_id=run_id,
-            kind="plan",
-            subject_type="plan",
-            payload={"plan_version": 1},
-        )
-    )
-    assert approval.subject_id == "plan-v1"
-
-    await service.decide_approval(
-        run_id=run_id,
-        approval_id=approval.approval_id,
-        decision=decision,
-        plan_body=None,
-        note="",
-        principal=PRINCIPAL,
-    )
-
-    plan, _tasks = await service.store.get_plan(run_id)
-    assert plan.status == expected_status
-
-
-@pytest.mark.asyncio
-async def test_plan_update_failure_leaves_memory_approval_pending(
-    service: AgentControlService,
-    run_store: RunStore,
-) -> None:
-    run_id = _parked_agent_run(run_store)
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-missing",
-            run_id=run_id,
-            version=1,
-            status="proposed",
-            created_by="agent",
-        ),
-        tasks=[],
-    )
-    approval = await service.store.create_approval(
-        ApprovalRecord(
-            approval_id="apr-missing-plan",
-            run_id=run_id,
-            kind="plan",
-            subject_type="plan",
-            payload={"plan_version": 1},
-        )
-    )
-    store = service.store
-    assert isinstance(store, MemoryAgentControlStore)
-    with store._lock:
-        store._plans.pop("plan-missing")
-        store._plan_tasks.pop("plan-missing", None)
-
-    with pytest.raises(PlanNotFound):
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=approval.approval_id,
-            decision="approve",
-            plan_body=None,
-            note="",
-            principal=PRINCIPAL,
-        )
-
-    stored = await store.get_approval(run_id, approval.approval_id)
-    assert stored.status == "pending"
-    assert (
-        run_store.get(run_id, visible_to=VISIBLE)["status"]
-        == "waiting_for_approval"
-    )
-
-
-@pytest.mark.asyncio
-async def test_edited_plan_rejects_client_managed_task_budget(
-    service: AgentControlService,
-    run_store: RunStore,
-) -> None:
-    run_id = _parked_agent_run(run_store)
-    approval = await service.store.create_approval(_approval(run_id))
-    body = _plan_body()
-    body["tasks"][0]["budget"] = {"max_tokens": 1800}
-
-    with pytest.raises(AgentControlValidationError) as exc_info:
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=approval.approval_id,
-            decision="edit",
-            plan_body=body,
-            note="",
-            principal=PRINCIPAL,
-        )
-
-    assert exc_info.value.error_type == "task_budget_server_managed"
-    stored = await service.store.get_approval(run_id, approval.approval_id)
-    assert stored.status == "pending"
-
-
-def _research_edit_plan(profile: str) -> dict[str, Any]:
-    return {
-        "summary_markdown": "Explicit research",
-        "tasks": [
-            {
-                "id": "r1",
-                "title": "Research",
-                "tool_kind": "web_research",
-                "queries": ["Which evidence answers the question?"],
-                "params": {"profile": profile},
-            },
-            {
-                "id": "s",
-                "title": "Synthesis",
-                "tool_kind": "synthesis",
-                "depends_on": ["r1"],
-            },
-        ],
-    }
-
-
-@pytest.mark.asyncio
-async def test_edited_plan_removes_task_model_tier_without_mutating_input(service, run_store):
-    from copy import deepcopy
-
-    run_id = _parked_agent_run(run_store)
-    body = _research_edit_plan("compact")
-    body["tasks"][0]["params"].update(model_tier="high", recency="year")
-    original = deepcopy(body)
-
-    _plan, tasks = await service._parse_edited_plan(run_id, body, VISIBLE)
-
-    assert tasks[0].params == {"profile": "compact", "recency": "year"}
-    assert body == original
-
-
-@pytest.mark.asyncio
-async def test_edited_plan_still_refuses_unrecognized_task_parameters(service, run_store):
-    run_id = _parked_agent_run(run_store)
-    body = _research_edit_plan("compact")
-    body["tasks"][0]["params"].update(model_tier="high", misspelled_profile="deep")
-
-    with pytest.raises(AgentControlValidationError) as error:
-        await service._parse_edited_plan(run_id, body, VISIBLE)
-
-    assert any("misspelled_profile" in line for line in error.value.errors)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("depth", "profile", "accepted"),
-    [
-        ("normal", "compact", True),
-        ("normal", "deep", False),
-        ("deep", "deep", True),
-        ("deep", "compact", False),
-    ],
-)
-async def test_edited_research_plan_uses_server_selected_profile(
-    service: AgentControlService,
-    run_store: RunStore,
-    depth: str,
-    profile: str,
-    accepted: bool,
-) -> None:
-    summary = run_store.submit(
-        mode="research",
-        workflow_contract=1,
-        question="Agent assignment",
-        stack_name="default",
-        work=lambda handle: handle.complete({"answer": "done"}),
-        kind="agent",
-        agent_overrides={"depth": depth},
-        created_by_user_id=PRINCIPAL.user_id,
-        created_by_tenant_id=PRINCIPAL.tenant_id,
-    )
-    _wait_until(
-        lambda: run_store.get(
-            summary["run_id"], visible_to=VISIBLE
-        )["status"] == "completed"
-    )
-    if accepted:
-        _plan, tasks = await service._parse_edited_plan(
-            summary["run_id"], _research_edit_plan(profile), None
-        )
-        assert tasks[0].params["profile"] == profile
-        return
-    with pytest.raises(AgentControlValidationError) as exc_info:
-        await service._parse_edited_plan(
-            summary["run_id"], _research_edit_plan(profile), None
-        )
-    assert any("profile=" in error for error in exc_info.value.errors)
-
-
-@pytest.mark.asyncio
-async def test_edited_plan_preflights_collection_visibility(
-    run_store: RunStore, identity: MemoryIdentityStore
-) -> None:
-    """An edited rag task pointing at an invisible collection is a 400 at
-    edit time — the same collection-visibility rule retrieval enforces at
-    runtime — never a silent approve that fails mid-run. The
-    caller-visible catalog (THE shared resolver/validator the planner
-    also runs) is the gate."""
-
-    class CatalogKnowledge:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def list_collections(self, *, visible_to=None):
-            self.calls += 1
-            return [
-                SimpleNamespace(id="kc_visible", name="Marktdaten"),
-            ]
-
-    knowledge = CatalogKnowledge()
-    service = AgentControlService(
-        store=MemoryAgentControlStore(),
-        run_store=run_store,
-        audit=identity,
-        knowledge=knowledge,
-        durable=False,
-    )
-    run_id = _parked_agent_run(
-        run_store, knowledge_collection_ids=["kc_visible"]
-    )
-    approval = await service.store.create_approval(_approval(run_id))
-    body = _plan_body()
-    body["tasks"][0]["params"] = {
-        "profile": "standard",
-        "collection_ids": ["col-forbidden"],
-    }
-
-    with pytest.raises(AgentControlValidationError) as exc_info:
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=approval.approval_id,
-            decision="edit",
-            plan_body=body,
-            note="",
-            principal=PRINCIPAL,
-        )
-
-    assert knowledge.calls == 1
-    assert any(
-        "col-forbidden" in error for error in exc_info.value.errors
-    )
-    # Nothing was committed: the approval stays pending, no plan version.
-    stored = await service.store.get_approval(run_id, approval.approval_id)
-    assert stored.status == "pending"
-    with pytest.raises(PlanNotFound):
-        await service.store.get_plan(run_id)
-
-
-@pytest.mark.asyncio
-async def test_edited_plan_canonicalizes_collection_names(
-    run_store: RunStore, identity: MemoryIdentityStore
-) -> None:
-    """A user edit naming a collection ("EU-AI-Act") saves the plan with
-    the canonical id — the exact reference shape retrieval expects, so
-    the approved plan can never fail as a raw unknown-collection error."""
-
-    class CatalogKnowledge:
-        async def list_collections(self, *, visible_to=None):
-            return [
-                SimpleNamespace(id="kc_18d4", name="EU-AI-Act"),
-            ]
-
-    service = AgentControlService(
-        store=MemoryAgentControlStore(),
-        run_store=run_store,
-        audit=identity,
-        knowledge=CatalogKnowledge(),
-        durable=False,
-    )
-    run_id = _parked_agent_run(
-        run_store, knowledge_collection_ids=["kc_18d4"]
-    )
-    approval = await service.store.create_approval(_approval(run_id))
-    body = _plan_body()
-    body["tasks"][0]["params"] = {
-        "profile": "standard",
-        "collection_ids": ["EU-AI-Act"],
-    }
-
-    await service.decide_approval(
-        run_id=run_id,
-        approval_id=approval.approval_id,
-        decision="edit",
-        plan_body=body,
-        note="",
-        principal=PRINCIPAL,
-    )
-
-    _plan, tasks = await service.store.get_plan(run_id)
-    assert tasks[0].params["collection_ids"] == ["kc_18d4"]
-
-
-@pytest.mark.asyncio
-async def test_edited_plan_cannot_expand_parked_run_collection_scope(
-    run_store: RunStore, identity: MemoryIdentityStore
-) -> None:
-    """A late share is visible to the editor but outside the admitted run."""
-
-    class CatalogKnowledge:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def list_collections(self, *, visible_to=None):
-            self.calls += 1
-            return [
-                SimpleNamespace(id="kc_initial", name="Initial"),
-                SimpleNamespace(id="kc_late", name="Late share"),
-            ]
-
-    knowledge = CatalogKnowledge()
-    service = AgentControlService(
-        store=MemoryAgentControlStore(),
-        run_store=run_store,
-        audit=identity,
-        knowledge=knowledge,
-        durable=False,
-    )
-    run_id = _parked_agent_run(
-        run_store, knowledge_collection_ids=["kc_initial"]
-    )
-    approval = await service.store.create_approval(_approval(run_id))
-    body = _plan_body()
-    body["tasks"][0]["params"] = {
-        "profile": "standard",
-        "collection_ids": ["kc_late"],
-    }
-
-    with pytest.raises(AgentControlValidationError) as exc_info:
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=approval.approval_id,
-            decision="edit",
-            plan_body=body,
-            note="",
-            principal=PRINCIPAL,
-        )
-
-    assert knowledge.calls == 1
-    assert any("kc_late" in error for error in exc_info.value.errors)
-    stored = await service.store.get_approval(run_id, approval.approval_id)
-    assert stored.status == "pending"
-    with pytest.raises(PlanNotFound):
-        await service.store.get_plan(run_id)
-
-
-@pytest.mark.asyncio
-async def test_edit_requires_plan_kind_and_plan_body(
-    service: AgentControlService, run_store: RunStore
-) -> None:
-    run_id = _parked_agent_run(run_store)
-    discovery = await service.store.create_approval(
-        _approval(run_id, kind="discovery")
-    )
-    with pytest.raises(AgentControlValidationError):
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=discovery.approval_id,
-            decision="edit",
-            plan_body=_plan_body(),
-            note="",
-            principal=PRINCIPAL,
-        )
-    plan_approval = await service.store.create_approval(_approval(run_id))
-    with pytest.raises(AgentControlValidationError):
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=plan_approval.approval_id,
-            decision="edit",
-            plan_body=None,
-            note="",
-            principal=PRINCIPAL,
-        )
-    with pytest.raises(AgentControlValidationError):
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=plan_approval.approval_id,
-            decision="approve",
-            plan_body=_plan_body(),
-            note="",
-            principal=PRINCIPAL,
-        )
-
-
 # -- tool approvals (kernel policy gates) --------------------------------- #
-
-
-def _tool_approval(run_id: str) -> ApprovalRecord:
-    return ApprovalRecord(
-        approval_id=f"apr_{uuid.uuid4().hex[:8]}",
-        run_id=run_id,
-        kind="tool",
-        payload={
-            "actions": [
-                {
-                    "tool": "web_instant",
-                    "args": {"query": "EU AI Act Fristen"},
-                    "summary": "Websuche",
-                }
-            ]
-        },
-    )
 
 
 @pytest.mark.asyncio
@@ -1670,7 +453,6 @@ async def test_tool_edit_replaces_args_and_resumes(
         run_id=run_id,
         approval_id=approval.approval_id,
         decision="edit",
-        plan_body=None,
         note="",
         principal=PRINCIPAL,
         actions_body=[
@@ -1704,7 +486,6 @@ async def test_tool_edit_validation_matrix(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="edit",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
             actions_body=[{"tool": "rag_query", "args": {"query": "x"}}],
@@ -1715,7 +496,6 @@ async def test_tool_edit_validation_matrix(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="edit",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
             actions_body=[],
@@ -1725,39 +505,25 @@ async def test_tool_edit_validation_matrix(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="edit",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
             actions_body=[{"tool": "web_instant", "args": "nope"}],
         )
-    # A plan body belongs to plan approvals, actions to tool approvals.
+    # An edit without an actions body is a 400.
     with pytest.raises(AgentControlValidationError):
         await service.decide_approval(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="edit",
-            plan_body=_plan_body(),
             note="",
             principal=PRINCIPAL,
         )
-    plan_approval = await service.store.create_approval(_approval(run_id))
-    with pytest.raises(AgentControlValidationError):
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=plan_approval.approval_id,
-            decision="edit",
-            plan_body=_plan_body(),
-            note="",
-            principal=PRINCIPAL,
-            actions_body=[{"tool": "web_instant", "args": {}}],
-        )
-    # actions without decision=edit is a 400, mirroring the plan rule.
+    # actions without decision=edit is a 400.
     with pytest.raises(AgentControlValidationError):
         await service.decide_approval(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
             actions_body=[{"tool": "web_instant", "args": {}}],
@@ -1776,7 +542,6 @@ async def test_tool_edit_replay_same_actions_is_idempotent(
         run_id=run_id,
         approval_id=approval.approval_id,
         decision="edit",
-        plan_body=None,
         note="",
         principal=PRINCIPAL,
         actions_body=edited,
@@ -1790,7 +555,6 @@ async def test_tool_edit_replay_same_actions_is_idempotent(
         run_id=run_id,
         approval_id=approval.approval_id,
         decision="edit",
-        plan_body=None,
         note="",
         principal=PRINCIPAL,
         actions_body=edited,
@@ -1802,7 +566,6 @@ async def test_tool_edit_replay_same_actions_is_idempotent(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="edit",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
             actions_body=[{"tool": "web_instant", "args": {"query": "anders"}}],
@@ -2401,7 +1164,7 @@ async def test_session_memo_lineage_read_and_agent_cas(
 
     Turn 1 writes the session memo; the user then edits it. A follow-up
     turn (a DIFFERENT run) must READ that latest user revision by session
-    (get_session_artifact, run-agnostic) and its guarded write must REFUSE
+    (get_session_artifact_by_id, run-agnostic) and its guarded write must REFUSE
     to advance from the pre-edit revision (ArtifactRevisionConflict) while
     succeeding from the current one.
     """
@@ -2435,8 +1198,7 @@ async def test_session_memo_lineage_read_and_agent_cas(
     with pytest.raises(ArtifactNotFound):
         await store.get_artifact(run2, "art_lin_memo")
     # ...but the session read reaches the LATEST user revision.
-    prior = await store.get_session_artifact("sess-lin", "memo")
-    assert prior is not None
+    prior = await store.get_session_artifact_by_id("sess-lin", "art_lin_memo")
     assert prior.revision == 2
     assert prior.content_markdown == "# Turn 1 mit Nutzer-Edit"
 
@@ -2588,7 +1350,6 @@ async def test_concurrent_decides_yield_exactly_one_resume(
                     run_id=run_id,
                     approval_id=approval.approval_id,
                     decision="approve",
-                    plan_body=None,
                     note="",
                     principal=PRINCIPAL,
                 )
@@ -2613,102 +1374,6 @@ async def test_concurrent_decides_yield_exactly_one_resume(
         lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
         == "completed"
     )
-
-
-@pytest.mark.asyncio
-async def test_edit_replay_with_different_plan_conflicts(
-    service: AgentControlService, run_store: RunStore
-) -> None:
-    """The plan payload IS the edit decision: a retry with a DIFFERENT
-    plan must 409, never be swallowed as an idempotent replay."""
-    run_id = _parked_agent_run(run_store)
-    approval = await service.store.create_approval(_approval(run_id))
-    await service.decide_approval(
-        run_id=run_id,
-        approval_id=approval.approval_id,
-        decision="edit",
-        plan_body=_plan_body(),
-        note="",
-        principal=PRINCIPAL,
-    )
-
-    # Same verb, same plan -> idempotent replay.
-    _decided, _summary, replayed = await service.decide_approval(
-        run_id=run_id,
-        approval_id=approval.approval_id,
-        decision="edit",
-        plan_body=_plan_body(),
-        note="",
-        principal=PRINCIPAL,
-    )
-    assert replayed
-
-    different = _plan_body()
-    different["summary_markdown"] = "Ein ganz anderer Plan"
-    with pytest.raises(ApprovalAlreadyDecided):
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=approval.approval_id,
-            decision="edit",
-            plan_body=different,
-            note="",
-            principal=PRINCIPAL,
-        )
-    # The differing plan was NOT applied: still exactly one version.
-    _plan, _tasks, versions = await service.get_plan(run_id)
-    assert len(versions) == 1
-
-
-@pytest.mark.asyncio
-async def test_failed_edit_resume_restores_prior_plan_status(
-    service: AgentControlService, run_store: RunStore
-) -> None:
-    """Memory revert must undo the supersede flip too (Postgres gets it
-    from the transaction rollback — lockstep on the failure path)."""
-    summary = run_store.submit(
-        mode="research",
-        workflow_contract=1,
-        question="normal",
-        stack_name="default",
-        work=lambda handle: handle.complete({}),
-        kind="agent",
-        created_by_user_id=PRINCIPAL.user_id,
-        created_by_tenant_id=PRINCIPAL.tenant_id,
-    )
-    run_id = summary["run_id"]
-    _wait_until(
-        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
-        == "completed"
-    )
-    await service.store.save_plan(
-        run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan_v1",
-            run_id=run_id,
-            version=1,
-            status="proposed",
-            created_by="agent",
-        ),
-        tasks=[],
-    )
-    approval = await service.store.create_approval(_approval(run_id))
-
-    with pytest.raises(RunActive):
-        await service.decide_approval(
-            run_id=run_id,
-            approval_id=approval.approval_id,
-            decision="edit",
-            plan_body=_plan_body(),
-            note="",
-            principal=PRINCIPAL,
-        )
-
-    stored = await service.store.get_approval(run_id, approval.approval_id)
-    assert stored.status == "pending"
-    plan, _tasks, versions = await service.get_plan(run_id)
-    assert plan.version == 1
-    assert plan.status == "proposed"
-    assert len(versions) == 1
 
 
 @pytest.mark.asyncio
@@ -2745,7 +1410,7 @@ async def test_terminal_run_releases_canvas_and_settles_approvals(
     )
     assert run_store.cancel(run_id, visible_to=VISIBLE)["status"] == "cancelled"
 
-    assert await service.reconcile_terminal_tasks(run_id) is True
+    assert await service.reconcile_terminal_control_rows(run_id) is True
 
     released, revisions = await service.store.get_artifact(
         run_id, artifact.artifact_id
@@ -2810,7 +1475,7 @@ async def test_failed_run_settles_control_rows_too(
     run_store.fail(run_id, "kaputt", error_type="server_error")
     assert run_store.get(run_id, visible_to=VISIBLE)["status"] == "failed"
 
-    assert await service.reconcile_terminal_tasks(run_id) is True
+    assert await service.reconcile_terminal_control_rows(run_id) is True
 
     released, _revisions = await service.store.get_artifact(
         run_id, "art_settle_failed"
@@ -2827,7 +1492,7 @@ async def test_approval_scope_run_rides_decision_payload_and_replays(
 ) -> None:
     """approve+run stores {"approval_scope": "run"}; the SAME retry
     replays 200, a retry with a DIFFERENT scope conflicts — the payload
-    IS replay identity, exactly like an edited plan."""
+    IS replay identity, exactly like edited actions."""
     run_id = _parked_agent_run(run_store)
     approval = await service.store.create_approval(_tool_approval(run_id))
 
@@ -2835,7 +1500,6 @@ async def test_approval_scope_run_rides_decision_payload_and_replays(
         run_id=run_id,
         approval_id=approval.approval_id,
         decision="approve",
-        plan_body=None,
         note="",
         principal=PRINCIPAL,
         approval_scope="run",
@@ -2847,7 +1511,6 @@ async def test_approval_scope_run_rides_decision_payload_and_replays(
         run_id=run_id,
         approval_id=approval.approval_id,
         decision="approve",
-        plan_body=None,
         note="",
         principal=PRINCIPAL,
         approval_scope="run",
@@ -2860,7 +1523,6 @@ async def test_approval_scope_run_rides_decision_payload_and_replays(
             run_id=run_id,
             approval_id=approval.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
         )
@@ -2879,7 +1541,6 @@ async def test_approval_scope_once_stores_nothing(
         run_id=run_id,
         approval_id=approval.approval_id,
         decision="approve",
-        plan_body=None,
         note="",
         principal=PRINCIPAL,
         approval_scope="once",
@@ -2890,7 +1551,6 @@ async def test_approval_scope_once_stores_nothing(
         run_id=run_id,
         approval_id=approval.approval_id,
         decision="approve",
-        plan_body=None,
         note="",
         principal=PRINCIPAL,
     )
@@ -2910,7 +1570,6 @@ async def test_approval_scope_validation_matrix(
             run_id=run_id,
             approval_id=tool_gate.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
             approval_scope="forever",
@@ -2923,26 +1582,29 @@ async def test_approval_scope_validation_matrix(
             run_id=run_id,
             approval_id=tool_gate.approval_id,
             decision="reject",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
             approval_scope="run",
         )
     assert "only for decision=approve" in str(exc_info.value)
 
-    # Scope on a plan gate.
-    plan_gate = await service.store.create_approval(_approval(run_id))
+    # A stored plan gate of a mission run is not decided at all, with or
+    # without a scope.
+    plan_gate = ApprovalRecord(
+        approval_id=f"apr_{uuid.uuid4().hex[:8]}", run_id=run_id, kind="plan"
+    )
+    with service.store._lock:
+        service.store._approvals[plan_gate.approval_id] = plan_gate
     with pytest.raises(AgentControlValidationError) as exc_info:
         await service.decide_approval(
             run_id=run_id,
             approval_id=plan_gate.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
             approval_scope="run",
         )
-    assert "only for tool approvals" in str(exc_info.value)
+    assert exc_info.value.reason == "workflow_retired"
 
     # A run grant must never cover an always-gated tool.
     patch_gate = await service.store.create_approval(
@@ -2966,26 +1628,12 @@ async def test_approval_scope_validation_matrix(
             run_id=run_id,
             approval_id=patch_gate.approval_id,
             decision="approve",
-            plan_body=None,
             note="",
             principal=PRINCIPAL,
             approval_scope="run",
         )
     assert "propose_editor_patch" in str(exc_info.value)
     assert "for each call" in str(exc_info.value)
-
-
-def test_session_memo_artifact_id_is_the_one_definition():
-    """Mission flush and kernel hand-over derive the session memo id
-    from the same rule (``uq_run_artifacts_session_memo``): the last
-    twelve characters of the session id, or of the run id without one."""
-    assert session_memo_artifact_id("sess_0123456789abcdef", "run_x") == (
-        "art_456789abcdef_memo"
-    )
-    assert session_memo_artifact_id(None, "run_0123456789abcdef") == (
-        "art_456789abcdef_memo"
-    )
-    assert session_memo_artifact_id("", "run_short") == "art_run_short_memo"
 
 
 @pytest.mark.asyncio

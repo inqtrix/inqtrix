@@ -62,6 +62,18 @@ because a save replaces the whole preference row: a borrowed account without
 German as its saved interface language stops the run right after login,
 before any paid step.
 
+One choice does stick to a borrowed account. The research composer and the
+Agent Desk start with the report profile and the Stufe the user picked last,
+and the desk saves that pick to the account like any other preference. The
+`agent-desk` engine chooses Stufen in the visible run setup, so it reads the
+tester account's last choices at its start and chooses the noted Stufe again
+through the Agent Desk at its end, waiting for the save that carries it. An
+account that had no saved Stufe keeps the published default afterwards,
+because the interface cannot store "no choice". The opening turn chooses the
+published default explicitly, so the conversation does not depend on what an
+earlier run or the account owner picked last. The engine never chooses a
+report profile and never writes one.
+
 ## npm integration contract
 
 The root `package.json` exposes these stable integration points:
@@ -81,23 +93,11 @@ npm run verify:edge -- --container-engine podman
 # or: npm run verify:edge -- --container-engine docker
 ```
 
-Their `scripts` entries are:
-
-```json
-{
-  "verify:orchestrator": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types tests/verification/cli.ts",
-  "verify:list": "npm run verify:orchestrator -- --list",
-  "verify:tooling": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types tests/verification/orchestrator.test.ts tests/verification/container-engine.test.ts tests/verification/repository-hygiene.test.ts tests/verification/fixtures/accounts.test.mjs tests/verification/fixtures/fault-control-server.test.mjs e2e/browser-observer.test.ts e2e/config.test.ts e2e/control.test.ts e2e/layout.test.ts e2e/protocol-session.test.ts e2e/scenario-reporter.test.ts e2e/transport-fingerprint.test.ts && node --test tests/load/collaboration-load.test.mjs && tsc -p e2e/tsconfig.json --noEmit",
-  "verify:ui-fixture": "npm run verify:orchestrator -- --profile ui-fixture",
-  "verify:system-smoke": "npm run verify:orchestrator -- --profile system-smoke",
-  "verify:agent-desk": "npm run verify:orchestrator -- --profile agent-desk",
-  "verify:fault-injection": "npm run verify:orchestrator -- --profile fault-injection",
-  "verify:load-smoke": "npm run verify:orchestrator -- --profile load-smoke",
-  "verify:load-soak": "npm run verify:orchestrator -- --profile load-soak --container-engine podman",
-  "verify:load-capacity": "npm run verify:orchestrator -- --profile load-capacity",
-  "verify:edge": "npm run verify:orchestrator -- --profile edge-conformance"
-}
-```
+Each entry calls the one orchestrator (`tests/verification/cli.ts`) with its
+profile; `verify:tooling` runs the offline tests of the tooling itself. The
+exact commands stand in the `scripts` block of the root `package.json` and
+are not repeated here; `npm run verify:list` prints every profile with its
+scenarios.
 
 For diagnostics, the same orchestrator can be invoked directly:
 
@@ -121,7 +121,14 @@ fixtures are generated inside the run directory and removed before completion.
 `--container-engine` accepts only an explicit `podman` or `docker`; there is no
 automatic selection or fallback. It is mandatory for generated
 `fault-injection`, `load-soak`, and `edge-conformance`; load-soak specifically
-requires Podman for namespace-scoped shaping. Playwright grep, project, reporter, worker,
+requires Podman with a Podman machine for namespace-scoped shaping. Every shaping
+step runs `tc` in the collaboration container's network namespace through
+`podman machine ssh sudo nsenter`, so the machine needs `tc`, `nsenter` and the
+kernel's `prio`, `netem` and `flower` traffic-control support. On a host that
+runs Podman without a machine, as Linux usually does, the run stops at its first
+shaping step, before the mixed workload starts; the temporary accounts, the
+document, the shares and the leases created before it are removed by the run's
+cleanup. Playwright grep, project, reporter, worker,
 and file overrides are intentionally not accepted by this entrypoint.
 
 ## Log inspection
@@ -148,6 +155,14 @@ later than the run because it was rotated or the clocks differ, or logs in text
 format. A run that selected a container engine then ends as `blocked`, never as
 `passed`. The npm scripts of the four profiles above select Podman; with Docker,
 pass `-- --container-engine docker`.
+
+Two of these conditions are known before anything runs, so the preflight asks
+them first (check `log-inspection`): more than one Compose project on the stack
+file, stopped containers included, and a missing `api` or `web` container. Such a
+run is `blocked` before its first scenario instead of after its last one. Stopped
+containers of a second project on the same stack file, a measurement stack for
+example, have to be removed first; `--preflight-only` shows the check without
+running a scenario.
 
 ## Run lifecycle
 
@@ -218,8 +233,9 @@ follow-up answers must render at least one citation. An answer from the
 model's memory alone meets neither.
 Set `INQTRIX_E2E_MANUAL_CONVERSATION=1` to submit each question in the in-app
 browser. The engine publishes its session, exact prompt and intended web control
-state in `manual-conversation-turn.json` and registers the resulting native run
-with the shared ledger. Each submission has a bounded five-minute wait.
+state in `manual-conversation-turn.json`, for the opening and the tenth turn also
+the Stufe to choose, and registers the resulting native run with the shared
+ledger. Each submission has a bounded five-minute wait.
 `conversation-runs.json` and the per-turn event files retain the native run IDs,
 artifact details and trace correlations for content review. Structural scenario
 passes establish execution, source-tool use and persistence; they do not establish
@@ -238,9 +254,11 @@ Successful calls alone do not prove complete reading: inspect actual returned
 ranges, subsequent model inputs and quoted content in the trace. The engine
 additionally reads the run's published source coverage
 (`snapshot.execution.source_coverage`) and requires the selected knowledge
-original (R6) and editor working version (R7) to be read completely with no
-open continuation, and the anchor search to have scanned the whole working
-version. These are expectations of the two questions, not product rules.
+original (R6) to be read completely with no open continuation or analysed
+completely by the server (`snapshot.execution.document_analyses`), the editor
+working version (R7) to be read completely with no open continuation, and the
+anchor search to have scanned the whole working version. These are
+expectations of the two questions, not product rules.
 An eighth turn then asks, without any document pin, for a verbatim passage of
 the approved guide's archiving section that no published answer quotes (its
 review steps and who names a deputy) and where in the conversation it came
@@ -281,29 +299,39 @@ and no answer event on the role run, only profile tools in its tool events, one
 `review_role` delegation row on the parent (and no role child where the
 material fit one review call), an outcome record whose `review` is
 `completed` with its `summary`, and no research in a turn whose documents are
-both in the selected collection. The events of the role run are saved as
+both in the selected collection. The tenth question asks for the guide and the
+attachment in full, and the engine requires each of them to be read or
+analysed completely, as for the sixth turn. A read the role's handover refuses
+is the contract working, since the refusal tells the role to name the gap
+instead: it fails the turn only when a refused knowledge-document read
+(`read_project_document`) stands beside a document of the turn the role never
+re-read, because the events of a document read do not name its target; every
+other refusal is logged as a warning line. A progress line says whether the role re-read a document the turn took
+in by analysis alone, which shows that analysed documents are released to the
+role. The events of the role run are saved as
 `events-R10-review-role.json`. Whether the verdict is right, what the role
 re-read and what the revision changed belong to the content and trace review.
-An eleventh turn runs on the mission engine with the permission "Auto" (the
-manual handover names both; in the in-app browser they are chosen under
-"Arbeitsweise" and "Berechtigung" in the run setup) and asks for a memo from
-the selected collection without web. The mission shares the review pass with
-the kernel. The engine requires an outcome record whose `review` is
-`completed` with its `summary`, no `critic_unavailable` decision, a review role
-child — `work_profile` `review`, origin key `role-review:<round>`, one
-delegation row — for at most as many reviews as the record's `round` counts,
-a stored `critic_report` of that round whose `transport` (`prompt` for the one
-structured call, `role` for the review role) matches whether that round's role
-child exists and whose verdict settles every planned success criterion by its
-number, and a memo that cites only labels of its own references; an applied
-revision must have raised the memo's revision and shown its findings. Whether the verdict is right and what an edit changed belong to
-the content and trace review.
 
 Every completed turn records the review its Stufe owes in the outcome record:
-`completed` where the level owes one, `waived` where the Stufe skips it. A
-review that ran but gave no usable verdict ("Prüfung nicht auswertbar") fails
-`agent.review-matches-tier` with the turn named; it does not stop the
-conversation, so the turns after it are still measured.
+`completed` where the level owes one, with a known `basis` and its reader
+text, `waived` where the Stufe skips it. A review that was owed and gave no
+usable verdict (`unavailable`) fails `agent.review-matches-tier` with the turn
+named; it does not stop the conversation, so the turns after it are still
+measured. Two reasons are a warning instead, because nothing is broken when
+they occur: a verdict that negates a flag and names no reason for it
+(`inconsistent`), and a review role that reaches its tool budget before it
+judges (`budget_exhausted`). The warning holds only while the record carries
+the reason (for `inconsistent` also the flags in `unexplained`) and the reader
+text names it, and for at most two turns of one conversation; a third fails
+the scenario. A scenario that passed inside this band says so in its reason
+in the report, with the ceiling and the turns counted, and the run summary
+prints that note. A turn's review is judged before the turn's other
+expectations, so a turn that fails one of those still counts here and in the
+band. For every review the surface shows, the answer block of its turn must
+state the record's summary; every deviation stands as a line of its own in
+the run's progress, because the scenario's reason in the report is one
+bounded line whose cut says how much it left out. The rule lives in
+`tests/verification/fixtures/review-outcome.mjs` and is tested without a stack.
 
 Three scenarios cover the controls of the session itself. A researching turn
 is stopped through the visible Stop control; it must end cancelled, and so
@@ -469,6 +497,16 @@ Chromium, Firefox, and Playwright WebKit unless the inventory declares it for
 Chromium alone. The input method composition across a reconnect is such a
 scenario: it is driven through the Chromium DevTools protocol, and the other
 engines skip it.
+
+Every run starts its own fixture server and never takes over a server that is
+already running: on a port in use the run stops before the first test. The
+port is 5187 unless `INQTRIX_UI_FIXTURE_PORT` names another one, so two
+working copies of the repository can run their specs side by side, each
+against its own code. A run of a single spec, a single test or a single
+browser exits with status 1 even when every test it ran passed: the scenario
+reporter judges the whole `ui-fixture` inventory, and a scenario the run did
+not attempt counts as failed. For such a partial run add `--reporter=line`
+and read its counted summary line.
 
 ## Collaboration Playwright engine
 

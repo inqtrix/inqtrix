@@ -23,18 +23,6 @@ ASYNC_EXCEPTIONS: tuple[AsyncException, ...] = (
         "the library facade drives the sync research graph until the graph runs async",
     ),
     AsyncException(
-        "inqtrix.agents.algorithm",
-        "legacy_bridge",
-        56,
-        "synchronous code still crosses the thread bridge until its engine is async",
-    ),
-    AsyncException(
-        "inqtrix.agents.discovery",
-        "legacy_bridge",
-        1,
-        "synchronous code still crosses the thread bridge until its engine is async",
-    ),
-    AsyncException(
         "inqtrix.agents.kernel.compaction",
         "thread",
         1,
@@ -61,7 +49,7 @@ ASYNC_EXCEPTIONS: tuple[AsyncException, ...] = (
     AsyncException(
         "inqtrix.agents.scheduler",
         "thread",
-        2,
+        1,
         "blocking work still runs on a thread instead of the one thread bridge",
     ),
     AsyncException(
@@ -91,7 +79,7 @@ ASYNC_EXCEPTIONS: tuple[AsyncException, ...] = (
     AsyncException(
         "inqtrix.knowledge.stores.qdrant_store",
         "thread",
-        40,
+        39,
         "blocking work still runs on a thread instead of the one thread bridge",
     ),
     AsyncException(
@@ -212,12 +200,6 @@ ASYNC_EXCEPTIONS: tuple[AsyncException, ...] = (
         "inqtrix.services.agent_answer_publisher",
         "legacy_bridge",
         3,
-        "synchronous code still crosses the thread bridge until its engine is async",
-    ),
-    AsyncException(
-        "inqtrix.services.agent_control_service",
-        "legacy_bridge",
-        1,
         "synchronous code still crosses the thread bridge until its engine is async",
     ),
     AsyncException(

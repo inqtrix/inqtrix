@@ -19,7 +19,6 @@ from langchain_core.messages import HumanMessage
 
 from inqtrix.agents.kernel.deps import KernelDeps, set_kernel_deps
 from inqtrix.agents.kernel.middleware import (
-    POST_MISSION_NUDGE_FLAG,
     SUFFICIENCY_NUDGE_FLAG,
     KernelSufficiencyMiddleware,
 )
@@ -421,38 +420,3 @@ def test_kernel_run_judges_after_three_searches():
         assert judged[0]["nudge"] is True
         assert judged[0]["coverage"] == "covered"
         assert judged[0]["tool_uses"] == 3
-
-
-def test_post_mission_advisory_is_delivered_exactly_once():
-    """A returned mission child arms ONE advisory: the memo is the
-    deliverable and no second research child verifies it. The flag
-    clears on delivery, so the following turn gets nothing."""
-    deps = make_deps(StructuredJudgeLLM([]), gate=False, tier="tief")
-    deps.post_mission_nudge_pending = True
-    set_kernel_deps(deps)
-    middleware = KernelSufficiencyMiddleware()
-
-    update = middleware.before_model(_state(), None)
-
-    assert update is not None
-    (message,) = update["messages"]
-    assert isinstance(message, HumanMessage)
-    assert message.additional_kwargs[POST_MISSION_NUDGE_FLAG] is True
-    assert "clarify doubtful statements with read_evidence" in message.content
-    assert "The final deep check itself starts no new research" in message.content
-    assert "short conclusion" in message.content
-    assert deps.post_mission_nudge_pending is False
-    assert middleware.before_model(_state(), None) is None
-
-
-def test_post_mission_advisory_precedes_the_sufficiency_gate():
-    """With the gate armed AND a mission just returned, the mission
-    advisory wins the turn; the gate judges the next one."""
-    deps = make_deps(StructuredJudgeLLM([]), gate=True, web_uses=3, tier="tief")
-    deps.post_mission_nudge_pending = True
-    set_kernel_deps(deps)
-    update = KernelSufficiencyMiddleware().before_model(_state(), None)
-    assert update is not None
-    (message,) = update["messages"]
-    assert POST_MISSION_NUDGE_FLAG in message.additional_kwargs
-    assert SUFFICIENCY_NUDGE_FLAG not in message.additional_kwargs

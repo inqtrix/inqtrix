@@ -24,15 +24,15 @@ _NOTICE = {
 @pytest.mark.parametrize(
     ("language", "purpose", "retry_head"),
     [
-        ("de", "Ausführungsplan wird erstellt", "Provider-Versuch 1/3"),
-        ("en", "The execution plan is being created", "Provider attempt 1/3"),
+        ("de", "Agent-Antwort wird fortgesetzt", "Beim Anbieter ist Versuch 1/3 fehlgeschlagen"),
+        ("en", "The agent answer is being continued", "Provider attempt 1/3"),
     ],
 )
 def test_the_model_retry_label_follows_the_run_language(
     language: str, purpose: str, retry_head: str
 ) -> None:
     activity = model_retry_activity(
-        dict(_NOTICE), node="agent_plan", language=language
+        dict(_NOTICE), node="agent_kernel", language=language
     )
     assert activity["purpose"] == purpose
     assert activity["detail"].startswith(purpose)
@@ -59,10 +59,15 @@ def test_the_provider_retry_text_carries_its_numbers_in_both_languages() -> None
 
 
 def test_every_model_call_names_its_retry_in_both_languages() -> None:
-    """A purpose without its own text would show the raw message key."""
+    """A purpose without its own text would show the raw message key, and one
+    without its German text would show English to a German reader: the lookup
+    falls back silently in both cases, so the texts are read directly."""
     from inqtrix.agents.telemetry import _MODEL_RETRY_CONTEXT
+    from inqtrix.i18n import MESSAGES
 
-    for node in _MODEL_RETRY_CONTEXT:
+    for node, (key, _phase) in _MODEL_RETRY_CONTEXT.items():
+        texts = MESSAGES.get(f"telemetry_{key}") or {}
+        assert texts.get("de") and texts.get("en"), node
         for language in ("de", "en"):
             purpose = model_retry_activity(dict(_NOTICE), node=node, language=language)["purpose"]
-            assert not purpose.startswith("telemetry_"), (node, language)
+            assert purpose == texts[language], (node, language)

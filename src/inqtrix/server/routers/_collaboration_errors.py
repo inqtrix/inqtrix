@@ -10,7 +10,8 @@ answers for guest-link failures in front of it.
 
 A failure mapped by only one router would answer the other with an unhandled
 500, where the browser's lease recovery, which decides on the status, cannot
-run.
+run. The patch decision routes answer their own failures first and the named
+collaboration failures through :func:`collaboration_failure_view`.
 """
 
 from __future__ import annotations
@@ -25,7 +26,11 @@ from inqtrix.project.editor_collaboration_ports import (
     CollaborationLeaseInvalid,
     CollaborationRateLimited,
 )
-from inqtrix.project.editor_ports import DocumentNotFound
+from inqtrix.project.editor_ports import (
+    CONTENT_MODE_CHANGED_TEXT,
+    DocumentContentModeConflict,
+    DocumentNotFound,
+)
 from inqtrix.services.collaboration_client import (
     CollaborationNodeConflict,
     CollaborationServiceUnavailable,
@@ -34,6 +39,10 @@ from inqtrix.services.editor_collaboration_service import (
     CollaborationAuthenticationRequired,
     CollaborationDocumentTooLarge,
     CollaborationProtocolConflict,
+)
+from inqtrix.services.editor_persistence_service import (
+    COLLABORATION_PROJECTION_UNAVAILABLE_TEXT,
+    CollaborationProjectionUnavailable,
 )
 
 
@@ -48,8 +57,29 @@ class CollaborationErrorView:
 
 
 def collaboration_error_view(exc: Exception) -> CollaborationErrorView | None:
-    """Map a collaboration failure to its public answer, or ``None``.
+    """Map a collaboration failure or a rejected request value, or ``None``.
 
+    The named failures answer as :func:`collaboration_failure_view` maps
+    them. Every other ``ValueError`` answers 400 with its own text: the
+    collaboration and guest routes raise one for a rejected request value
+    inside the same ``try`` as the service call. ``None`` means the
+    exception is neither; the caller re-raises it.
+    """
+    view = collaboration_failure_view(exc)
+    if view is not None:
+        return view
+    if isinstance(exc, ValueError):
+        return CollaborationErrorView(400, str(exc), "invalid_request_error")
+    return None
+
+
+def collaboration_failure_view(exc: Exception) -> CollaborationErrorView | None:
+    """Map a named collaboration failure to its public answer, or ``None``.
+
+    Only the failure types below count, never a bare ``ValueError``: on a
+    route that validates no request value inside its ``try``, a
+    ``ValueError`` is an inner error, such as a collaboration-service reply
+    that failed its shape check, and must not become a 400 with inner text.
     ``None`` means the exception is no collaboration failure this module
     knows; the caller re-raises it.
     """
@@ -83,6 +113,23 @@ def collaboration_error_view(exc: Exception) -> CollaborationErrorView | None:
             "service_unavailable",
             {"reason": "collaboration_unavailable"},
         )
+    if isinstance(exc, CollaborationProjectionUnavailable):
+        # The wording of the editor capabilities, whose reads meet the same
+        # barrier.
+        return CollaborationErrorView(
+            503,
+            COLLABORATION_PROJECTION_UNAVAILABLE_TEXT,
+            "service_unavailable",
+            {"reason": "collaboration_projection_unavailable"},
+        )
+    if isinstance(exc, DocumentContentModeConflict):
+        # The answer the Markdown save route gives the same conflict.
+        return CollaborationErrorView(
+            409,
+            CONTENT_MODE_CHANGED_TEXT,
+            "conflict",
+            {"reason": "content_mode_changed"},
+        )
     if isinstance(
         exc,
         (
@@ -93,11 +140,10 @@ def collaboration_error_view(exc: Exception) -> CollaborationErrorView | None:
     ):
         reason = getattr(exc, "reason", str(exc))
         current_sequence = getattr(exc, "current_sequence", None)
-        # Nur wo der Server einen konkreten Stand nennen kann, ist die
-        # Aussage "nicht mehr aktuell" wahr. Fuer jeden anderen Konflikt
-        # benennt die Meldung den Vorgang, ohne eine Ursache zu erfinden:
-        # eine falsche Begruendung schickt den Nutzer in eine Wiederholung,
-        # die nie gelingen kann, und verdeckt den echten Grund.
+        # Only where the server can name a concrete state is "no longer
+        # current" true. Every other conflict names what happened without
+        # inventing a cause: a wrong cause sends the user into a retry that
+        # can never succeed, and it hides the real reason.
         message = (
             "The collaboration state is no longer current."
             if current_sequence is not None
@@ -130,6 +176,4 @@ def collaboration_error_view(exc: Exception) -> CollaborationErrorView | None:
             "service_unavailable",
             {"reason": str(exc)},
         )
-    if isinstance(exc, ValueError):
-        return CollaborationErrorView(400, str(exc), "invalid_request_error")
     return None

@@ -194,7 +194,7 @@ def _generation(identifier, *, purpose, schema_name="", output="answer", kind="G
     }
 
 
-def _write_export(directory, observations, mode="workspace_agent"):
+def _write_export(directory, observations, mode="agent_kernel"):
     directory.mkdir(exist_ok=True)
     (directory / "trace.json").write_text(json.dumps({"payload": {
         "name": f"run:{mode}", "observations": [
@@ -206,20 +206,18 @@ def _write_export(directory, observations, mode="workspace_agent"):
 
 def test_calibration_separates_purposes_and_response_schemas(calibration, tmp_path):
     _write_export(tmp_path, [
-        _generation("intake", purpose="agent_intake", schema_name="AssignmentProfile", output="intake"),
-        _generation("outline", purpose="agent_synthesis", schema_name="ReportOutline", output="outline"),
-        _generation("section", purpose="agent_synthesis", schema_name="SectionText", output="section"),
-        _generation("review", purpose="agent_deep_review", schema_name="DeepReviewVerdict", output="review"),
+        _generation("sufficiency", purpose="agent_sufficiency", schema_name="SufficiencyJudgement", output="sufficiency"),
+        _generation("verdict", purpose="agent_deep_review", schema_name="DeepReviewVerdict", output="verdict"),
+        _generation("recheck", purpose="agent_deep_review", schema_name="RevisionCheckVerdict", output="recheck"),
     ])
     operations, provenance, responses, routing, _ = calibration.collect(str(tmp_path))
     expected = {
-        "workspace_agent.agent_intake.AssignmentProfile.llm": "intake",
-        "workspace_agent.agent_synthesis.ReportOutline.llm": "outline",
-        "workspace_agent.agent_synthesis.SectionText.llm": "section",
-        "workspace_agent.agent_deep_review.DeepReviewVerdict.llm": "review",
+        "agent_kernel.agent_sufficiency.SufficiencyJudgement.llm": "sufficiency",
+        "agent_kernel.agent_deep_review.DeepReviewVerdict.llm": "verdict",
+        "agent_kernel.agent_deep_review.RevisionCheckVerdict.llm": "recheck",
     }
     assert set(operations) == set(responses) == set(routing) == set(expected)
-    assert provenance["provider_call_samples"] == 4
+    assert provenance["provider_call_samples"] == 3
     assert {key: [reply["content"] for reply in pool] for key, pool in responses.items()} == {
         key: [value] for key, value in expected.items()
     }
@@ -404,7 +402,7 @@ def test_calibration_gives_a_research_child_its_own_mode_under_a_kernel_trace(ca
 
 
 def test_calibration_merges_one_instruction_recorded_under_two_modes(calibration, tmp_path):
-    (tmp_path / "one.json").write_text(json.dumps({"payload": {"name": "run:workspace_agent", "observations": [_generation("a", purpose="review", output="first")]}}))
+    (tmp_path / "one.json").write_text(json.dumps({"payload": {"name": "run:research", "observations": [_generation("a", purpose="review", output="first")]}}))
     (tmp_path / "two.json").write_text(json.dumps({"payload": {"name": "run:agent_kernel", "observations": [_generation("b", purpose="review", output="second")]}}))
     operations, provenance, responses, routing, _ = calibration.collect(str(tmp_path))
     assert provenance["merged_signatures"] == 1
@@ -554,7 +552,7 @@ def test_replay_drops_and_counts_a_call_this_request_cannot_make(client, calibra
 def test_replay_prefers_a_recording_whose_tools_the_request_offers(client, calibration, tmp_path, monkeypatch):
     module = sys.modules["mock_providers_under_test"]
     catalogue, _ = _kernel_catalogue(calibration, module, tmp_path, [
-        _kernel_turn("mission", start="2026-10-31T10:00:01Z", user="Assignment:\nWith mission", run="run_m", calls=[_call("run_deep_mission", assignment="A")]),
+        _kernel_turn("batch", start="2026-10-31T10:00:01Z", user="Assignment:\nWith a batch", run="run_m", calls=[_call("delegate_batch", assignments=[])]),
         _kernel_turn("plain", start="2026-10-31T10:00:02Z", user="Assignment:\nWithout tools", run="run_p", content="Direkt."),
         _kernel_turn("plain-tool", start="2026-10-31T10:00:03Z", user="Assignment:\nWith todos", run="run_t", calls=[_call("write_todos", todos=[])]),
     ])
@@ -563,21 +561,21 @@ def test_replay_prefers_a_recording_whose_tools_the_request_offers(client, calib
         messages = [{"role": "system", "content": "You are the agent."}, {"role": "user", "content": f"Assignment:\nAnother task {ordinal}"}]
         choice = client.post("/v1/chat/completions", json={"messages": messages, "tools": _tools("write_todos")}).json()["choices"][0]
         names = [c["function"]["name"] for c in choice["message"].get("tool_calls") or []]
-        assert "run_deep_mission" not in names
+        assert "delegate_batch" not in names
 
 
 def test_replay_takes_the_recording_of_the_same_tier_for_the_same_assignment(client, calibration, tmp_path, monkeypatch):
     module = sys.modules["mock_providers_under_test"]
     catalogue, conversations = _kernel_catalogue(calibration, module, tmp_path, [
         _kernel_turn("mid", start="2026-10-31T10:00:01Z", user="Tier: gruendlich (thorough)\nAssignment:\nSame task", run="run_g", calls=[_call("run_web_research", question="Q")]),
-        _kernel_turn("deep", start="2026-10-31T10:00:02Z", user="Tier: tief (deep)\nAssignment:\nSame task", run="run_t", calls=[_call("run_deep_mission", assignment="A")]),
+        _kernel_turn("deep", start="2026-10-31T10:00:02Z", user="Tier: tief (deep)\nAssignment:\nSame task", run="run_t", calls=[_call("delegate_batch", assignments=[])]),
     ])
     assert sorted(entry["tier"] for entry in conversations["agent_kernel.agent_kernel.llm"]) == ["gruendlich", "tief"]
     monkeypatch.setattr(module, "CATALOGUE", catalogue)
     deep = [{"role": "system", "content": "You are the agent."}, {"role": "user", "content": "Tier: tief (deep)\nAssignment:\nSame task, run 3"}]
     # The deep tier also offers the middle tier's tool: only the tier tells the two recordings apart.
-    choice = client.post("/v1/chat/completions", json={"messages": deep, "tools": _tools("run_web_research", "run_deep_mission")}).json()["choices"][0]
-    assert [c["function"]["name"] for c in choice["message"]["tool_calls"]] == ["run_deep_mission"]
+    choice = client.post("/v1/chat/completions", json={"messages": deep, "tools": _tools("run_web_research", "delegate_batch")}).json()["choices"][0]
+    assert [c["function"]["name"] for c in choice["message"]["tool_calls"]] == ["delegate_batch"]
 
 
 def test_replay_skips_a_turn_it_cannot_make_and_still_reaches_the_typed_result(client, calibration, tmp_path, monkeypatch):

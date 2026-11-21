@@ -27,7 +27,7 @@ from fastapi import APIRouter, Request
 
 from inqtrix.auth.permissions import LastWorkspaceOwnerError, WorkspaceRole
 from inqtrix.server.routers._admin_guard import require_instance_admin
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import error_response, read_json_object
 from inqtrix.services.workspace_administration import (
     WorkspaceNameError,
     create_workspace_for_admin,
@@ -117,17 +117,14 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal, error = await _admin(request)
         if error is not None:
             return error
-        try:
-            body = await request.json()
-        except Exception:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
         try:
             workspace_id, created_name = await create_workspace_for_admin(
                 workspace_admin,
                 principal=principal,
-                name=(body or {}).get("name", ""),
+                name=body.get("name", ""),
             )
         except WorkspaceNameError as exc:
             return error_response(400, str(exc), "invalid_request_error")
@@ -139,14 +136,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal, error = await _admin(request)
         if error is not None:
             return error
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
         try:
-            body = await request.json()
-        except Exception:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
-        try:
-            name = normalize_workspace_name((body or {}).get("name", ""))
+            name = normalize_workspace_name(body.get("name", ""))
         except WorkspaceNameError as exc:
             return error_response(400, str(exc), "invalid_request_error")
         renamed = await workspace_admin.rename_workspace(
@@ -219,20 +213,17 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal, error = await _admin(request)
         if error is not None:
             return error
-        try:
-            body = await request.json()
-        except Exception:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
-        raw_user_id = str((body or {}).get("user_id", "")).strip()
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
+        raw_user_id = str(body.get("user_id", "")).strip()
         try:
             user_id = uuid.UUID(raw_user_id)
         except ValueError:
             return error_response(
                 400, "Field 'user_id' must be a UUID", "invalid_request_error"
             )
-        role = _parse_role((body or {}).get("role"))
+        role = _parse_role(body.get("role"))
         if role is None:
             valid = ", ".join(member.value for member in WorkspaceRole)
             return error_response(
@@ -271,13 +262,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal, error = await _admin(request)
         if error is not None:
             return error
-        try:
-            body = await request.json()
-        except Exception:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
-        role = _parse_role((body or {}).get("role"))
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
+        role = _parse_role(body.get("role"))
         if role is None:
             valid = ", ".join(member.value for member in WorkspaceRole)
             return error_response(

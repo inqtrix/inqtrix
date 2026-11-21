@@ -13,7 +13,7 @@ from inqtrix.agents.context_archive import text_hash
 from inqtrix.agents.context_sources import ContextReadInput, ContextSearchInput, encode_source
 from inqtrix.agents.control_memory import MemoryAgentControlStore
 from inqtrix.agents.control_ports import ArtifactNotFound
-from inqtrix.auth.permissions import SharePermission
+from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.capabilities import CapabilityContext, CapabilityError
 from inqtrix.project.agent_sessions_memory import MemoryAgentSessionStore
@@ -637,7 +637,9 @@ class _Templates:
             return []
         return [
             (SimpleNamespace(id=template_id, label=template_id, title=template_id.title(),
-                             revision=revision, content_markdown="Regeltext"), None)
+                             revision=revision, content_markdown="Regeltext"),
+             # The port always annotates the caller's access; this catalog is the owner's.
+             ResourceAccess(AccessMode.OWNER))
             for template_id, revision in self.revisions.items()
         ]
 

@@ -3542,6 +3542,21 @@ describe('scenario results an engine hands over', () => {
     lines.length = 0
     printSummary(stated, false, { write: (text: string) => { lines.push(text); return true } })
     assert.match(lines.join(''), new RegExp(`skipped scenarios: 1\\n    ${skipped}: Guest links need HTTPS\\.`))
+    assert.match(lines.join(''), /scenarios passed with a note: 0\n/)
+  })
+
+  test('the summary shows the note a scenario passed with', async () => {
+    const [noted, ...rest] = IDS
+    const report = await runChild([
+      { id: noted!, reason: 'warning band: 1 of 9 reviews without a usable verdict (ceiling 2)', status: 'passed' },
+      ...rest.map((id) => ({ id, status: 'passed' })),
+    ], 0, 'inqv-handover-summary-03')
+    const lines: string[] = []
+    printSummary(report, false, { write: (text: string) => { lines.push(text); return true } })
+    assert.match(
+      lines.join(''),
+      new RegExp(`scenarios passed with a note: 1\\n    ${noted}: warning band: 1 of 9 reviews without a usable verdict \\(ceiling 2\\)\\n`),
+    )
   })
 
   test('an engine that passes with an unmeasured scenario stays red', async () => {

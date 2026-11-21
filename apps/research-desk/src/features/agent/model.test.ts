@@ -299,7 +299,6 @@ describe('resolveAgentArtifact (anchor independence)', () => {
       snapshot: { current_node: 'agent_kernel', last_message: '' },
       error: null,
       events_url: `/v1/runs/${runId}/events`,
-      result_url: `/v1/runs/${runId}/result`,
     } as ResearchRunSummary)
     const artifacts: typeof record.artifacts = {}
     for (const artifactId of artifactIds) {

@@ -58,6 +58,7 @@ import {
 } from '@/features/editor/collaborationProjection'
 import { useAssetHistoryApi } from '@/features/fileLibrary/useAssetHistoryApi'
 import { useVectorIndexHistoryApi } from '@/features/fileLibrary/useVectorIndexHistoryApi'
+import { preferencesWithLastChoicesKept } from '@/features/account/accountPreferencesSync'
 import { useAccountPreferences } from '@/features/account/useAccountPreferences'
 import { useProjectServerImport } from '@/features/project/useProjectServerImport'
 import { prepareProjectFileImport } from '@/features/project/detachedImport'
@@ -136,7 +137,7 @@ import { buildKnowledgeAskMessages } from '@/features/knowledge/conversationCont
 import { knowledgeComposerContextForSession } from '@/features/knowledge/composerSessionContext'
 import { AgentWorkspace } from '@/features/agent/AgentWorkspace'
 import { emptyAgentComposerDraft } from '@/features/agent/composerDraft'
-import { effectiveAgentAutonomy, effectiveAgentDepth } from '@/features/agent/agentStatusOverview'
+import { agentDeskVisible, effectiveAgentAutonomy, effectiveAgentDepth } from '@/features/agent/agentStatusOverview'
 import { createAgentDemo } from '@/features/agent/demo'
 import { agentRuleSources } from '@/features/agent/contextCategories'
 import { applyKnowledgeRunEvent } from '@/features/knowledge/runSteps'
@@ -156,10 +157,6 @@ import {
 } from '@/features/knowledge/profileOptions'
 import type { KnowledgeCollectionOption, KnowledgeDataSource } from '@/features/knowledge/types'
 import { readGatewaySignedOut, reloadApplication, useAuthSession } from '@/features/auth/useAuthSession'
-import {
-  clearAllPlanDrafts,
-  identityChanged,
-} from '@/features/agent/plan/planDraftStorage'
 import { flushActiveCollaborationDocuments } from '@/features/editor/useCollaborationDocument'
 import { useReplacedGenerationRecovery } from '@/features/editor/collaborationRecovery'
 import {
@@ -291,11 +288,15 @@ export function ResearchDesk({
     agentModelTier,
     chatModelTier,
     contrastMode,
+    lastAgentTier,
+    lastResearchProfile,
     preset: themePreset,
     setAgentMemoryEnabled,
     setAgentModelTier,
     setChatModelTier,
     setContrastMode,
+    setLastAgentTier,
+    setLastResearchProfile,
     setPreset: setThemePreset,
     setTheme,
     setUserBubbleTone,
@@ -489,15 +490,16 @@ export function ResearchDesk({
       queries += 3
       sources += 5
       claims += node === 'search' || node === 'evaluate' ? 4 : 1
+      // Worded like the server's steps, so the demo reads like a live run.
       const message = node === 'plan'
         ? `Plane Suchanfragen (Runde ${round}/${maxRounds})...`
         : node === 'search'
           ? `Durchsuche ${4 + round} Suchanfragen (Runde ${round}/${maxRounds})...`
           : node === 'evaluate'
-            ? `Bewerte Informationsqualitaet (nach Runde ${round}/${maxRounds})...`
+            ? `Bewerte Informationsqualität (nach Runde ${round}/${maxRounds})...`
             : node === 'answer'
-              ? 'Formuliere Antwort aus verifizierter Evidenz...'
-              : 'Analysiere Frage und extrahiere Pflichtaspekte...'
+              ? 'Formuliere Antwort...'
+              : 'Analysiere Frage...'
 
       sequence += 1
       dispatch({
@@ -700,6 +702,8 @@ export function ResearchDesk({
       agentModelTier,
       chatModelTier,
       contrastMode,
+      lastAgentTier,
+      lastResearchProfile,
       locale,
       theme,
       themePreset,
@@ -710,6 +714,8 @@ export function ResearchDesk({
       agentModelTier,
       chatModelTier,
       contrastMode,
+      lastAgentTier,
+      lastResearchProfile,
       locale,
       theme,
       themePreset,
@@ -841,7 +847,6 @@ export function ResearchDesk({
       reloadApplication()
     }
   }, [refreshAuthSession, ssoLogin])
-  const lastIdentityRef = useRef<string | null | undefined>(undefined)
   const lastTitleIdentityRef = useRef<string | null | undefined>(undefined)
   useEffect(() => {
     const identity
@@ -849,14 +854,6 @@ export function ResearchDesk({
         ? authSession.user?.id ?? null
         : null
     setExpectedUserIdentity(identity)
-    // Unsent plan drafts live in `localStorage`, which survives the hard
-    // reload the auth layer performs on an identity transition. Without
-    // this sweep one account's unsent rejection note could reappear in
-    // the next account's gate on a shared profile.
-    if (identityChanged(lastIdentityRef.current, identity)) {
-      clearAllPlanDrafts()
-    }
-    lastIdentityRef.current = identity
     lastTitleIdentityRef.current = updateTitleDraftIdentity(lastTitleIdentityRef.current, identity,
       !isCookieMode || authSession.status !== 'unknown')
     return () => setExpectedUserIdentity(null)
@@ -1201,8 +1198,10 @@ export function ResearchDesk({
     workspaceId: effectiveWorkspaceId,
   })
   const {
+    conflictCopies: editorConflictCopies,
     error: editorSyncError,
     flushDocumentForShare,
+    mergeServerDocument,
     prefetchDocumentBody,
     registerOpenedServerDocument,
     selectedDocumentBodyHydration,
@@ -1214,6 +1213,7 @@ export function ResearchDesk({
     editorComments: state.editorComments,
     editorDocuments: state.editorDocuments,
     editorFolders: state.editorFolders,
+    locale,
     projectEpoch: state.projectEpoch,
     refreshToken: editorRefreshToken,
     selectedDocumentId: state.editorUi.activeDocumentId,
@@ -1466,7 +1466,7 @@ export function ResearchDesk({
   // filter in projectResearchJobs (the thread is its surface, not a job
   // card). Demo asks reuse the identical event path with synthetic events.
   const knowledgeWorkspaceVisible = isDemoMode || capabilities?.features.knowledge === true
-  const agentWorkspaceVisible = isDemoMode || capabilities?.features.workspace_agent === true
+  const agentWorkspaceVisible = agentDeskVisible(capabilities?.features, isDemoMode)
   // Agent composer state is lifted so drafts survive view switches
   // (the KnowledgeComposer draft pattern): the text, and beside it the
   // document with its capsules, the attachments and the run setup.
@@ -1476,11 +1476,19 @@ export function ResearchDesk({
   // Thoroughness: lifted like autonomy, so Deep genuinely
   // stays on across view switches until the user toggles it off.
   const [agentDepth, setAgentDepth] = useState<'normal' | 'deep' | null>(null)
-  // Stufe (speed/depth ladder); lifted like depth so it survives view
-  // switches. null = server default from capabilities.
+  // Stufe (speed/depth ladder) picked on this page; lifted like depth so it
+  // survives view switches. null = no pick on this page: the workspace then
+  // starts on the user's last pick or the server default.
   const [agentTier, setAgentTier] = useState<
     import('@/features/researchRuns/types').AgentTierId | null
   >(null)
+  // Only a real pick in the menu becomes the user's last pick.
+  const handleAgentTierChange = useCallback((
+    tier: import('@/features/researchRuns/types').AgentTierId | null,
+  ) => {
+    setAgentTier(tier)
+    if (tier) setLastAgentTier(tier)
+  }, [setLastAgentTier])
   // Collection chips belong to their agent session (as in the Knowledge Desk);
   // the chips of a first question move to the session it creates.
   const [agentCollectionIdsBySession, setAgentCollectionIdsBySession] = useState<
@@ -1528,9 +1536,6 @@ export function ResearchDesk({
       isDemoMode
         ? createAgentDemo(
           dispatch,
-          (documentId) =>
-            projectStateRef.current.editorDocuments[documentId]
-              ?.contentMarkdown ?? null,
           // Where the server reads its rule catalog, the demo reads the
           // project's own agent rules — by the same ids the composer sent.
           (ruleId) => {
@@ -2471,8 +2476,13 @@ export function ResearchDesk({
       // project file must NOT bleed its embedded prefs into the live theme
       // (which the account autosave would then PUT, clobbering the account
       // from an unrelated file). Project-embedded prefs apply only offline /
-      // when there is no account sync (the local-first case).
-      if (!accountSyncActive) applyProjectPreferences(nextState.preferences)
+      // when there is no account sync (the local-first case). A file without
+      // last picks keeps the current ones.
+      if (!accountSyncActive) {
+        applyProjectPreferences(
+          preferencesWithLastChoicesKept(nextState.preferences, currentPreferences),
+        )
+      }
       setIsIncognitoChat(false)
       resetIncognitoSession()
       setActiveChatRequestsByThreadId({})
@@ -3595,6 +3605,8 @@ export function ResearchDesk({
     setAgentModelTier(preferences.agentModelTier)
     setChatModelTier(preferences.chatModelTier)
     setContrastMode(preferences.contrastMode)
+    setLastAgentTier(preferences.lastAgentTier)
+    setLastResearchProfile(preferences.lastResearchProfile)
     setLocale(preferences.locale)
     setTheme(preferences.theme)
     setThemePreset(preferences.themePreset)
@@ -3758,6 +3770,8 @@ export function ResearchDesk({
               onActiveFilterChange={(filter) => dispatch({ filter, type: 'setActiveFilter' })}
               onAuthenticationRequired={handleResearchAuthenticationRequired}
               onComposerSubmit={handleComposerSubmit}
+              lastReportProfile={lastResearchProfile}
+              onReportProfileChange={setLastResearchProfile}
               researchQuestion={researchQuestion}
               onResearchQuestionChange={setResearchQuestion}
               onComposerVisibleChange={(isVisible) => dispatch({
@@ -3948,6 +3962,7 @@ export function ResearchDesk({
               apiKey={apiKey.trim() || undefined}
               assetBodyLoadStates={assetBodyLoadStates}
               capabilities={capabilities}
+              conflictCopies={editorConflictCopies}
               chatModelOptions={chatModelOptions}
               chatModelOptionsStatus={chatModelOptionsState.status}
               chatModelCatalog={chatModelCatalog}
@@ -3958,6 +3973,7 @@ export function ResearchDesk({
               ensureUploadTarget={projectPersistenceAvailable ? ensureUploadTarget : undefined}
               onCollaborationControllerChange={handleCollaborationControllerChange}
               onFlushDocumentForShare={projectSyncActive ? flushDocumentForShare : undefined}
+              onMergeServerDocument={mergeServerDocument}
               onRecoveryCaptureProviderChange={setEditorRecoveryCaptureProvider}
               onShareDocument={sharingEnabled ? handleShareEditorDocument : undefined}
               onServerDocumentObserved={registerOpenedServerDocument}
@@ -4012,7 +4028,8 @@ export function ResearchDesk({
               selectedAutonomy={agentRunAutonomy}
               selectedDepth={effectiveDepth}
               selectedTier={agentTier}
-              onTierChange={setAgentTier}
+              lastTier={lastAgentTier}
+              onTierChange={handleAgentTierChange}
               selectedCollectionIds={agentCollectionIds}
               selectedDocumentId={agentDocumentId}
               serverEnabled={!isDemoMode}

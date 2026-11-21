@@ -17,12 +17,12 @@ COPY README.md LICENSE NOTICE ./
 COPY src ./src
 
 # Install into /app/.venv against the frozen lock. The knowledge/queue/agent
-# extras are baked in so the `knowledge`, `workers` and workspace-agent paths
-# work without rebuilding the image; the default (memory/local) paths never
-# import them. The `agent` extra ships the LangGraph postgres checkpointer, so
-# a postgres-backed stack auto-registers the workspace agent —
-# without it /v1/capabilities reports workspace_agent:false and the Agent Desk
-# stays hidden even though the runtime is fully wired. The `metrics` extra
+# extras are baked in so the `knowledge`, `workers` and agent paths work
+# without rebuilding the image; the default (memory/local) paths never import
+# them. The `agent` extra ships the LangGraph postgres checkpointer, so a
+# postgres-backed stack auto-registers the agent kernel — without it
+# /v1/capabilities reports agent_kernel:false and the Agent Desk stays hidden
+# even though the runtime is fully wired. The `metrics` extra
 # (prometheus-client) is baked in so INQTRIX_METRICS_ENABLED works without a
 # rebuild; it stays dormant until the flag is set.
 RUN uv sync --frozen --no-dev --extra agent --extra knowledge-qdrant --extra queue-valkey --extra metrics --extra observability

@@ -60,8 +60,15 @@ class KnowledgeSessionsService:
         visible_to: "UserContext | None",
         created_at: float | None = None,
     ) -> KnowledgeSession:
-        """Atomically create or validate the saved session for one run."""
+        """Atomically create or validate the saved session for one run.
 
+        Knowledge runs write the same ``runs.session_id`` column as agent runs.
+        An id whose runs belong to someone else is therefore refused, the same
+        rule the agent claim applies; otherwise a second owner on the id locks
+        the agent owner out of the session.
+        """
+
+        await self._require_owner_of_runs(session_id, visible_to=visible_to)
         claimed = await self._store.claim_session(
             id=session_id,
             title=title,
@@ -71,6 +78,34 @@ class KnowledgeSessionsService:
         )
         self._require_owner(claimed, visible_to=visible_to)
         return claimed
+
+    async def _require_owner_of_runs(
+        self, session_id: str, *, visible_to: "UserContext | None"
+    ) -> None:
+        """Refuse *session_id* when the runs under it belong to someone else.
+
+        One rule for every way a registry row is created or kept, read from
+        the run store: no runs, no objection; one recorded owner, and it must
+        be the caller; more than one, and the id is nobody's to take.
+        """
+        owners = (
+            await self._run_store.asession_owners(session_id)
+            if self._run_store is not None
+            else set()
+        )
+        if not owners:
+            return
+        if len(owners) != 1:
+            raise KnowledgeSessionNotFound(session_id)
+        historical_tenant, historical_user_id = next(iter(owners))
+        if visible_to is None:
+            return
+        principal = visible_to.principal
+        if (
+            historical_user_id != principal.user_id
+            or historical_tenant not in (None, principal.tenant_id)
+        ):
+            raise KnowledgeSessionNotFound(session_id)
 
     async def list_sessions(
         self, *, caller_user_id: uuid.UUID | None, workspace_id: str | None
@@ -97,6 +132,12 @@ class KnowledgeSessionsService:
         caller_user_id: uuid.UUID | None,
         workspace_id: str | None, visible_to: "UserContext | None",
     ) -> KnowledgeSession:
+        # A save is the second way a registry row comes to be, and it follows
+        # the claim: a row under an id whose runs belong to someone else could
+        # not run (the claim refuses the id) and could not be deleted again
+        # (the deletion stops at the foreign runs). A row left from before
+        # this rule does not outrank the runs under its id either.
+        await self._require_owner_of_runs(id, visible_to=visible_to)
         try:
             existing = await self._store.get_session(id)
         except KnowledgeSessionNotFound:

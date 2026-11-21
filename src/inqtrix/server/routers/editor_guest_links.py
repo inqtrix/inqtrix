@@ -25,7 +25,7 @@ from inqtrix.services.editor_collaboration_service import (
     CollaborationAuthenticationRequired,
 )
 from inqtrix.server.routers._collaboration_errors import collaboration_error_view
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import error_response, read_json_object
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -116,9 +116,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         request: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(request)
-        if body is None:
-            return _invalid("Invalid JSON body")
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
         try:
             command_id = _uuid(body, "command_id")
             generation = _positive_int(body, "generation")
@@ -155,9 +155,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         request: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(request)
-        if body is None:
-            return _invalid("Invalid JSON body")
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
         try:
             parsed_link_id = uuid.UUID(link_id)
             permission = (
@@ -198,9 +198,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         request: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(request)
-        if body is None:
-            return _invalid("Invalid JSON body")
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
         try:
             result = await service.revoke_link(
                 document_id=document_id,
@@ -232,9 +232,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         request: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(request)
-        if body is None:
-            return _invalid("Invalid JSON body")
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
         try:
             result = await service.rotate_password(
                 document_id=document_id,
@@ -266,9 +266,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         request: Request,
         principal: Principal = Depends(principal_dep),
     ):
-        body = await _json_object(request)
-        if body is None:
-            return _invalid("Invalid JSON body")
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
         try:
             result = await service.rotate_token(
                 document_id=document_id,
@@ -846,6 +846,12 @@ def _origin(url: str) -> str:
 
 
 async def _json_object(request: Request) -> dict[str, Any] | None:
+    """The guest request's JSON object, or ``None``.
+
+    The guest routes refuse a body that is no object in their own guest
+    envelope, so they read it without the shared refusal of
+    ``read_json_object``.
+    """
     try:
         body = await request.json()
     except Exception:

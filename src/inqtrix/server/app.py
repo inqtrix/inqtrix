@@ -147,6 +147,50 @@ async def start_job_stores(container: Any) -> None:
         start = getattr(store, "astart", None)
         if start is not None:
             await start()
+    await end_outdated_waits_in_process(container)
+
+
+async def end_outdated_waits_in_process(container: Any) -> None:
+    """End the parked runs whose workflow binding no longer lets them resume, once at its start.
+
+    Without a queue worker the API process resumes parked runs itself. A run
+    waiting under an older contract than this process's registry names for
+    its mode, or under a retired mode, ends now with its children, as the
+    worker ends it at its start (``aend_outdated_waits`` of the Postgres run
+    store), instead of when its wait expires. Only those, although without a
+    queue worker no parked run of an earlier process can resume (its work was
+    retained in that process): a run waiting for an approval or an answer
+    under the current contract stays parked until its wait expires, and a run
+    waiting for its children is woken when the restart fails them and ends
+    as a queued run no process executes. With a queue worker the
+    worker does this; a store without durable rows keeps no parked run
+    across a restart. A failure leaves such runs parked until their wait
+    expires and says so in a WARNING.
+    """
+    settings = getattr(container, "settings", None)
+    if (
+        settings is None
+        or settings.queue.backend == "valkey"
+        or settings.storage.backend != "postgres"
+    ):
+        return
+    try:
+        ended = await container.run_store.aend_outdated_waits(
+            container.registry.workflow_contracts()
+        )
+    except Exception:  # noqa: BLE001 — such runs still end when their wait expires
+        log.warning(
+            "Ending the parked runs outside their workflow binding failed at "
+            "startup; they stay parked until their wait expires.",
+            exc_info=True,
+        )
+        return
+    if ended:
+        log.info(
+            "API process ended %d parked runs that their workflow binding no "
+            "longer lets resume.",
+            ended,
+        )
 
 
 PERIODIC_SWEEPS = ("upload_reconciler", "indexing_auto_resumer", "run_retention_sweep")
@@ -421,58 +465,24 @@ def create_app(
                 extra_label="agent checkpointer",
                 vector_write_slots=_vector_write_slots(settings),
             )
+        from inqtrix.agents.kernel.tools import MAX_BATCH_ASSIGNMENTS
+
         if (
             settings.server.run_max_concurrent_per_user is not None
-            and settings.server.run_max_concurrent_per_user
-            < settings.agent_platform.max_parallel_children
+            and settings.server.run_max_concurrent_per_user < MAX_BATCH_ASSIGNMENTS
         ):
-            # Visible constraint (No Silent Fallbacks): a per-user cap
-            # below one agent wave's width means a single agent tree's
-            # children cannot all be admitted — the wave truncates to
-            # proceed-and-mark holes. Loud at startup, not discovered as
-            # mysteriously incomplete agent runs.
+            # Visible constraint (No Silent Fallbacks): the children of one
+            # kernel batch count against their user's cap, the parent does
+            # not. A cap below the batch width admits only part of such a
+            # batch; loud at startup, not discovered as mysteriously
+            # incomplete agent runs.
             log.warning(
-                "RUN_MAX_CONCURRENT_PER_USER=%d is smaller than "
-                "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN=%d; a single agent wave exceeds "
-                "the per-user budget and will be limited. Set the cap to at least the "
-                "wave width.",
+                "RUN_MAX_CONCURRENT_PER_USER=%d is smaller than the %d child runs one "
+                "kernel batch (delegate_batch) may start; such a batch exceeds the "
+                "per-user budget and will be limited. Set the cap to at least %d.",
                 settings.server.run_max_concurrent_per_user,
-                settings.agent_platform.max_parallel_children,
-            )
-        from inqtrix.agents.plan_validation import MAX_PLAN_TASKS_DEFAULT
-
-        # A wave is never wider than the plan the validator accepts, so
-        # the raw knob overstates the peak whenever it exceeds that
-        # ceiling. Warning on the overstated number would cry wolf —
-        # and a warning nobody believes is worse than none.
-        effective_wave = min(
-            settings.agent_platform.max_parallel_children,
-            MAX_PLAN_TASKS_DEFAULT,
-        )
-        peak_agent_calls = (
-            effective_wave
-            * settings.agent_platform.max_parallel_queries_per_task
-        )
-        run_lane = (
-            settings.server.run_max_concurrent
-            or settings.server.max_concurrent
-        )
-        if peak_agent_calls > run_lane:
-            # Visible constraint (No Silent Fallbacks): one run's widest
-            # wave, each task running its sub-queries concurrently, can
-            # demand more model calls than the lane admits. The excess
-            # does not fail — it queues, and the run simply takes longer
-            # for a reason nothing on any surface states. Loud at
-            # startup, not discovered as a mysteriously slow agent.
-            log.warning(
-                "Effective wave width %d (plan limit) x "
-                "INQTRIX_AGENT_MAX_PARALLEL_QUERIES_PER_TASK=%d = %d concurrent model "
-                "calls from one run, but the lane admits only %d; waves queue. Increase"
-                " MAX_CONCURRENT or reduce query concurrency.",
-                effective_wave,
-                settings.agent_platform.max_parallel_queries_per_task,
-                peak_agent_calls,
-                run_lane,
+                MAX_BATCH_ASSIGNMENTS,
+                MAX_BATCH_ASSIGNMENTS,
             )
         if database_ready and settings.sharing.restrict_to_workspace_members:
             from inqtrix.services.workspace_administration import (

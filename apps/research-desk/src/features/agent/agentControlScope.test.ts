@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   getAgentRunArtifact,
-  getAgentRunPlan,
   listAgentRunApprovals,
   listAgentRunArtifacts,
   listAgentRunClarifications,
@@ -12,8 +11,8 @@ import type { ResearchRunSummary } from '@/features/researchRuns/types'
 import { agentRunFromSummary, type AgentRunRecord, type AgentSessionArtifactIndex } from './model'
 import { agentControlScope, useAgentControlApi } from './useAgentControlApi'
 
-// Execute the hook's fetch effect without a DOM test runtime (as in
-// childControlRows.test.ts); the visible behaviour is checked live.
+// Execute the hook's fetch effect without a DOM test runtime; the visible
+// behaviour is checked live.
 vi.mock('react', async (original) => ({
   ...await original<typeof import('react')>(),
   useRef: <T,>(value: T) => ({ current: value }),
@@ -24,7 +23,6 @@ vi.mock('react', async (original) => ({
 vi.mock('@/api/inqtrixClient', async (original) => ({
   ...await original<typeof import('@/api/inqtrixClient')>(),
   getAgentRunArtifact: vi.fn(),
-  getAgentRunPlan: vi.fn(),
   listAgentRunApprovals: vi.fn(),
   listAgentRunArtifacts: vi.fn(),
   listAgentRunClarifications: vi.fn(),
@@ -35,7 +33,7 @@ vi.mock('@/api/inqtrixClient', async (original) => ({
 const summary = (overrides: Partial<ResearchRunSummary>): ResearchRunSummary => ({
   access: { mode: 'owner' }, agent_overrides: {}, created_at: 1, elapsed_seconds: 1, error: null,
   events_url: '/events', finished_at: 2, kind: 'agent', mode: 'agent_kernel', question: 'Q',
-  queue_position: null, result_url: '/result', run_id: 'run', snapshot: {}, stack: 'default',
+  queue_position: null, run_id: 'run', snapshot: {}, stack: 'default',
   started_at: 1, status: 'completed', ...overrides,
 } as ResearchRunSummary)
 
@@ -44,7 +42,6 @@ const staleRun = (overrides: Partial<ResearchRunSummary>): AgentRunRecord => {
   run.approvalsStale = true
   run.clarificationsStale = true
   run.artifactsStale = true
-  run.planStale = false
   return run
 }
 
@@ -52,7 +49,6 @@ const staleIndex = { stale: true } as unknown as AgentSessionArtifactIndex
 
 beforeEach(() => {
   vi.mocked(getAgentRunArtifact).mockReset().mockResolvedValue({ artifact_id: 'artifact-1' } as never)
-  vi.mocked(getAgentRunPlan).mockReset().mockResolvedValue(null as never)
   vi.mocked(listAgentRunApprovals).mockReset().mockResolvedValue([] as never)
   vi.mocked(listAgentRunArtifacts).mockReset().mockResolvedValue([] as never)
   vi.mocked(listAgentRunClarifications).mockReset().mockResolvedValue([] as never)
@@ -61,14 +57,16 @@ beforeEach(() => {
 })
 
 describe('control rows of the open session only', () => {
-  it('names the runs of the open session and every inspected child mission', () => {
+  it('names the runs of the open session only', () => {
+    // A delegated child's rows are no run of the session: its gates load
+    // on behalf of the parent.
     const runs = {
       'run-a': staleRun({ run_id: 'run-a', session_id: 'session-a' }),
       'run-b': staleRun({ run_id: 'run-b', session_id: 'session-b' }),
       child: staleRun({ kind: 'agent_child', parent_run_id: 'run-b', root_run_id: 'run-b', run_id: 'child' }),
     }
-    expect([...agentControlScope(runs, 'session-a')].sort()).toEqual(['child', 'run-a'])
-    expect([...agentControlScope(runs, null)]).toEqual(['child'])
+    expect([...agentControlScope(runs, 'session-a')]).toEqual(['run-a'])
+    expect([...agentControlScope(runs, null)]).toEqual([])
   })
 
   it('does not load the rows of runs in other sessions', async () => {

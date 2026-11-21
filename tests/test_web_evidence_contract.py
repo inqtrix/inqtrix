@@ -9,7 +9,6 @@ import subprocess
 
 import pytest
 
-from inqtrix.agents.evidence_context import synthesis_evidence
 from inqtrix.agents.kernel.deps import KernelDeps, run_coro
 from inqtrix.agents.kernel.evidence_read import (
     build_review_evidence,
@@ -99,7 +98,7 @@ def test_research_extracts_only_api_material_in_each_profile(no_page_access, pro
     assert UNRELATED_TEXT not in json.dumps(result)
 
 
-def test_retained_read_review_and_mission_synthesis_use_only_provider_ledger():
+def test_retained_read_and_review_use_only_provider_ledger():
     control = MemoryAgentControlStore()
     deps = KernelDeps(
         run_id="run-provider-reader", session_id="session-provider-reader",
@@ -124,12 +123,10 @@ def test_retained_read_review_and_mission_synthesis_use_only_provider_ledger():
     ref, = deps.evidence_refs.values()
     read = read_registered_evidence(deps, reference_id=ref["reference_id"])
     query_read = read_registered_evidence(deps, query_id="query")
-    review = build_review_evidence(deps, [ref], mission_run_ids=[], language="de")
+    review = build_review_evidence(deps, [ref], language="de")
     for context in (read, query_read, review):
         assert context["searches"]["query"]["provider_answer"] == ANSWER
         assert UNRELATED_TEXT not in evidence_read_document(context)
-    assert ANSWER in synthesis_evidence([ref], ledger)
-    assert UNRELATED_TEXT not in synthesis_evidence([ref], ledger)
     assert deps.tool_use_counts == {"web": 0, "knowledge": 0}
 
 

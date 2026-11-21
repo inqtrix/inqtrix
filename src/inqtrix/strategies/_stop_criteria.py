@@ -308,7 +308,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
             "komplett", "voellig", "falsch", "inkorrekt", "gegensaetzlich",
         )
         if any(kw in contradiction_text for kw in severe_keywords):
-            emit_progress(s, t(s, "contradictions_severe"))
+            emit_progress(s, t(s, "contradictions_severe"), severity="warning")
             return min(conf, self._stop_for(s) - 2)
         emit_progress(s, t(s, "contradictions_light"))
         return min(conf, self._stop_for(s) - 1)
@@ -542,7 +542,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
             )
             s["done"] = True
             s["_stop_reason"] = "stagnation_low_evidence"
-            emit_progress(s, t(s, "stagnation_low_evidence_stop"))
+            emit_progress(s, t(s, "stagnation_low_evidence_stop"), severity="warning")
             return conf, True
         return conf, False
 

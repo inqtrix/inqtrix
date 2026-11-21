@@ -97,9 +97,11 @@ class ClaudeRules(BaseModel, frozen=True):
 
 
 class OpenAIRules(BaseModel, frozen=True):
-    """What an OpenAI model accepts in a request, read by the OpenAI-compatible adapters.
+    """What an OpenAI model accepts in a request.
 
-    The Azure and LiteLLM adapters read these rules; the picker never shows them.
+    The Azure and LiteLLM adapters read ``api``; the model routing reads
+    ``prose_verbosity`` and names it in the resolution of a writing node. The
+    picker never shows these rules.
     Source: the OpenAI model pages and the Azure reasoning guide.
     """
 
@@ -109,6 +111,12 @@ class OpenAIRules(BaseModel, frozen=True):
     or offers no Chat Completions at all (the Pro models); the
     adapters then send every call through the Responses API. ``chat_completions``,
     the proven path, for every other model; it takes no ``max`` effort."""
+    prose_verbosity: Literal["low", "medium", "high"] | None = None
+    """The ``verbosity`` a call that writes prose for a reader sends for this model
+    (``text.verbosity`` on the Responses API, ``verbosity`` on Chat Completions).
+    ``None`` sends no field, so the API applies its own default (``medium``). A level
+    stands only on a card whose model was measured with it; which call sites write
+    prose is decided by :func:`inqtrix.model_routing.prose_verbosity`."""
 
 
 class ModelCard(BaseModel):
@@ -281,7 +289,7 @@ class ModelCard(BaseModel):
         exclude=True,
         description="Request rules of an OpenAI model; None for other vendors.",
     )
-    """Request rules of an OpenAI model, read by the Azure and LiteLLM adapters; never part of the picker catalogue."""
+    """Request rules of an OpenAI model, read by the Azure and LiteLLM adapters and by the model routing; never part of the picker catalogue."""
 
 
 _REGION_PREFIXES = ("eu.", "us.", "us-gov.", "apac.", "ap.", "ca.", "au.", "jp.", "global.")
@@ -634,7 +642,7 @@ MODEL_CARDS: tuple[ModelCard, ...] = (
         aliases=["gpt-6.1-terra", "openai/gpt-6.1-terra"],
         source_url="https://developers.openai.com/api/docs/models/gpt-6.1-terra",
         last_verified="2026-11-06",
-        openai=OpenAIRules(api="responses"),
+        openai=OpenAIRules(api="responses", prose_verbosity="high"),
     ),
     ModelCard(
         id="gpt-6-luna",

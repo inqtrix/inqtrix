@@ -14,16 +14,18 @@ from __future__ import annotations
 
 import dataclasses
 import queue
+import re
 
 import pytest
 
 from inqtrix.core.results import WebRecency
 from inqtrix.evidence import assemble_evidence_records
+from inqtrix.exceptions import AzureOpenAIAPIError
 from inqtrix.graph import run
 from inqtrix.report_profiles import ReportProfile
 from inqtrix.providers.base import ProviderContext
 from inqtrix.result import ResearchResult
-from inqtrix.search_result import GroundedSearchResult
+from inqtrix.search_result import CitationSpan, GroundedSearchResult, GroundedSource
 from inqtrix.runtime_logging import normalize_source_provenance
 from inqtrix.settings import AgentSettings
 from inqtrix.strategies import StrategyContext, create_default_strategies
@@ -109,6 +111,7 @@ def _run_scenario(
     settings: AgentSettings | None = None,
     strategies: StrategyContext | None = None,
     web_recency: WebRecency | None = None,
+    run_event_sink=None,
 ) -> tuple[dict, list[tuple[str, str]]]:
     """Execute the real graph with the given fakes and capture progress."""
     settings = settings or _settings()
@@ -126,6 +129,7 @@ def _run_scenario(
         strategies=strategies,
         settings=settings,
         web_recency=web_recency,
+        run_event_sink=run_event_sink,
     )
     return raw, _drain(progress_queue)
 
@@ -242,7 +246,7 @@ def test_clean_contract_from_verified_bound_claim() -> None:
     assert result.metrics.evidence_contract_status == "clean"
     assert result.metrics.answer_bound_claims_count >= 1
 
-    # I3: every statement the evidence layer ties to a source in the report's
+    # Every statement the evidence layer ties to a source in the report's
     # references is readable at that reference, with its status.
     by_url = {reference.url: reference for reference in result.references}
     checked_any = False
@@ -257,6 +261,126 @@ def test_clean_contract_from_verified_bound_claim() -> None:
             assert statements[text].status == claim.get("verification_status")
             checked_any = True
     assert checked_any, "precondition: a referenced source carries a claim"
+
+
+_NOT_HANDED = "not handed"
+"""A call that did not get the keyword at all; ``None`` would be a keyword an older provider cannot take."""
+
+
+class _RecordingLLM(FakeLLM):
+    """Keeps the ``verbosity`` every call of the run was handed, by kind of call."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.verbosity_by_call: list[tuple[str, object]] = []
+        self.section_calls: list[tuple[object, object]] = []
+
+    def complete(self, prompt, **kwargs):
+        self.verbosity_by_call.append(("text", kwargs.get("verbosity", _NOT_HANDED)))
+        return super().complete(prompt, **kwargs)
+
+    def complete_with_metadata(self, prompt, **kwargs):
+        self.verbosity_by_call.append(("section", kwargs.get("verbosity", _NOT_HANDED)))
+        self.section_calls.append((kwargs.get("model"), kwargs.get("verbosity", _NOT_HANDED)))
+        return super().complete_with_metadata(prompt, **kwargs)
+
+    def complete_structured(self, prompt, **kwargs):
+        self.verbosity_by_call.append(("structured", kwargs.get("verbosity", _NOT_HANDED)))
+        return super().complete_structured(prompt, **kwargs)
+
+
+class _VerbosityLLM(_RecordingLLM):
+    """A provider that says it can send the parameter."""
+
+    def supports_verbosity(self, *, model: str | None = None) -> bool:
+        return True
+
+
+def _run_on_a_model_with_a_prose_verbosity(llm: _RecordingLLM) -> dict:
+    """One clean run in which every node resolves to a model whose card names a prose verbosity."""
+    llm.models.reasoning_model = "gpt-6.1-terra"
+    raw, _events = _run_scenario(llm, FakeSearch(load_search_result_fixture(_FIXTURE_SLUG)))
+    assert raw["result_state"]["node_model_resolutions"]["classify"]["model"] == "gpt-6.1-terra"
+    return raw
+
+
+def test_only_the_report_sections_ask_for_the_prose_verbosity_of_their_model() -> None:
+    """Classify, plan, evaluate and the claim extraction run on the same model and ask for nothing."""
+    llm = _VerbosityLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_bindings=_clean_answer_bindings())
+
+    raw = _run_on_a_model_with_a_prose_verbosity(llm)
+
+    by_kind: dict[str, set[object]] = {}
+    for kind, verbosity in llm.verbosity_by_call:
+        by_kind.setdefault(kind, set()).add(verbosity)
+    assert by_kind == {"text": {_NOT_HANDED}, "structured": {_NOT_HANDED}, "section": {"high"}}
+    resolutions = raw["result_state"]["node_model_resolutions"]
+    assert resolutions["answer"]["verbosity"] == "high"
+    assert resolutions["evaluate"]["verbosity"] == ""
+
+
+def test_a_provider_that_cannot_send_the_verbosity_is_not_handed_it() -> None:
+    llm = _RecordingLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_bindings=_clean_answer_bindings())
+
+    _run_on_a_model_with_a_prose_verbosity(llm)
+
+    assert {verbosity for _kind, verbosity in llm.verbosity_by_call} == {_NOT_HANDED}
+    assert llm.answer_section_calls >= 1
+
+
+def test_a_model_without_the_rule_writes_its_sections_as_before() -> None:
+    llm = _VerbosityLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_bindings=_clean_answer_bindings())
+
+    _run_scenario(llm, FakeSearch(load_search_result_fixture(_FIXTURE_SLUG)))
+
+    assert {verbosity for _kind, verbosity in llm.verbosity_by_call} == {_NOT_HANDED}
+    assert llm.answer_section_calls >= 1
+
+
+class _FailingOnOneModelLLM(_VerbosityLLM):
+    """Refuses every section of one model the way an overloaded service does."""
+
+    def __init__(self, *, failing_model: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.failing_model = failing_model
+
+    def complete_with_metadata(self, prompt, **kwargs):
+        if kwargs.get("model") == self.failing_model:
+            self.section_calls.append((kwargs.get("model"), kwargs.get("verbosity", _NOT_HANDED)))
+            raise AzureOpenAIAPIError(
+                model=self.failing_model, status_code=503, error_code="server_error", message="overloaded"
+            )
+        return super().complete_with_metadata(prompt, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("routed", "fallback", "routed_level", "fallback_level"),
+    [
+        ("gpt-6.1-terra", "gpt-5.4", "high", _NOT_HANDED),
+        ("gpt-5.4", "gpt-6.1-terra", _NOT_HANDED, "high"),
+    ],
+)
+def test_a_fallback_model_writes_with_the_level_of_its_own_card(
+    routed: str, fallback: str, routed_level: object, fallback_level: object
+) -> None:
+    """The level follows the model that writes; the resolution keeps naming the routed one."""
+    llm = _FailingOnOneModelLLM(
+        failing_model=routed,
+        claim_payload=_CLEAN_CLAIM_PAYLOAD,
+        answer_bindings=_clean_answer_bindings(),
+    )
+    llm.models.tier_high_model = routed
+    llm.models.tier_mid_model = fallback
+
+    raw, _events = _run_scenario(llm, FakeSearch(load_search_result_fixture(_FIXTURE_SLUG)))
+
+    by_model: dict[object, set[object]] = {}
+    for model, verbosity in llm.section_calls:
+        by_model.setdefault(model, set()).add(verbosity)
+    assert by_model == {routed: {routed_level}, fallback: {fallback_level}}
+    resolution = raw["result_state"]["node_model_resolutions"]["answer"]
+    assert resolution["model"] == routed
+    assert resolution["verbosity"] == ("" if routed_level is _NOT_HANDED else routed_level)
 
 
 def test_answer_diagnostics_reflect_routed_model_and_effort() -> None:
@@ -492,6 +616,750 @@ def test_matched_plus_source_only_binding_stays_clean() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Why the contract reads as it does: cause, ceiling and basis as fields
+# --------------------------------------------------------------------------- #
+
+# The reader's words under a German report, spelled out here: a reworded or
+# swapped text must be caught at the answer, not read back from the table.
+_NOTICE_HEADING = "## Evidenzhinweis"
+_NOTICE_BY_CAUSE = {
+    "unknown_citation": "Mindestens ein zitierter Link ließ sich keinem Beleg zuordnen.",
+    "citation_without_claim": "Zu mindestens einer zitierten Quelle ist keine Aussage erfasst.",
+    "algorithm_failure": "Mindestens ein Schritt der Recherche ist fehlgeschlagen.",
+}
+_PROVIDER_BASIS_LINE = (
+    "Grundlage: die Angaben des Suchanbieters zu den zitierten Quellen; "
+    "die Seiten selbst wurden nicht gelesen."
+)
+_FOOTER_RULE = "\n\n---\n*"
+
+
+def _depth_numbers(multi: int, supported: int) -> str:
+    return (
+        "Gestützte Aussagen der Recherche mit mehr als einer Quelle: "
+        f"{multi} von {supported}."
+    )
+
+
+def _assert_notice_names_only(answer: str, cause: str) -> None:
+    """The notice carries the heading and the text of *cause*, no other's."""
+    assert _NOTICE_HEADING in answer, answer[-1500:]
+    assert _NOTICE_BY_CAUSE[cause] in answer, answer[-1500:]
+    others = [text for name, text in _NOTICE_BY_CAUSE.items() if name != cause]
+    assert not [text for text in others if text in answer], answer[-1500:]
+
+
+def _claim(text: str, snippet: str, refs: list[str]) -> dict:
+    return {
+        "claim_text": text,
+        "evidence_snippet": snippet,
+        "claim_type": "fact",
+        "polarity": "affirmed",
+        "needs_primary": False,
+        "provider_refs": refs,
+        "published_date": "2026-05-20",
+    }
+
+
+_THREE_CLAIMS_ONE_SOURCE = [
+    _claim(
+        "NVIDIA meldete fuer das erste Quartal Geschaeftsjahr 2027 einen Rekordumsatz von 81,6 Milliarden US-Dollar.",
+        "record revenue for the first quarter ended April 26, 2026, of $81.6 billion",
+        ["3"],
+    ),
+    _claim(
+        "Der Umsatz im Rechenzentrumsgeschaeft von NVIDIA erreichte 75,2 Milliarden US-Dollar.",
+        "Data Center revenue of $75.2 billion",
+        ["3"],
+    ),
+    _claim(
+        "NVIDIA erwartet fuer das zweite Quartal einen Umsatz von 91,0 Milliarden US-Dollar.",
+        "revenue is expected to be $91.0 billion",
+        ["3"],
+    ),
+]
+
+_FOUR_CLAIMS_TWO_PRIMARY_SOURCES = [
+    _claim(
+        "NVIDIA meldete fuer das erste Quartal Geschaeftsjahr 2027 einen Rekordumsatz von 81,6 Milliarden US-Dollar.",
+        "record revenue for the first quarter ended April 26, 2026, of $81.6 billion",
+        ["1", "3"],
+    ),
+    _claim(
+        "Der Umsatz im Rechenzentrumsgeschaeft von NVIDIA erreichte 75,2 Milliarden US-Dollar.",
+        "Data Center revenue of $75.2 billion",
+        ["2", "3"],
+    ),
+    _claim(
+        "NVIDIA erwartet fuer das zweite Quartal einen Umsatz von 91,0 Milliarden US-Dollar.",
+        "revenue is expected to be $91.0 billion",
+        ["1", "3"],
+    ),
+    _claim(
+        "Die Bruttomarge von NVIDIA lag im ersten Quartal bei 74,9 Prozent.",
+        "GAAP gross margin of 74.9%",
+        ["2", "3"],
+    ),
+]
+
+
+def test_clean_run_names_its_basis_and_carries_no_ceiling() -> None:
+    """A clean web run names the material behind its cited references:
+    what the search provider returned, no stored source text. The report
+    says so in one quiet line right above the footer, without a notice."""
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    llm = FakeLLM(
+        claim_payload=_CLEAN_CLAIM_PAYLOAD,
+        answer_bindings=_clean_answer_bindings(),
+    )
+    raw, _events = _run_scenario(llm, FakeSearch(fixture))
+    metrics = ResearchResult.from_raw(raw).metrics
+
+    assert metrics.evidence_contract_status == "clean"
+    assert metrics.evidence_contract_causes == []
+    assert metrics.confidence_cap is None
+    assert metrics.confidence_cap_reasons == []
+    assert metrics.evidence_depth_gap_reasons == []
+    assert metrics.evidence_basis == "provider_context"
+    assert metrics.cited_reference_count >= 1
+    assert metrics.provider_only_reference_count == metrics.cited_reference_count
+
+    # One supported statement with two sources (provider ranks 3 and 4).
+    answer = raw["answer"]
+    assert f"{_PROVIDER_BASIS_LINE} {_depth_numbers(1, 1)}{_FOOTER_RULE}" in answer, answer[-1500:]
+    assert _NOTICE_HEADING not in answer, answer[-1500:]
+
+
+def test_cited_source_without_statement_is_named_as_the_cause() -> None:
+    """The mixed case of the scenario above: the cause is the cited record
+    that carries no statement, not a link that could not be assigned."""
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    llm = FakeLLM(
+        claim_payload=_CLEAN_CLAIM_PAYLOAD,
+        source_roles=_FIXTURE_SOURCE_ROLES,
+        answer_bindings=[
+            {"label": "E1", "claim_text": _CLEAN_CLAIM_PAYLOAD[0]["claim_text"]},
+            {"label": "E3", "claim_text": "Ergaenzender Hintergrund ohne belegte Kennzahl."},
+        ],
+    )
+    raw, _events = _run_scenario(llm, FakeSearch(fixture))
+    metrics = ResearchResult.from_raw(raw).metrics
+
+    assert metrics.evidence_contract_status == "needs_review"
+    assert metrics.evidence_contract_causes == ["citation_without_claim"]
+    assert metrics.confidence_cap == 6
+    assert metrics.confidence_cap_reasons == ["citation_without_claim"]
+    # The reader learns the same cause, under the warning heading.
+    _assert_notice_names_only(raw["answer"], "citation_without_claim")
+    assert _PROVIDER_BASIS_LINE in raw["answer"]
+
+
+def test_a_failed_step_is_named_as_the_cause() -> None:
+    """A step that failed without blocking the report (the query plan could
+    not be read, the run fell back to the question itself) holds an
+    otherwise clean run at needs_review, and the result says which cause."""
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+
+    class UnreadablePlanLLM(FakeLLM):
+        def _plan_block(self) -> str:
+            return "keine Liste von Suchanfragen"
+
+    llm = UnreadablePlanLLM(
+        claim_payload=_CLEAN_CLAIM_PAYLOAD,
+        answer_bindings=_clean_answer_bindings(),
+    )
+    raw, _events = _run_scenario(llm, FakeSearch(fixture))
+    state = raw["result_state"]
+    metrics = ResearchResult.from_raw(raw).metrics
+
+    failures = state.get("algorithm_failures") or []
+    assert failures, "precondition: the plan failure was recorded"
+    assert not any(failure.get("blocking") for failure in failures), failures
+    statuses = {b.get("binding_status") for b in state.get("answer_claim_bindings", [])}
+    assert "matched" in statuses and "citation_without_claim" not in statuses, statuses
+
+    assert metrics.evidence_contract_status == "needs_review"
+    assert metrics.evidence_contract_causes == ["algorithm_failure"]
+    assert metrics.confidence_cap_reasons == ["algorithm_failure"]
+    _assert_notice_names_only(raw["answer"], "algorithm_failure")
+
+
+def test_a_cited_link_without_a_record_is_named_as_the_cause(monkeypatch) -> None:
+    """The URL audit's own signal: a cited link that resolves to no record.
+    The link allowlist of a run rules it out in normal flow, so the audit's
+    result is extended here; the contract still has to name it."""
+    import inqtrix.nodes as nodes
+
+    real_audit = nodes.audit_answer_evidence_bindings
+
+    def audit_with_an_unknown_link(answer_body, evidence_ledger):
+        return [
+            *real_audit(answer_body, evidence_ledger),
+            {
+                "binding_id": "bind_ev_without_record",
+                "citation_url": "https://example.org/ohne-beleg",
+                "evidence_id": "",
+                "verification": "unknown",
+                "binding_status": "unknown_citation",
+            },
+        ]
+
+    monkeypatch.setattr(nodes, "audit_answer_evidence_bindings", audit_with_an_unknown_link)
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    llm = FakeLLM(
+        claim_payload=_CLEAN_CLAIM_PAYLOAD,
+        answer_bindings=_clean_answer_bindings(),
+    )
+    raw, _events = _run_scenario(llm, FakeSearch(fixture))
+    metrics = ResearchResult.from_raw(raw).metrics
+
+    assert metrics.unbound_answer_citations_count == 1
+    assert metrics.evidence_contract_status == "needs_review"
+    assert metrics.evidence_contract_causes == ["unknown_citation"]
+    assert metrics.confidence_cap_reasons == ["unknown_citation"]
+    _assert_notice_names_only(raw["answer"], "unknown_citation")
+
+
+def test_depth_gap_alone_caps_a_clean_run_at_six() -> None:
+    """Three supported statements from one source, nothing cited without a
+    record or a statement: the run is clean, and the depth gap alone holds
+    the confidence. The evaluator's 8 ends at the ceiling of 6, the ceiling
+    names the gap's own reasons, and the report carries the basis line with
+    the numbers instead of a warning notice."""
+    from inqtrix.agents.kernel.evidence_read import research_evidence_note
+
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    llm = FakeLLM(
+        claim_payload=_THREE_CLAIMS_ONE_SOURCE,
+        source_roles=_FIXTURE_SOURCE_ROLES,
+        answer_bindings=[
+            {"label": "E1", "claim_text": _THREE_CLAIMS_ONE_SOURCE[0]["claim_text"]},
+        ],
+        evaluate_confidence=8,
+    )
+    raw, _events = _run_scenario(llm, FakeSearch(fixture))
+    state = raw["result_state"]
+    metrics = ResearchResult.from_raw(raw).metrics
+
+    statuses = {b.get("binding_status") for b in state.get("answer_claim_bindings", [])}
+    assert "matched" in statuses, state.get("answer_claim_bindings")
+    assert not statuses & {"citation_without_claim"}, statuses
+    gap = state["evidence_depth_gap"]
+    assert gap["active"] and gap["single_source_count"] == gap["supported_count"] == 3, gap
+
+    assert metrics.evidence_contract_status == "clean"
+    assert metrics.evidence_contract_causes == []
+    assert metrics.confidence == 6
+    assert metrics.confidence_cap == 6
+    assert metrics.evidence_depth_gap_reasons == [
+        "no_cross_checked_claims", "majority_single_source_claims",
+    ]
+    assert metrics.confidence_cap_reasons == metrics.evidence_depth_gap_reasons
+
+    answer = raw["answer"]
+    assert f"{_PROVIDER_BASIS_LINE} {_depth_numbers(0, 3)}{_FOOTER_RULE}" in answer, answer[-1500:]
+    assert _NOTICE_HEADING not in answer, answer[-1500:]
+    assert "single-source" not in answer, answer[-600:]
+    # A parent run reading this child learns that clean is capped, and why.
+    assert research_evidence_note(metrics.model_dump()).startswith(
+        "Evidence state of the subtask: clean, confidence 6/10 (ceiling 6: "
+        "none of the supported statements counts as cross-checked; most "
+        "supported statements cite a single source)."
+    )
+
+
+def test_two_primary_sources_per_statement_are_not_called_single_source() -> None:
+    """Four statements with two primary sources each: no statement rests on
+    a single source, yet none counts as confirmed by independent witnesses
+    because a primary source wins first. The run is clean; the ceiling says
+    why and does not claim a single-source majority, and the basis line
+    counts every statement with more than one source."""
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    llm = FakeLLM(
+        claim_payload=_FOUR_CLAIMS_TWO_PRIMARY_SOURCES,
+        source_roles=_FIXTURE_SOURCE_ROLES,
+        answer_bindings=[
+            {"label": "E1", "claim_text": _FOUR_CLAIMS_TWO_PRIMARY_SOURCES[0]["claim_text"]},
+        ],
+        evaluate_confidence=8,
+    )
+    raw, _events = _run_scenario(llm, FakeSearch(fixture))
+    state = raw["result_state"]
+    metrics = ResearchResult.from_raw(raw).metrics
+
+    gap = state["evidence_depth_gap"]
+    assert gap["supported_count"] == 4 and gap["single_source_count"] == 0, gap
+    assert {
+        claim.get("verification_basis") for claim in state["consolidated_claims"]
+    } == {"primary_source"}, state["consolidated_claims"]
+
+    assert metrics.evidence_contract_status == "clean"
+    assert metrics.evidence_contract_causes == []
+    assert metrics.confidence == 6
+    assert metrics.confidence_cap == 6
+    assert metrics.evidence_depth_gap_reasons == ["no_cross_checked_claims"]
+    assert metrics.confidence_cap_reasons == ["no_cross_checked_claims"]
+    assert metrics.single_source_ratio == 0.0
+    assert _depth_numbers(4, 4) in raw["answer"], raw["answer"][-1500:]
+
+
+def test_the_research_basis_matches_the_projection_a_review_reads() -> None:
+    """The basis a research result reports equals what the evidence
+    projection of a review yields for the same cited references and the
+    same retained searches, by the same material rule."""
+    from inqtrix.agents.evidence_context import project_evidence_context
+    from inqtrix.evidence import cited_material_basis
+
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    llm = FakeLLM(
+        claim_payload=_CLEAN_CLAIM_PAYLOAD,
+        answer_bindings=_clean_answer_bindings(),
+    )
+    raw, _events = _run_scenario(llm, FakeSearch(fixture))
+    result = ResearchResult.from_raw(raw)
+
+    cited = [
+        reference.model_dump(mode="json")
+        for reference in result.references
+        if reference.cited
+    ]
+    assert cited, "precondition: the answer cites a reference"
+    projected = project_evidence_context(cited, result.web_search_ledger or {})
+    kinds = [source["material_kind"] for source in projected["sources"]]
+
+    assert result.metrics.evidence_basis == cited_material_basis(kinds) == "provider_context"
+    assert result.metrics.provider_only_reference_count == kinds.count("provider_context")
+
+
+class _AnswerProviderDownLLM(FakeLLM):
+    """Every report section fails the way an unavailable service does."""
+
+    def complete_with_metadata(self, prompt, **kwargs):
+        raise AzureOpenAIAPIError(
+            model="reasoning-model", status_code=503, error_code="server_error", message="unavailable"
+        )
+
+
+def _binding_cause_scenario() -> tuple[FakeLLM, AgentSettings]:
+    llm = FakeLLM(
+        claim_payload=_CLEAN_CLAIM_PAYLOAD,
+        source_roles=_FIXTURE_SOURCE_ROLES,
+        answer_bindings=[
+            {"label": "E1", "claim_text": _CLEAN_CLAIM_PAYLOAD[0]["claim_text"]},
+            {"label": "E3", "claim_text": "Ergaenzender Hintergrund ohne belegte Kennzahl."},
+        ],
+    )
+    return llm, _settings()
+
+
+def _source_context_scenario() -> tuple[FakeLLM, AgentSettings]:
+    return FakeLLM(claim_payload=[]), _settings()
+
+
+def _blocked_report_scenario() -> tuple[FakeLLM, AgentSettings]:
+    # The forensic profile blocks the report instead of writing a fallback.
+    settings = AgentSettings(
+        testing_mode=True,
+        observability_profile="forensic",
+        first_round_queries=2,
+        max_rounds=1,
+        min_rounds=1,
+        report_profile=ReportProfile.COMPACT,
+    )
+    return _AnswerProviderDownLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD), settings
+
+
+@pytest.mark.parametrize(
+    ("key", "scenario"),
+    [
+        ("evidence_contract_needs_review", _binding_cause_scenario),
+        ("evidence_contract_source_context_only", _source_context_scenario),
+        ("algorithm_failure_report_blocked", _blocked_report_scenario),
+    ],
+)
+def test_an_evidence_step_stays_a_warning_when_its_text_changes(monkeypatch, key, scenario) -> None:
+    """Each evidence step names its severity itself. Reworded so that no
+    word of it names a problem, the step still reaches the run events as a
+    warning."""
+    from inqtrix.i18n import MESSAGES
+
+    reworded = "Hinweis zur Belegbindung des Berichts"
+    monkeypatch.setitem(MESSAGES, key, {"de": reworded, "en": reworded})
+    events: list[tuple[str, dict]] = []
+    llm, settings = scenario()
+
+    _run_scenario(
+        llm,
+        FakeSearch(load_search_result_fixture(_FIXTURE_SLUG)),
+        settings,
+        run_event_sink=lambda event_type, payload: events.append((event_type, payload)),
+    )
+
+    steps = [
+        payload
+        for event_type, payload in events
+        if event_type == "inqtrix.progress.message" and payload.get("message") == reworded
+    ]
+    assert [step["severity"] for step in steps] == ["warning"], steps
+
+
+class _SmallWindowLLM(FakeLLM):
+    """A model whose context window cannot hold a report section's prompt."""
+
+    context_window_tokens = 1_000
+
+
+class _OutputLimitLLM(FakeLLM):
+    """Every report section stops at the model's output limit."""
+
+    def complete_with_metadata(self, prompt, **kwargs):
+        response = super().complete_with_metadata(prompt, **kwargs)
+        return dataclasses.replace(response, finish_reason="length")
+
+
+class _ClassifyTimeoutLLM(FakeLLM):
+    """The classification call times out; the research goes on without it."""
+
+    def complete(self, prompt, **kwargs):
+        if "CLASSIFICATION" in prompt:
+            from inqtrix.exceptions import AgentTimeout
+
+            raise AgentTimeout("classification timed out")
+        return super().complete(prompt, **kwargs)
+
+
+class _UnhandledErrorLLM(FakeLLM):
+    """Every model call fails with an error no node handles."""
+
+    def complete(self, prompt, **kwargs):
+        raise RuntimeError("model unavailable")
+
+    def complete_with_metadata(self, prompt, **kwargs):
+        raise RuntimeError("model unavailable")
+
+
+class _RateLimitedChatLLM(FakeLLM):
+    """The chat-only call hits the model service's request limit."""
+
+    def complete_with_metadata(self, prompt, **kwargs):
+        from inqtrix.exceptions import AgentRateLimited
+
+        raise AgentRateLimited("reasoning-model", RuntimeError("429 Too Many Requests"))
+
+
+class _RateLimitedLLM(FakeLLM):
+    """Every model call of the research run hits the service's request limit."""
+
+    def complete(self, prompt, **kwargs):
+        from inqtrix.exceptions import AgentRateLimited
+
+        raise AgentRateLimited("reasoning-model", RuntimeError("429 Too Many Requests"))
+
+    def complete_with_metadata(self, prompt, **kwargs):
+        from inqtrix.exceptions import AgentRateLimited
+
+        raise AgentRateLimited("reasoning-model", RuntimeError("429 Too Many Requests"))
+
+
+def _chat_only_settings() -> AgentSettings:
+    return AgentSettings(testing_mode=True, skip_search=True)
+
+
+@pytest.mark.parametrize(
+    ("key", "make_llm", "make_settings", "raises"),
+    [
+        # FakeLLM declares no context window, so the answer node warns once.
+        (
+            "context_window_unknown_warning",
+            lambda: FakeLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_bindings=_clean_answer_bindings()),
+            _settings,
+            None,
+        ),
+        ("context_window_too_small", lambda: _SmallWindowLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD), _settings, None),
+        (
+            "compose_section_token_limit",
+            lambda: _OutputLimitLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_bindings=_clean_answer_bindings()),
+            _settings,
+            None,
+        ),
+        (
+            "compose_section_truncation",
+            lambda: FakeLLM(
+                claim_payload=_CLEAN_CLAIM_PAYLOAD,
+                answer_override="Ein vollständiger Satz steht hier.\n\nDer Abschnitt bricht ab",
+            ),
+            _settings,
+            None,
+        ),
+        (
+            "classify_failed",
+            lambda: _ClassifyTimeoutLLM(
+                claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_bindings=_clean_answer_bindings()
+            ),
+            _settings,
+            None,
+        ),
+        ("run_failed", lambda: _UnhandledErrorLLM(), _settings, RuntimeError),
+        ("chat_mode_failed", lambda: _UnhandledErrorLLM(), _chat_only_settings, RuntimeError),
+        ("run_aborted", lambda: _RateLimitedChatLLM(), _chat_only_settings, None),
+        # The research path ends at the same request limit as the chat path.
+        ("run_rate_limited", lambda: _RateLimitedLLM(), _settings, None),
+        # Every section comes back empty, so the writing stops after two.
+        ("compose_aborted", lambda: FakeLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_override=""), _settings, None),
+    ],
+)
+def test_a_problem_step_stays_a_warning_when_its_text_changes(
+    monkeypatch, key, make_llm, make_settings, raises
+) -> None:
+    """A step that reports a problem names its severity itself. Reworded so
+    that no word of it names a problem, the step still reaches the run
+    events as a warning, every time it is sent."""
+    from inqtrix.i18n import MESSAGES
+
+    reworded = "Hinweis zum Ablauf der Recherche"
+    monkeypatch.setitem(MESSAGES, key, {"de": reworded, "en": reworded})
+    events: list[tuple[str, dict]] = []
+
+    def sink(event_type: str, payload: dict) -> None:
+        events.append((event_type, payload))
+
+    search = FakeSearch(load_search_result_fixture(_FIXTURE_SLUG))
+    if raises is None:
+        _run_scenario(make_llm(), search, make_settings(), run_event_sink=sink)
+    else:
+        with pytest.raises(raises):
+            _run_scenario(make_llm(), search, make_settings(), run_event_sink=sink)
+
+    severities = [
+        payload["severity"]
+        for event_type, payload in events
+        if event_type == "inqtrix.progress.message" and payload.get("message") == reworded
+    ]
+    assert severities and set(severities) == {"warning"}, severities
+
+
+def test_an_extraction_that_finds_no_statement_is_an_info_step(monkeypatch) -> None:
+    """A page that states nothing the question needs is the ordinary yield of
+    a search, so the step informs; the server log keeps its WARNING for the
+    operator. Reworded, the step still goes out as info."""
+    from inqtrix.i18n import MESSAGES
+
+    reworded = "Hinweis zur Aussagenerfassung"
+    monkeypatch.setitem(MESSAGES, "claim_extract_empty", {"de": reworded, "en": reworded})
+    events: list[tuple[str, dict]] = []
+
+    def sink(event_type: str, payload: dict) -> None:
+        events.append((event_type, payload))
+
+    search = FakeSearch(load_search_result_fixture(_FIXTURE_SLUG))
+    _run_scenario(
+        FakeLLM(claim_payload=None, answer_bindings=_clean_answer_bindings()),
+        search,
+        _settings(),
+        run_event_sink=sink,
+    )
+
+    severities = [
+        payload["severity"]
+        for event_type, payload in events
+        if event_type == "inqtrix.progress.message" and payload.get("message") == reworded
+    ]
+    assert severities and set(severities) == {"info"}, severities
+
+
+# --------------------------------------------------------------------------- #
+# Reader texts of a report: no internal codes, in the language of the answer
+# --------------------------------------------------------------------------- #
+
+# The internal codes and labels no report text may carry, in any language.
+_INTERNAL_REPORT_CODES = (
+    "ALGO-FAIL",
+    "Evidence-Contract",
+    "single-source",
+    "mehrfach belegt",
+    "Hard-Fact",
+    "hard-fact",
+    "Evidence-Pfad",
+    "Records",
+    "Claim-Extraction",
+    "evidence ledger",
+)
+# Every piece of the stats footer, spelled out per language; a piece the
+# server adds or rewords outside these forms is caught at the footer.
+_FOOTER_PIECE = {
+    "de": re.compile(
+        r"\d+ (?:Quellen? recherchiert|Belege? für den Bericht bereitgestellt"
+        r"|Quellen? im Bericht verlinkt|verifizierte Aussagen?(?: gegengeprüft)?"
+        r"|vom Anbieter zugeschriebene Aussagen?|Evidenzbelege? wegen Budget ausgelassen"
+        r"|fehlgeschlagener Schritt|fehlgeschlagene Schritte|Suchen?|Runden?)"
+        r"|\d+s|\d+:\d{2} min|Konfidenz \d+/10"
+    ),
+    "en": re.compile(
+        r"\d+ (?:sources? researched|evidence records? provided for the report"
+        r"|sources? linked in the report|verified statements?(?: cross-checked)?"
+        r"|statements? attributed by the search provider|evidence records? omitted for budget"
+        r"|failed steps?|search(?:es)?|rounds?)"
+        r"|\d+s|\d+:\d{2} min|Confidence \d+/10"
+    ),
+}
+# German marks a fixed text would carry into an English report: real
+# umlauts, and words with no English twin.
+_GERMAN_MARK = re.compile(
+    r"[äöüßÄÖÜ]|\b(?:der|das|und|nicht|kein|keine|wurde|ist|sind|eine|mit|ohne|zur|zum"
+    r"|Quelle|Quellen|Runde|Runden|Suchen|Konfidenz|Grundlage|Hinweis|Bericht|Diagnose"
+    r"|Fehlende|Einordnung|Ausblick|Unbalancierte|Offener|leer)\b"
+)
+
+
+class _UnreadablePlanLLM(FakeLLM):
+    """The query plan cannot be read, so the run searches with the question."""
+
+    def _plan_block(self) -> str:
+        return "keine Liste von Suchanfragen"
+
+
+def _footer_pieces(answer: str) -> list[str]:
+    footer = answer.rsplit(_FOOTER_RULE, 1)[1]
+    assert footer.endswith("*"), answer[-400:]
+    return footer[:-1].split(" · ")
+
+
+def _english_llm(cls: type[FakeLLM] = FakeLLM, **kwargs) -> FakeLLM:
+    return cls(classify_language="en", classify_search_language="en", **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("make_llm", "make_settings", "failed_steps"),
+    [
+        (lambda: FakeLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_bindings=_clean_answer_bindings()), _settings, 0),
+        (
+            lambda: _UnreadablePlanLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_bindings=_clean_answer_bindings()),
+            _settings,
+            1,
+        ),
+        (lambda: _blocked_report_scenario()[0], lambda: _blocked_report_scenario()[1], 1),
+    ],
+    ids=["clean", "failed_step", "blocked"],
+)
+def test_a_german_report_carries_no_internal_code(make_llm, make_settings, failed_steps) -> None:
+    """A German report, the blocked one included, names no internal code:
+    its footer is reader phrases only, a failed step is counted in words,
+    and the confidence reads 'Konfidenz'."""
+    raw, _events = _run_scenario(make_llm(), FakeSearch(load_search_result_fixture(_FIXTURE_SLUG)), make_settings())
+    answer = raw["answer"]
+    state = raw["result_state"]
+
+    assert len(state.get("algorithm_failures") or []) == failed_steps, state.get("algorithm_failures")
+    assert not [code for code in _INTERNAL_REPORT_CODES if code in answer], answer[-2500:]
+    pieces = _footer_pieces(answer)
+    assert [piece for piece in pieces if not _FOOTER_PIECE["de"].fullmatch(piece)] == [], pieces
+    assert any(piece.startswith("Konfidenz ") for piece in pieces), pieces
+    if failed_steps:
+        assert "1 fehlgeschlagener Schritt" in pieces, pieces
+
+
+def test_the_blocked_german_report_keeps_its_diagnosis_for_operators() -> None:
+    """The blocked report says in German what happened, keeps the run id,
+    and lists the technical failure verbatim under a section for operators,
+    where the settings to look at stand as code."""
+    llm, settings = _blocked_report_scenario()
+    raw, _events = _run_scenario(llm, FakeSearch(load_search_result_fixture(_FIXTURE_SLUG)), settings)
+    answer = raw["answer"]
+    state = raw["result_state"]
+
+    reader_part, operator_part = answer.split("## Für den Betrieb: blockierende Fehler", 1)
+    assert reader_part.startswith("## Kein Bericht erstellt\n\nEin Schritt, den der Bericht braucht, ist fehlgeschlagen."), answer[:600]
+    assert f"- Laufkennung: `{state['_run_id']}`" in reader_part, reader_part
+    assert "`OBSERVABILITY_PROFILE=forensic`" not in reader_part, reader_part
+    failure = state["algorithm_failures"][0]
+    assert f"\n  {failure['message']}\n" in operator_part, operator_part
+    assert "### Nächster Schritt" in operator_part, operator_part
+    assert "`OBSERVABILITY_PROFILE=forensic`" in operator_part, operator_part
+
+
+@pytest.mark.parametrize(
+    ("make_llm", "make_settings"),
+    [
+        (
+            lambda: _english_llm(
+                claim_payload=_CLEAN_CLAIM_PAYLOAD,
+                answer_override="A complete sentence stands here.\n\nThe section breaks off",
+            ),
+            _settings,
+        ),
+        (
+            lambda: _english_llm(_AnswerProviderDownLLM, claim_payload=_CLEAN_CLAIM_PAYLOAD),
+            lambda: _blocked_report_scenario()[1],
+        ),
+    ],
+    ids=["cut_off", "blocked"],
+)
+def test_an_english_report_carries_no_fixed_german_text(make_llm, make_settings) -> None:
+    """Every text the server adds to an English report reads in English:
+    the completeness note and its reasons, the evidence notice, the source
+    labels, the blocked report and the footer. The model's text here is
+    English too, so the whole report is checked."""
+    raw, _events = _run_scenario(make_llm(), FakeSearch(load_search_result_fixture(_FIXTURE_SLUG)), make_settings())
+    answer = raw["answer"]
+
+    assert raw["result_state"]["language"] == "en"
+    assert _GERMAN_MARK.findall(answer) == [], answer[-2500:]
+    assert not [code for code in _INTERNAL_REPORT_CODES if code in answer], answer[-2500:]
+    pieces = _footer_pieces(answer)
+    assert [piece for piece in pieces if not _FOOTER_PIECE["en"].fullmatch(piece)] == [], pieces
+
+
+def test_an_unlabelled_source_is_numbered_in_the_language_of_the_report() -> None:
+    """A source the evidence overview gave no label is listed under the
+    source label of the run's language, in the text and in the record; a
+    record handed over without a label gets the same word."""
+    from inqtrix.nodes import _build_answer_appendix_sections, _format_report_reference_records
+
+    strategies = create_default_strategies(_settings())
+    for language, word in (("en", "Source"), ("de", "Quelle")):
+        appendix = _build_answer_appendix_sections(
+            "",
+            allowed_citations=["https://example.com/report/a"],
+            label_urls={},
+            strategies=strategies,
+            incomplete_reasons=[],
+            finish_reason="stop",
+            language=language,
+        )
+        assert f"- [{word} 1](https://example.com/report/a)" in "\n".join(appendix.sections), language
+        assert [record["label"] for record in appendix.references] == [f"{word} 1"], language
+        records = _format_report_reference_records(
+            [("", "https://example.com/report/b")], strategies, language=language
+        )
+        assert [record["label"] for record in records] == [word], language
+
+
+@pytest.mark.parametrize(
+    ("language", "step"),
+    [
+        ("de", "Warnung: Abschnitt 'Kernaussagen' wirkt abgeschnitten: endet mit einem kurzen Bruchstück ohne Satzende"),
+        ("en", "Warning: section 'Key points' looks cut off: ends in a short fragment without a sentence ending"),
+    ],
+)
+def test_a_cut_off_section_names_its_signal_in_the_language_of_the_run(language, step) -> None:
+    """The step of a section that looks cut off names why in the run's
+    language; the log keeps the English words."""
+    llm = FakeLLM(
+        classify_language=language,
+        classify_search_language=language,
+        claim_payload=_CLEAN_CLAIM_PAYLOAD,
+        answer_override=_CUT_OFF_SECTION,
+    )
+    raw, events = _run_scenario(llm, FakeSearch(load_search_result_fixture(_FIXTURE_SLUG)))
+
+    assert step in _progress_messages(events), _progress_messages(events)
+    section_logs = raw["result_state"]["iteration_logs"][-1]["section_logs"]
+    assert section_logs[0]["incomplete_reasons"] == [
+        "ends in a short fragment without a sentence ending"
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Scenario: source_context_only
 # --------------------------------------------------------------------------- #
 
@@ -513,6 +1381,40 @@ def test_provider_grounded_search_is_preserved_without_page_fetch() -> None:
     assert any(search["citations"] for search in searches.values())
 
 
+def test_a_research_reference_carries_its_own_cell_of_a_cited_table_row() -> None:
+    """Two sources in one row of the provider's table, each annotated at
+    its link: the references of the result say what the row says for their
+    own source, behind the label of the row."""
+    vdi = "https://www.vdi.example/faktencheck"
+    energy = "https://www.energiewechsel.example/waermepumpe"
+    answer = (
+        "| Kriterium | Luft-Wasser | Sole-Wasser |\n"
+        "|---|---|---|\n"
+        f"| **Effizienz** | Schwankt mit der Außentemperatur. ([vdi.example]({vdi})) "
+        f"| Meist effizienter, weil das Erdreich konstant bleibt. ([energiewechsel.example]({energy})) |"
+    )
+
+    def span(url: str) -> CitationSpan:
+        start = answer.index("([", answer.index(url) - 40)
+        return CitationSpan(start, answer.index("))", start) + 2)
+
+    search = FakeSearch(GroundedSearchResult(
+        answer=answer,
+        sources=[
+            GroundedSource(url=url, rank=rank, origin="url_citation", spans=(span(url),))
+            for rank, url in enumerate((vdi, energy), start=1)
+        ],
+    ))
+    raw, _events = _run_scenario(FakeLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD), search)
+    result = ResearchResult.from_raw(raw)
+
+    supports = {reference.url: reference.grounded_support for reference in result.references}
+    assert supports == {
+        vdi: "**Effizienz** | Schwankt mit der Außentemperatur.",
+        energy: "**Effizienz** | Meist effizienter, weil das Erdreich konstant bleibt.",
+    }
+
+
 def test_source_context_only_when_no_claims_extracted() -> None:
     """No extracted claims -> ``source_context_only`` and capped confidence."""
     fixture = load_search_result_fixture(_FIXTURE_SLUG)
@@ -527,6 +1429,23 @@ def test_source_context_only_when_no_claims_extracted() -> None:
     assert result.metrics.evidence_contract_status == "source_context_only"
     # _CONTRACT_CONFIDENCE_CAP["source_context_only"] == 4.
     assert state["final_confidence"] <= 4
+    # The status is its own reason; no cause of needs_review is read into it.
+    assert result.metrics.evidence_contract_causes == []
+    assert result.metrics.confidence_cap == 4
+    assert result.metrics.confidence_cap_reasons == ["source_context_only"]
+    # The reader gets the source-context notice under the warning heading;
+    # the basis line names no numbers while no statement is supported.
+    answer = raw["answer"]
+    assert _NOTICE_HEADING in answer, answer[-1500:]
+    # The notice says what the status counts: no cited sentence restates a
+    # recorded statement, whatever that statement's status.
+    assert (
+        "Kein Satz der Antwort, der eine Quelle zitiert, gibt eine zu dieser "
+        "Quelle erfasste Aussage wieder. Ob ein Satz von seiner Quelle gestützt "
+        "wird, ist daher nicht festgestellt."
+    ) in answer, answer[-1500:]
+    assert "verifizierte oder strittige" not in answer, answer[-1500:]
+    assert f"{_PROVIDER_BASIS_LINE}{_FOOTER_RULE}" in answer, answer[-1500:]
 
     # With no consolidated claims there can be no claim-level "matched" binding,
     # so the claim-grounded metric reports 0 -- consistent with the contract.
@@ -600,6 +1519,12 @@ def test_empty_search_produces_no_evidence() -> None:
     # NO citable evidence, not merely an uncited body.
     result = ResearchResult.from_raw(raw)
     assert result.metrics.evidence_contract_status == "unknown"
+    # Nothing is cited, so the run names no basis and carries no ceiling,
+    # and the report carries no basis line.
+    assert result.metrics.evidence_basis == "none"
+    assert result.metrics.cited_reference_count == 0
+    assert result.metrics.confidence_cap is None
+    assert "Grundlage:" not in raw["answer"], raw["answer"][-800:]
 
     # Genuinely empty -> the empty-search notice still fires (no over-correction).
     messages = _progress_messages(events)
@@ -892,6 +1817,104 @@ def test_english_classified_run_composes_english_headings() -> None:
     assert (state["language"], state["language_source"]) == ("en", "classified")
     assert "## Summary" in raw["answer"] and "## Key points" in raw["answer"]
     assert "## Kurzfazit" not in raw["answer"] and "## Kernaussagen" not in raw["answer"]
-    # The system-generated appendix and footer follow the answer language too.
+    # The system-generated appendix, basis line and footer follow the answer
+    # language too.
     assert "## References" in raw["answer"] and "Referenzen" not in raw["answer"]
     assert " round" in raw["answer"] and "Runde" not in raw["answer"]
+    assert (
+        "Basis: what the search provider returned for the cited sources; the "
+        "pages themselves were not read. Supported statements of the research "
+        "with more than one source: 1 of 1."
+    ) in raw["answer"], raw["answer"][-1200:]
+    assert "Grundlage:" not in raw["answer"]
+
+
+# --------------------------------------------------------------------------- #
+# Scenario: a cut-off report names what it lacks, in its own language
+# --------------------------------------------------------------------------- #
+
+_CUT_OFF_SECTION = "A complete sentence stands here.\n\nThe section breaks off"
+
+
+class _EmptyClosingSectionLLM(FakeLLM):
+    """The closing section of a German compact report comes back empty, every
+    other section ends in a fragment."""
+
+    def complete_with_metadata(self, prompt, **kwargs):
+        response = super().complete_with_metadata(prompt, **kwargs)
+        if "Einordnung / Ausblick" in prompt:
+            return dataclasses.replace(response, content="")
+        return response
+
+
+def test_a_cut_off_english_report_misses_no_closing_section_it_carries() -> None:
+    """An English report checks its closing sections under its own
+    headings: every section of the plan is there, so the cut-off report
+    names none of them missing, and its completeness note reads in
+    English."""
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    llm = FakeLLM(
+        classify_language="en",
+        classify_search_language="en",
+        claim_payload=_CLEAN_CLAIM_PAYLOAD,
+        answer_override=_CUT_OFF_SECTION,
+    )
+    raw, _events = _run_scenario(llm, FakeSearch(fixture))
+    state = raw["result_state"]
+    answer = raw["answer"]
+
+    assert "## Context and outlook" in answer, answer[:1500]
+    assert state["answer_incomplete"] is True
+    assert state["answer_incomplete_reasons"] == [
+        "ends in a short fragment without a sentence ending"
+    ]
+    note = answer[answer.index("## Note on completeness"):]
+    assert "- Diagnosis: ends in a short fragment without a sentence ending\n" in note, note
+    assert "closing section" not in note and "Abschluss" not in note, note
+
+
+def test_a_cut_off_quick_report_is_not_held_to_closing_sections_it_never_plans() -> None:
+    """The quick profile plans a summary and key points only, so a cut-off
+    quick report names no missing closing section."""
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    settings = AgentSettings(
+        testing_mode=True,
+        first_round_queries=2,
+        max_rounds=1,
+        min_rounds=1,
+        report_profile=ReportProfile.SCHNELL,
+    )
+    llm = FakeLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_override=_CUT_OFF_SECTION)
+    raw, _events = _run_scenario(llm, FakeSearch(fixture), settings)
+    state = raw["result_state"]
+
+    assert state["answer_incomplete"] is True
+    assert state["answer_incomplete_reasons"] == [
+        "ends in a short fragment without a sentence ending"
+    ]
+    note = raw["answer"][raw["answer"].index("## Hinweis zur Vollständigkeit"):]
+    assert "- Diagnose: endet mit einem kurzen Bruchstück ohne Satzende\n" in note, note
+    assert "Abschluss" not in note, note
+
+
+def test_a_cut_off_report_names_the_closing_section_it_lacks() -> None:
+    """The positive control: a compact report whose closing section came
+    back empty names that section, under its heading in the run's
+    language."""
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    llm = _EmptyClosingSectionLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD, answer_override=_CUT_OFF_SECTION)
+    raw, _events = _run_scenario(llm, FakeSearch(fixture))
+    state = raw["result_state"]
+    answer = raw["answer"]
+
+    body = answer[: answer.index("## Hinweis zur Vollständigkeit")]
+    assert "## Einordnung / Ausblick" not in body and "## Detailanalyse" in body, body
+    assert state["answer_incomplete_reasons"] == [
+        "ends in a short fragment without a sentence ending",
+        "missing closing sections: Einordnung / Ausblick",
+    ]
+    note = answer[answer.index("## Hinweis zur Vollständigkeit"):]
+    assert (
+        "- Diagnose: endet mit einem kurzen Bruchstück ohne Satzende; "
+        "fehlende Abschlussabschnitte: Einordnung / Ausblick\n"
+    ) in note, note

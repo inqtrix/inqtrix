@@ -2,7 +2,7 @@
 
 Thin HTTP layer over the shared orchestration cores in
 :mod:`inqtrix.services.editor_assist_service` (shared with the
-workspace-agent patch flow). The router keeps request parsing, workspace
+agent's patch flow). The router keeps request parsing, workspace
 resolution, quota admission/record, the concurrency semaphore, and the
 exception -> error-envelope mapping; the SYNC cores run in the executor
 under the same ``editor_wait_seconds`` HTTP grace as before, so the wire
@@ -51,6 +51,7 @@ from inqtrix.services.editor_assist_service import (
 from inqtrix.services.request_parsing import (
     editor_wait_seconds,
     error_response,
+    read_json_object,
     workspace_id_from_request,
 )
 from inqtrix.urls import sanitize_error
@@ -82,10 +83,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         node) and prefers native structured output, with a visible
         prompt-JSON fallback.
         """
-        try:
-            body = await req.json()
-        except Exception:
-            return error_response(400, "Invalid JSON body", "invalid_request_error")
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
 
         try:
             workspace_id = workspace_id_from_request(req, body)
@@ -222,10 +222,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(container.principal_dependency),
     ):
         """Turn one free-form editor instruction into anchored document edits."""
-        try:
-            body = await req.json()
-        except Exception:
-            return error_response(400, "Invalid JSON body", "invalid_request_error")
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
 
         try:
             workspace_id = workspace_id_from_request(req, body)

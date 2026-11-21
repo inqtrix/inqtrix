@@ -97,14 +97,38 @@ To explore the UI without any backend or API keys, open Settings (Einstellungen)
 
 ## What a good answer looks like
 
-A healthy run prints the final Markdown answer followed by a stats footer:
+A healthy run prints the final Markdown answer, its reference sections, one
+line on what the cited sources rest on, and a stats footer. The texts follow
+the language of the question; a German question gives, for example:
 
 ```text
+Grundlage: die Angaben des Suchanbieters zu den zitierten Quellen; die Seiten selbst wurden nicht gelesen. Gestützte Aussagen der Recherche mit mehr als einer Quelle: 3 von 14.
+
 ---
-*18 Quellen recherchiert · 9 Suchen · 3 Runden · 45s · Confidence 8/10*
+*18 Quellen recherchiert · 22 Belege für den Bericht bereitgestellt · 7 Quellen im Bericht verlinkt · 14 vom Anbieter zugeschriebene Aussagen · 9 Suchen · 3 Runden · 45s · Konfidenz 6/10*
 ```
 
-If you see confidence pinned at 8 with open sub-questions, that is the coverage cap (see [Sub-question coverage](../architecture/websearch/stopping.md#sub-question-coverage)): it fires only above 8 and clamps to exactly 8. A run that sits at 6 or 7 usually means no guardrail fired at all: the evaluator's value is written through unchanged, and every clamp is conditional — the low-tier-source majority and the two-or-more-contested-claims guardrails only engage above 7, the missing-citations and unbacked-evidence caps only above 6. Look for a reason tag in the iteration log before assuming a rule held the value down. If confidence stays at 1–4 across rounds, the default `compact` profile simply runs out its two rounds: falsification can only arm in the final evaluate — with no further planning round left to act on it — and stagnation is suppressed in exactly that case, so raise `MAX_ROUNDS` or set `REPORT_PROFILE=deep` to give either mechanism room to work (see [Falsification mode](../architecture/websearch/stopping.md#falsification-mode)).
+The line counts every supported statement the research collected, not only
+those the report cites, and a source is a distinct address. With a search
+provider that returns excerpts of its sources (the default Perplexity
+provider does), the footer can also name verified statements: statements the
+run checked against the search provider's excerpt. A counted footer piece
+appears only when its count is above zero, so a run with a failed step names
+it ("1 fehlgeschlagener Schritt").
+
+When the confidence ends below the evaluator's value, look for a ceiling
+first: `metrics.confidence_cap` and `metrics.confidence_cap_reasons` name it,
+and the Research Desk shows it as the ceiling of the confidence in the
+evidence tab. For example, a web run with three or more supported statements
+of which none counts as cross-checked is capped at 6. If you see confidence pinned at 8
+with open sub-questions, that is the coverage cap (see
+[Sub-question coverage](../architecture/websearch/stopping.md#sub-question-coverage)):
+it fires only above 8 and clamps to exactly 8. Without a ceiling, the
+evaluator's value is written through unchanged, and every clamp is
+conditional: the low-tier-source majority and the two-or-more-contested-claims
+guardrails only engage above 7, the missing-citations and unbacked-evidence
+caps only above 6. Look for a reason tag in the iteration log before assuming
+a rule held the value down. If confidence stays at 1–4 across rounds, the default `compact` profile simply runs out its two rounds: falsification can only arm in the final evaluate — with no further planning round left to act on it — and stagnation is suppressed in exactly that case, so raise `MAX_ROUNDS` or set `REPORT_PROFILE=deep` to give either mechanism room to work (see [Falsification mode](../architecture/websearch/stopping.md#falsification-mode)).
 
 ## What to do when the answer looks wrong
 

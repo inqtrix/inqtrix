@@ -906,31 +906,64 @@ describe('server patch decisions route through the official endpoints (source pi
     'utf8',
   )
 
+  /** One function of the hook, from its signature to the next function. */
+  function hookFunction(signature: string): string {
+    const start = source.indexOf(signature)
+    expect(start, signature).toBeGreaterThan(-1)
+    const length = source.slice(start + signature.length).search(/\n {2}(?:async )?function /)
+    expect(length, signature).toBeGreaterThan(-1)
+    return source.slice(start, start + signature.length + length)
+  }
+
   it('accept and reject check serverPatch BEFORE the collaboration branch', () => {
-    const accept = source
-      .slice(source.indexOf('async function handleAcceptSuggestion'))
-      .slice(0, 700)
-    expect(accept.indexOf('suggestion.serverPatch')).toBeGreaterThan(-1)
-    expect(accept.indexOf('suggestion.serverPatch')).toBeLessThan(
-      accept.indexOf("contentMode === 'collaboration'"),
-    )
-    const reject = source
-      .slice(source.indexOf('async function handleRejectSuggestion'))
-      .slice(0, 700)
-    expect(reject.indexOf('suggestion.serverPatch')).toBeGreaterThan(-1)
-    expect(reject.indexOf('suggestion.serverPatch')).toBeLessThan(
-      reject.indexOf("contentMode === 'collaboration'"),
-    )
+    for (const signature of [
+      'async function handleAcceptSuggestion(',
+      'async function handleRejectSuggestion(',
+    ]) {
+      const handler = hookFunction(signature)
+      const serverPatch = handler.indexOf('suggestion.serverPatch')
+      expect(serverPatch, signature).toBeGreaterThan(-1)
+      expect(handler.indexOf("contentMode === 'collaboration'"), signature).toBeGreaterThan(serverPatch)
+    }
   })
 
-  it('the decision helper uses apply/reject endpoints and the rebase adoption', () => {
-    const helper = source
-      .slice(source.indexOf('async function decideServerPatch'))
-      .slice(0, 2600)
-    expect(helper).toContain('applyEditorPatch(patchId, document.revision')
+  it('the decision helper uses apply/reject endpoints and merges the server text like any other writer', () => {
+    const helper = hookFunction('async function decideServerPatch(')
+    // Applied on the revision the save before it returned; the server's text
+    // afterwards is merged into the record with the record's own base.
+    expect(helper).toContain('const base = await serverPatchBase(document)')
+    expect(helper).toContain('applyEditorPatch(patchId, base.revision')
+    expect(helper).toContain('await mergeServerDocument(document.id, documentRecordFromServer(server))')
     expect(helper).toContain('rejectEditorPatch(patchId')
-    expect(helper).toContain("type: 'rebaseServerEditorDocument'")
     expect(helper).not.toContain('applySuggestionToEditor')
+    expect(helper).not.toContain('contentMarkdown: server.content_markdown')
+  })
+})
+
+describe('which runs replace the suggestions of the instruction run before them (source pin)', () => {
+  // Bound stated: the runs dispatch inside the hook, which these node tests do
+  // not render. The browser tests send an instruction without notes and mirror
+  // agent patches; the send with attached notes is pinned here only.
+  const source = readFileSync(
+    fileURLToPath(new URL('./useEditorSuggestions.ts', import.meta.url)),
+    'utf8',
+  )
+  const optIn = 'replacesPreviousInstructionRun: true'
+
+  /** One function of the hook, from its signature to its closing brace; the
+   * last function of the hook has no next one to end at. */
+  function functionBody(signature: string): string {
+    const start = source.indexOf(signature)
+    expect(start, signature).toBeGreaterThan(-1)
+    const end = source.indexOf('\n  }\n', start)
+    expect(end, signature).toBeGreaterThan(start)
+    return source.slice(start, end)
+  }
+
+  it('both ways to send an instruction opt in, and nothing else does', () => {
+    expect(functionBody('async function executeGlobalRun(')).toContain(optIn)
+    expect(functionBody('async function executeInstructionRun(')).toContain(optIn)
+    expect(source.split(optIn).length - 1).toBe(2)
   })
 })
 

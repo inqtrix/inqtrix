@@ -42,7 +42,7 @@ from inqtrix.runs.deletion_operations import (
     new_deletion_operation_id,
 )
 from inqtrix.server.routers._admin_guard import require_instance_admin
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import error_response, read_json_object
 
 if TYPE_CHECKING:
     from inqtrix.auth.directory import MirroredUser
@@ -162,13 +162,10 @@ def build_admin_router(
         if error is not None:
             return error
         principal, session, _mirror = resolved
-        try:
-            body = await request.json()
-        except Exception:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
-        role = str((body or {}).get("instance_role", "")).strip()
+        body, error = await read_json_object(request)
+        if error is not None:
+            return error
+        role = str(body.get("instance_role", "")).strip()
         if role not in {"admin", "user"}:
             return error_response(
                 400,
@@ -431,15 +428,12 @@ def build_admin_router(
             if error is not None:
                 return error
             principal, _session, _mirror = resolved
-            try:
-                body = await request.json()
-            except Exception:
-                return error_response(
-                    400, "Invalid JSON body", "invalid_request_error"
-                )
-            email = str((body or {}).get("email", "")).strip()
-            password = str((body or {}).get("password", ""))
-            role = str((body or {}).get("instance_role", "user")).strip()
+            body, error = await read_json_object(request)
+            if error is not None:
+                return error
+            email = str(body.get("email", "")).strip()
+            password = str(body.get("password", ""))
+            role = str(body.get("instance_role", "user")).strip()
             if "@" not in email or len(email) > 320:
                 return error_response(
                     400, "Invalid email address", "invalid_request_error"
@@ -456,7 +450,7 @@ def build_admin_router(
                     "Field 'instance_role' must be 'admin' or 'user'",
                     "invalid_request_error",
                 )
-            display_name = str((body or {}).get("display_name", "")).strip() or email
+            display_name = str(body.get("display_name", "")).strip() or email
             credential = LocalCredential(
                 user_id=uuid.uuid4(),
                 subject=new_subject(),
@@ -502,13 +496,10 @@ def build_admin_router(
             if error is not None:
                 return error
             principal, _session, _mirror = resolved
-            try:
-                body = await request.json()
-            except Exception:
-                return error_response(
-                    400, "Invalid JSON body", "invalid_request_error"
-                )
-            password = str((body or {}).get("password", ""))
+            body, error = await read_json_object(request)
+            if error is not None:
+                return error
+            password = str(body.get("password", ""))
             if len(password) < _MIN_PASSWORD_LEN:
                 return error_response(
                     400,

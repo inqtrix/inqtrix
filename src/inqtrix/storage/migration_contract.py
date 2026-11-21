@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-SCHEMA_HEAD_REVISION: Final = "0100_runs_workflow_contract"
+SCHEMA_HEAD_REVISION: Final = "0102_account_last_tiers"
 """Single Alembic head shipped by this source tree."""
 
 TENANT_RLS_POLICY: Final = "tenant_isolation"

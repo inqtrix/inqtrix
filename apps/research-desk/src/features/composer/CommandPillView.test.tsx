@@ -102,39 +102,22 @@ describe('a document capsule says which document it is and in what state', () =>
   })
 
   it('marks a capsule whose document is gone instead of showing a raw id', () => {
-    const html = pill('report', 'CO2-Bericht', { refusedKinds: [], unavailable: ['report:r9'] }, 'r9')
+    const html = pill('report', 'CO2-Bericht', { unavailable: ['report:r9'] }, 'r9')
     expect(outer(html)).toContain('data-command-pill-unavailable="true"')
     expect(outer(html)).toContain('text-warning')
     expect(html).toContain('nicht mehr verfügbar')
     expect(ariaLabel(html))
       .toBe('Recherche-Bericht: CO2-Bericht (nicht mehr verfügbar), mit Rücktaste entfernen')
     // Another capsule of the same kind is unaffected.
-    expect(outer(pill('report', 'Marktbericht', { refusedKinds: [], unavailable: ['report:r9'] }, 'r1')))
+    expect(outer(pill('report', 'Marktbericht', { unavailable: ['report:r9'] }, 'r1')))
       .not.toContain('data-command-pill-unavailable')
-  })
-
-  it('carries the engine refusal on the capsule, described by the notice', () => {
-    const html = pill('report', 'CO2-Bericht', {
-      refusalNoticeId: 'refusal-1',
-      refusedKinds: ['report', 'canvas'],
-      unavailable: [],
-    })
-    expect(outer(html)).toContain('data-engine-refused="true"')
-    expect(outer(html)).toContain('aria-describedby="refusal-1"')
-    expect(outer(html)).toContain('text-warning')
-    // A rule is no attachment the engine refuses.
-    expect(outer(pill('rule', 'Executive Briefing', {
-      refusalNoticeId: 'refusal-1',
-      refusedKinds: ['report', 'canvas'],
-      unavailable: [],
-    }))).not.toContain('data-engine-refused')
   })
 
   it('speaks English for an English desk', () => {
     localeState.locale = 'en'
     try {
       expect(ariaLabel(pill('report', 'CO2 report'))).toBe('Research report: CO2 report, remove with Backspace')
-      expect(ariaLabel(pill('editTarget', 'Contract', { refusedKinds: [], unavailable: ['editTarget:id-1'] })))
+      expect(ariaLabel(pill('editTarget', 'Contract', { unavailable: ['editTarget:id-1'] })))
         .toBe('Editing target: Contract (no longer available), remove with Backspace')
     } finally {
       localeState.locale = 'de'

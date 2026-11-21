@@ -41,15 +41,6 @@ SEARCH_CACHE_TTL = 3600
 # Risk scoring
 HIGH_RISK_SCORE_THRESHOLD = 4
 
-MAX_PLAN_TASKS_DEFAULT = 8
-"""Task-count ceiling of one mission plan — the ONE definition behind the
-validator, the ``INQTRIX_AGENT_MAX_PLAN_TASKS`` default and the control
-service default (a literal 8 at any of those sites bypasses this edit
-point)."""
-
-MAX_TASK_QUERIES = 8
-"""Queries one plan task may carry; the planner prompt names the same
-bound ("1-8 Leitfragen") from this constant."""
 
 CLARIFICATION_OPTION_LABEL_CHARS = 60
 """Length a clarification answer option should keep so its chip stays
@@ -57,12 +48,6 @@ short. A request, not a limit: the option schema asks for it, and a longer
 option is stored and shown in full with a warning in the log, because the
 stored option wording is the user's answer."""
 
-DISCOVERY_CONTENT_QUESTIONS_MAX = 4
-"""Content questions the intake is asked to write at most. A request, not a
-limit: the intake prompt and the schema state it, nothing enforces it.
-Every content question is searched in discovery until the discovery call
-budget (``discovery_max_tool_calls``) is used up, and that budget is the
-only cut, reported as a visible limit event."""
 
 RUN_INCOGNITO_RETENTION_SECONDS = 900
 """How long an incognito knowledge ask stays in the run store after it

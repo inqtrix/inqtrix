@@ -62,6 +62,11 @@ account_preferences = Table(
     # where a concrete id may not exist. ``''`` means no preference.
     Column("chat_model_tier", Text, nullable=False, server_default=text("''")),
     Column("agent_model_tier", Text, nullable=False, server_default=text("''")),
+    # The last report profile and the last Stufe picked in the two composers
+    # that start with one, so each starts with the user's habit on any device.
+    # ``''`` means no pick yet; the server derives nothing from either value.
+    Column("last_research_profile", Text, nullable=False, server_default=text("''")),
+    Column("last_agent_tier", Text, nullable=False, server_default=text("''")),
     Column("updated_at", Float, nullable=False),
 )
 """One user's account-level UI preferences, following

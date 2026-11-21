@@ -293,3 +293,26 @@ def test_check_contradictions_ignores_negative_lines_and_incidental_ja(line):
     state = _base_state()
     stop = strategy._stop_for(state)
     assert strategy.check_contradictions(state, line, stop) == stop
+
+
+@pytest.mark.parametrize("step", ["stagnation", "severe_contradiction"])
+def test_a_stop_for_thin_evidence_and_a_severe_contradiction_are_warnings(step):
+    """Both steps report a problem with the research, so each states its
+    severity itself; a step without one would reach the reader as info."""
+    events = []
+    state = _base_state(_run_event_sink=lambda event_type, payload: events.append((event_type, payload)))
+    strategy = MultiSignalStopCriteria(AgentSettings())
+    if step == "stagnation":
+        _, detected = strategy.check_stagnation(
+            state, conf=4, prev_conf=4, n_citations=30, falsification_just_triggered=False,
+        )
+        assert detected is True
+    else:
+        strategy.check_contradictions(
+            state, "CONTRADICTIONS: ja, die Quellen widersprechen sich grundlegend\n", 9,
+        )
+
+    severities = [
+        payload["severity"] for event_type, payload in events if event_type == "inqtrix.progress.message"
+    ]
+    assert severities == ["warning"]

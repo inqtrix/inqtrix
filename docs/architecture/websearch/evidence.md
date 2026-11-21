@@ -56,7 +56,7 @@ flowchart TD
     EvidenceLedger --> Overview["fn render_evidence_ledger_overview()<br/>single canonical answer-prompt view"]
     Overview --> AnswerPrompt{{"LLM call: answer prompt"}}
     AnswerPrompt --> AnswerAudit[("data AnswerEvidenceBinding<br/>audit view")]
-    AnswerPrompt --> Parent["kernel or mission parent"]
+    AnswerPrompt --> Parent["agent kernel parent"]
     WebLedger --> Parent
     WebLedger --> Canvas["Evidence Canvas<br/>query, answer, mapping, links"]
 ```
@@ -98,18 +98,55 @@ Inqtrix.
 One coherent provider answer can synthesize several links. Therefore every
 ledger citation carries an honest mapping status:
 
-- `provider_answer_context`: the provider associated supporting answer context
-  with this citation;
-- `provider_citation_marker`: the provider annotated only the rendered citation
-  marker (Azure's common case), or supplied no annotation at all and only
-  nearby answer context was available -- either way the provider exposed no
-  1:1 claim mapping;
-- `provider_snippet`: the provider returned URL-specific snippet metadata;
-- `source_only`: the provider listed the URL but supplied no exclusive passage.
+- `provider_answer_context`: the provider annotated a statement of its answer
+  for this citation, and that statement is the citation's text;
+- `provider_citation_marker`: the text comes from the place where the answer
+  cites the source, not from an annotated statement. The provider annotated
+  only the rendered citation marker (Azure's common case), supplied no
+  annotation, or its offsets had slipped -- either way it exposed no 1:1 claim
+  mapping;
+- `provider_snippet`: no statement stands at the citation, and the provider
+  returned URL-specific snippet metadata;
+- `source_only`: the provider listed the URL, and no statement stands at the
+  citation. A marker alone in its line names a source, not a statement.
+
+The ledger decides the text of a citation, and a web reference takes its
+`grounded_support` from there:
+
+- A citation marker is a link, or several, in a pair of parentheses of its
+  own. It leaves the text together with that pair. A link inside a sentence
+  stays by its label and is no marker.
+- A line with at most one marker is the text of every citation in it. Where
+  a line holds several markers, each marker takes the part that ends at it,
+  and a link inside a sentence the part between the markers around it. The
+  part of a marker begins behind the marker before when at least three words
+  stand between the two, or a cell in a table row; otherwise it reaches back
+  to the statement the markers share. In a table row a part that does not
+  open the row is led by the row's first cell, so a row whose cells cite
+  different sources gives each source its own cell.
+- An annotation on a link of the cited address stands for that link. An
+  annotation on prose is the statement the provider annotated, unless other
+  annotations of the same answer lie on their links and the answer links the
+  address: then the offsets have slipped, and the first link of the address
+  with a statement decides, never the window the offsets happen to cover.
+- An annotation that cuts through a link, or holds fewer than three words,
+  marks a place rather than a statement. It stands for the first link of its
+  address with a statement; where the answer does not link the address, for
+  the link it lies on, or else for its whole line.
+- A citation without an annotation stands for the first link of its address
+  with a statement.
+- A reference without a text takes the first citation of its source that
+  carries one: within the first search that has such a citation, the one
+  that stands first in the answer. Where a search hands a reference in, only
+  that search gives the text. A reference a run already holds keeps the text
+  it has.
 
 The Canvas shows the complete coherent answer for the query and never claims
 that a sentence came from exactly one URL unless the provider supplied that
-mapping. Credential-bearing URLs are redacted before provider output,
+mapping. A source that a search cites at several places opens with all of
+them: above the complete answer, the evidence view lists every statement the
+answer makes where it cites the source, each once and in the order of the
+answer. The reference itself keeps the text of the first place. Credential-bearing URLs are redacted before provider output,
 metadata, prompts, checkpoints, or UI state can observe them. Provider prose
 is kept under a visible persistence bound; truncation includes an explicit
 marker rather than silently masquerading as a complete result.
@@ -185,8 +222,8 @@ Terminology used below:
 | Term | Role | Stored where | Read by |
 |---|---|---|---|
 | **Working truth** | Complete graph-local representation of search-derived evidence and projected verification | `AgentState.evidence_ledger` | claim projection, evidence overview, answer audit |
-| **Durable web-search contract** | Exact queries, coherent provider answers, citation metadata, mapping precision, timing, usage, and status | `web_search_ledger` inside the existing evidence artifact | audit, resume, kernel/mission handoff, Canvas |
-| **Parent handoff** | Complete child report plus its translated references and web-search ledger | child tool result and evidence artifact | kernel or mission parent |
+| **Durable web-search contract** | Exact queries, coherent provider answers, citation metadata, mapping precision, timing, usage, and status | `web_search_ledger` inside the existing evidence artifact | audit, resume, kernel handoff, Canvas |
+| **Parent handoff** | Complete child report plus its translated references and web-search ledger | child tool result and evidence artifact | agent kernel parent |
 | **Claim assessment** | All computed claim statuses, independently of display caps | `consolidated_claims_full` | `plan`, `evaluate`, stop diagnostics, answer bindings, quality counters and observability via `claim_assessments()` |
 | **Compact claims view** | Bounded selection for compact lists | `consolidated_claims` | Evaluator claim-list hint and public `top_claims` |
 | **Answer-prompt view** | The single record-driven Markdown overview the answer composer consumes | rendered on demand by `render_evidence_ledger_overview()` (not persisted) | `answer()`, section composer |
@@ -461,11 +498,11 @@ comparison question) vanished from the writer's view, and the report read as
 "nothing found" for them.
 
 When records are dropped because of the total budget, the renderer appends a
-visible footer line:
+visible footer line to the overview, in English like the rest of the prompt:
 
 ```text
-HINWEIS: 12 weitere belegfaehige Quellen aus 3 Suchen passten nicht in das
-Evidenz-Budget und sind in dieser Uebersicht nicht enthalten.
+NOTE: 12 citable sources from 3 searches did not fit into the evidence budget
+and are not contained in this overview.
 ```
 
 so budget loss is **never silent** -- the answer-LLM sees that some report-
@@ -511,10 +548,10 @@ both the official IR page and Bloomberg corroborating the range. Analysts
 flagged elevated AI-infrastructure spend; no source contradicted the range.
 Sources from this search:
 [E1] Meta Reports First Quarter 2026 Results
-  Date: 2026-04-30 | Tier: primary (company_primary) | Standing: its own text checked; primary source
-  Statements checked against this source's text:
+  Date: 2026-04-30 | Tier: primary (company_primary) | Standing: checked against the search provider's excerpt; primary source
+  Statements checked against the search provider's excerpt of this source:
   - Meta plans 2026 AI capital expenditures of 115-135 USD billion.
-  Text the search provider returned from this source:
+  The search provider's excerpt of this source:
   - Meta expects full-year 2026 capital expenditures of 115-135 USD billion.
 
 [E2] Meta lifts 2026 capex range on AI buildout
@@ -525,11 +562,16 @@ Sources from this search:
   - Meta raised its 2026 capex range to $115B-$135B, citing AI infrastructure ...
 ```
 
-A statement is listed as checked only under the source whose own text was
-checked (`checked_here`); everything else is what the search provider
-attributes to the source. The text a provider returned from a page and the
+A statement is listed as checked only under the source whose search-provider
+excerpt was checked (`checked_here`); everything else is what the search
+provider attributes to the source. The search provider's excerpt of a source
+(the snippet a provider such as Perplexity returns per source) and the
 provider text a statement was extracted from (the answer, for most
-providers) keep separate headings, and neither is called evidence.
+providers) keep separate headings, and neither is called evidence. One word
+names that excerpt everywhere: in the model input, in the result
+(`status_reason`, the field descriptions) and in the Research Desk. Inqtrix
+reads no page itself, so no text says that a page was read; the stored text
+of a document (a Knowledge source) is called the text of the document.
 
 ## Verification labels per record
 
@@ -541,10 +583,11 @@ projected onto every `record.claims[n]` by
   supported claim (verified or attributed) had been checked. Ranking
   (`_VERIFICATION_RANK` in the record score), section selection and the URL
   audit read it, so they treat every search provider alike whether or not it
-  returns source text.
+  returns excerpts.
 - `_record_verification_label()` is the standing the writer sees: the support
-  standing when this record's own source text was checked for one of its
-  claims (`checked_here`), else `provider-attributed` for a supported record.
+  standing when the search provider's excerpt of this record's source was
+  checked for one of its claims (`checked_here`), else `provider-attributed`
+  for a supported record.
 
 The labels are the internal vocabulary of ranking, the URL audit, the binding
 records, the API and forensics. A prompt never shows them: the overview's
@@ -562,12 +605,12 @@ though `_VERIFICATION_RANK` scores `primary-source` higher. Possible values:
 
 | Label | Shown in the prompt as | Trigger (across all claims of the record) | Allowed report use |
 |---|---|---|---|
-| `cross-checked` | its own text checked; independently confirmed | A supported claim has `verification_basis == "cross_checked"` and this record's text was checked | Hard fact, cite with the label. |
+| `cross-checked` | checked against the search provider's excerpt; independently confirmed | A supported claim has `verification_basis == "cross_checked"` and the search provider's excerpt of this record's source was checked | Hard fact, cite with the label. |
 | `contested` | sources disagree | Some claim is `contested` (in status or basis) | Show both sides, attribute. |
-| `primary-source` | its own text checked; primary source | A supported claim has `verification_basis == "primary_source"` and this record's text was checked | Hard fact within that scope; cite with the label. |
-| `single-source verified` | its own text checked; one source | Another supported claim, this record's text checked | Allowed, but must be inline-attributed ("according to [E12] …"). |
-| `provider-attributed` | attributed by the search provider; page not read | Supported claims, but this record's own text was not checked (Azure never returns page text) | Attributed to the source in plain words once per paragraph, table row or list item; dates and figures always carry the label; never presented as the source's own wording or as established fact. |
-| `source-context` | background only; no extracted statement | The record has no claims at all (claimless background) | Allowed for context / source-backed statements; not a cross-checked hard fact. |
+| `primary-source` | checked against the search provider's excerpt; primary source | A supported claim has `verification_basis == "primary_source"` and the search provider's excerpt of this record's source was checked | Hard fact within that scope; cite with the label. |
+| `single-source verified` | checked against the search provider's excerpt; one source | Another supported claim, the search provider's excerpt of this record's source checked | Allowed as a single piece of evidence, attributed by the attribution rule (below). |
+| `provider-attributed` | attributed by the search provider; page not read | Supported claims, but no excerpt of this record's source was checked (Azure never returns excerpts) | Attributed by the attribution rule; dates and figures always carry the label; never presented as the source's own wording or as established fact. |
+| `source-context` | background only; no extracted statement | The record has no claims at all (claimless background) | Allowed for context / source-backed statements, attributed by the attribution rule; not a cross-checked hard fact. |
 | `unverified` | insufficiently supported | All claims have `status="unverified"` (a weak source, or a statement that needs a primary source and has none) | Never stated as fact; named only as unconfirmed. |
 
 The support standing feeds the `_VERIFICATION_RANK` bonus in the record-score
@@ -577,17 +620,20 @@ their tier band, checked or attributed alike.
 ## Final answer system prompt
 
 The system prompt of every per-section answer LLM call is built by
-`_build_answer_system_prompt_with_style()` in `src/inqtrix/prompts.py` (lines
-~405-702). It is **identical across all section calls** of a single answer --
-only the section-specific style block (heading / instruction / position /
-length guidance, see [Answer composition](answer.md)) changes.
+`build_answer_section_system_prompt()`, which delegates the body to
+`_build_answer_system_prompt_with_style()` in `src/inqtrix/prompts.py`; there
+is no prompt for a whole report in one call. It is **identical across all
+section calls** of a single answer -- only the section-specific style block
+(heading / instruction / position / length guidance, see
+[Answer composition](answer.md)) and what the section that owns the evidence
+limits receives change.
 The block order below reflects the actual emission order in code: the
 language directive (first line), the role/date line, the section style
 block, the unconditional guardrail blocks (EVIDENCE FIDELITY, SAFETY,
 SELF-VERIFICATION, PRECISION, TEMPORAL PRECISION, OUTPUT FORMAT), then
 CLAIM CALIBRATION, SUB-QUESTION COVERAGE, EVIDENCE DEPTH,
-TRANSPARENCY OBLIGATION, COMPETING EXPLANATIONS, the evidence block, and
-finally the conversation-history block.
+TRANSPARENCY OBLIGATION, COMPETING EXPLANATIONS, the evidence block (with the
+one ATTRIBUTION RULE), and finally the conversation-history block.
 
 ### 1. Header (always emitted)
 
@@ -607,12 +653,23 @@ blocks emitted unconditionally:
 Triggers when `source_counts` or `claim_counts` are non-empty. Shows the
 source-tier mix, the quality score, and the verified / contested / unverified
 breakdown, plus the primary-source obligation count. Lets the LLM calibrate
-the language strength.
+the language strength. A `verified` statement is one checked against the
+search provider's excerpt of a source; an `attributed` statement is
+attributed by the ATTRIBUTION RULE of the evidence block, never as the
+source's own wording, and a date or figure from it stays that source's
+statement. Claims that need a primary source and have none are written
+cautiously, with their attribution following the same rule.
 
 ### 3. SUB-QUESTION COVERAGE (conditional)
 
 Triggers when `required_aspects` is non-empty. Lists required and uncovered
-aspects; instructs to mark uncovered aspects inline as `(unbestaetigt)`.
+aspects. Open sub-questions are an evidence limit: the section that owns the
+evidence limits is told to name them in itself, under its own heading in the
+answer language ("When sub-questions remain open, name them transparently in
+this section ('Einordnung / Ausblick')." in a compact report); every other
+section marks the ones relevant to it inline with the unconfirmed marker
+(`(unbestätigt)` / `(unconfirmed)`) and names no other section, so no prompt
+points at a section its profile does not have.
 
 ### 4. EVIDENCE DEPTH (conditional on `evidence_depth_gap.active == True`)
 
@@ -627,14 +684,25 @@ EVIDENCE DEPTH -- IMPORTANT FOR THE TONE OF THE REPORT:
 - Of {N} supported statements only {k} are independently confirmed; {m} ({p}%)
   rest on a single source.
 - Treat only independently confirmed statements or statements from a primary
-  source as hard facts, and only where their own text was checked; attributed
-  statements are always attributed to their source.
-- Statements from a single source MUST be attributed inline ('according to
-  [E12] ...') and kept in cautious wording ('reports', 'states', 'is said to').
+  source as hard facts, and only where they were checked against the search
+  provider's excerpt; attributed statements are always attributed to their
+  source.
+- Attribute statements from a single source by the ATTRIBUTION RULE.
 - Do NOT present figures, actor attributions and causal statements that stem
   from a single source as established fact.
-- The section '{risks heading}' MUST name this thin cross-check situation
+- This section ('{heading}') MUST name this thin cross-check situation
   explicitly as an evidence limit of the report.
+```
+
+The last line goes only to the section that owns the evidence limits
+(`owns_evidence_limits` in the section plan: "Kernaussagen" in `schnell`,
+"Einordnung / Ausblick" in `compact`, "Risiken / Unsicherheiten" in `deep`),
+under that section's own heading in the answer language. Every other section
+reads instead:
+
+```text
+- Add NO own block on this thin cross-check situation in THIS section; the
+  section responsible for the evidence limits names it.
 ```
 
 ### 5. TRANSPARENCY OBLIGATION (conditional on `evidence_is_weak`)
@@ -646,24 +714,55 @@ Triggers when **any** of:
   obligations unmet), or
 - `evidence_depth_gap.active == True`.
 
-In section mode only the section that owns the evidence limits
-(`owns_evidence_limits` in the section plan) is instructed to add the
-uncertainties sub-section; its heading is resolved to the answer language
-("Unsicherheiten / Offene Punkte" / "Uncertainties and open points").
+Only the section that owns the evidence limits (`owns_evidence_limits` in
+the section plan) is instructed to add the uncertainties sub-section; its
+heading is resolved to the answer language ("Unsicherheiten / Offene Punkte"
+/ "Uncertainties and open points"). Every section is told to mark contested
+and only secondarily supported figures as such ('contested', 'not
+conclusively supported by a primary source'); every other statement follows
+the ATTRIBUTION RULE without such a mark.
 
 ### 6. EVIDENCE OVERVIEW + CITATION RULES + QUANTITY RULE FOR REPORTS (conditional on a non-empty `evidence_overview`)
 
 These three blocks share a single `if evidence_overview:` branch -- they are
 emitted together or not at all. When the overview is empty but
 `allowed_citations` is not, the prompt falls back to a short `NOTE ON THE
-EVIDENCE` block and carries no citation rules whatsoever.
+EVIDENCE` block and carries no citation rules whatsoever. The ATTRIBUTION
+RULE (below) normally stands inside the overview block; when the overview is
+empty but CLAIM CALIBRATION, EVIDENCE DEPTH or TRANSPARENCY OBLIGATION is
+emitted, the rule follows the evidence section on its own, so no block refers
+to a rule the prompt lacks.
 
 The single canonical evidence view. The LLM is told the structure (query
 groups, per-source labels, verification labels, citation rule) and then
 receives the embedded `evidence_overview.markdown` produced by
-`render_evidence_ledger_overview()`.
+`render_evidence_ledger_overview()`. Statements under "checked against the
+search provider's excerpt" were checked against the excerpt the search
+provider returned for that source; statements the search provider attributes
+to a source are its attribution; the block adds that Inqtrix reads no page
+itself.
 
-Quoted from `prompts.py`:
+The three standings that rest on a single source (`single-source verified`,
+`provider-attributed`, `source-context`) all point to one rule, and so do
+CLAIM CALIBRATION, EVIDENCE DEPTH and TRANSPARENCY OBLIGATION. Quoted from
+`prompts.py`:
+
+```text
+ATTRIBUTION RULE (applies to every statement you attribute to a source):
+- Name a source in plain words once per paragraph.
+- In a list, name it once in the sentence that introduces the list; in a
+  table, once in the sentence that introduces the table.
+- When that introduction does not name a source, name it at the first item or
+  row that uses it.
+- Further statements of the same source in that paragraph, list or table carry
+  only its label.
+- Dates and figures always carry the label.
+```
+
+A list that draws on one source names it once in its introductory sentence;
+a list that draws on two names both there, or names the one the introduction
+leaves out at the first item that uses it. Every further item carries only
+the label.
 
 ```text
 CITATION RULES:
@@ -727,6 +826,94 @@ plausibly carry a consolidated claim?), not by this coarser URL audit. The URL
 audit contributes the `unknown_citation` signal that forces `needs_review`. See
 [Score ledger](../../observability/forensic-cookbook.md#score-ledger).
 
+The answer node decides the contract once (`_evidence_contract()` in
+`src/inqtrix/nodes.py`) and stores, next to the status, why it reads as it
+does:
+
+| State field | Content |
+|---|---|
+| `evidence_contract_causes` | What holds a claim-bound answer at `needs_review`, each entry sufficient on its own: `unknown_citation` (a cited link has no record), `citation_without_claim` (a cited record carries no claim), `algorithm_failure` (a non-blocking step failed). Empty for every other status: below `needs_review` the status is its own reason, and a `clean` answer has no cause. |
+| `confidence_cap` | The ceiling on `final_confidence`: 3 (`algorithm_failed`), 4 (`source_context_only`), 6 (`needs_review`, and any claim-bound answer with an active [evidence-depth gap](stopping.md#evidence-depth-gap), `clean` included), otherwise none. |
+| `confidence_cap_reasons` | Why the ceiling applies: the status for the two lower ceilings; for a claim-bound answer its causes, then the reasons of an active depth gap (`no_cross_checked_claims`, `majority_single_source_claims`, `central_claim_single_quality_source`). |
+
+The causes say whether the answer is bound to what its cited sources state;
+the depth gap says how deep the support of the statements is. The gap is
+therefore no cause and never holds a contract at `needs_review`: it caps a
+claim-bound answer at 6 through its own constant
+(`_EVIDENCE_DEPTH_CONFIDENCE_CAP`), joined to the ceiling of the status with
+`min`, and its reasons follow the causes. Several causes can hold at once,
+and the gap hides none of them.
+
+### Evidence notice and basis line
+
+The contract decides what follows the reference sections of the answer,
+before the stats footer:
+
+- **Evidence notice.** At `needs_review` the heading `## Evidenzhinweis`
+  (`## Evidence notice` in English answers) with one text per cause, in the
+  order of `evidence_contract_causes`; at `source_context_only` the heading
+  with the text that no sentence citing a source restates a statement
+  recorded for that source, whatever the status of such a statement, so
+  whether a sentence is supported by its source is not established. A `clean`
+  answer carries no notice, also when the depth gap capped it.
+- **Basis line.** One line without a heading under every answer that cites a
+  source. It names the basis of the cited references in words: what the
+  search provider returned (`provider_context`), or the stored material of
+  the cited sources (`evidence`, with the number of cited sources that carry
+  only what the provider returned when the basis is mixed). When the run has
+  supported statements, it adds how many supported statements of the research
+  cite more than one source: `supported_count - single_source_count` of
+  `supported_count`, the numbers of the depth gap. They count every supported
+  statement the run collected, not only those the report cites, and a source
+  is a distinct address. The words mean what the research note to a
+  parent run says (`research_evidence_note()` in
+  `src/inqtrix/agents/kernel/evidence_read.py`). There is no line when
+  nothing is cited, which includes a blocked report. An attached research
+  report reaches a later run without its metrics, so this line is how that
+  run learns the basis.
+
+The contract and the basis line read the same depth gap: the one the last
+`plan`, `search` or `evaluate` pass stored, which the answer prompt and the
+gap fields of the result read as well. The stats footer names no share of
+single-source statements; the depth of the support stands in the basis
+line only. The footer counts verified statements whose basis is
+`cross_checked` as "gegengeprüft" ("cross-checked" in English answers); the
+progress step after each search round counts that basis whatever the
+status, and says so. The basis line counts statements with more than one
+source, which is a different number again.
+
+The progress steps of the contract carry their severity themselves: the
+step at `needs_review`, the step at `source_context_only` and the step of a
+blocked report emit `severity="warning"`, so a reworded step keeps its
+warning (see [Runs API](../../extending/runs-api.md)).
+
+`ResearchResult.metrics` exposes the three fields unchanged and adds
+`evidence_basis`: the material behind the references flagged as cited. The
+basis follows the material kind of each cited reference
+(`reference_material_kind()` and `cited_material_basis()` in
+`src/inqtrix/evidence.py`), derived by one function, `research_references()`
+in `src/inqtrix/result.py`, which the answer node calls for the basis line and
+`ResearchResult.from_raw()` for the metrics: `provider_context` when every
+cited reference carries only what the search provider returned, `evidence`
+for any other mix
+(in practice: a cited reference carries the stored text of a document; a
+cited reference without any stored material also falls here), `none` when
+nothing is cited. A web reference carries no stored text of a document: with
+its search retained it counts as provider context, whichever provider
+answered and whether or not the provider supplied an excerpt. The basis
+describes the references, not the claims: with a provider that returns
+excerpts a claim can be `verified` against the search provider's excerpt
+while the basis still reads `provider_context`, because the excerpt reached
+the run through the provider and no page was read.
+
+The review of an agent run derives the basis of its verdict with the same two
+functions, so for the same cited references and the same retained searches a
+delegated research run and the review of its parent name the same basis. The
+two differ by design where nothing is cited (the result says `none`; the
+review says `knowledge` or `evidence`, depending on whether the run holds
+stored evidence), and they can differ when the review can no longer read a
+search the research run had retained.
+
 ## Mini example: one fact through the pipeline
 
 1. `SearchProvider.search()` returns a Bloomberg + Meta-IR result for the
@@ -743,8 +930,8 @@ audit contributes the `unknown_citation` signal that forces `needs_review`. See
    signature "meta plans capital expenditures", finds 2 affirmed
    supports and no contradiction, and -- because one of the two sources is
    `primary` tier -- reads the primary structure first:
-   `verification_basis="primary_source"`. Azure returned no page text, so no
-   source text checked the claim: `status="attributed"`, `status_reason=
+   `verification_basis="primary_source"`. Azure returns no excerpt, so no
+   excerpt checked the claim: `status="attributed"`, `status_reason=
    "primary evidence present; attributed by the search provider"`. The
    `cross_checked` structure is only reached when no primary-tier source backs
    the claim.
@@ -761,11 +948,12 @@ audit contributes the `unknown_citation` signal that forces `needs_review`. See
    Markdown block, and returns an `EvidenceOverview` with
    `rendered_record_count=2`, `omitted_record_count=0`,
    `allowed_urls=["https://investor.atmeta.com/...", "https://www.bloomberg.com/..."]`.
-8. `_build_answer_system_prompt_with_style()` assembles the final system
-   prompt (directive → header → CLAIM CALIBRATION → EVIDENCE OVERVIEW → CITATION RULES
-   → embedded `evidence_overview.markdown`); the answer composer runs one LLM
-   call per section with this system prompt and a section-specific user
-   prompt (see [Answer composition](answer.md)).
+8. `build_answer_section_system_prompt()` assembles the system prompt of
+   each section (directive → header → CLAIM CALIBRATION → EVIDENCE OVERVIEW
+   → ATTRIBUTION RULE → CITATION RULES → embedded
+   `evidence_overview.markdown`); the answer composer runs one LLM call per
+   section with this system prompt and a section-specific user prompt (see
+   [Answer composition](answer.md)).
 9. `audit_answer_evidence_bindings()` records that the generated answer cited
    both `https://investor.atmeta.com/...` and
    `https://www.bloomberg.com/...` near the capex sentence → binding status
@@ -853,7 +1041,7 @@ Post-parse normalisation:
 - Actor-verb regex may reclassify `"fact"` to `"actor_claim"` when speech verbs are found.
 - `needs_primary` is forced to `false` for every claim type other than `fact`; for `fact` claims the model's boolean is taken unchanged, and the primary-hint regex only fills in when the model returned no boolean at all (which the structured-output schema already prevents).
 - `source_urls` are never returned by the model: the extractor resolves each `provider_refs` entry against the provider citation map of the same search result, keeping only normalised URLs that are already on that result's citation allow-list -- a result that carries no citations at all skips the allow-list check instead of rejecting every ref. Refs that resolve to nothing are dropped and logged as unknown refs.
-- The model's refs are checked against the provider's text. Where the claim's `evidence_snippet` stands exactly once in the search answer and a citation the source map resolves closes its paragraph or list item (a Markdown link `([domain](url))` or a numbered marker `[2]`), that citation is the provider's attribution: a model choice foreign to it is rebound and counted (`provider_refs_rebound`, one WARNING per extraction), a choice that shares it stays. An excerpt the text does not place keeps the model's refs (`provider_refs_unchecked`). Replayed on the extraction inputs of six runs of 17.10.2026: 300 of 393 claims placeable, 11 of them rebound.
+- The model's refs are checked against the provider's text. Where the claim's `evidence_snippet` stands exactly once in the search answer and a citation the source map resolves closes its paragraph or list item (a Markdown link `([domain](url))` or a numbered marker `[2]`), that citation is the provider's attribution: a model choice foreign to it is rebound and counted (`provider_refs_rebound`, one WARNING per extraction), a choice that shares it stays. An excerpt the text does not place keeps the model's refs (`provider_refs_unchecked`).
 - Non-fatal provider errors are tolerated: the search result stays in the loop even when no structured claim is produced for it (iteration-log marker `_claim_extraction_fallback`).
 - Each result keeps at most `claim_max_items` claims -- 6 (SCHNELL) / 8 (COMPACT) / 24 (DEEP).
 
@@ -937,9 +1125,9 @@ Source: `DefaultClaimConsolidator.consolidate()` in
 - `verification_basis` is the **support structure**, read once over all
   affirmed witnesses (an affirmed entry that is not a reprint of another), the
   same for every search provider;
-- `status` says **what was checked**: `verified` only when a source's own text
-  states the claim, `attributed` when the search provider's answer is all that
-  ties the claim to its sources.
+- `status` says **what was checked**: `verified` only when the search
+  provider's excerpt of a source states the claim, `attributed` when the
+  search provider's answer is all that ties the claim to its sources.
 
 A tier says who speaks, never what a page says, and provider prose (the
 answer, the text around a citation, the excerpt a claim was extracted from)
@@ -949,8 +1137,8 @@ tier alone made a claim `verified`; stored results from that time say
 
 **Witnesses and independence.** Every URL an affirmed witness binds the claim
 to is one unit: the provider answer that bound it (`query_id`), the source's
-domain and tier, and the source's own text when the provider returned it
-(`source_texts`, the page snippet; Azure returns none). Two units are
+domain and tier, and the search provider's excerpt of the source when it
+returned one (`source_texts`; Azure returns none). Two units are
 independent only when they come from different provider answers **and**
 different registrable domains of a non-low source: one provider sentence
 citing two pages is one witness, and so are two answers citing one site. The
@@ -972,19 +1160,20 @@ domains among the non-low units.
 | `status` | Condition |
 |---|---|
 | `contested` | affirmed and negated members of one value split coexist, or another split of the same signature states a conflicting value (see [Values in claim identity](#values-in-claim-identity)); basis `contested` |
-| `verified` | a supporting structure, and the units whose own text states the claim reach one on their own (`page_states_claim`: every date, percentage, amount and identity number of the claim stands in the page text with the same normalized value, and at least half of its other content words, two at least; a claim without such a value is never checked by words). Near-identical page texts count once. `checked_urls` lists the pages |
-| `attributed` | a supporting structure, and no checked text reaches one |
+| `verified` | a supporting structure, and the units whose search-provider excerpt states the claim reach one on their own (`page_states_claim`: every date, percentage, amount and identity number of the claim stands in the excerpt with the same normalized value, and at least half of its other content words, two at least; a claim without such a value is never checked by words). Near-identical excerpts count once. `checked_urls` lists the sources whose excerpt was checked |
+| `attributed` | a supporting structure, and no checked excerpt reaches one |
 | `unverified` | no supporting structure |
 
 `status_reason` names both parts, for example "primary evidence present;
 attributed by the search provider" or "issuer identifies itself (kfw); checked
-against source text".
+against the search provider's excerpt". Results stored before 0.2.0.13 say
+"checked against source text" for the same case.
 
 Everything the research loop decides reads the structure and the supported
 statuses together (`SUPPORTED_STATUSES` in `scoring.py`): stopping, the
 evidence-depth gap, cross-check planning, the claim selection, the confidence
 guardrails and the claim-quality score behave the same whether or not a
-provider returns page text. What a report, a count or the user interface
+provider returns excerpts. What a report, a count or the user interface
 shows reads the status.
 
 Source tiers remain discovery, ranking, and source-quality signals. They do

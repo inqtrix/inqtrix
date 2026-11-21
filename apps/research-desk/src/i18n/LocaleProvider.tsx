@@ -45,12 +45,25 @@ export function LocaleProvider({
     document.documentElement.lang = locale
   }, [locale])
 
+  // Another tab of this browser saved a language: take it over, so this tab
+  // never sends an older one back with the whole preference row it saves next.
+  useEffect(() => {
+    const follow = (event: StorageEvent) => {
+      const next = localeFromStorage(event.key, event.newValue)
+      if (next) setLocaleState(next)
+    }
+    window.addEventListener('storage', follow)
+    return () => window.removeEventListener('storage', follow)
+  }, [])
+
   const value = useMemo<LocaleContextValue>(
     () => ({
       locale,
       setLocale(nextLocale) {
-        localStorage.setItem(LOCALE_STORAGE_KEY, nextLocale)
+        // The choice takes effect first; a device that refuses to store it
+        // keeps it for this page.
         setLocaleState(nextLocale)
+        saveStoredLocale(nextLocale)
       },
       t: translations[locale],
     }),
@@ -105,7 +118,31 @@ export function readVisitorLocale(): Locale {
 }
 
 function storedLocale(): Locale | null {
-  if (typeof localStorage === 'undefined') return null
-  const stored = localStorage.getItem(LOCALE_STORAGE_KEY)
-  return stored === 'en' || stored === 'de' ? stored : null
+  try {
+    if (typeof localStorage === 'undefined') return null
+    return localeOf(localStorage.getItem(LOCALE_STORAGE_KEY))
+  } catch {
+    // Blocked site data throws on access; the page keeps its default.
+    return null
+  }
+}
+
+/** Keeps the chosen language on this device. A device that refuses to store
+ * it changes nothing else: the choice stays in effect for the page. */
+export function saveStoredLocale(locale: Locale): void {
+  try {
+    localStorage.setItem(LOCALE_STORAGE_KEY, locale)
+  } catch {
+    // Blocked or full storage; nothing to keep.
+  }
+}
+
+/** The language another tab saved, or null for another key or a value the
+ * desk does not speak. */
+export function localeFromStorage(key: string | null, value: string | null): Locale | null {
+  return key === LOCALE_STORAGE_KEY ? localeOf(value) : null
+}
+
+function localeOf(value: string | null): Locale | null {
+  return value === 'en' || value === 'de' ? value : null
 }

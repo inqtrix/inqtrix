@@ -1,52 +1,103 @@
 import type { AgentRunRecord, AgentStepEntry } from '../model'
-import {
-  agentTaskResultPreview,
-  effectiveAgentTaskStatus,
-} from '../plan/taskPresentation'
 
-type TaskRowRun = Pick<AgentRunRecord, 'plan' | 'stepLog' | 'taskStates'>
+type TaskRowRun = Pick<AgentRunRecord, 'stepLog'>
 
-/**
- * The result line a task row shows under its title: the plain-text head of
- * the task's result, and only once the row is terminal, carries no error
- * and did not end without sufficient evidence (those rows show the error or
- * the status instead). Empty means the row shows no result. The row and the
- * fold of the task's narration read THIS function, so the narration is
- * hidden exactly when the row states the same result.
- */
-export function taskRowResultPreview(entry: AgentStepEntry, run: TaskRowRun): string {
-  if (entry.kind !== 'task_finished' && entry.kind !== 'task_failed') return ''
-  if (entry.error) return ''
-  const task = run.plan?.tasks.find((candidate) => candidate.taskId === entry.taskId)
-  const live = entry.taskId ? run.taskStates[entry.taskId] : undefined
-  if (task && effectiveAgentTaskStatus(task, live) === 'insufficient_evidence') return ''
-  const result = task?.resultSummary || live?.resultSummary || ''
-  const title = task?.title ?? entry.taskId ?? ''
-  return result ? agentTaskResultPreview(title, result) : ''
+/** Compact plain-text task evidence for a transcript row: Markdown marks,
+ * links and a leading "<title>:" are dropped, the words stay as written. */
+export function agentTaskResultPreview(title: string, markdown: string): string {
+  let text = markdown
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[`*_~>#|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const normalizedTitle = title.trim()
+  if (
+    normalizedTitle
+    && text.toLocaleLowerCase().startsWith(
+      `${normalizedTitle.toLocaleLowerCase()}:`,
+    )
+  ) {
+    text = text.slice(normalizedTitle.length + 1).trimStart()
+  }
+  return text
 }
 
 const TASK_NARRATION_ID = /^n-task-(.+)$/
 
+/** The result line a finished task wrote (`n-task-<id>`, kind `task`):
+ * "<title>: <result head>". */
+function taskNarration(
+  stepLog: readonly AgentStepEntry[],
+  taskId: string,
+): AgentStepEntry | undefined {
+  return stepLog.find(
+    (entry) =>
+      entry.kind === 'narration'
+      && entry.detail === 'task'
+      && entry.narrationId === `n-task-${taskId}`,
+  )
+}
+
+/**
+ * What a task row of a stored mission run says. The title is the one its
+ * event carried; a run stored before task events carried titles names the
+ * task by its result line instead — whole, since it opens with the title
+ * and where that title ends cannot be read back — and else by its id.
+ * `result` is the head of a concluded task's result, empty where the title
+ * line already carries it or nothing was reported.
+ */
+export function retiredTaskRow(
+  entry: AgentStepEntry,
+  stepLog: readonly AgentStepEntry[],
+): { title: string; result: string } {
+  const concluded = entry.kind === 'task_finished' || entry.kind === 'task_failed'
+  const taskId = entry.taskId ?? ''
+  if (entry.title) {
+    return {
+      title: entry.title,
+      result: concluded ? agentTaskResultPreview(entry.title, entry.result ?? '') : '',
+    }
+  }
+  const narration = concluded ? taskNarration(stepLog, taskId) : undefined
+  if (narration?.text) {
+    return { title: agentTaskResultPreview('', narration.text), result: '' }
+  }
+  return {
+    title: taskId,
+    result: concluded ? agentTaskResultPreview(taskId, entry.result ?? '') : '',
+  }
+}
+
+/** Whether a task's start line has been answered by its outcome line: the
+ * transcript then shows the outcome alone, one line per concluded task. */
+export function taskStartConcluded(
+  entry: AgentStepEntry,
+  stepLog: readonly AgentStepEntry[],
+): boolean {
+  return stepLog.some(
+    (row) =>
+      (row.kind === 'task_finished' || row.kind === 'task_failed')
+      && row.taskId === entry.taskId
+      && row.seq > entry.seq,
+  )
+}
+
 /**
  * Whether a finished task's narration (`n-task-<id>`, kind `task`) says
- * nothing the task's own row does not already show. The server keeps
- * emitting that line — the child mission card joins it by id — so the
- * transcript folds it here, and only while a finished row of the same task
- * renders a non-empty result from {@link taskRowResultPreview}.
+ * nothing the task's own row does not already show: the row names the
+ * task by that narration, or shows the result head under its title. The
+ * transcript then folds the narration, so the result stands once.
  */
 export function taskResultShownByRow(entry: AgentStepEntry, run: TaskRowRun): boolean {
   if (entry.kind !== 'narration' || entry.detail !== 'task') return false
   const taskId = TASK_NARRATION_ID.exec(entry.narrationId ?? '')?.[1]
   if (!taskId) return false
-  // Without its plan task the row can only show the raw id as its title;
-  // the narration is then the one line naming the task in words.
-  if (!run.plan?.tasks.some((task) => task.taskId === taskId)) return false
-  return run.stepLog.some(
-    (row) =>
-      row.kind === 'task_finished'
-      && row.taskId === taskId
-      && taskRowResultPreview(row, run) !== '',
-  )
+  return run.stepLog.some((row) => {
+    if (row.kind !== 'task_finished' || row.taskId !== taskId || row.error) return false
+    if (row.status !== undefined && row.status !== 'completed') return false
+    return !row.title || retiredTaskRow(row, run.stepLog).result !== ''
+  })
 }
 
 /**

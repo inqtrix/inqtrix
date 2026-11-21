@@ -31,7 +31,6 @@ function summary(overrides: Partial<ResearchRunSummary> = {}): ResearchRunSummar
     snapshot: { current_node: 'agent_kernel', last_message: '' },
     error: null,
     events_url: '/v1/runs/run_parent_1/events',
-    result_url: '/v1/runs/run_parent_1/result',
     ...overrides,
   }
 }
@@ -65,11 +64,11 @@ function approval(
   overrides: Partial<AgentApprovalRecord> = {},
 ): AgentApprovalRecord {
   return {
-    approvalId: 'apr_child_plan_0',
-    kind: 'plan',
+    approvalId: 'apr_child_tool_0',
+    kind: 'tool',
     status: 'pending',
-    subjectType: 'plan',
-    subjectId: 'plan_1',
+    subjectType: 'tool',
+    subjectId: 'call_1',
     payload: {},
     decision: '',
     note: '',
@@ -196,6 +195,18 @@ describe('pendingGate over children', () => {
       status: 'waiting_for_approval' as const,
     }
     expect(pendingGate(run)?.kind).toBe('tool')
+  })
+
+  it('offers no tray for an approval this desk cannot decide', () => {
+    // A parked run of the retired mission engine waits for its plan; the
+    // desk has no gate for that, and a tool gate in its place would offer
+    // a decision the server would not take as one.
+    const retired = approval({ kind: 'plan', subjectType: 'plan' })
+    expect(pendingGate(parentWithParkedChild({ approvals: [retired] }))).toBeNull()
+    expect(pendingGate({
+      ...agentRunFromSummary(summary({ status: 'waiting_for_approval' })),
+      approvals: [{ ...retired, approvalId: 'apr_root_plan' }],
+    })).toBeNull()
   })
 
   it('offers nothing once the child resumed, despite stale pending rows', () => {

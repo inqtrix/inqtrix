@@ -1,4 +1,4 @@
-"""Agent instant-evidence enrichment and synthesis digest contracts."""
+"""Agent evidence merge, register digest and kernel registration contracts."""
 
 from __future__ import annotations
 
@@ -7,13 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from inqtrix.agents.evidence import (
-    enrich_instant_evidence,
+    dedup_key,
     evidence_digest,
-    merge_evidence,
-    overlapping_claim_pairs,
-    run_contradiction_analysis,
+    merge_missing_evidence_fields,
 )
-from inqtrix.agents.scheduler import TaskOutcome
 from inqtrix.untrusted_content import UNTRUSTED_FENCE_CLOSE
 
 
@@ -29,175 +26,12 @@ def _register_lines(digest: str) -> list[str]:
     return lines[1:-1]
 
 
-@pytest.mark.parametrize("other", ["The limit is 5 MW.", "  The limit\tis 5 MW.\n"])
-def test_identical_claims_do_not_invoke_the_contradiction_model(other):
-    claims = [{"text": "The limit is 5 MW.", "task_id": "a"}, {"text": other, "task_id": "b"}]
-    before = [dict(claim) for claim in claims]
-    pairs = overlapping_claim_pairs(claims, signature=lambda text: "limit")
-    assert pairs == []
-    assert run_contradiction_analysis(
-        None, pairs=pairs, model=None, reasoning_effort=None, timeout=1,
-    ) is None
-    assert claims == before
-
-
-@pytest.mark.parametrize("other", [
-    "The limit is not 5 MW.", "The limit is 6 MW.", "The limit is 5 mW.",
-])
-def test_distinct_claims_keep_negation_numbers_and_case(other):
-    first, second = {"text": "The limit is 5 MW."}, {"text": other}
-    assert overlapping_claim_pairs([first, second], signature=lambda text: "limit") == [(first, second)]
-
-
-def test_identical_pairs_do_not_consume_the_limit_or_remove_claims():
-    claims = [{"text": text} for text in ("Alpha is true.", "Alpha is true.", "Alpha is false.", "Gamma is true.")]
-    assert overlapping_claim_pairs(claims, signature=lambda text: "shared", limit=1) == [(claims[1], claims[2])]
-    assert len(claims) == 4
-    assert overlapping_claim_pairs([{"text": "  \n\t"}, claims[0]], signature=lambda text: "shared") == []
-
-
-def test_grounded_answer_associates_each_inline_url_with_its_statement() -> None:
-    answer = (
-        "Gartner beziffert die weltweiten KI-Ausgaben 2025 auf US-$1.5T "
-        "([Gartner](https://example.com/gartner)).\n\n"
-        "Statista grenzt den GenAI-Umsatz auf $244 Mrd. ein "
-        "([Statista](https://example.com/statista))."
-    )
-    refs = enrich_instant_evidence(
-        answer,
-        [
-            {
-                "url": "https://example.com/gartner",
-                "title": "Gartner",
-                "excerpt": "",
-            },
-            {
-                "url": "https://example.com/statista",
-                "title": "Statista",
-                "excerpt": "",
-            },
-        ],
-    )
-
-    assert "KI-Ausgaben 2025" in refs[0]["grounded_support"]
-    assert "GenAI-Umsatz" not in refs[0]["grounded_support"]
-    assert "GenAI-Umsatz" in refs[1]["grounded_support"]
-    assert "KI-Ausgaben 2025" not in refs[1]["grounded_support"]
-    assert refs[0]["grounded_support"].count("https://") == 0
-    assert "US-$1.5T" in refs[0]["grounded_support"]
-
-
-def test_empty_provider_snippet_still_yields_a_factual_digest() -> None:
-    answer = (
-        "Der Umsatz stieg 2025 um 29 Prozent "
-        "([Marktbericht](https://example.com/report))."
-    )
-    enriched = enrich_instant_evidence(
-        answer,
-        [
-            {
-                "label": "W1",
-                "url": "https://example.com/report",
-                "title": "Marktbericht",
-                "excerpt": "",
-            }
-        ],
-    )
-
-    digest = _register_lines(evidence_digest(enriched))
-    assert digest[0].startswith("[W1]")
-    assert "Umsatz stieg 2025 um 29 Prozent" in digest[0]
-    assert digest != ["[W1] Marktbericht"]
-
-
-def test_support_is_bounded_and_never_invented_for_an_uncited_url() -> None:
-    cited_url = "https://example.com/cited"
-    refs = enrich_instant_evidence(
-        "A" * 500 + f" ([Quelle]({cited_url})).",
-        [
-            {"url": cited_url, "title": "Cited"},
-            {"url": "https://example.com/uncited", "title": "Uncited"},
-        ],
-        support_chars=80,
-    )
-
-    assert 0 < len(refs[0]["grounded_support"]) <= 80
-    assert "grounded_support" not in refs[1]
-
-
-def test_a_support_window_never_opens_inside_a_number() -> None:
-    """The window start falls inside ``1 500 000``; the support opens on
-    the next whole word instead of on a partial number a writer could
-    quote."""
-    url = "https://example.com/q"
-    answer = (
-        "Nach Angaben des Amtes wurden bis Ende Juni insgesamt 1 500 000 "
-        "EUR an Hilfen ausgezahlt, so der aktuelle Bericht "
-        f"([Quelle]({url})), und weitere Mittel sind für das kommende Jahr "
-        "fest zugesagt worden."
-    )
-    (ref,) = enrich_instant_evidence(answer, [{"url": url}], support_chars=80)
-    assert ref["grounded_support"] == (
-        "…EUR an Hilfen ausgezahlt, so der aktuelle Bericht (Quelle), und "
-        "weitere Mittel…"
-    )
-
-
-def test_a_support_window_never_ends_inside_a_number() -> None:
-    """The window's end would fall inside ``1 500 000``; the support keeps
-    the whole number and is cut at a later word, visibly."""
-    url = "https://example.com/q"
-    answer = (
-        f"Laut Bericht ([Quelle]({url})) stiegen die Ausgaben auf 1 500 000 "
-        "EUR, und weitere Mittel sind für das kommende Jahr fest zugesagt."
-    )
-    (ref,) = enrich_instant_evidence(answer, [{"url": url}], support_chars=80)
-    assert ref["grounded_support"] == (
-        "Laut Bericht (Quelle) stiegen die Ausgaben auf 1 500 000 EUR, und "
-        "weitere…"
-    )
-
-
-def test_first_paragraph_keeps_its_first_character_and_urls_match_exactly() -> None:
-    answer = (
-        "Gartner nennt einen Wert "
-        "([Lang](https://example.com/report-extended))."
-    )
-    refs = enrich_instant_evidence(
-        answer,
-        [
-            {"url": "https://example.com/report", "title": "Short"},
-            {
-                "url": "https://example.com/report-extended",
-                "title": "Long",
-            },
-        ],
-    )
-
-    assert "grounded_support" not in refs[0]
-    assert refs[1]["grounded_support"].startswith("Gartner")
-
-
 def test_web_identity_uses_the_platform_url_normalizer() -> None:
-    references, _claims = merge_evidence(
-        {
-            "a": TaskOutcome(
-                status="completed",
-                evidence=[
-                    {"url": "https://example.com/report?utm_source=one"}
-                ],
-            ),
-            "b": TaskOutcome(
-                status="completed",
-                evidence=[
-                    {"url": "https://example.com/report?utm_source=two"}
-                ],
-            ),
-        }
-    )
+    first = {"url": "https://example.com/report?utm_source=one"}
+    second = {"url": "https://example.com/report?utm_source=two"}
 
-    assert len(references) == 1
-    assert references[0]["tasks"] == ["a", "b"]
+    assert dedup_key(first) == dedup_key(second) == "https://example.com/report"
+    assert dedup_key({"url": "https://example.com/other"}) != dedup_key(first)
 
 
 def test_digest_prefers_source_content_then_grounded_support_then_title() -> None:
@@ -237,15 +71,6 @@ def test_digest_prefers_source_content_then_grounded_support_then_title() -> Non
         ),
         "[W4] title four",
     ]
-
-    scoped = evidence_digest(
-        [
-            {"label": "W1", "excerpt": "one"},
-            {"label": "W2", "excerpt": "two"},
-        ],
-        labels=["W2"],
-    )
-    assert _register_lines(scoped) == ["[W2] two"]
 
 
 PASSAGE_MARKER = " [shortened here; the passage continues]"
@@ -309,6 +134,27 @@ def test_a_long_title_or_address_is_cut_without_the_passage_marker() -> None:
     ]
 
 
+def test_a_register_line_names_an_internal_document_without_its_id() -> None:
+    """A reference without a passage falls back to its NAME, not to its
+    address: an internal document by its title, or as an untitled document,
+    never by its id or its internal link. A web source keeps its title."""
+    internal = {
+        "label": "K1", "document_id": "doc-42", "chunk_index": 0,
+        "url": "inqtrix://documents/doc-42#chunk-0",
+        "title": "Interner Marktbericht", "excerpt": "Die Lage ist stabil.",
+    }
+    untitled = {
+        "label": "K2", "document_id": "doc-99", "chunk_index": 0,
+        "url": "inqtrix://documents/doc-99#chunk-0",
+    }
+    web = {"label": "W1", "url": "https://example.org/a", "title": "Marktbericht"}
+
+    register = evidence_digest([internal, untitled, web])
+    assert "[K2] untitled document" in register
+    assert "doc-99" not in register and "inqtrix://" not in register
+    assert "[W1] Marktbericht" in register
+
+
 def test_a_passage_of_two_hundred_characters_stays_whole() -> None:
     passage = "Frist " * 33 + "14"
     assert len(passage) == 200
@@ -318,46 +164,29 @@ def test_a_passage_of_two_hundred_characters_stays_whole() -> None:
 
 
 def test_duplicate_url_fills_missing_stronger_evidence_without_overwrite() -> None:
-    references, _claims = merge_evidence(
-        {
-            "a": TaskOutcome(
-                status="completed",
-                evidence=[
-                    {
-                        "url": "https://example.com/report",
-                        "title": "First title",
-                        "grounded_support": "Provider answer support",
-                    }
-                ],
-            ),
-            "b": TaskOutcome(
-                status="completed",
-                evidence=[
-                    {
-                        "url": "https://example.com/report/",
-                        "title": "Later title",
-                        "excerpt": "Verbatim provider excerpt",
-                    }
-                ],
-            ),
-            "c": TaskOutcome(
-                status="completed",
-                evidence=[
-                    {
-                        "url": "https://example.com/report",
-                        "excerpt": "Must not replace the first excerpt",
-                    }
-                ],
-            ),
-        }
-    )
+    canonical = {
+        "label": "W1",
+        "url": "https://example.com/report",
+        "title": "First title",
+        "grounded_support": "Provider answer support",
+        "excerpt": "",
+    }
+    later = {
+        "label": "W9",
+        "url": "https://example.com/report/",
+        "title": "Later title",
+        "excerpt": "Verbatim provider excerpt",
+    }
+    last = {"url": "https://example.com/report", "excerpt": "Must not replace the first excerpt"}
 
-    assert len(references) == 1
-    assert references[0]["label"] == "W1"
-    assert references[0]["tasks"] == ["a", "b", "c"]
-    assert references[0]["title"] == "First title"
-    assert references[0]["grounded_support"] == "Provider answer support"
-    assert references[0]["excerpt"] == "Verbatim provider excerpt"
+    assert dedup_key(later) == dedup_key(canonical)
+    assert merge_missing_evidence_fields(canonical, later) is True
+    assert merge_missing_evidence_fields(canonical, last) is False
+
+    assert canonical["label"] == "W1"
+    assert canonical["title"] == "First title"
+    assert canonical["grounded_support"] == "Provider answer support"
+    assert canonical["excerpt"] == "Verbatim provider excerpt"
 
 
 def test_kernel_ledger_assigns_stable_labels_across_resume() -> None:
@@ -509,6 +338,143 @@ def test_a_provider_answer_without_urls_is_cut_like_every_grounded_support() -> 
     assert reference["grounded_support"] == ("Wort " * 119).rstrip() + "…"
 
 
+EURLEX = "https://eur-lex.europa.eu/eli/reg/2023/1542/oj"
+COMMISSION = "https://environment.ec.europa.eu/news/battery-passport_en"
+AGENCY = "https://www.bundesnetzagentur.example/ladeinfrastruktur"
+FIRST_QUARTER = "https://www.sap.example/investors/q1-2025.pdf"
+SECOND_QUARTER = "https://www.sap.example/investors/q2-2025.pdf"
+PASSPORT = "Der Batteriepass ist ab dem 18. Februar 2027 vorgeschrieben."
+UNCHANGED = "Eine spätere Verordnung hat den Stichtag nicht verschoben."
+
+# Answers the way the search provider writes them: the link follows its
+# statement on the same line, and the provider's span marks exactly the link.
+CITED_PROSE = (
+    f"{PASSPORT} ([eur-lex.europa.eu]({EURLEX}))\n\n"
+    f"{UNCHANGED} ([environment.ec.europa.eu]({COMMISSION}))"
+)
+CITED_DATED_ITEM = (
+    "- **1. September 2026:** 214.334 öffentliche Ladepunkte in Deutschland. "
+    f"([bundesnetzagentur.example]({AGENCY}))"
+)
+CITED_TABLE = (
+    "| Quartal | Umsatz | Quelle |\n"
+    "|---|---:|---|\n"
+    f"| Q1 2025 | 9.013 Mio. € | ([sap.example]({FIRST_QUARTER})) |\n"
+    f"| Q2 2025 | 9.027 Mio. € | ([sap.example]({SECOND_QUARTER})) |"
+)
+
+
+def _cited_sources(answer: str, urls: list[str]) -> list[dict]:
+    """The sources of *answer* with the span of every link that cites them."""
+    import re
+
+    return [
+        {
+            "url": url,
+            "title": "",
+            "rank": rank,
+            "origin": "url_citation",
+            "spans": [
+                {"start": match.start(), "end": match.end()}
+                for match in re.finditer(r"\(\[[^\]]+\]\(" + re.escape(url) + r"\)\)", answer)
+            ],
+        }
+        for rank, url in enumerate(urls, start=1)
+    ]
+
+
+def _instant_search(answer: str, urls: list[str], *, query_id: str = "query-cited-line") -> SimpleNamespace:
+    return SimpleNamespace(
+        answer=answer,
+        completion_tokens=1,
+        duration_ms=1,
+        finished_at="2026-07-23T12:00:01Z",
+        parameters={},
+        prompt_tokens=1,
+        provider="AzureFoundryWebSearch",
+        query="Ab wann gilt der Batteriepass?",
+        query_id=query_id,
+        sources=_cited_sources(answer, urls),
+        started_at="2026-07-23T12:00:00Z",
+    )
+
+
+def _kernel_deps(run_id: str):
+    from inqtrix.agents.control_memory import MemoryAgentControlStore
+    from inqtrix.agents.kernel.deps import KernelDeps
+
+    return KernelDeps(
+        run_id=run_id,
+        control=MemoryAgentControlStore(),
+        platform=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        model=None,
+        reasoning_effort=None,
+        timeout=1.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        (CITED_PROSE, {EURLEX: PASSPORT, COMMISSION: UNCHANGED}),
+        (CITED_DATED_ITEM, {AGENCY: "**1. September 2026:** 214.334 öffentliche Ladepunkte in Deutschland."}),
+        (CITED_TABLE, {FIRST_QUARTER: "Q1 2025 | 9.013 Mio. €", SECOND_QUARTER: "Q2 2025 | 9.027 Mio. €"}),
+    ],
+    ids=["statement", "dated list item", "table row"],
+)
+def test_the_kernel_stores_the_line_that_cites_each_source_of_an_instant_search(
+    answer: str, expected: dict[str, str],
+) -> None:
+    """The reference of a source says what the search said where it cites
+    the source, the same text the ledger keeps at that citation, and the
+    register a sufficiency judgement reads names it."""
+    deps = _kernel_deps("run_kernel_cited_line")
+    registered = deps.register_instant_web_search(_instant_search(answer, list(expected)))
+
+    citations = deps.web_search_ledger["searches"]["query-cited-line"]["citations"]
+    register = evidence_digest(registered)
+    assert {item["url"]: item["grounded_support"] for item in registered} == expected
+    assert {item["url"]: item["grounded_support"] for item in citations} == expected
+    assert all(f"Grounded answer context (no source excerpt): {text}" in register for text in expected.values())
+
+
+def test_a_source_an_earlier_search_cited_takes_the_line_of_the_search_that_registers_it() -> None:
+    """The ledger of the run also holds the searches of a child, whose
+    sources are not all references of the run: a later search that cites
+    one of them speaks for itself, and it leads the pointers."""
+    from inqtrix.evidence import build_instant_web_search_ledger
+
+    deps = _kernel_deps("run_kernel_two_searches")
+    earlier = f"Die Verordnung regelt das Recycling von Altbatterien. ([eur-lex.europa.eu]({EURLEX}))"
+    deps.register_web_search_ledger(build_instant_web_search_ledger(
+        run_id="run_child",
+        query_id="query-earlier",
+        query="Was regelt die Batterieverordnung?",
+        provider="AzureFoundryWebSearch",
+        answer=earlier,
+        sources=_cited_sources(earlier, [EURLEX]),
+    ))
+    (reference,) = deps.register_instant_web_search(
+        _instant_search(f"{PASSPORT} ([eur-lex.europa.eu]({EURLEX}))", [EURLEX], query_id="query-later")
+    )
+    assert (reference["grounded_support"], reference["query_id"], reference["query_ids"]) == (
+        PASSPORT, "query-later", ["query-later", "query-earlier"],
+    )
+
+
+def test_a_source_cited_only_by_a_link_that_stands_alone_stays_provider_context_without_a_text() -> None:
+    """No statement stands in the line of the link: the reference carries no
+    text, and it is still what the provider wrote, not a stronger material."""
+    from inqtrix.agents.evidence_context import project_evidence_context
+
+    deps = _kernel_deps("run_kernel_link_alone")
+    answer = f"| Jahr | Wert |\n|---|---|\n| 2025 | 3,1 % |\n\n([bundesnetzagentur.example]({AGENCY}))"
+    (reference,) = deps.register_instant_web_search(_instant_search(answer, [AGENCY]))
+    (source,) = project_evidence_context([reference], deps.web_search_ledger)["sources"]
+    assert ("grounded_support" in reference, source["material_kind"]) == (False, "provider_context")
+
+
 def test_a_canvas_update_adds_sources_instead_of_replacing_them():
     """A model that fact-checks one paragraph passes only the newly
     found source; replacing the list would DELETE every source the
@@ -557,3 +523,90 @@ def test_a_reference_without_an_id_is_never_silently_swallowed():
 
     merged = _merged_refs([{"label": "W1"}], [{"label": "W2"}])
     assert len(merged) == 2
+
+
+def _ledger_deps(store, run_id: str = "run_kernel_gathered"):
+    from inqtrix.agents.kernel.deps import KernelDeps
+
+    return KernelDeps(
+        run_id=run_id,
+        control=store,
+        platform=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        model=None,
+        reasoning_effort=None,
+        timeout=1.0,
+    )
+
+
+def test_the_run_keeps_which_references_it_gathered_itself_across_a_park() -> None:
+    """What a run searched or cited is its own; what it was handed is not.
+
+    The ledger also holds the references of earlier turns and of documents
+    the run read, so that their labels stay citable. Only what the run's own
+    source tools registered counts as gathered, a reference an earlier turn
+    left included once a tool finds it again, and the set comes back with
+    the ledger after a park.
+    """
+    from inqtrix.agents.control_memory import MemoryAgentControlStore
+
+    store = MemoryAgentControlStore()
+    first = _ledger_deps(store)
+    handed, = first.register_references(
+        [{"url": "https://example.com/earlier", "title": "Earlier turn"}],
+        gathered=False,
+    )
+    own, = first.register_references(
+        [{"url": "https://example.com/own", "title": "This run"}]
+    )
+    assert first.gathered_reference_ids == {own["reference_id"]}
+
+    resumed = _ledger_deps(store)
+    resumed.hydrate_evidence()
+    assert sorted(resumed.evidence_refs) == sorted(
+        [handed["reference_id"], own["reference_id"]]
+    )
+    assert resumed.gathered_reference_ids == {own["reference_id"]}
+
+    # A search of this run finds the earlier reference again: nothing about
+    # the reference changes, and it is this run's source from now on.
+    again, = resumed.register_references([{"url": "https://example.com/earlier"}])
+    assert again["reference_id"] == handed["reference_id"]
+    both = {own["reference_id"], handed["reference_id"]}
+    assert resumed.gathered_reference_ids == both
+
+    third = _ledger_deps(store)
+    third.hydrate_evidence()
+    assert third.gathered_reference_ids == both
+
+
+def test_a_ledger_stored_before_the_marker_counts_all_of_it_as_gathered() -> None:
+    """A run in flight across the change keeps the list it had before."""
+    import asyncio
+
+    from inqtrix.agents.control_memory import MemoryAgentControlStore
+
+    store = MemoryAgentControlStore()
+    run_id = "run_kernel_gathered_old"
+    asyncio.run(
+        store.upsert_artifact(
+            run_id=run_id,
+            kind="evidence_bundle",
+            session_id=None,
+            title="Kernel evidence",
+            status="ready",
+            content_markdown="",
+            payload={"schema_version": 1, "web_search_ledger": {}},
+            refs=[
+                {"label": "W1", "url": "https://example.com/one"},
+                {"label": "W2", "url": "https://example.com/two"},
+            ],
+            updated_by="agent",
+            artifact_id=f"art_{run_id[-12:]}_evidence",
+        )
+    )
+    deps = _ledger_deps(store, run_id)
+    deps.hydrate_evidence()
+
+    assert len(deps.evidence_refs) == 2
+    assert deps.gathered_reference_ids == set(deps.evidence_refs)

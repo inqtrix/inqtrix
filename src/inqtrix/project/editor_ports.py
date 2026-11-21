@@ -37,6 +37,18 @@ if TYPE_CHECKING:
 EDITOR_CONTEXT_COMMENT_PAGE_SIZE = 200
 """Maximum comment page delivered with a model's editor context."""
 
+COLLABORATION_DOCUMENT_CODE = "editor.collaboration_document"
+"""Failure code of an agent proposal to a document in collaboration mode."""
+
+COLLABORATION_DOCUMENT_NOTICE = (
+    "Documents in collaboration mode do not accept agent proposals; "
+    "describe the change in your answer instead."
+)
+"""The one text for documents in collaboration mode, wherever the agent meets
+it: the hint both kernel read tools give for such a document, the refusal of
+the kernel's patch tool, and the refusal of ``editor.patch.propose``. Kept in
+the editor contract, which the kernel tools and the capability both read."""
+
 
 class DocumentNotFound(KeyError):
     """Raised when a document id is unknown to the store (maps to HTTP 404)."""
@@ -45,13 +57,13 @@ class DocumentNotFound(KeyError):
 class DocumentRevisionConflict(RuntimeError):
     """Raised when a document save loses the revision guard (HTTP 409).
 
-    The store accepts a save only when it carries a STRICTLY newer
-    revision than the stored row (monotonic guard, not base+1-exact —
-    debounced autosave legitimately jumps several revisions per flush).
-    A concurrent writer — human autosave vs. agent patch apply — whose
-    counter is stale-or-equal gets this instead of silently overwriting
-    the newer content or moving the revision backwards. The carried
-    ``current_revision`` lets the client refetch and rebase precisely.
+    The store accepts a save only when it carries exactly the stored
+    revision plus one: the writer names the revision it last saw as its
+    base and sends base+1. A concurrent writer — human autosave vs. agent
+    patch apply — whose base is stale gets this instead of silently
+    overwriting the newer content or moving the revision backwards. The
+    carried ``current_revision`` lets the client fetch that version and
+    merge its own text into it.
 
     Attributes:
         current_revision: The revision actually stored right now.
@@ -74,6 +86,11 @@ class DocumentContentModeConflict(RuntimeError):
     def __init__(self, document_id: str) -> None:
         super().__init__(f"document {document_id} is no longer markdown-owned")
         self.document_id = document_id
+
+
+CONTENT_MODE_CHANGED_TEXT = "Document content is already being synchronized live."
+"""The public text of :class:`DocumentContentModeConflict` (409 with reason
+``content_mode_changed``), one wording for every route that answers it."""
 
 
 class DocumentMetadataConflict(RuntimeError):

@@ -35,6 +35,8 @@ class MemoryAccountPreferencesStore:
         enable_agent_memory=False,
         chat_model_tier="",
         agent_model_tier="",
+        last_research_profile="",
+        last_agent_tier="",
     ) -> AccountPreferences:
         prefs = AccountPreferences(
             user_id=user_id, contrast_mode=contrast_mode, locale=locale, theme=theme,
@@ -42,6 +44,8 @@ class MemoryAccountPreferencesStore:
             enable_agent_memory=enable_agent_memory,
             chat_model_tier=chat_model_tier,
             agent_model_tier=agent_model_tier,
+            last_research_profile=last_research_profile,
+            last_agent_tier=last_agent_tier,
             updated_at=updated_at,
         )
         self._rows[user_id] = prefs

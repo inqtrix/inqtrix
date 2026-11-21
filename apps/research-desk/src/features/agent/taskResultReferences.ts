@@ -18,7 +18,7 @@ export type TaskResultReferenceGroup =
   | { kind: 'web'; reference: TaskResultReference }
   | { kind: 'document'; title: string; references: TaskResultReference[] }
 
-/** Build the compact task-detail source projection.
+/** Build the compact source projection of the run's source list.
  *
  * Web entries deduplicate by canonical URL and remain one flat row. Internal
  * chunks group only when several hits belong to the same document; a single

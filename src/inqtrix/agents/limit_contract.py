@@ -313,6 +313,39 @@ def effective_tool_grants(
     return frozenset(granted)
 
 
+def knowledge_batch_granted(
+    control: AgentControlStore,
+    *,
+    run_id: str,
+    run_async: Callable[[Any], Any],
+) -> bool:
+    """Whether the user granted, for the run, a batch that searches project knowledge.
+
+    Folded like :func:`effective_tool_grants`, from the decided approval
+    rows at every segment start. It counts only a run-wide approve of a
+    batch with a knowledge assignment whose card named the collections
+    (``knowledge_scope`` in the gate payload): the user then saw the
+    boundary the assignments search and approved such batches for the rest
+    of the run. A grant given at a batch of research alone named no
+    collections and covers no knowledge assignment.
+    """
+    from inqtrix.agents.source_policy import BATCH_TOOL_NAME, batch_reaches_knowledge
+
+    for record in run_async(control.list_approvals(run_id)):
+        if record.kind != "tool" or record.decision != "approve":
+            continue
+        if dict(record.decision_payload).get("approval_scope") != "run":
+            continue
+        if record.payload.get("knowledge_scope") is None:
+            continue
+        if any(
+            str(action.get("tool") or "") == BATCH_TOOL_NAME and batch_reaches_knowledge(action.get("args"))
+            for action in record.payload.get("actions") or []
+        ):
+            return True
+    return False
+
+
 BOUND_BUDGET_SIBLING_SHARE = 0.5
 """Share below which a sibling budget counts as barely spent.
 

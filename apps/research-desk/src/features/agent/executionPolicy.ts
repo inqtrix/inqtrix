@@ -33,6 +33,10 @@ export type AgentExecutionSnapshot = {
   /** Web searches the run's own provider calls executed; null when the
    * payload did not record it (a snapshot from before the count). */
   webSearches: number | null
+  /** Searches of the knowledge base the run executed itself; null when
+   * the payload records none (a mission, a snapshot from before the
+   * count). `toolUseCounts.knowledge` counts a document read as well. */
+  knowledgeSearches: number | null
   limits: Record<string, AgentExecutionLimit>
   /** Tools the user approved run-wide (`approval_scope: 'run'`);
    * empty when nothing is granted, or when an older server that does not
@@ -43,7 +47,6 @@ export type AgentExecutionSnapshot = {
 export type AgentKnowledgeScopeReport = 'all' | 'pinned' | 'inherited'
 
 export type AgentExecutionDisplay = {
-  effectiveMode: string
   responseForm: string
   depth: string
 }
@@ -60,23 +63,19 @@ export const DEFAULT_AGENT_SOURCE_POLICY: AgentSourcePolicy = {
 export function resolveAgentExecutionDisplay({
   execution,
   selectedDepth,
-  selectedMode,
   selectedResponseForm,
 }: {
   execution: AgentExecutionSnapshot | null
   selectedDepth: string
-  selectedMode: string
   selectedResponseForm: string
 }): AgentExecutionDisplay {
   if (execution) {
     return {
-      effectiveMode: execution.effectiveMode ?? selectedMode,
       responseForm: execution.responseForm ?? selectedResponseForm,
       depth: execution.depth ?? selectedDepth,
     }
   }
   return {
-    effectiveMode: selectedMode,
     responseForm: selectedResponseForm,
     depth: selectedDepth,
   }
@@ -264,6 +263,7 @@ export function normalizeAgentExecutionSnapshot(
       nonNegativeInteger(record.knowledge_collection_count) ?? 0,
     consentReason: stringOrNull(record.consent_reason ?? record.consent),
     webSearches: nonNegativeInteger(record.web_searches) ?? null,
+    knowledgeSearches: nonNegativeInteger(record.knowledge_searches) ?? null,
     toolUseCounts: {
       web: typeof counts.web === 'number' && counts.web >= 0 ? counts.web : 0,
       knowledge:

@@ -8,6 +8,7 @@ from inqtrix.agents.kernel.algorithm import (
     _result_references,
     _validate_kernel_answer_citations,
 )
+from inqtrix.agents.kernel.deps import KernelDeps
 from inqtrix.agents.report_quality import CitationValidationFailed
 
 
@@ -115,15 +116,22 @@ def test_failed_repair_marks_unknown_label_and_preserves_valid_citation(
     assert deps.events[-1][1]["status"] == "degraded"
 
 
-def test_uncited_answer_keeps_the_basis_only_when_the_run_gathered_sources() -> None:
-    """The basis fallback is for answers built on sources THIS run
-    searched or read. A run that only wrote a file (its ledger filled by
-    reading a document) must not surface "N Quellen" on a status answer."""
+def test_uncited_answer_lists_only_what_the_run_gathered_itself() -> None:
+    """An answer without a citation label lists the basis of THIS run's work.
+
+    The ledger also holds what the run was handed: the references of earlier
+    turns and of documents it read. A run that only wrote a file must not
+    surface "N Quellen" on a status answer, and a follow-up must not list the
+    sources of the turn before it.
+    """
     answer = "Die Antwort steht jetzt als Canvas-Datei vor."
-    assert _result_references(answer, LEDGER, basis_fallback=True) == LEDGER
-    assert _result_references(answer, LEDGER, basis_fallback=False) == []
-    # A citing answer is unaffected by the flag.
-    cited = _result_references("Belegt [W1].", LEDGER, basis_fallback=False)
+    one, two = (KernelDeps.ledger_id(reference) for reference in LEDGER)
+    assert _result_references(answer, LEDGER, basis={one, two}) == LEDGER
+    assert _result_references(answer, LEDGER, basis={two}) == [LEDGER[1]]
+    assert _result_references(answer, LEDGER, basis=set()) == []
+    assert _result_references(answer, LEDGER) == []
+    # A citing answer lists what it cites, whoever gathered it.
+    cited = _result_references("Belegt [W1].", LEDGER, basis={two})
     assert [reference["label"] for reference in cited] == ["W1"]
 
 

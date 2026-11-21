@@ -1174,7 +1174,7 @@ def test_followup_contextualization_reraises_cancellation() -> None:
         contextualize_followup_question(
             CancelledLLM(),
             question="Und die Haftung?",
-            history="Nutzer: Wie ist der Rahmenvertrag geregelt?",
+            history="User: Wie ist der Rahmenvertrag geregelt?",
         )
 
 

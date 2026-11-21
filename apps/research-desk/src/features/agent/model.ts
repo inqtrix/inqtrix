@@ -1,10 +1,10 @@
 /**
  * Agent Desk record model — separate from ResearchRunRecord.
  *
- * Rows are the truth: the control surfaces (plan, approvals,
- * clarifications, artifacts) are FETCHED rows converted here; SSE events only
- * flip `*Stale` flags and carry live task/phase state. All converters are
- * pure so they stay unit-testable without React.
+ * Rows are the truth: the control surfaces (approvals, clarifications,
+ * artifacts) are FETCHED rows converted here; SSE events only flip
+ * `*Stale` flags and carry the live phase and transcript. All converters
+ * are pure so they stay unit-testable without React.
  */
 
 import type {
@@ -12,9 +12,6 @@ import type {
   AgentArtifactDetailWire,
   AgentArtifactMetaWire,
   AgentClarificationWire,
-  AgentPatchWire,
-  AgentPlanTaskWire,
-  AgentPlanWire,
 } from './types'
 import type {
   ResearchRunAccess,
@@ -31,29 +28,11 @@ import type {
 // --- Pulse-track stations (the signature progress line) ---------------------
 
 /**
- * The metro-line stations of the pulse track. Deliberately fewer than the
- * backend phases: `clarification` is a GATE overlay (not a station) and
- * `evidence` folds into synthesis — six stations keep the track compact.
- */
-export const AGENT_PHASE_STATIONS = [
-  'intake',
-  'discovery',
-  'planning',
-  'execution',
-  'synthesis',
-  'critic',
-] as const
-
-export type AgentPhaseStation = (typeof AGENT_PHASE_STATIONS)[number]
-
-/**
- * The stations of the AGENT KERNEL — measured, not assumed.
+ * The stations of the pulse track — measured, not assumed.
  *
- * Across every kernel run in the store the engine reports exactly two
- * phases: `execution` and `done`. It has no discovery, no planning, no
- * synthesis and no critic. Painting the mission's six stations for it
- * would describe a flow that never happens; `result` is the station the
- * finished run is standing on.
+ * The kernel reports exactly two phases: `execution` and `done`. `result`
+ * is the station a finished run is standing on; no phase leads there, a
+ * completed run fills the line up to it.
  */
 export const AGENT_KERNEL_STATIONS = [
   'intake',
@@ -61,65 +40,30 @@ export const AGENT_KERNEL_STATIONS = [
   'result',
 ] as const
 
-/** Which line to draw. Absent metadata keeps the mission line, which is
- * the older and broader vocabulary — an unknown engine must not lose
- * stations it may well have visited. */
-export function agentStationsFor(
-  effectiveMode: string | undefined,
-): readonly string[] {
-  return effectiveMode === 'agent_kernel'
-    ? AGENT_KERNEL_STATIONS
-    : AGENT_PHASE_STATIONS
-}
+/** The stations a phase can reach; `result` is reached by completing. */
+export type AgentStation = 'intake' | 'execution'
 
 /**
  * How far the pulse track is filled: every station BEFORE this index is
- * done, the station AT it is the active one while the run is alive.
- *
- * A finished run fills up to the station it actually reached and no
- * further. Filling the whole line on completion makes the track lie about
- * the kernel, which only ever reports `intake` and `execution`: it would
- * claim a discovery, a plan and a verification pass that never ran. The
- * line is read as a record of what happened, so an engine that visits
- * four of six stations must show four.
+ * done, the station AT it is the active one while the run is alive. A
+ * completed run holds its result, so the whole line is done; a run that
+ * stopped keeps the station it stopped at.
  */
 export function agentPulseActiveIndex(
-  station: AgentPhaseStation,
+  station: AgentStation,
   completed: boolean,
-  stations: readonly string[] = AGENT_PHASE_STATIONS,
 ): number {
-  const reached = Math.max(0, stations.indexOf(station))
-  if (!completed) return reached
-  // The two lines end differently. The kernel's ends in the RESULT a
-  // finished run holds, so completing it means reaching the last
-  // station. The mission's ends in the critic, which a completed run may
-  // well have skipped — there, completion only closes the station the
-  // run actually reached, and the rest stay pale.
-  return stations === AGENT_KERNEL_STATIONS ? stations.length : reached + 1
+  if (completed) return AGENT_KERNEL_STATIONS.length
+  return Math.max(0, AGENT_KERNEL_STATIONS.indexOf(station))
 }
 
 /**
- * Backend phase -> station index; `null` keeps the previous station (gates
- * and unknown phases must never bounce the track backwards).
+ * Backend phase -> station; `null` keeps the previous station. A phase
+ * outside the kernel's line — `done`, or a phase a stored run of the
+ * retired mission engine reported — must never bounce the track back.
  */
-export function agentPhaseStation(phase: string): AgentPhaseStation | null {
-  switch (phase) {
-    case 'intake':
-      return 'intake'
-    case 'discovery':
-      return 'discovery'
-    case 'planning':
-      return 'planning'
-    case 'execution':
-      return 'execution'
-    case 'evidence':
-    case 'synthesis':
-      return 'synthesis'
-    case 'critic':
-      return 'critic'
-    default:
-      return null
-  }
+export function agentPhaseStation(phase: string): AgentStation | null {
+  return phase === 'intake' || phase === 'execution' ? phase : null
 }
 
 export function isTerminalAgentPhase(phase: string): boolean {
@@ -127,40 +71,6 @@ export function isTerminalAgentPhase(phase: string): boolean {
 }
 
 // --- Records -----------------------------------------------------------------
-
-export type AgentPlanTaskRecord = {
-  taskId: string
-  ordinal: number
-  title: string
-  toolKind: AgentPlanTaskWire['tool_kind']
-  objective: string
-  queries: string[]
-  gapIds: string[]
-  dependsOn: string[]
-  budget: Record<string, unknown>
-  params: Record<string, unknown>
-  expectedOutput: string
-  status: string
-  childRunId: string | null
-  resultSummary: string
-}
-
-export type AgentPlanVersionRecord = {
-  planId: string
-  version: number
-  status: string
-  createdBy: 'agent' | 'user'
-  reason: string
-  createdAt: number
-}
-
-export type AgentPlanRecord = AgentPlanVersionRecord & {
-  summaryMarkdown: string
-  assumptions: string[]
-  successCriteria: string[]
-  tasks: AgentPlanTaskRecord[]
-  versions: AgentPlanVersionRecord[]
-}
 
 export type AgentApprovalRecord = {
   approvalId: string
@@ -244,88 +154,6 @@ export type AgentArtifactRecord = {
   publicationGap?: boolean
 }
 
-/** One editor patch proposed by the run; mirrors the wire detail. */
-export type AgentPatchRecord = {
-  patchId: string
-  documentId: string
-  source: AgentPatchWire['source']
-  status: AgentPatchWire['status']
-  summary: string
-  edits: AgentPatchWire['edits']
-  warnings: string[]
-  revisionBefore: number
-  appliedRevision: number | null
-  appliedEditIds: string[] | null
-  note: string
-  documentRevision: number
-}
-
-export function agentPatchFromWire(wire: AgentPatchWire): AgentPatchRecord {
-  return {
-    patchId: wire.patch_id,
-    documentId: wire.document_id,
-    source: wire.source,
-    status: wire.status,
-    summary: wire.summary,
-    edits: wire.edits.map((edit) => ({ ...edit })),
-    warnings: [...wire.warnings],
-    revisionBefore: wire.revision_before,
-    appliedRevision: wire.applied_revision,
-    appliedEditIds: wire.applied_edit_ids ? [...wire.applied_edit_ids] : null,
-    note: wire.note,
-    documentRevision: wire.document_revision,
-  }
-}
-
-/** THE settled-task vocabulary: statuses whose result rows exist and no
- * longer change. One definition for event reduction, result caching and
- * prefetch eligibility — no surface may keep its own copy of this set. */
-export const TERMINAL_AGENT_TASK_STATUSES: ReadonlySet<string> = new Set([
-  'cancelled',
-  'completed',
-  'failed',
-  'insufficient_evidence',
-  'skipped',
-])
-
-/** Live per-task state derived from `inqtrix.agent.task.*` events. */
-export type AgentTaskLiveState = {
-  status:
-    | 'running'
-    | 'cancel_requested'
-    | 'cancelled'
-    | 'completed'
-    | 'failed'
-    | 'insufficient_evidence'
-    | 'skipped'
-  /** Terminal task outcome as reported (completed|failed|insufficient_evidence…). */
-  outcome?: string
-  attempt: number
-  childRunId?: string
-  error?: string
-  /** Latest task-scoped operation for local Instant/Knowledge work. */
-  activity?: AgentActivityRecord
-  /** Bounded invocation-level history for the selected task detail. */
-  activityHistory?: AgentActivityRecord[]
-  /** Truthful terminal counters emitted by the task executor. */
-  metrics?: Record<string, unknown>
-  /** Immediate task outcome from the terminal event. The authoritative plan
-   * row replaces it on refresh, but live cards must not wait for that fetch. */
-  resultSummary?: string
-  errorCode?: string
-  /** The task took a visible fallback path (it belongs under attention). */
-  fallback?: boolean
-  /** The task's evidence has a limit the run names as an open point. A
-   * note, not a fallback: the task keeps its own status group. */
-  evidenceLimit?: boolean
-  /** First task/activity boundary (unix seconds). Retries retain the original
-   * start so the card reports the complete work-unit duration. */
-  startedAt?: number
-  /** Earliest truthful terminal operation boundary. A later wave-level
-   * task.finished event must not inflate parallel task durations. */
-  finishedAt?: number
-}
-
 /** Latest child-run snapshot (throttled `child.progress` events). */
 export type AgentChildProgressRecord = {
   childRunId: string
@@ -349,65 +177,15 @@ export type AgentChildProgressRecord = {
   lastTool?: string
   toolCalls?: number
   updatedAt?: number
-  /** Zero-based ordinals a delegated MISSION currently has OPEN. A
-   * mission starts its whole parallel wave at once, so this is a set,
-   * not a single "current task". Empty means every started task has
-   * settled. A research child reports none of this. */
-  openTasks?: number[]
-  taskToolKind?: string
   /** Grounded evidence answers the child has completed so far — the
    * unit of progress that actually moves during a long execution. */
   checkedAnswers?: number
-  /** Plan task titles by zero-based ordinal, from the mission's
-   * `task.started` projections — what the line names a task by. */
-  taskTitles?: Record<number, string>
-  /** Zero-based ordinals of tasks that FAILED (settled, not open). The
-   * line says how many, so a mission that lost two tasks and went on
-   * planning is not read as two tasks still running. */
-  failedTasks?: number[]
-  /** The search a mission task started most recently (projected
-   * `agent.activity`, `scope="task"`); the line shows it while the
-   * child executes. */
-  lastQuery?: string
-  /** Searches the mission's tasks completed so far — with the parallel
-   * wave this is the honest count next to the one query shown. */
-  searchesDone?: number
-  /** The latest derived synthesis line of the mission (outline title,
-   * section written) — what the child is writing right now. */
-  section?: string
-  /** Memo sections the mission has written (n-section-* narrations). */
-  sectionsDone?: number
-  /** First projection seen for this child — the summary line's clock
-   * runs from here to the terminal update. */
+  /** First projection seen for this child — what the line says the child
+   * has been working since. */
   startedAt?: number
-  /** The child's own plan-task ids by ordinal — the join key between a
-   * task row, its searches (`child_task_id`) and its result line
-   * (`n-task-<id>`). */
-  taskIds?: Record<string, number>
-  /** Arrival time (epoch seconds) of a task's start / settle projection. */
-  taskStartedAt?: Record<number, number>
-  taskSettledAt?: Record<number, number>
-  /** Completed searches per task ordinal — only the mission's OWN
-   * searches (instant/knowledge tasks) cross; a `web_research` task
-   * delegates to a grandchild whose searches stay in its own stream. */
-  taskSearches?: Record<number, number>
-  /** Tool kind per task ordinal (`web_research`, `web_instant`, ...). */
-  taskKinds?: Record<number, string>
-  /** Ordinal of the task whose search `lastQuery` belongs to. */
-  lastQueryTask?: number
-  /** Head of a finished task's result (narration kind `task`, its title
-   * prefix stripped) — the mission's intermediate results, one line each. */
-  taskResults?: Record<number, string>
-  /** The mission's derived plan line ("Mein Plan (N Aufgaben): …"). */
-  planLine?: string
-  /** The latest decision after a check (`critic_unavailable`,
-   * `critic_revise`, `critic_research`, `critic_research_exhausted`,
-   * `replan_invalid`): why the mission goes on or stops. */
-  decision?: { kind: string; label: string; detail?: string; at: number }
-  /** Critic research rounds the mission opened so far. */
-  researchRounds?: number
-  /** How the mission's review ended, as its projected outcome record: the
-   * states and the server's bounded summary sentence, never its lines. */
+  /** How the child's review ended, as its projected outcome record: the
+   * states and the server's bounded summary sentence, never its lines. A
+   * stored kernel run's delegated mission reports one. */
   outcome?: AgentChildOutcome
 }
 
@@ -698,6 +476,10 @@ export type AgentStepEntry = {
    * `false` marks persisted replay/catch-up and suppresses presentation
    * effects; absent keeps locally produced/demo entries backwards compatible. */
   arrivedLive?: boolean
+  /** `plan` and `task_*` rows exist only in stored runs of the retired
+   * mission engine (`RETIRED_AGENT_EVENT_TYPES`): plain lines that carry
+   * their own text, since the plan and task rows behind them are no longer
+   * read. */
   kind:
     | 'phase'
     | 'activity'
@@ -712,6 +494,11 @@ export type AgentStepEntry = {
     | 'gate_requested'
   phase?: string
   taskId?: string
+  /** A retired task row's title, as its event carried it (absent in runs
+   * stored before task events carried titles). */
+  title?: string
+  /** A retired task row's result summary, as its event carried it. */
+  result?: string
   activityKind?: string
   /** The passages a review flagged, with what is wrong about each. The
    * prose of a review activity carries its count; this carries the text
@@ -748,10 +535,10 @@ export type AgentStepEntry = {
   error?: string
   /** Narration prose. */
   text?: string
-  /** Stable narration slot id (e.g. `n-synthesis`, `n-section-0`). The
-   * backend re-emits the SAME id on node re-execution (critic replan
-   * loop) with a fresh sequence — the reducer upserts on this id so the
-   * line updates in place instead of multiplying. */
+  /** Stable narration slot id (e.g. `kernel_deep_review`). The backend
+   * re-emits the SAME id while it updates the line, with a fresh sequence —
+   * the reducer upserts on this id so the line updates in place instead of
+   * multiplying. */
   narrationId?: string
   /** A narration line the server is still writing (`final: false`): the
    * next emission with the same id replaces it. */
@@ -762,7 +549,7 @@ export type AgentStepEntry = {
   noticeCode?: string
 }
 
-/** Step-log bound; the tail is the recent story, the plan tab the map. */
+/** Step-log bound; the tail is the recent story. */
 export const MAX_STEP_LOG = 400
 
 /** Flagged passages kept per review row — a bound, never a silent cap on
@@ -812,8 +599,9 @@ export type AgentRunRecord = {
   runId: string
   sessionId?: string
   kind: 'agent' | 'agent_child' | 'standard'
-  /** Durable run-tree links used to retain loaded children while their root
-   * remains visible and prune the whole tree when the root disappears. */
+  /** Run-tree links copied from the server summary. Nothing reads them: a
+   * child run never becomes a record (`isAgentRunSummary`), so a session
+   * holds no tree to follow. */
   parentRunId?: string
   rootRunId?: string
   question: string
@@ -821,11 +609,11 @@ export type AgentRunRecord = {
    * single-run read away. Drives the transcript bubble's "show more". */
   questionClipped?: boolean
   autonomy?: string
-  /** Thoroughness: 'deep' shows the badge; unset = normal. */
+  /** Thoroughness: 'deep' names a run without a Stufe "Deep"; unset = normal. */
   depth?: string
-  /** Selected Stufe: schnell|gruendlich|tief; unset = legacy depth
-   * semantics. Drives the gate's Suchtiefe options and add-task
-   * defaults (the server validator stays the enforcement). */
+  /** The Stufe the run was accepted with: schnell|gruendlich|tief; unset =
+   * legacy depth semantics. The header of the question and the settings line
+   * name it (`runTierBadge`); it does not change after the run was accepted. */
   agentTier?: string
   /** Latest ANSWER-node model resolution from the live event stream.
    * Live-only by design: agent runs are not project-persisted, so after
@@ -837,10 +625,11 @@ export type AgentRunRecord = {
     modelSource: string
   }
   status: ResearchRunStatus
-  /** Backend phase string (intake…critic|done|cancelled). */
+  /** Backend phase string (intake|execution|done|cancelled; a stored run
+   * of the retired mission engine also reports its own phases). */
   phase: string
   /** Last station the pulse track reached (never moves backwards). */
-  station: AgentPhaseStation
+  station: AgentStation
   access?: ResearchRunAccess
   queuePosition?: number | null
   createdAt: string
@@ -863,8 +652,6 @@ export type AgentRunRecord = {
   /** Highest event sequence applied (drives `?after=` replay filtering). */
   lastSequence: number
   // Control rows (fetched; `*Stale` flags are the SSE refetch signals).
-  plan?: AgentPlanRecord
-  planStale: boolean
   approvals: AgentApprovalRecord[]
   approvalsStale: boolean
   clarifications: AgentClarificationRecord[]
@@ -873,7 +660,6 @@ export type AgentRunRecord = {
   artifacts: Record<string, AgentArtifactRecord>
   artifactsStale: boolean
   // Live progress.
-  taskStates: Record<string, AgentTaskLiveState>
   children: Record<string, AgentChildProgressRecord>
   /** Fetched gate rows of parked children, keyed by child run id. */
   childGates: Record<string, AgentChildGateRecord>
@@ -899,13 +685,6 @@ export type AgentRunRecord = {
   canvasContextMeta?: AgentCanvasContextMeta
   /** Rules the run started under (replay-durable). */
   requirementMeta?: AgentRequirementMeta
-  /** Auto-approved replan note (plan.revised{auto_approved}). */
-  lastAutoApprovedVersion?: number
-  /** Proposed editor patch: id from the patch.proposed event, the
-   * detail fetched row-first like every other control surface. */
-  patchId?: string
-  patch?: AgentPatchRecord
-  patchStale: boolean
 }
 
 /**
@@ -1042,50 +821,6 @@ export function agentCenterScreen({
 
 // --- Wire -> record converters (pure) ---------------------------------------
 
-export function agentPlanFromWire(wire: AgentPlanWire): AgentPlanRecord {
-  return {
-    planId: wire.plan_id,
-    version: wire.version,
-    status: wire.status,
-    createdBy: wire.created_by,
-    reason: wire.reason,
-    createdAt: wire.created_at,
-    summaryMarkdown: wire.summary_markdown,
-    assumptions: [...wire.assumptions],
-    successCriteria: [...wire.success_criteria],
-    tasks: wire.tasks.map(agentPlanTaskFromWire),
-    versions: wire.versions.map((version) => ({
-      planId: version.plan_id,
-      version: version.version,
-      status: version.status,
-      createdBy: version.created_by,
-      reason: version.reason,
-      createdAt: version.created_at,
-    })),
-  }
-}
-
-export function agentPlanTaskFromWire(
-  wire: AgentPlanTaskWire,
-): AgentPlanTaskRecord {
-  return {
-    taskId: wire.task_id,
-    ordinal: wire.ordinal,
-    title: wire.title,
-    toolKind: wire.tool_kind,
-    objective: wire.objective,
-    queries: [...wire.queries],
-    gapIds: [...wire.gap_ids],
-    dependsOn: [...wire.depends_on],
-    budget: { ...wire.budget },
-    params: { ...wire.params },
-    expectedOutput: wire.expected_output,
-    status: wire.status,
-    childRunId: wire.child_run_id,
-    resultSummary: wire.result_summary,
-  }
-}
-
 export function agentApprovalFromWire(
   wire: AgentApprovalWire,
 ): AgentApprovalRecord {
@@ -1219,7 +954,8 @@ export function agentArtifactFromWire(
 }
 
 /** Whether a run summary belongs on the Agent Desk (root agent runs only).
- * Both engines count — the FE twin of the backend's AGENT_MODE_IDS. */
+ * The kernel's runs and those of the retired mission engine count — the FE
+ * twin of the backend's AGENT_RUN_MODE_IDS. */
 export function isAgentRunSummary(summary: ResearchRunSummary): boolean {
   return (
     (summary.mode === 'workspace_agent' || summary.mode === 'agent_kernel')
@@ -1230,8 +966,7 @@ export function isAgentRunSummary(summary: ResearchRunSummary): boolean {
 /**
  * Session identity for one agent summary. Shared runs must not materialize the
  * owner's `session_id` in the recipient's syncable session namespace. A view
- * session is therefore derived from the server-generated root run id; children
- * resolve to the same id and the whole tree prunes together.
+ * session is therefore derived from the server-generated root run id.
  */
 export function agentSessionIdFromSummary(
   summary: ResearchRunSummary,
@@ -1273,11 +1008,6 @@ export function agentRunFromSummary(
     errorCode: summary.error?.type,
     snapshot: summary.snapshot,
     lastSequence: 0,
-    // The kernel has no plan phase (its /plan is a guaranteed 404), so
-    // seeding it stale would fire one doomed fetch per desk open. The FE
-    // twin of the backend's AGENT_MODE_IDS split — a kernel that ever
-    // gains plans must flip this together with isAgentRunSummary.
-    planStale: summary.mode !== 'agent_kernel',
     approvals: [],
     approvalsStale: true,
     clarifications: [],
@@ -1285,12 +1015,10 @@ export function agentRunFromSummary(
     artifactOrder: [],
     artifacts: {},
     artifactsStale: true,
-    taskStates: {},
     children: {},
     childGates: {},
     stepLog: [],
     touchedArtifacts: [],
-    patchStale: false,
   }
 }
 

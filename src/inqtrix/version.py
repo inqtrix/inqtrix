@@ -7,4 +7,4 @@ __version__ = "0.2.0"
 # separate from ``__version__``, which stays on the three-segment release line
 # because packaging metadata, npm, and the eval baselines are pinned to it.
 # It must start with ``__version__`` — tests/test_routes.py pins that.
-__display_version__ = "0.2.0.12"
+__display_version__ = "0.2.0.13"

@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import logging
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
@@ -64,9 +65,15 @@ class _World:
         self.model = build_tool_chat_model(self.provider)
         self.archives: list[tuple[str, str]] = []
         self.events: list[tuple[str, dict]] = []
+        # The run's clarifications as the control store lists them, newest first.
+        self.clarifications: list = []
+
+        async def list_clarifications(run_id: str) -> list:
+            return list(self.clarifications)
+
         self.deps = KernelDeps(
             run_id=run_id,
-            control=None,
+            control=SimpleNamespace(list_clarifications=list_clarifications),  # type: ignore[arg-type]
             platform=AgentPlatformSettings(),
             llm=self.provider,
             model=None,
@@ -294,8 +301,24 @@ def _loaded(skill_id: str) -> str:
 
 @BOTH_HOOKS
 def test_the_assignment_answers_and_skills_stay_outside_the_fence(asynchronous):
+    """What directs the work survives a compaction as an instruction: the
+    assignment, what the user typed in answer to the run's questions, and
+    the loaded skills. The questions and the wording of a chosen option are
+    the model's own text and come back as the record, in its fence."""
+    from inqtrix.agents.control_ports import ClarificationRecord
+
     world = _World("runH", [_text_turn("First."), _text_turn("Second.")])
-    world.deps.clarified_answers = ["Answer: only 2025."]
+    world.clarifications = [
+        ClarificationRecord(
+            clarification_id="clr_2", run_id="runH", question="MODEL-ASKED which form?",
+            options=({"id": "o1", "label": "MODEL-OPTION table"},),
+            status="answered", option_id="o1",
+        ),
+        ClarificationRecord(
+            clarification_id="clr_1", run_id="runH", question="MODEL-ASKED which years?",
+            status="answered", answer="Answer: only 2025.",
+        ),
+    ]
     messages = [
         HumanMessage(content="H1 assignment: compare the offers"),
         AIMessage(content="", tool_calls=[{"id": "s1", "name": "load_skill", "args": {"name": "tables"}}]),
@@ -315,6 +338,12 @@ def test_the_assignment_answers_and_skills_stay_outside_the_fence(asynchronous):
     fence = content.index('<untrusted_content source="conversation-summary">')
     for verbatim in ("H1 assignment: compare the offers", "Answer: only 2025.", "SKILL: always answer as a table"):
         assert content.index(verbatim) < fence
+    opened = '<untrusted_content source="run-clarifications">'
+    record, after = content.split(opened, 1)[1].split("</untrusted_content>", 1)
+    outside = content.split(opened, 1)[0] + after
+    for stored in ("MODEL-ASKED which years?", "MODEL-ASKED which form?", "MODEL-OPTION table"):
+        assert stored in record and stored not in outside, stored
+    assert "Answer: only 2025." in outside and "Answer: only 2025." not in record
 
 
 def test_a_refused_skill_load_is_not_restated_as_an_instruction():
@@ -519,7 +548,7 @@ def test_the_trigger_never_lies_above_the_input_budget_of_any_model_card():
 
 @pytest.mark.parametrize(
     ("bound", "expected"),
-    [(COMPACTION_PURPOSE, COMPACTION_PURPOSE), ("agent_answer", "agent_kernel"), (None, "agent_kernel")],
+    [(COMPACTION_PURPOSE, COMPACTION_PURPOSE), ("agent_deep_review", "agent_kernel"), (None, "agent_kernel")],
 )
 def test_the_kernel_provider_keeps_the_purpose_of_a_compaction_only(bound, expected):
     """A summary inside a kernel turn is billed and traced as compaction, not as a kernel turn."""
@@ -546,6 +575,64 @@ def test_the_kernel_provider_keeps_the_purpose_of_a_compaction_only(bound, expec
         set_kernel_deps(None)
 
     assert purposes == [expected]
+
+
+class _VerbosityRecording(_ScriptedProvider):
+    """Records the ``verbosity`` a kernel turn was handed; says whether it can send one."""
+
+    def __init__(self, turns, *, sends: bool) -> None:
+        super().__init__(turns)
+        self.sends = sends
+        self.handed: list[object] = []
+
+    def supports_verbosity(self, *, model=None) -> bool:
+        return self.sends
+
+    def chat(self, messages, **kwargs):
+        self.handed.append(kwargs.get("verbosity", "absent"))
+        return super().chat(messages, **kwargs)
+
+
+def _kernel_turn_verbosity(*, model, sends=True, bound=None, profile=None):
+    from contextlib import nullcontext
+
+    from inqtrix.agents.kernel.algorithm import _DepsChatProvider
+    from inqtrix.observability.context import bind_purpose
+
+    world = _World("runV", [])
+    provider = _VerbosityRecording([_text_turn("ok")], sends=sends)
+    world.deps.llm = provider
+    world.deps.model = model
+    world.deps.work_profile = profile
+    set_kernel_deps(world.deps)
+    try:
+        with bind_purpose(bound) if bound else nullcontext():
+            _DepsChatProvider().chat([{"role": "user", "content": "x"}])
+    finally:
+        set_kernel_deps(None)
+    (handed,) = provider.handed
+    return handed
+
+
+def test_a_kernel_turn_asks_for_the_prose_verbosity_of_its_model():
+    assert _kernel_turn_verbosity(model="gpt-6.1-terra") == "high"
+    # A model whose card names none, and a run on the provider's default model, ask for nothing.
+    assert _kernel_turn_verbosity(model="gpt-6-luna") == "absent"
+    assert _kernel_turn_verbosity(model=None) == "absent"
+
+
+def test_a_summary_and_a_role_inside_the_kernel_ask_for_no_prose_verbosity():
+    """A compaction summary and a role's turns go through the same delegate under their own purpose."""
+    from inqtrix.agents.kernel.work_profiles import resolve_work_profile
+
+    assert _kernel_turn_verbosity(model="gpt-6.1-terra", bound=COMPACTION_PURPOSE) == "absent"
+    assert _kernel_turn_verbosity(
+        model="gpt-6.1-terra", profile=resolve_work_profile("review")
+    ) == "absent"
+
+
+def test_a_kernel_provider_that_cannot_send_the_verbosity_is_not_handed_it():
+    assert _kernel_turn_verbosity(model="gpt-6.1-terra", sends=False) == "absent"
 
 
 PREFIX = archive_prefix("runS")

@@ -9,6 +9,7 @@ small-gap tool; a full report goes through ``research``.
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -26,12 +27,20 @@ from inqtrix.runtime_logging import (
     make_record_id,
     sanitize_grounded_search_result,
 )
+from inqtrix.search_form import (
+    ANSWER_FORM_PARAMETER,
+    ANSWER_FORMS,
+    DEFAULT_ANSWER_FORM,
+)
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.providers.attempts import observe_retries
+from inqtrix.providers.base import get_search_provider_capabilities
 from inqtrix.observability.context import bind_purpose
 
 if TYPE_CHECKING:
     from inqtrix.providers.base import SearchProvider
+
+log = logging.getLogger(__name__)
 
 _RECENCY = {"", "day", "week", "month", "year"}
 
@@ -42,6 +51,10 @@ class WebInstantInput(BaseModel):
     query: str = Field(..., min_length=1)
     recency: str = Field("", description="'', 'day', 'week', 'month', 'year'")
     max_sources: int = Field(8, ge=1, le=20)
+    answer_form: str = Field(
+        DEFAULT_ANSWER_FORM,
+        description="'overview' (the default, sends nothing), 'table', 'timeline'",
+    )
 
 
 class WebCitationSpan(BaseModel):
@@ -104,11 +117,32 @@ def build_web_capabilities(
                 "recency must be '', 'day', 'week', 'month' or 'year'.",
                 http_status=400,
             )
+        if payload.answer_form not in ANSWER_FORMS:
+            raise CapabilityError(
+                "invalid_input",
+                "answer_form must be 'overview', 'table' or 'timeline'.",
+                http_status=400,
+            )
+        # The default form asks for nothing. Any other form is asked of a
+        # provider that names the parameter, and of no other: the keyword
+        # never reaches a provider that does not know it.
+        form_requested = payload.answer_form != DEFAULT_ANSWER_FORM
+
         # The search runs through its sync face, off the loop: the retry
         # callback is bound on this thread, and the sync face waits for the
         # process loop.
-        def _search_with_notice() -> tuple[GroundedSearchResult, object]:
+        def _search_with_notice() -> tuple[GroundedSearchResult, object, bool]:
             active_search = context.search_provider or search_provider
+            form_sent = form_requested and get_search_provider_capabilities(
+                active_search
+            ).supports(ANSWER_FORM_PARAMETER)
+            if form_requested and not form_sent:
+                log.info(
+                    "Web search runs without the requested answer form %s: "
+                    "the search provider %s names no answer form.",
+                    payload.answer_form,
+                    _provider_label(active_search),
+                )
             callback = None
             if context.on_provider_retry is not None:
                 callback = lambda notice: context.on_provider_retry({
@@ -121,13 +155,14 @@ def build_web_capabilities(
                     payload.query,
                     search_context_size="low",
                     recency_filter=payload.recency or None,
+                    **({"answer_form": payload.answer_form} if form_sent else {}),
                 )
             notice = next((item.as_detail() for item in result.notices), None)
-            return result, notice
+            return result, notice, form_sent
 
         started_at = datetime.now(timezone.utc).isoformat()
         started_monotonic = time.perf_counter()
-        result, notice = await aio.run_provider_blocking(_search_with_notice)
+        result, notice, form_sent = await aio.run_provider_blocking(_search_with_notice)
         result = sanitize_grounded_search_result(result)
         finished_at = datetime.now(timezone.utc).isoformat()
         duration_ms = max(
@@ -154,12 +189,19 @@ def build_web_capabilities(
             for index, source in enumerate(result.sources, start=1)
         ]
         provider = _provider_label(context.search_provider or search_provider)
+        # The id decides which record a search is. Without a form it is
+        # what it always was. The same question in another form is another
+        # search, whether or not the provider was handed the form: its id
+        # is made from the id without a form, so no question text can
+        # stand in for a form.
         query_id = make_record_id(
             "query",
             context.run_id
             or make_record_id("run", "web.search.instant", payload.query),
             payload.query,
         )
+        if form_requested:
+            query_id = make_record_id("query", query_id, payload.answer_form)
         return WebInstantOutput(
             query_id=query_id,
             query=payload.query,
@@ -173,6 +215,17 @@ def build_web_capabilities(
                 "recency": payload.recency,
                 "search_context_size": "low",
                 "visible_source_limit": payload.max_sources,
+                # What was asked for and whether it was handed to the
+                # provider: one that names no answer form searched without
+                # it. Whether the answer follows the form, nobody checks.
+                **(
+                    {
+                        "answer_form": payload.answer_form,
+                        "answer_form_sent": form_sent,
+                    }
+                    if form_requested
+                    else {}
+                ),
             },
             started_at=started_at,
             finished_at=finished_at,

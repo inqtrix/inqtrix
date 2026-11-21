@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import uuid
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -38,6 +38,19 @@ class RunStoreMetrics:
     queued: int
     active: int
     capacity: int | None
+
+
+class CheckpointCleanup(Protocol):
+    """Deletes one run's checkpoint thread inside an authorized delete gate.
+
+    ``never_claimed`` says the run never ran and so has no thread; the
+    cleanup then needs no checkpoint store. A store that cannot tell leaves
+    it unset, and the cleanup deletes or fails visibly.
+    """
+
+    def __call__(self, run_id: str, mode: str, *, never_claimed: bool = False) -> None:
+        """Delete the thread of *run_id*, a run of *mode*."""
+        ...
 
 
 class RunSubscriptionPort(Protocol):
@@ -254,21 +267,19 @@ class RunStorePort(Protocol):
     ) -> Any:
         """Run one agent-control mutation under live ``edit`` authority.
 
-        ``control_write(transaction, cancel_child)`` is invoked only after
-        the canonical run root, active caller, and accepted direct share have
-        been locked. Durable backends pass their database transaction;
-        in-memory backends pass ``None`` while holding the corresponding
-        run/identity locks. ``cancel_child`` cancels one direct child subtree
-        inside that same boundary and returns the child's resulting status.
+        ``control_write(transaction)`` is invoked only after the canonical run
+        root, active caller, and accepted direct share have been locked.
+        Durable backends pass their database transaction; in-memory backends
+        pass ``None`` while holding the corresponding run/identity locks.
 
         This is the control-table counterpart of ``resume_run``'s
         ``control_write`` seam: a revoke either commits before the callback
         and the write is denied, or waits until the complete control mutation
-        (including an optional child cancellation) has committed.
+        has committed.
         """
         ...
 
-    def bind_checkpoint_cleanup(self, cleanup: Callable[[str, str], None]) -> None:
+    def bind_checkpoint_cleanup(self, cleanup: CheckpointCleanup) -> None:
         """Remove external execution caches before authorized run/retention deletion."""
         ...
 

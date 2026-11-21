@@ -1,4 +1,4 @@
-"""Shared semantic telemetry projections for both Agent engines."""
+"""Shared semantic telemetry projections of agent runs."""
 
 from __future__ import annotations
 
@@ -15,19 +15,11 @@ _MODEL_RETRY_CONTEXT: dict[str, tuple[str, str]] = {
     # time against the run's answer language — these lines surface exactly
     # when a provider or model call is being retried, so they must read in
     # the reader's language.
-    "agent_intake": ("intake", "intake"),
-    "agent_discovery_analyst": ("discovery_analyst", "discovery"),
     "agent_skill_point_check": ("skill_point_check", "intake"),
-    "agent_plan": ("plan", "planning"),
-    "agent_contradiction": ("contradiction", "evidence"),
     "agent_sufficiency": ("sufficiency", "evidence"),
-    "agent_synthesis": ("synthesis", "synthesis"),
     "agent_citation_repair": ("citation_repair", "synthesis"),
-    "agent_answer": ("answer", "synthesis"),
-    "agent_answer_light": ("answer", "synthesis"),
     "agent_memory_reflection": ("memory_reflection", "critic"),
     "agent_file_analysis": ("file_analysis", "execution"),
-    "agent_patch": ("patch", "patch"),
     "agent_kernel": ("kernel", "execution"),
     COMPACTION_PURPOSE: ("context_compaction", "execution"),
     "agent_deep_review": ("deep_review", "critic"),

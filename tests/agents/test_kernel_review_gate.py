@@ -67,16 +67,19 @@ def _activities(client, run_id: str, kind: str) -> list[dict[str, Any]]:
     ]
 
 
-def _outcome_reviews(client, run_id: str) -> list[str]:
-    """How each outcome record of the run says its review ended."""
+def _outcome_records(client, run_id: str) -> list[dict[str, Any]]:
+    """Every outcome record the run sent, in order."""
     events = client.get(
         f"/v1/runs/{run_id}/events", params={"format": "json"}
     ).json()["data"]
     return [
-        item["data"]["review"]
-        for item in events
-        if item["type"] == "inqtrix.agent.outcome"
+        item["data"] for item in events if item["type"] == "inqtrix.agent.outcome"
     ]
+
+
+def _outcome_reviews(client, run_id: str) -> list[str]:
+    """How each outcome record of the run says its review ended."""
+    return [record["review"] for record in _outcome_records(client, run_id)]
 
 
 def _reviews(llm: StructuredScriptedLLM) -> list[dict[str, Any]]:
@@ -226,6 +229,11 @@ def test_a_review_that_was_owed_and_did_not_run_is_visible(caplog):
         assert len(unavailable) == 1
         assert unavailable[0]["reason"] == "failed"
         assert _outcome_reviews(client, run_id) == ["unavailable"]
+        # The record under the answer names the reason too, not only the
+        # activity in the work log.
+        (record,) = _outcome_records(client, run_id)
+        assert record["unavailable_reason"] == "failed"
+        assert record["summary"] == "Prüfung gescheitert, Ergebnis ungeprüft"
         assert _activities(client, run_id, "deep_review_waived") == []
     assert any(
         "owes a review pass" in record.getMessage() for record in caplog.records

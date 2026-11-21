@@ -6,8 +6,8 @@ import type {
 import {
   sourceAvailabilityFromOverviewSource,
   buildAgentOverview,
-  countAgentToolUse,
-  defaultEngineMode,
+  agentDeskVisible,
+  agentRunsAvailable,
   effectiveAgentAutonomy,
   effectiveAgentDepth,
   type AgentOverviewSource,
@@ -70,18 +70,12 @@ describe('effectiveAgentDepth', () => {
 })
 
 const BALANCED: AgentPermissionModeEntry = {
-  plan_gate: true,
-  web_replan_regate: true,
-  patch_gate: true,
-  kernel_gated_tools: ['load_skill', 'run_deep_mission', 'run_web_research', 'web_instant'],
+  kernel_gated_tools: ['load_skill', 'run_web_research', 'web_instant'],
   kernel_conditional_tools: ['search_project_knowledge'],
   kernel_always_gated: ['propose_editor_patch'],
 }
 
 const AUTONOMOUS: AgentPermissionModeEntry = {
-  plan_gate: false,
-  web_replan_regate: false,
-  patch_gate: true,
   kernel_gated_tools: [],
   kernel_conditional_tools: [],
   kernel_always_gated: ['propose_editor_patch'],
@@ -101,14 +95,6 @@ const LIMITS: AgentLimitCapabilities = {
     normal: { tool_calls: 30, tool_calls_ceiling: 60, steps: 73, steps_ceiling: 145 },
     deep: { tool_calls: 60, tool_calls_ceiling: 120, steps: 121, steps_ceiling: 241 },
   },
-  mission: {
-    discovery_tool_calls: 15,
-    plan_tasks: 8,
-    replan_rounds: 2,
-    clarification_rounds: 2,
-    parallel_children: 6,
-  },
-  research: { rounds: 2 },
 }
 
 function source(overrides: Partial<AgentOverviewSource> = {}): AgentOverviewSource {
@@ -126,64 +112,35 @@ function source(overrides: Partial<AgentOverviewSource> = {}): AgentOverviewSour
 }
 
 describe('buildAgentOverview', () => {
-  it('describes the phase machine gates per mode', () => {
-    const balanced = buildAgentOverview({
+  it('names the kernel active, and drops a reason the server sent for an unregistered one', () => {
+    const active = buildAgentOverview({
       agent: source(),
       autonomy: 'balanced',
       kernelReason: 'tool_calls_required',
       kernelSelectable: true,
-      mode: 'workspace_agent',
     })
-    expect(balanced.brain).toBe('workspace_agent')
-    expect(balanced.kernel).toBe('selectable')
-    expect(balanced.kernelReason).toBeNull()
-    expect(balanced.limits).toBe(LIMITS)
-    expect(balanced.approvals).toEqual([
-      { id: 'plan', state: 'asks' },
-      { id: 'web_search', state: 'asks' },
-      { id: 'editor_patch', state: 'always' },
-    ])
+    expect(active.kernel).toBe('active')
+    expect(active.kernelReason).toBeNull()
+    expect(active.limits).toBe(LIMITS)
+  })
 
-    const auto = buildAgentOverview({
+  it('names the kernel unavailable with its reason', () => {
+    const blocked = buildAgentOverview({
       agent: source(),
-      autonomy: 'autonomous',
+      autonomy: 'balanced',
       kernelReason: 'tool_calls_required',
       kernelSelectable: false,
-      mode: 'workspace_agent',
     })
-    expect(auto.kernel).toBe('unavailable')
-    expect(auto.kernelReason).toBe('tool_calls_required')
-    expect(auto.approvals).toEqual([
-      { id: 'plan', state: 'free' },
-      { id: 'web_search', state: 'free' },
-      { id: 'editor_patch', state: 'always' },
-    ])
+    expect(blocked.kernel).toBe('unavailable')
+    expect(blocked.kernelReason).toBe('tool_calls_required')
   })
 
-  it('starts on the published default only when the feature flag confirms', () => {
-    const agent = source({ default_mode: 'agent_kernel' })
-    // default_mode alone is not enough — the feature flag must confirm.
-    expect(defaultEngineMode(agent, null)).toBe('workspace_agent')
-    expect(
-      defaultEngineMode(agent, {
-        agent_kernel: true, embedding_provider: true, knowledge: true, multi_stack: false, openapi: true,
-      }),
-    ).toBe('agent_kernel')
-    expect(
-      defaultEngineMode(source(), {
-        agent_kernel: true, embedding_provider: true, knowledge: true, multi_stack: false, openapi: true,
-      }),
-    ).toBe('workspace_agent')
-  })
-
-  it('renders kernel approval rows for the selected kernel engine', () => {
+  it('renders the kernel approval rows of the selected mode', () => {
     const kernel = buildAgentOverview({
       agent: source(),
       autonomy: 'balanced',
       kernelSelectable: true,
-      mode: 'agent_kernel',
     })
-    expect(kernel.brain).toBe('agent_kernel')
     expect(kernel.kernel).toBe('active')
     expect(kernel.approvals).toEqual([
       { id: 'web_search', state: 'asks' },
@@ -199,7 +156,6 @@ describe('buildAgentOverview', () => {
       agent: source(),
       autonomy: 'autonomous',
       kernelSelectable: true,
-      mode: 'agent_kernel',
     })
     expect(kernel.approvals).toEqual([
       { id: 'web_search', state: 'free' },
@@ -220,7 +176,6 @@ describe('buildAgentOverview', () => {
       agent,
       autonomy: 'balanced',
       kernelSelectable: true,
-      mode: 'agent_kernel',
     })
     expect(kernel.approvals?.some((row) => row.id === 'summon_dragon' && row.state === 'asks')).toBe(true)
   })
@@ -230,7 +185,6 @@ describe('buildAgentOverview', () => {
       agent: source({ permission_modes: undefined }),
       autonomy: 'balanced',
       kernelSelectable: false,
-      mode: 'workspace_agent',
     })
     expect(overview.approvals).toBeNull()
   })
@@ -240,7 +194,6 @@ describe('buildAgentOverview', () => {
       agent: source({ limits: undefined }),
       autonomy: 'balanced',
       kernelSelectable: true,
-      mode: 'agent_kernel',
     })
     expect(overview.limits).toBeNull()
   })
@@ -254,7 +207,6 @@ describe('buildAgentOverview', () => {
       }),
       autonomy: 'balanced',
       kernelSelectable: false,
-      mode: 'workspace_agent',
     })
     expect(overview.tools).toEqual([
       { id: 'web_search', available: false },
@@ -264,21 +216,21 @@ describe('buildAgentOverview', () => {
   })
 })
 
-describe('countAgentToolUse', () => {
-  it('counts only completed web and knowledge tasks', () => {
-    expect(countAgentToolUse({
-      tasks: [
-        { taskId: 'w1', toolKind: 'web_instant' },
-        { taskId: 'w2', toolKind: 'web_research' },
-        { taskId: 'k1', toolKind: 'rag_query' },
-        { taskId: 's1', toolKind: 'synthesis' },
-      ],
-      taskStates: {
-        w1: { status: 'completed' },
-        w2: { status: 'running' },
-        k1: { status: 'completed' },
-        s1: { status: 'completed' },
-      },
-    })).toEqual({ web: 1, knowledge: 1 })
+describe('agent desk and agent runs', () => {
+  const features = (extra: Record<string, boolean>) => ({
+    embedding_provider: true, knowledge: true, multi_stack: false, openapi: true, ...extra,
+  })
+
+  it('shows the desk where the server set up agent runs, whatever else it reports', () => {
+    expect(agentDeskVisible(features({ agent_desk: true, workspace_agent: false }), false)).toBe(true)
+    expect(agentDeskVisible(features({ agent_desk: false, workspace_agent: true }), false)).toBe(false)
+    expect(agentDeskVisible(null, false)).toBe(false)
+    expect(agentDeskVisible(null, true)).toBe(true)
+  })
+
+  it('starts a run only on the registered kernel', () => {
+    expect(agentRunsAvailable(features({ agent_desk: true, agent_kernel: true }), true)).toBe(true)
+    expect(agentRunsAvailable(features({ agent_desk: true, agent_kernel: false, workspace_agent: true }), true)).toBe(false)
+    expect(agentRunsAvailable(null, false)).toBe(true)
   })
 })

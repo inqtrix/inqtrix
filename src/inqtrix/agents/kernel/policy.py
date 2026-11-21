@@ -17,6 +17,7 @@ ask_user                free                                free
 web_instant             GATED — query verbatim in args      free
 search_project_...      gated only UN-scoped                free
 read_project_document   free                                free
+analyze_document        free (only the run's collections)  free
 cite_document_passages  free (only text the run read)       free
 read_research_report    free (only ATTACHED reports)        free
 ======================  ==================================  ==========
@@ -25,9 +26,11 @@ read_research_report    free (only ATTACHED reports)        free
 already registered to the run does not need renewed consent; its reader
 still authorizes the retained origin. Write-effect tools
 (``propose_editor_patch``) are ALWAYS gated in every mode — they belong
-to :data:`ALWAYS_GATED_TOOLS`, not to a mode table. Canvas reads and
-writes are gated only in ``strict``; Standard and Auto keep the canvas
-itself as their review surface.
+to :data:`ALWAYS_GATED_TOOLS`, not to a mode table; the one call that
+skips the card is a proposal the tool refuses without effect (see
+:func:`_editor_write_needs_review`). Canvas reads and writes are gated only
+in ``strict``; Standard and Auto keep the canvas itself as their review
+surface.
 
 The config dicts are LangChain ``InterruptOnConfig`` TypedDicts (plain
 dicts at runtime — no langchain import needed here). Allowed decisions
@@ -39,6 +42,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from inqtrix.agents.source_policy import BATCH_TOOL_NAME, batch_reaches_knowledge
+
 GATE_DECISIONS = ["approve", "edit", "reject"]
 """HITL decisions the platform exposes — 1:1 our approval verbs."""
 
@@ -46,9 +51,16 @@ ALWAYS_GATED_TOOLS: tuple[str, ...] = ("propose_editor_patch",)
 """Write-effect tools gated in EVERY mode (patches are never
 autonomous — the user's document is the one surface the agent must not
 touch unreviewed). Kept separate from the mode table so a new autonomy
-mode can never accidentally free a write path. ``write_canvas`` is
-deliberately NOT here: it stays free in Standard/Auto and is gated only
-by the explicit ``strict`` table."""
+mode can never accidentally free a write path, and never grantable for
+the run. ``write_canvas`` is deliberately NOT here: it stays free in
+Standard/Auto and is gated only by the explicit ``strict`` table.
+
+Their gate carries :func:`_editor_write_needs_review` in every mode,
+``strict`` included: a proposal to a document the run's last read found in
+collaboration mode asks nothing, because such a document accepts no agent
+proposal and the tool body refuses the call without effect — no capability
+call, no patch row. Every other call asks. Not user-conditional: the skipped
+call leaves no path ungated that could reach the document."""
 
 
 def _gate(when: Any = None, *, user_conditional: bool = False) -> dict[str, Any]:
@@ -116,13 +128,66 @@ def _unscoped_knowledge_search(request: Any) -> bool:
     args = getattr(request, "tool_call", {}).get("args", {}) or {}
     if args.get("collection_ids"):
         return False
+    return not _user_picked_knowledge_scope()
+
+
+def _user_picked_knowledge_scope() -> bool:
+    """Whether the run's knowledge scope is the user's own pick.
+
+    Every run that reaches knowledge is pinned to a concrete collection set
+    at submission, so the pin alone says nothing; only a scope the user
+    picked is the approved shape of internal retrieval. Fail-closed:
+    without a segment context nothing counts as picked.
+    """
     from inqtrix.agents.kernel.deps import kernel_deps
 
     try:
         deps = kernel_deps()
     except RuntimeError:
+        return False
+    return bool(getattr(deps, "knowledge_scope_explicit", False))
+
+
+def _batch_needs_consent(request: Any) -> bool:
+    """Gate predicate: whether a batch of subtasks still owes a question.
+
+    A batch asks until the user granted it for the run. That grant says
+    the run may delegate; it does not say the run may search a boundary
+    the user never picked. A knowledge assignment searches the run's whole
+    boundary, so unless the user picked that boundary (collections, or the
+    switch for everything visible) it is the broad internal search
+    Standard asks about first: such a batch asks again unless the user
+    granted the knowledge search itself, or granted for the run a batch
+    whose card named the collections (the user saw the boundary then).
+
+    Only the run's own scope counts. A batch takes no collections of its
+    own, so nothing in the call's arguments can narrow the search and
+    nothing there may silence the question.
+    """
+    if _ungranted(BATCH_TOOL_NAME)(request):
         return True
-    return not getattr(deps, "knowledge_scope_explicit", False)
+    args = getattr(request, "tool_call", {}).get("args", {}) or {}
+    if not batch_reaches_knowledge(args):
+        return False
+    return (
+        not _user_picked_knowledge_scope()
+        and _ungranted("search_project_knowledge")(request)
+        and not _knowledge_batch_granted()
+    )
+
+
+def _knowledge_batch_granted() -> bool:
+    """Whether the run holds a grant for batches over its knowledge boundary.
+
+    Fail-closed: without a segment context nothing counts as granted.
+    """
+    from inqtrix.agents.kernel.deps import kernel_deps
+
+    try:
+        deps = kernel_deps()
+    except RuntimeError:
+        return False
+    return bool(getattr(deps, "knowledge_batch_granted", False))
 
 
 def _single_child_dispatch(request: Any) -> bool:
@@ -154,6 +219,36 @@ def _single_child_dispatch(request: Any) -> bool:
         # guard's docstring for the single-authority rule).
         return False
     return len(child_calls) <= 1
+
+
+def _editor_write_needs_review(request: Any) -> bool:
+    """Gate predicate of the always-gated editor write: skip only a refused call.
+
+    ``False`` exactly when the run's last read of the call's ``document_id``
+    found the document in collaboration mode
+    (:func:`~inqtrix.agents.kernel.deps.collaboration_document_read`): such a
+    document accepts no agent proposal, and the tool body refuses the call
+    without effect — no capability call, no patch row. Gating it would park
+    an approval whose approve does nothing and whose edit cannot change
+    that. The body is the one authority over such a call, as the batch guard
+    is over a doomed child batch (:func:`_single_child_dispatch`).
+
+    ``True`` (the card) for every other call: an unread document, one read
+    in Markdown mode, a read without a recorded mode, a call without a valid
+    ``document_id``, and any call outside a segment context, because nothing
+    counts as read there. A run-wide grant never frees the tool.
+    """
+    from inqtrix.agents.kernel.deps import collaboration_document_read, kernel_deps
+
+    try:
+        deps = kernel_deps()
+    except RuntimeError:
+        # No segment context (``kernel_deps`` raises when unset) — nothing
+        # counts as read, the gate fires.
+        return True
+    args = getattr(request, "tool_call", {}).get("args", {}) or {}
+    document_id = args.get("document_id") if isinstance(args, dict) else None
+    return not collaboration_document_read(deps, document_id)
 
 
 def interrupt_config_for(autonomy: str) -> dict[str, Any] | None:
@@ -189,15 +284,8 @@ def interrupt_config_for(autonomy: str) -> dict[str, Any] | None:
                     _single_child_dispatch, _ungranted("run_web_research")
                 )
             ),
-            "run_deep_mission": _gate(
-                when=_all_of(
-                    _single_child_dispatch, _ungranted("run_deep_mission")
-                )
-            ),
-            "delegate_batch": _gate(
-                when=_all_of(
-                    _single_child_dispatch, _ungranted("delegate_batch")
-                )
+            BATCH_TOOL_NAME: _gate(
+                when=_all_of(_single_child_dispatch, _batch_needs_consent)
             ),
             "load_skill": _gate(when=_ungranted("load_skill")),
         }
@@ -206,6 +294,7 @@ def interrupt_config_for(autonomy: str) -> dict[str, Any] | None:
             "web_instant": _gate(),
             "search_project_knowledge": _gate(),
             "read_project_document": _gate(),
+            "analyze_document": _gate(),
             "read_canvas": _gate(),
             "search_context": _gate(),
             "read_context": _gate(),
@@ -218,12 +307,11 @@ def interrupt_config_for(autonomy: str) -> dict[str, Any] | None:
             "read_editor_document": _gate(),
             "search_editor_document": _gate(),
             "run_web_research": _gate(when=_single_child_dispatch),
-            "run_deep_mission": _gate(when=_single_child_dispatch),
             "delegate_batch": _gate(when=_single_child_dispatch),
             "load_skill": _gate(),
         }
     else:
         raise ValueError(f'Unknown autonomy mode: {autonomy!r}')
     for tool_name in ALWAYS_GATED_TOOLS:
-        gated[tool_name] = _gate()
+        gated[tool_name] = _gate(when=_editor_write_needs_review)
     return gated or None

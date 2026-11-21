@@ -52,6 +52,14 @@ async function draftAttachments(page: Page, composer: Locator) {
   }
 }
 
+test('the run setup shows the one engine as text, not as a choice that does nothing', async ({ page }) => {
+  await openAgentDesk(page)
+  await page.getByRole('button', { exact: true, name: 'Ausführung' }).click()
+  const menu = page.getByRole('menu')
+  await expect(menu.locator('[data-run-setup-engine]')).toContainText('Automatisch')
+  await expect(menu.getByRole('menuitem', { name: /^Automatisch/ })).toHaveCount(0)
+})
+
 test('a view switch keeps the agent draft with its capsules, attachments and run setup', async ({ page }) => {
   const composer = await openAgentDesk(page)
   await composer.click()
@@ -65,12 +73,7 @@ test('a view switch keeps the agent draft with its capsules, attachments and run
   await pick(page, '/canv', /\/canvas/)
   await page.keyboard.type('mit ')
   await pick(page, '/wiss', /\/wissen/)
-  // The run setup belongs to the draft too: the engine and the web search.
-  await page.getByRole('button', { exact: true, name: 'Ausführung' }).click()
-  await page.getByRole('menuitem', { name: /^Missions-Maschine/ }).click()
-  await page.keyboard.press('Escape')
-  const setup = page.getByRole('button', { exact: true, name: 'Ausführung' })
-  await expect(setup).toContainText('Missions-Maschine')
+  // The run setup belongs to the draft too: the web search.
   const web = page.getByRole('button', { exact: true, name: 'Web' })
   await expect(web).toHaveAttribute('aria-pressed', 'true')
   await web.click()
@@ -93,7 +96,6 @@ test('a view switch keeps the agent draft with its capsules, attachments and run
   await expect(restored).toBeVisible()
   expect(await draftAttachments(page, restored)).toEqual(before)
   expect(await restored.textContent()).toBe(sentence)
-  await expect(setup).toContainText('Missions-Maschine')
   await expect(web).toHaveAttribute('aria-pressed', 'false')
 })
 
@@ -197,37 +199,6 @@ test('the editing target stays for the next task', async ({ page }) => {
   await page.keyboard.type('@')
   await expect(page.getByRole('button', { name: /^Bearbeitungsziel/ }))
     .toContainText('Höchstens ein Bearbeitungsziel je Auftrag')
-})
-
-test('a report the engine refuses holds the send until the kernel is back', async ({ page }) => {
-  const composer = await openAgentDesk(page)
-  await composer.click()
-  await page.keyboard.type('Fasse ')
-  await pick(page, '@research:Kleiderschrank', /digitalen Kleiderschrank/)
-  await page.keyboard.type('zusammen.')
-  const send = page.getByTestId('agent-submit')
-  await expect(send).toBeEnabled()
-  const setup = page.getByRole('button', { exact: true, name: 'Ausführung' })
-  const engine = async (name: RegExp) => {
-    await setup.click()
-    await page.getByRole('menuitem', { name }).click()
-    await page.keyboard.press('Escape')
-    // The menu fades out first; a click during the fade only ends it.
-    await expect(page.getByRole('menu')).toHaveCount(0)
-  }
-  // The mission engine takes no report: the server would answer the send
-  // with 400, so the send waits and the notice says how to go on.
-  await engine(/^Missions-Maschine/)
-  await expect(page.getByTestId('agent-engine-refusal')).toContainText('um zu senden')
-  await expect(send).toBeDisabled()
-  await composer.press('End')
-  await composer.press('Enter')
-  await expect(composer).toContainText('zusammen.')
-  await expect(page.getByRole('heading', { name: WELCOME })).toBeVisible()
-  // Back on the kernel the same draft may go.
-  await engine(/^Automatisch/)
-  await expect(page.getByTestId('agent-engine-refusal')).toHaveCount(0)
-  await expect(send).toBeEnabled()
 })
 
 test('"+" leads to the prompt library, as in the chat', async ({ page }) => {

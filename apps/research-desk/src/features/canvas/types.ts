@@ -13,14 +13,7 @@
 
 export type CanvasViewDescriptor =
   | { view: 'document'; runId: string; artifactId: string }
-  | { view: 'plan'; runId: string; version?: number }
-  | {
-      view: 'run'
-      runId: string
-      taskId?: string
-      /** Task button that regains focus after the nested detail closes. */
-      focusTaskId?: string
-    }
+  | { view: 'run'; runId: string }
   | {
       view: 'evidence'
       runId: string
@@ -37,7 +30,6 @@ export type CanvasViewDescriptor =
       fromRevision: number
       toRevision: number
     }
-  | { view: 'patch'; runId: string; patchId: string }
 
 export type CanvasViewKind = CanvasViewDescriptor['view']
 
@@ -82,16 +74,11 @@ export const EMPTY_CANVAS_STATE: CanvasState = {
 }
 
 /**
- * Stable tab identity per descriptor. Deliberately coarser than value
- * equality where one tab should absorb variants: a plan's versions
- * share one tab (the view owns version navigation). A run and its task
- * drill-down also share one tab; the task is a nested view with Back, not a
- * sibling document. Documents and patches remain distinct per entity.
+ * Stable tab identity per descriptor: one tab per run, document, evidence
+ * entry, file and revision pair.
  */
 export function canvasTabKey(descriptor: CanvasViewDescriptor): string {
   switch (descriptor.view) {
-    case 'plan':
-      return `plan:${descriptor.runId}`
     case 'run':
       return `run:${descriptor.runId}`
     case 'document':
@@ -100,8 +87,6 @@ export function canvasTabKey(descriptor: CanvasViewDescriptor): string {
       // split one document across tabs and dead-end the old one. The
       // descriptor's runId stays as a resolution HINT only.
       return `document:${descriptor.artifactId}`
-    case 'patch':
-      return `patch:${descriptor.runId}:${descriptor.patchId}`
     case 'evidence':
       return `evidence:${descriptor.runId}:${descriptor.artifactId}:${descriptor.label}`
     case 'file':

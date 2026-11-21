@@ -138,8 +138,7 @@ INQTRIX_REQUIREMENT_COMPOSED_CHARS = "inqtrix.requirement.composed_chars"
 library rules as template ids with the revisions the run is frozen under
 (same order), and the size of the composed requirement. Opaque ids and
 counts only — a rule's label and text are user content and reach a trace
-solely as captured prompt content. A plan-gate decision that replaces the
-requirement of a mission is recorded on its approval, not here."""
+solely as captured prompt content."""
 INQTRIX_OUTCOME = "inqtrix.outcome"
 # Outcome values. ``completed``, ``parked`` and ``cancelled`` mean the same on
 # the run span and on a tool span. ``failed`` depends on the span: terminal
@@ -160,13 +159,11 @@ INQTRIX_INCOGNITO = "inqtrix.incognito"
 on purpose (metadata, usage and codes only), whatever the content policy.
 Mirrored into the filterable trace metadata."""
 INQTRIX_PURPOSE = "inqtrix.purpose"
-"""The call site that made an LLM/search/embedding call (``agent_plan``,
-``agent_synthesis``, ``agent_kernel``, ``classify``, ``claim_extract``, ``session_title``,
+"""The call site that made an LLM/search/embedding call (``agent_kernel``,
+``agent_deep_review``, ``classify``, ``claim_extract``, ``session_title``,
 ...). Bound through :func:`inqtrix.observability.context.bind_purpose`
 at the few provider-boundary sites, read by the tracing wrappers, and
 mirrored into the filterable Langfuse metadata namespace."""
-INQTRIX_TASK_ID = "inqtrix.task_id"
-INQTRIX_TASK_KIND = "inqtrix.task_kind"
 INQTRIX_STEP = "inqtrix.step"
 INQTRIX_TOOL_CAPABILITY = "inqtrix.tool.capability"
 INQTRIX_TOOL_FAILURE_CODE = "inqtrix.tool.failure_code"
@@ -205,10 +202,9 @@ INQTRIX_EVIDENCE_BUDGET_CHARS = "inqtrix.evidence.budget_chars"
 EVIDENCE_OMITTED_EVENT = "inqtrix.evidence.omitted"
 """Span event raised whenever the evidence overview drops report-eligible
 records for budget reasons — the trace-side twin of the prompt footer."""
-SPAN_AGENT_TASK = "agent.task"
 SPAN_DOCUMENT_ANALYSIS = "agent.document_analysis"
-"""One whole-document analysis (window sweep) inside a task span; its window
-generations and reduce call nest under it."""
+"""One whole-document analysis (window sweep) under the observation of the
+tool call that runs it; its window generations nest under it."""
 INQTRIX_DOCUMENT_COUNT = "inqtrix.document.count"
 INQTRIX_DOCUMENT_WINDOWS_PLANNED = "inqtrix.document.windows_planned"
 INQTRIX_DOCUMENT_WINDOWS_ANALYSED = "inqtrix.document.windows_analysed"
@@ -249,6 +245,8 @@ INQTRIX_REASONING_EFFORT = "inqtrix.request.reasoning_effort"
 INQTRIX_REASONING_EFFORT_SENT = "inqtrix.request.reasoning_effort.sent"
 """The reasoning effort the request carried after the adapter's rules (``xhigh`` where
 ``max`` was asked over Chat Completions); absent when the adapter does not say."""
+INQTRIX_VERBOSITY_SENT = "inqtrix.request.verbosity.sent"
+"""The ``verbosity`` the request carried; absent when it carried none or the adapter does not say."""
 INQTRIX_TOOL_CHOICE = "inqtrix.request.tool_choice"
 """The obligation a chat turn was sent with (``required`` for a role's
 turns, which must end with their typed result call); absent when the
@@ -261,6 +259,7 @@ INQTRIX_SEARCH_ENGINE = "inqtrix.search.engine"
 INQTRIX_SEARCH_QUERY = "inqtrix.search.query"
 INQTRIX_SEARCH_MODE = "inqtrix.search.mode"
 INQTRIX_SEARCH_RECENCY = "inqtrix.search.recency_filter"
+INQTRIX_SEARCH_ANSWER_FORM = "inqtrix.search.answer_form"
 INQTRIX_SEARCH_DOMAIN_FILTER_COUNT = "inqtrix.search.domain_filter_count"
 INQTRIX_SEARCH_SOURCE_COUNT = "inqtrix.search.source_count"
 INQTRIX_SEARCH_ANSWER_LENGTH = "inqtrix.search.answer_length"

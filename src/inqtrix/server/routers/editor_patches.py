@@ -6,6 +6,11 @@ following the ``agent_runs.py`` conventions: manual body parsing, the
 ``error_response`` envelope, and 404 (never 403) for anything the caller
 may not see. The parent-document visibility rule lives in the service —
 a foreign document answers exactly like an absent one.
+
+The decision routes answer the failures they name themselves first; a named
+collaboration failure they do not name answers through the shared
+collaboration mapping (:func:`_collaboration_failure`), so it never ends as
+an unhandled 500.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import list_envelope
@@ -25,12 +31,17 @@ from inqtrix.project.editor_patch_ports import (
     PatchRevisionConflict,
 )
 from inqtrix.project.editor_ports import DocumentNotFound
+from inqtrix.server.routers._collaboration_errors import collaboration_failure_view
 from inqtrix.services.collaboration_client import (
     CollaborationNodeConflict,
     CollaborationServiceUnavailable,
 )
 from inqtrix.services.editor_patch_service import EditorPatchValidationError
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import (
+    error_response,
+    read_json_object,
+    read_optional_json_object,
+)
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -103,11 +114,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         stale ``expected_revision`` answers 409 with the current and
         proposed-against revisions.
         """
-        body = await _json_object(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         expected = body.get("expected_revision")
         expected_sequence = body.get("expected_sequence")
         try:
@@ -176,6 +185,11 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "service_unavailable",
                 reason="collaboration_unavailable",
             )
+        except Exception as exc:
+            response = _collaboration_failure(exc)
+            if response is None:
+                raise
+            return response
         if patch.collaboration_generation is not None:
             return {
                 "document_id": patch.document_id,
@@ -200,9 +214,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Reject a pending patch (optional ``note``); replay answers 200."""
-        body = await _json_object(req)
-        if body is None:
-            body = {}
+        body, error = await read_optional_json_object(req)
+        if error is not None:
+            return error
         note = body.get("note")
         expected_sequence = body.get("expected_sequence")
         try:
@@ -259,18 +273,27 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "service_unavailable",
                 reason="collaboration_unavailable",
             )
+        except Exception as exc:
+            response = _collaboration_failure(exc)
+            if response is None:
+                raise
+            return response
         return _patch_detail_payload(patch)
 
     return router
 
 
-async def _json_object(req: Request) -> dict[str, Any] | None:
-    """Parse the request body as a JSON object, or ``None`` when malformed."""
-    try:
-        body = await req.json()
-    except Exception:  # noqa: BLE001 — malformed body is a client error
+def _collaboration_failure(exc: Exception) -> JSONResponse | None:
+    """The shared answer to a named collaboration failure, or ``None``.
+
+    Reached only behind the route's own branches, which keep their answers.
+    A bare ``ValueError`` is no named failure (it stays an inner error);
+    ``None`` re-raises.
+    """
+    view = collaboration_failure_view(exc)
+    if view is None:
         return None
-    return body if isinstance(body, dict) else None
+    return error_response(view.status, view.message, view.error_type, **view.extra)
 
 
 # -- wire payloads ------------------------------------------------------------ #

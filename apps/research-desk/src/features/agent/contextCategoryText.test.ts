@@ -17,7 +17,6 @@ const sources: AgentContextSources = {
   canvasDocuments: [],
   collections: [],
   documents: [],
-  engine: 'agent_kernel',
   pinnedCanvasDocumentId: null,
   reportIds: [],
   reportLimit: 3,
@@ -71,7 +70,7 @@ describe('a category at its cap', () => {
     const t = translations.de
     const text = agentContextText(t, 'de', { report: 3, rule: 3 })
     const capped = category({ ...sources, ruleIds: ['pt_a', 'pt_b', 'pt_c'] }, 'rule')
-    const reason = t.agent.plan.reportRulesCap.replace('{max}', '3')
+    const reason = t.agent.composer.ruleCap.replace('{max}', '3')
     expect(capped.items.map((item) => text.itemSecondary('rule', item))).toEqual([reason])
     expect(text.categoryBlockText(capped)).toBe(reason)
   })

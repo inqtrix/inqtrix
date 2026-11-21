@@ -42,12 +42,10 @@ from inqtrix.agents.control_ports import (
     ClarificationRecord,
     PlanNotFound,
     PlanRecord,
-    PlanTaskNotFound,
     PlanTaskRecord,
     SESSION_SINGLETON_ARTIFACT_KINDS,
     RUN_SINGLETON_ARTIFACT_KINDS,
-    transitioned_plan_task,
-    requested_task_cancellation,
+    check_creatable_approval,
 )
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.execution_authority import AuthorizationRevoked
@@ -155,20 +153,7 @@ class PostgresAgentControlStore(BaseSessionStore):
         if current_actor != actor_user_id:
             raise AuthorizationRevoked("run execution actor changed")
 
-    # -- plans ----------------------------------------------------------- #
-
-    async def save_plan(
-        self,
-        *,
-        run_id: str,
-        plan: PlanRecord,
-        tasks: list[PlanTaskRecord],
-    ) -> PlanRecord:
-        async with self._session() as session:
-            await self._lock_runtime_authority(session, run_id)
-            return await _save_plan_tx(
-                session, run_id=run_id, plan=plan, tasks=tasks
-            )
+    # -- plans (stored rows of mission runs, read only) ------------------ #
 
     async def get_plan(
         self, run_id: str, *, version: int | None = None
@@ -196,21 +181,6 @@ class PostgresAgentControlStore(BaseSessionStore):
             )
             return plan, [_task_from_row(r) for r in task_rows]
 
-    async def list_plan_versions(self, run_id: str) -> list[PlanRecord]:
-        async with self._session() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(run_plans)
-                        .where(run_plans.c.run_id == run_id)
-                        .order_by(run_plans.c.version.desc())
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            return [_plan_from_row(row) for row in rows]
-
     async def settle_terminal_control_rows(
         self, run_id: str
     ) -> tuple[int, int]:
@@ -223,9 +193,9 @@ class PostgresAgentControlStore(BaseSessionStore):
         """
         now = time.time()
         async with self._session() as session:
-            # Probe first, lock-free: reconcile runs on every plan read
-            # of a terminal run, and the settled steady state must not
-            # pay an authority lock plus two empty UPDATEs per poll.
+            # Probe first, lock-free: a reconcile of a run whose rows are
+            # already settled must not pay an authority lock plus two
+            # empty UPDATEs.
             has_candidates = (
                 await session.execute(
                     select(literal(1)).where(
@@ -276,116 +246,14 @@ class PostgresAgentControlStore(BaseSessionStore):
             ).rowcount
             return max(0, int(released)), max(0, int(settled))
 
-    async def transition_plan_task(
-        self,
-        *,
-        run_id: str,
-        plan_id: str,
-        task_id: str,
-        status: str,
-        child_run_id: str | None = None,
-        result_summary: str | None = None,
-        result_payload: dict[str, Any] | None = None,
-    ) -> PlanTaskRecord:
-        async with self._session() as session:
-            await self._lock_runtime_authority(session, run_id)
-            row = (
-                await session.execute(
-                    select(run_plan_tasks)
-                    .where(
-                        run_plan_tasks.c.run_id == run_id,
-                        run_plan_tasks.c.plan_id == plan_id,
-                        run_plan_tasks.c.task_id == task_id,
-                    )
-                    .with_for_update()
-                )
-            ).mappings().first()
-            if row is None:
-                raise PlanTaskNotFound(task_id)
-            stored = transitioned_plan_task(
-                _task_from_row(row),
-                status=status,
-                child_run_id=child_run_id,
-                result_summary=result_summary,
-                result_payload=result_payload,
-            )
-            await session.execute(
-                update(run_plan_tasks)
-                .where(
-                    run_plan_tasks.c.run_id == run_id,
-                    run_plan_tasks.c.plan_id == plan_id,
-                    run_plan_tasks.c.task_id == task_id,
-                )
-                .values(
-                    status=stored.status,
-                    child_run_id=stored.child_run_id,
-                    result_summary=stored.result_summary,
-                    result_payload=stored.result_payload,
-                )
-            )
-            return stored
-
-    async def request_plan_task_cancel(
-        self,
-        *,
-        run_id: str,
-        plan_id: str,
-        task_id: str,
-        authorize: Any,
-    ) -> tuple[PlanTaskRecord, str | None]:
-        async def _write(
-            session: "AsyncSession", cancel_child: Any
-        ) -> tuple[PlanTaskRecord, str | None]:
-            row = (
-                await session.execute(
-                    select(run_plan_tasks)
-                    .where(
-                        run_plan_tasks.c.run_id == run_id,
-                        run_plan_tasks.c.plan_id == plan_id,
-                        run_plan_tasks.c.task_id == task_id,
-                    )
-                    .with_for_update()
-                )
-            ).mappings().first()
-            if row is None:
-                raise PlanTaskNotFound(task_id)
-            stored = requested_task_cancellation(_task_from_row(row))
-            await session.execute(
-                update(run_plan_tasks)
-                .where(
-                    run_plan_tasks.c.run_id == run_id,
-                    run_plan_tasks.c.plan_id == plan_id,
-                    run_plan_tasks.c.task_id == task_id,
-                )
-                .values(
-                    status=stored.status,
-                    result_summary=stored.result_summary,
-                    result_payload=stored.result_payload,
-                )
-            )
-            child_status = (
-                await cancel_child(stored.child_run_id)
-                if stored.child_run_id
-                and stored.status in {"cancel_requested", "cancelled"}
-                else None
-            )
-            return stored, child_status
-
-        return await authorize(_write)
 
     # -- approvals -------------------------------------------------------- #
 
     async def create_approval(self, approval: ApprovalRecord) -> ApprovalRecord:
+        check_creatable_approval(approval)
         async with self._session() as session:
             await self._lock_runtime_authority(session, approval.run_id)
             created_at = approval.created_at or time.time()
-            if approval.subject_type == "plan":
-                approval = replace(
-                    approval,
-                    subject_id=await _resolve_approval_plan_subject_tx(
-                        session, approval
-                    ),
-                )
             await session.execute(
                 insert(run_approvals).values(
                     approval_id=approval.approval_id,
@@ -438,8 +306,6 @@ class PostgresAgentControlStore(BaseSessionStore):
         note: str,
         decided_by_user_id: uuid.UUID | None,
         resume: Any,
-        edited_plan: PlanRecord | None = None,
-        edited_tasks: list[PlanTaskRecord] | None = None,
     ) -> tuple[ApprovalRecord, dict[str, Any]]:
         async def _writer(session: "AsyncSession") -> None:
             # Runs INSIDE the run store's waiting->queued transaction:
@@ -461,39 +327,11 @@ class PostgresAgentControlStore(BaseSessionStore):
                         decided_by_user_id=decided_by_user_id,
                         decided_at=time.time(),
                     )
-                    .returning(
-                        run_approvals.c.approval_id,
-                        run_approvals.c.subject_type,
-                        run_approvals.c.subject_id,
-                    )
+                    .returning(run_approvals.c.approval_id)
                 )
             ).first()
             if decided is None:
                 raise await _approval_cas_miss(session, run_id, approval_id)
-            if edited_plan is not None:
-                await _save_plan_tx(
-                    session,
-                    run_id=run_id,
-                    plan=edited_plan,
-                    tasks=list(edited_tasks or []),
-                )
-            elif decided[1] == "plan":
-                target_status = (
-                    "approved" if decision == "approve" else "rejected"
-                )
-                updated = (
-                    await session.execute(
-                        update(run_plans)
-                        .where(
-                            run_plans.c.run_id == run_id,
-                            run_plans.c.plan_id == decided[2],
-                        )
-                        .values(status=target_status)
-                        .returning(run_plans.c.plan_id)
-                    )
-                ).scalar_one_or_none()
-                if updated is None:
-                    raise PlanNotFound(run_id)
 
         summary = await resume(_writer)
         approval = await self.get_approval(run_id, approval_id)
@@ -1021,7 +859,7 @@ class PostgresAgentControlStore(BaseSessionStore):
         authorize: Any,
     ) -> ArtifactRecord:
         async def _write(
-            session: "AsyncSession", _cancel_child: Any
+            session: "AsyncSession",
         ) -> ArtifactRecord:
             now = time.time()
             row = (
@@ -1099,7 +937,7 @@ class PostgresAgentControlStore(BaseSessionStore):
         authorize: Any,
     ) -> ArtifactRecord:
         async def _write(
-            session: "AsyncSession", _cancel_child: Any
+            session: "AsyncSession",
         ) -> ArtifactRecord:
             # Metadata-only: no revision bump, no revision row —
             # the content history must not record a rename.
@@ -1217,24 +1055,6 @@ class PostgresAgentControlStore(BaseSessionStore):
                 for r in revision_rows
             ]
 
-    async def get_session_artifact(
-        self, session_id: str, kind: str
-    ) -> ArtifactRecord | None:
-        async with self._session() as session:
-            row = (
-                (
-                    await session.execute(
-                        select(run_artifacts).where(
-                            run_artifacts.c.session_id == session_id,
-                            run_artifacts.c.kind == kind,
-                        )
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            return _artifact_from_row(row) if row is not None else None
-
     async def get_session_artifact_by_id(
         self, session_id: str, artifact_id: str
     ) -> ArtifactRecord:
@@ -1322,109 +1142,6 @@ class PostgresAgentControlStore(BaseSessionStore):
 
 
 # -- transaction bodies shared with the resume-transaction writers ---------- #
-
-
-async def _resolve_approval_plan_subject_tx(
-    session: "AsyncSession", approval: ApprovalRecord
-) -> str:
-    """Resolve and lock a plan subject in the approval's tenant and run.
-
-    An explicit client subject is validated just like the legacy empty-subject
-    path.  The key-share lock keeps the parent stable until the approval insert
-    commits, and the run predicate prevents a globally valid plan id from being
-    attached to another run.
-    """
-    query = select(run_plans.c.plan_id).where(
-        run_plans.c.tenant_id == DEFAULT_TENANT,
-        run_plans.c.run_id == approval.run_id,
-    )
-    if approval.subject_id:
-        query = query.where(run_plans.c.plan_id == approval.subject_id)
-    else:
-        version = int(approval.payload.get("plan_version", 0) or 0)
-        if version > 0:
-            query = query.where(run_plans.c.version == version)
-        else:
-            query = query.order_by(run_plans.c.version.desc()).limit(1)
-    plan_id = (
-        await session.execute(
-            query.with_for_update(read=True, key_share=True)
-        )
-    ).scalar_one_or_none()
-    if plan_id is None:
-        raise PlanNotFound(approval.run_id)
-    return str(plan_id)
-
-
-async def _save_plan_tx(
-    session: "AsyncSession",
-    *,
-    run_id: str,
-    plan: PlanRecord,
-    tasks: list[PlanTaskRecord],
-) -> PlanRecord:
-    latest = (
-        await session.execute(
-            select(func.max(run_plans.c.version)).where(
-                run_plans.c.run_id == run_id
-            )
-        )
-    ).scalar_one()
-    version = plan.version if plan.version > 0 else (latest or 0) + 1
-    if version != (latest or 0) + 1:
-        raise ValueError(f"plan version must be {(latest or 0) + 1}, got {version}")
-    await session.execute(
-        update(run_plans)
-        .where(
-            run_plans.c.run_id == run_id,
-            run_plans.c.status.notin_(("rejected", "superseded")),
-        )
-        .values(status="superseded")
-    )
-    created_at = plan.created_at or time.time()
-    await session.execute(
-        insert(run_plans).values(
-            plan_id=plan.plan_id,
-            run_id=run_id,
-            version=version,
-            status=plan.status,
-            created_by=plan.created_by,
-            summary_markdown=plan.summary_markdown,
-            assumptions=list(plan.assumptions),
-            success_criteria=list(plan.success_criteria),
-            reason=plan.reason,
-            created_at=created_at,
-        )
-    )
-    if tasks:
-        await session.execute(
-            insert(run_plan_tasks),
-            [
-                {
-                    "task_id": task.task_id,
-                    "plan_id": plan.plan_id,
-                    "run_id": run_id,
-                    "ordinal": task.ordinal,
-                    "title": task.title,
-                    "tool_kind": task.tool_kind,
-                    "objective": task.objective,
-                    "queries": list(task.queries),
-                    "gap_ids": list(task.gap_ids),
-                    "depends_on": list(task.depends_on),
-                    "budget": dict(task.budget),
-                    "params": dict(task.params),
-                    "expected_output": task.expected_output,
-                    "status": task.status,
-                    "child_run_id": task.child_run_id,
-                    "result_summary": task.result_summary,
-                    "result_payload": dict(task.result_payload),
-                }
-                for task in tasks
-            ],
-        )
-    return replace(
-        plan, run_id=run_id, version=version, created_at=created_at
-    )
 
 
 async def _approval_cas_miss(

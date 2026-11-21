@@ -8,7 +8,10 @@ import type {
   EditorSuggestionRecord,
   ProjectState,
 } from '@/features/project/types'
-import { researchDeskReducer } from '@/features/researchDesk/state'
+import {
+  isReplacedByNextInstructionRun,
+  researchDeskReducer,
+} from '@/features/researchDesk/state'
 import {
   planEditorCommentReconciliation,
   planEditorDocumentAutosave,
@@ -485,11 +488,73 @@ describe('server editor hydration', () => {
     })
   })
 
+  it('carries an open agent patch suggestion into the recovery copy as a local suggestion', () => {
+    // The patch row goes with its document, so the server can decide nothing
+    // for the copy: there the suggestion is decided like any local one.
+    const removed = doc('ed_agent', { contentMarkdown: 'server body', serverSynced: true })
+    const base = createEmptyProjectState()
+    const state: ProjectState = {
+      ...base,
+      dirty: false,
+      editorDocumentOrder: [removed.id],
+      editorDocuments: { [removed.id]: removed },
+      editorSuggestionGroups: {
+        agent_group: {
+          createdAt: '2026-01-01T00:00:00.000Z',
+          documentId: removed.id,
+          id: 'agent_group',
+          origin: { kind: 'global_run' },
+        },
+      },
+      editorSuggestions: {
+        agent_part: {
+          anchor: { from: 0, quoteAfter: '', quoteBefore: '', selectedText: 'server', to: 6 },
+          blockId: 'agent-block',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          documentId: removed.id,
+          groupId: 'agent_group',
+          id: 'agent_part',
+          originalText: 'server',
+          origin: { kind: 'global_run' },
+          proposedText: 'agent',
+          serverPatch: { editId: 'ed_1', patchId: 'pch_removed' },
+          status: 'pending',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+    }
+
+    const recovered = researchDeskReducer(state, {
+      documents: [],
+      recoveryCaptures: [{
+        capturedAt: '2026-01-02T00:00:00.000Z',
+        contentMarkdown: 'unsaved local body',
+        documentId: removed.id,
+      }],
+      type: 'reconcileServerEditorDocuments',
+    })
+    const recoveryId = recovered.editorDocumentOrder[0]
+    const copies = Object.values(recovered.editorSuggestions)
+
+    expect(recoveryId).not.toBe(removed.id)
+    expect(copies).toHaveLength(1)
+    expect(copies[0]).toMatchObject({
+      documentId: recoveryId,
+      origin: { kind: 'global_run' },
+      proposedText: 'agent',
+      status: 'pending',
+    })
+    expect(copies[0]).not.toHaveProperty('serverPatch')
+    // A local suggestion of the copy: the next instruction run there replaces it.
+    expect(isReplacedByNextInstructionRun(copies[0], recoveryId)).toBe(true)
+  })
+
   it('sets a document body on load-on-open WITHOUT dirtying or bumping updatedAt', () => {
     const local = doc('ed_1', { updatedAt: '2026-01-01T00:00:00.000Z' })
     const next = researchDeskReducer(withDoc(local), {
       contentMarkdown: 'fetched body',
       documentId: 'ed_1',
+      revision: 1,
       type: 'setServerEditorDocumentBody',
     })
     expect(next.editorDocuments.ed_1.contentMarkdown).toBe('fetched body')
@@ -870,6 +935,144 @@ describe('collaboration metadata CAS adoption', () => {
   })
 })
 
+describe('a document that enters collaboration mode', () => {
+  // A collaboration document takes no agent patch, and the editor offers the
+  // patch rows of such a document nowhere: they stay pending on the server.
+  function card(
+    id: string,
+    documentId: string,
+    groupId: string,
+    overrides: Partial<EditorSuggestionRecord> = {},
+  ): EditorSuggestionRecord {
+    return {
+      anchor: { from: 0, quoteAfter: '', quoteBefore: '', selectedText: 'x', to: 1 },
+      blockId: '',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      documentId,
+      groupId,
+      id,
+      originalText: 'x',
+      origin: { kind: 'global_run' },
+      proposedText: 'y',
+      status: 'pending',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  const collaboration = {
+    generation: 1,
+    persistedSequence: 0,
+    projectionSequence: 0,
+    schemaVersion: 1,
+  }
+  const converted = doc('ed_1', {
+    access: { mode: 'owner', permission: 'edit' },
+    metadataRevision: 4,
+    serverSynced: true,
+  })
+  const other = doc('ed_2', { serverSynced: true })
+  // The first document as the server shows it once it was converted.
+  const convertedOnServer: EditorDocumentRecord = {
+    ...converted,
+    collaboration,
+    contentMode: 'collaboration',
+    metadataRevision: 5,
+    updatedAt: '2026-01-02T00:00:00.000Z',
+  }
+
+  /** Two Markdown documents with an open agent patch each, and the open
+   * suggestion of an instruction run on the first. */
+  function withAgentPatches(): ProjectState {
+    const group = (id: string, documentId: string) => ({
+      createdAt: '2026-01-01T00:00:00.000Z',
+      documentId,
+      id,
+      origin: { kind: 'global_run' as const },
+    })
+    return {
+      ...withDoc(converted),
+      editorDocumentOrder: [converted.id, other.id],
+      editorDocuments: { [converted.id]: converted, [other.id]: other },
+      editorSuggestionGroups: {
+        agent_group: group('agent_group', converted.id),
+        other_agent_group: group('other_agent_group', other.id),
+        run_group: group('run_group', converted.id),
+      },
+      editorSuggestions: {
+        agent_open: card('agent_open', converted.id, 'agent_group', {
+          serverPatch: { editId: 'ed_1', patchId: 'pch_1' },
+        }),
+        agent_stale: card('agent_stale', converted.id, 'agent_group', {
+          serverPatch: { editId: 'ed_2', patchId: 'pch_1' },
+          status: 'stale',
+        }),
+        other_agent: card('other_agent', other.id, 'other_agent_group', {
+          serverPatch: { editId: 'ed_1', patchId: 'pch_2' },
+        }),
+        run_part: card('run_part', converted.id, 'run_group'),
+      },
+    }
+  }
+
+  /** The first document is in collaboration mode, its agent patch is gone
+   * from the review undecided, and everything else is as it was. */
+  function expectFirstAgentPatchDropped(state: ProjectState, next: ProjectState): void {
+    expect(next.editorDocuments.ed_1.contentMode).toBe('collaboration')
+    expect(Object.keys(next.editorSuggestions).sort()).toEqual(['other_agent', 'run_part'])
+    expect(Object.keys(next.editorSuggestionGroups).sort()).toEqual(['other_agent_group', 'run_group'])
+    expect(next.editorSuggestions.run_part).toBe(state.editorSuggestions.run_part)
+    expect(next.editorSuggestions.other_agent).toBe(state.editorSuggestions.other_agent)
+    expect(next.dirty).toBe(false)
+  }
+
+  it('drops the agent patch suggestions it showed, without deciding them, and keeps the others', () => {
+    const state = withAgentPatches()
+
+    const activated = researchDeskReducer(state, {
+      collaboration,
+      documentId: converted.id,
+      metadataRevision: 5,
+      type: 'activateEditorDocumentCollaboration',
+    })
+
+    expectFirstAgentPatchDropped(state, activated)
+  })
+
+  // Converted elsewhere, for example in another tab: the document metadata
+  // the server sends shows the new mode. The other document stays in
+  // Markdown mode, and so does its agent patch.
+  for (const type of ['reconcileServerEditorDocuments', 'upsertServerEditorDocuments'] as const) {
+    it(`drops them as well when the server's document metadata shows the change (${type})`, () => {
+      const state = withAgentPatches()
+
+      const next = researchDeskReducer(state, {
+        documents: [convertedOnServer, other],
+        type,
+      })
+
+      expectFirstAgentPatchDropped(state, next)
+    })
+  }
+
+  it('drops them as well when the document detail from the server shows the change, and only then', () => {
+    const state = withAgentPatches()
+
+    // The other document's detail still shows Markdown mode: its agent patch
+    // stays as it is.
+    const afterOther = researchDeskReducer(state, {
+      document: other,
+      type: 'setServerEditorDocumentDetail',
+    })
+    const next = researchDeskReducer(afterOther, {
+      document: convertedOnServer,
+      type: 'setServerEditorDocumentDetail',
+    })
+
+    expectFirstAgentPatchDropped(state, next)
+  })
+})
+
 describe('private comment outbox', () => {
   it('tracks explicit local work and ignores acknowledgements for an older mutation', () => {
     const localComment = comment('local-comment', 'ed_1')
@@ -1022,6 +1225,7 @@ describe('Anweisungslauf: welche Vorschlaege ein neuer Lauf ablöst', () => {
         id: 'group-neu',
         origin: { kind: 'global_run' },
       },
+      replacesPreviousInstructionRun: true,
       suggestions: [vorschlag('neu-1', { commentId: 'c-neu', kind: 'assistant_edit' })],
       type: 'createEditorSuggestionGroup',
     })
@@ -1049,6 +1253,87 @@ describe('Anweisungslauf: welche Vorschlaege ein neuer Lauf ablöst', () => {
     const next = nachNeuemLauf([vorigerLauf])
 
     expect(next.editorSuggestions['vorher-md'].status).toBe('rejected')
+  })
+})
+
+describe('what a new suggestion group replaces', () => {
+  // Only an instruction run replaces suggestions, and only when it says so:
+  // those of the instruction run before it. An agent patch's suggestions stay
+  // until the server decides the patch.
+  const agentPatch = { editId: 'ed_1', patchId: 'pch_1' }
+
+  function card(
+    id: string,
+    origin: EditorSuggestionRecord['origin'],
+    overrides: Partial<EditorSuggestionRecord> = {},
+  ): EditorSuggestionRecord {
+    return {
+      anchor: { from: 0, quoteAfter: '', quoteBefore: '', selectedText: 'x', to: 1 },
+      blockId: '',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      documentId: 'ed_1',
+      groupId: `group-${id}`,
+      id,
+      originalText: 'old',
+      origin,
+      proposedText: 'new',
+      status: 'pending',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  function afterNewGroup(
+    existing: EditorSuggestionRecord[],
+    options: { replacesPreviousInstructionRun?: boolean } = {},
+  ): ProjectState {
+    const state: ProjectState = {
+      ...withDoc(doc('ed_1')),
+      editorSuggestions: Object.fromEntries(existing.map((item) => [item.id, item])),
+    }
+    return researchDeskReducer(state, {
+      group: {
+        createdAt: '2026-01-02T00:00:00.000Z',
+        documentId: 'ed_1',
+        id: 'group-new',
+        origin: { kind: 'global_run' },
+      },
+      ...options,
+      suggestions: [card('new', { kind: 'global_run' }, { groupId: 'group-new' })],
+      type: 'createEditorSuggestionGroup',
+    })
+  }
+
+  it('the next instruction run replaces an open suggestion of the run before it, never an agent patch suggestion', () => {
+    expect(isReplacedByNextInstructionRun(card('run', { kind: 'global_run' }), 'ed_1')).toBe(true)
+    expect(isReplacedByNextInstructionRun(
+      card('agent', { kind: 'global_run' }, { serverPatch: agentPatch }),
+      'ed_1',
+    )).toBe(false)
+  })
+
+  it('a group created without opting in replaces nothing', () => {
+    // An instruction run's suggestion without a server patch: the rule above
+    // would replace it, so only the missing opt-in keeps it open.
+    const next = afterNewGroup([card('previous', { kind: 'global_run' })])
+
+    expect(next.editorSuggestions.previous.status).toBe('pending')
+    expect(next.editorSuggestions.new.status).toBe('pending')
+  })
+
+  it('an instruction run that opts in replaces exactly the open suggestions of the run before it', () => {
+    const next = afterNewGroup([
+      card('previous', { kind: 'global_run' }),
+      card('previous-stale', { kind: 'global_run' }, { status: 'stale' }),
+      card('note', { commentId: 'c-note', kind: 'global_run' }),
+      card('agent', { kind: 'global_run' }, { serverPatch: agentPatch }),
+    ], { replacesPreviousInstructionRun: true })
+
+    expect(next.editorSuggestions.previous.status).toBe('rejected')
+    expect(next.editorSuggestions['previous-stale'].status).toBe('rejected')
+    expect(next.editorSuggestions.note.status).toBe('pending')
+    expect(next.editorSuggestions.agent.status).toBe('pending')
+    expect(next.editorSuggestions.new.status).toBe('pending')
   })
 })
 

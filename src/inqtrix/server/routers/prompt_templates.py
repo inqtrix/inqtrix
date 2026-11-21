@@ -14,7 +14,10 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
 
-from inqtrix.agents.report_requirement import compose_report_requirement
+from inqtrix.agents.report_requirement import (
+    compose_requirement_blocks,
+    rule_requirement_block,
+)
 from inqtrix.auth.permissions import (
     AccessMode,
     ResourceAccess,
@@ -29,7 +32,7 @@ from inqtrix.content.prompt_templates import (
 from inqtrix.services.prompt_template_service import (
     PromptTemplateValidationError,
 )
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import error_response, read_json_object
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -46,8 +49,10 @@ def _template_payload(
 
     ``composed_chars`` is the size this template takes as an attached
     rule in a result requirement — measured on the block
-    :func:`compose_report_requirement` builds from it (label folded,
-    body trimmed, frame markers defused), never by a second formula. A
+    :func:`rule_requirement_block` builds from it (label folded, body
+    trimmed, frame markers defused) under the opener this caller attaches
+    it with (a template another user shared names its source there), never
+    by a second formula. A
     client sums these plus the separators to pre-check the published
     ``max_composed_chars`` ceiling without re-implementing the
     composition (and without counting UTF-16 units where the server
@@ -60,8 +65,14 @@ def _template_payload(
         "category": record.category,
         "content_markdown": record.content_markdown,
         "composed_chars": len(
-            compose_report_requirement(
-                rules=[(record.label, record.content_markdown)]
+            compose_requirement_blocks(
+                [
+                    rule_requirement_block(
+                        record.label,
+                        record.content_markdown,
+                        shared=(access or {}).get("mode") == AccessMode.SHARED.value,
+                    )
+                ]
             )
         ),
         "visibility": dict(record.visibility),
@@ -90,13 +101,6 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
-
-    async def _parsed_body(req: Request):
-        try:
-            body = await req.json()
-        except Exception:
-            return None
-        return body if isinstance(body, dict) else None
 
     @router.get("/v1/prompt-templates")
     async def list_templates(
@@ -131,11 +135,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
     ):
         """Create one template; scoped principals own what they create."""
-        body = await _parsed_body(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             record = await service.create(
                 body,
@@ -166,11 +168,9 @@ def build_router(container: "AppContainer") -> APIRouter:
 
         ``expected_revision`` is mandatory; a stale value yields 409.
         """
-        body = await _parsed_body(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         raw_expected = body.get("expected_revision")
         if (
             isinstance(raw_expected, bool)

@@ -571,19 +571,20 @@ async def test_foreign_caller_gets_indistinct_not_found_everywhere() -> None:
 # ------------------------------------------------------------------ #
 
 
-def test_patch_capabilities_register_only_with_patch_service() -> None:
+def test_patch_capability_registers_only_with_patch_service() -> None:
+    """The agent proposes; applying a patch is the user's, so no capability
+    applies one."""
     service, _persistence = _memory_service()
     registry = build_capability_registry(editor_patch_service=service)
-    assert registry.ids() == ("editor.patch.propose", "editor.patch.apply")
+    assert registry.ids() == ("editor.patch.propose",)
     manifest = {entry["id"]: entry for entry in registry.manifest()}
     assert manifest["editor.patch.propose"]["effect"] == "write"
     assert manifest["editor.patch.propose"]["read_only"] is False
-    assert manifest["editor.patch.apply"]["effect"] == "write"
-    # Without the patch service the pair stays absent (degrades visibly).
+    # Without the patch service the capability stays absent (degrades visibly).
     assert "editor.patch.propose" not in build_capability_registry().ids()
 
 
-def test_patch_capability_propose_and_apply_roundtrip() -> None:
+def test_patch_capability_proposes_as_the_agent_of_its_run() -> None:
     service, persistence = _memory_service()
     asyncio.run(_seed_document(persistence))
     registry = build_capability_registry(editor_patch_service=service)
@@ -618,16 +619,6 @@ def test_patch_capability_propose_and_apply_roundtrip() -> None:
     record = asyncio.run(service.store.get(proposed.patch_id))
     assert record.source == "agent"
     assert record.run_id == "run-agent-1"
-
-    applied = asyncio.run(
-        registry.invoke(
-            "editor.patch.apply",
-            {"patch_id": proposed.patch_id, "expected_revision": 3},
-            context,
-        )
-    )
-    assert applied.revision == 4
-    assert applied.applied_edit_ids == ["ed_1"]
 
 
 # ------------------------------------------------------------------ #

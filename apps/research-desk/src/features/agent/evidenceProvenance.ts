@@ -18,6 +18,10 @@ export type WebSearchCitationLineage = {
 
 export type WebSearchLineage = {
   citation: WebSearchCitationLineage | null
+  /** The texts of every place where this search cites the source: each
+   * statement once, in the order of the answer. Empty where the search
+   * cites the source without a statement or not at all. */
+  places: string[]
   durationMs: number | null
   finishedAt: string | null
   invocationId: string
@@ -80,18 +84,19 @@ export function evidenceLineageFromArtifactPayload(
         && stringField(rawSearch, 'source_run_id')
         && !sourceRunIds.has(stringField(rawSearch, 'source_run_id'))
       ) return []
-      const citations = recordArray(rawSearch.citations)
-      const citation = selectCitation(
-        citations,
+      const own = ownCitations(
+        recordArray(rawSearch.citations),
         reference,
         citationIds,
       )
+      const citation = selectCitation(own)
       if (
         requestedQueryIds.length === 0
         && !citation
       ) return []
       return [{
         citation: citation ? citationLineage(citation, reference) : null,
+        places: citedPlaces(own),
         durationMs: nullableNumber(rawSearch.duration_ms),
         finishedAt: stringField(rawSearch, 'finished_at') || null,
         invocationId: stringField(rawSearch, 'invocation_id')
@@ -123,24 +128,64 @@ export function safeEvidenceHttpUrl(value: string | null): string | null {
   }
 }
 
-function selectCitation(
+/** The citations of one search that belong to the reference: the ones it
+ * points at, else the ones of its source, else the ones of its address. */
+function ownCitations(
   citations: Record<string, unknown>[],
   reference: AgentArtifactReference,
   citationIds: ReadonlySet<string>,
-): Record<string, unknown> | null {
-  return citations.find((citation) => (
-    citationIds.size > 0
-    && citationIds.has(stringField(citation, 'citation_id'))
-  ))
-    ?? citations.find((citation) => (
+): Record<string, unknown>[] {
+  const belonging: ((citation: Record<string, unknown>) => boolean)[] = [
+    (citation) => (
+      citationIds.size > 0
+      && citationIds.has(stringField(citation, 'citation_id'))
+    ),
+    (citation) => (
       Boolean(reference.sourceId)
       && stringField(citation, 'source_id') === reference.sourceId
+    ),
+    (citation) => sameUrl(stringField(citation, 'url'), reference.url),
+  ]
+  return belonging
+    .map((belongs) => citations.filter(belongs))
+    .find((matches) => matches.length > 0) ?? []
+}
+
+/** The citations that carry a statement, in the order of the answer; one
+ * without a position stands behind every placed one. */
+function statedCitations(
+  own: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return own
+    .filter((citation) => stringField(citation, 'grounded_support'))
+    .map((citation, index) => ({ citation, index }))
+    .sort((a, b) => (
+      answerPosition(a.citation) - answerPosition(b.citation) || a.index - b.index
     ))
-    ?? citations.find((citation) => sameUrl(
-      stringField(citation, 'url'),
-      reference.url,
-    ))
-    ?? null
+    .map(({ citation }) => citation)
+}
+
+function selectCitation(
+  own: Record<string, unknown>[],
+): Record<string, unknown> | null {
+  // One answer can cite a source at several places. The place that carries
+  // a statement speaks for it, the first of them in the answer: the rule the
+  // reference's own text follows. A place without a statement shows only
+  // when the search has no other place of the source.
+  return statedCitations(own)[0] ?? own[0] ?? null
+}
+
+/** The statements of the places where the search cites the source, each
+ * once. Only a citation's own text counts: the text of the reference may
+ * come from another search and stands nowhere in this one. */
+function citedPlaces(own: Record<string, unknown>[]): string[] {
+  return [...new Set(
+    statedCitations(own).map((citation) => stringField(citation, 'grounded_support')),
+  )]
+}
+
+function answerPosition(citation: Record<string, unknown>): number {
+  return nullableNumber(citation.annotation_start) ?? Number.POSITIVE_INFINITY
 }
 
 function citationLineage(

@@ -346,6 +346,68 @@ def test_stranger_is_blind_and_share_wiring_works(world):
     )
 
 
+def test_only_the_owner_changes_who_may_activate_a_skill(world):
+    """An editor's text must not switch on self-activation in the owner's runs.
+
+    The owner's model activates a ``model_allowed`` skill on its own. A
+    recipient with an edit grant may rewrite the skill, but who may activate
+    it stays the owner's choice: a changed ``invocation`` is refused in
+    either direction, and nothing of that request is stored.
+    """
+    client, _container = world
+    created = create_skill(client, invocation="user_only")
+    skill_id = created["id"]
+    granted = client.post(
+        "/v1/shares",
+        json={
+            "resource_type": "skill_template",
+            "resource_id": skill_id,
+            "invitees": [{"user_id": str(RECIPIENT), "permission": "edit"}],
+        },
+        headers=as_user(OWNER),
+    )
+    assert granted.status_code == 201, granted.text
+    accepted = client.post(
+        f"/v1/shares/{granted.json()['data'][0]['id']}/accept",
+        headers=as_user(RECIPIENT),
+    )
+    assert accepted.status_code == 200
+
+    def put(user_id: uuid.UUID, revision: int, **fields):
+        return client.put(
+            f"/v1/skills/{skill_id}",
+            json={**PAYLOAD, **fields, "expected_revision": revision},
+            headers=as_user(user_id),
+        )
+
+    def stored() -> dict:
+        listed = client.get("/v1/skills", headers=as_user(OWNER)).json()["data"]
+        return next(item for item in listed if item["id"] == skill_id)
+
+    refused = put(
+        RECIPIENT, created["revision"], invocation="model_allowed", title="Rewritten"
+    )
+    assert refused.status_code == 400, refused.text
+    assert "invocation" in refused.json()["error"]["message"]
+    before = stored()
+    assert (before["invocation"], before["title"], before["revision"]) == (
+        "user_only", PAYLOAD["title"], created["revision"],
+    )
+
+    # The editor still edits everything else, with the value left as it is.
+    edited = put(RECIPIENT, created["revision"], invocation="user_only", title="Rewritten")
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["title"] == "Rewritten"
+
+    # The owner changes it; an editor cannot switch it off again either.
+    owned = put(OWNER, edited.json()["revision"], invocation="model_allowed")
+    assert owned.status_code == 200, owned.text
+    assert owned.json()["invocation"] == "model_allowed"
+    off = put(RECIPIENT, owned.json()["revision"], invocation="user_only")
+    assert off.status_code == 400, off.text
+    assert stored()["invocation"] == "model_allowed"
+
+
 def test_stale_precondition_is_409(world):
     client, _container = world
     created = create_skill(client)

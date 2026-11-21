@@ -703,7 +703,8 @@ def _claim_record(query_id: str, url: str, claim_text: str, *, status: str) -> d
         claim["verification_basis"] = (
             "primary_source" if status in {"verified", "attributed"} else status
         )
-        # A verified claim was checked against this record's own text.
+        # A verified claim was checked against the search provider's excerpt
+        # of this record's source.
         claim["checked_here"] = status == "verified"
     return record
 
@@ -918,13 +919,13 @@ def test_compact_record_view_keeps_claims_and_drops_passages():
         query_synthesis=_synthesis("qryc", "compact query", "Summary."),
         record_view="compact",
     )
-    # Page text and the provider text a statement was taken from stay
-    # apart, and neither is called evidence.
-    assert "Text the search provider returned from this source:" in full.markdown
+    # The search provider's excerpt and the provider text a statement was
+    # taken from stay apart, and neither is called evidence.
+    assert "The search provider's excerpt of this source:" in full.markdown
     assert "Eine lange Passage" in full.markdown
     assert "Search-provider text these statements were taken from:" in full.markdown
     assert "Evidence excerpts" not in full.markdown
-    assert "Text the search provider returned" not in compact.markdown
+    assert "The search provider's excerpt" not in compact.markdown
     assert "Eine lange Passage" not in compact.markdown
     assert "Statements the search provider attributes to this source:" in compact.markdown
     assert "Die Foerderung betraegt 30 Prozent" in compact.markdown
@@ -1077,7 +1078,7 @@ PINNED_FULL = (
     "  Date: 2026-05-01 | Tier: primary | Standing: insufficiently supported\n"
     "  Statements the search provider attributes to this source:\n"
     "  - Die Grundförderung beträgt 30 Prozent der Kosten.\n"
-    "  Text the search provider returned from this source:\n"
+    "  The search provider's excerpt of this source:\n"
     "  - Meta expects capital expenditures of 115-135 USD billion.\n"
     "  Search-provider text these statements were taken from:\n"
     "  - Grundförderung: 30 Prozent.\n"
@@ -1101,7 +1102,7 @@ PINNED_COMPACT = (
     "\n"
     "[E2] Example report\n"
     "  Date: 2026-05-01 | Tier: primary | Standing: background only; no extracted statement\n"
-    "  Text the search provider returned from this source:\n"
+    "  The search provider's excerpt of this source:\n"
     "  - Meta expects capital expenditures of 115-135 USD billion."
 )
 
@@ -1192,7 +1193,9 @@ def test_a_sources_standing_reads_the_statements_of_every_place_it_is_cited_at()
     standings = [line for line in overview.markdown.splitlines() if "Standing:" in line]
     assert len(standings) == 1, overview.markdown
     assert standings[0].endswith(f"Standing: {STANDING_TEXT['contested']}")
-    assert f"Statements checked against this source's text:\n  - {BASE_RATE}" in overview.markdown
+    assert (
+        f"Statements checked against the search provider's excerpt of this source:\n  - {BASE_RATE}"
+    ) in overview.markdown
 
 
 def test_the_budget_counts_sources_not_the_places_they_are_cited_at():

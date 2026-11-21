@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { translations } from '@/i18n/translations'
 import type { ResearchRunRecord } from '@/features/project/types'
+import type { ResearchMetrics } from '@/features/researchRuns/types'
 import { attachRunResult } from '@/features/project/types'
 import { serializeResearchRun, parseResearchRun } from '@/features/project/markdown'
 import { agentArtifactReferences } from '@/features/agent/artifactCitations'
@@ -84,6 +85,10 @@ describe('research status overview', () => {
       statements: [
         { text: 'Teilregelungen gelten ab dem 2. Dezember 2026.', status: 'attributed', checked: false },
         { text: 'Die Frist endet am 2. August 2026.', status: 'verified', checked: true },
+        // Verified through the excerpt of another source: only attributed here.
+        { text: 'Die Übergangszeit dauert zwei Jahre.', status: 'verified', checked: false },
+        { text: 'Die Behörde bestreitet die Frist.', status: 'contested', checked: false },
+        { text: 'Die Zahl der Anträge steigt.', status: 'unverified', checked: false },
       ] }
     const completed = attachRunResult(record, {
       run_id: record.runId, status: 'completed', answer: 'A report.', references: [reference], top_sources: [], top_claims: [],
@@ -98,7 +103,13 @@ describe('research status overview', () => {
     const html = renderToStaticMarkup(<ReferenceStatements statements={reference.statements} />)
     expect(html).toContain('Aussagen, die die Recherche dieser Quelle zuordnet')
     expect(html).toContain('Teilregelungen gelten ab dem 2. Dezember 2026.</span> <span class="t-label text-muted-foreground">(vom Anbieter zugeschrieben)</span>')
-    expect(html).toContain('Die Frist endet am 2. August 2026.</span> <span class="t-label text-muted-foreground">(am Quelltext dieser Quelle geprüft)</span>')
+    expect(html).toContain('Die Frist endet am 2. August 2026.</span> <span class="t-label text-muted-foreground">(am Ausschnitt des Suchanbieters zu dieser Quelle geprüft)</span>')
+    expect(html).toContain('Die Übergangszeit dauert zwei Jahre.</span> <span class="t-label text-muted-foreground">(vom Anbieter zugeschrieben)</span>')
+    expect(html).not.toContain('(verifiziert)')
+    expect(html).toContain('Die Behörde bestreitet die Frist.</span> <span class="t-label text-muted-foreground">(widersprüchlich)</span>')
+    expect(html).toContain('Die Zahl der Anträge steigt.</span> <span class="t-label text-muted-foreground">(nicht ausreichend belegt)</span>')
+    // One word for the search provider's excerpt; no text claims the page itself was checked.
+    expect(html).not.toContain('Quelltext')
   })
 
   it('shows stored terminal duration and distinguishes an unknown duration from zero', () => {
@@ -116,6 +127,91 @@ describe('research status overview', () => {
     const missing = renderToStaticMarkup(<LiveRunOverview run={record} />)
     expect(missing).toContain('—')
     expect(missing).not.toContain('00:00:00')
+  })
+})
+
+describe('the basis and the ceiling in the evidence tab', () => {
+  const record: ResearchRunRecord = {
+    status: 'running', agentOverrides: {}, createdAt: '2026-01-01T10:00:00Z', events: [],
+    runId: 'run-basis', source: 'api', stack: 'default', submittedAt: '2026-01-01T10:00:00Z',
+    summary: { title: 'Basis' }, phaseState: { activePhase: 'answer', completedPhases: [] },
+    metrics: { rounds: '1 / 1', sources: 3, queries: 2, claims: 3 },
+  }
+  const stored = {
+    rounds: 1, elapsed_seconds: 2, total_queries: 2, total_citations: 3, confidence: 6,
+    claims: { status_counts: {}, quality_score: 0 }, sources: { tier_counts: {}, quality_score: 0 },
+    answer_bound_claims_count: 1, aspect_coverage: 1, completion_tokens: 0, prompt_tokens: 0,
+    evidence_consistency: 0, evidence_contract_status: 'needs_review', evidence_sufficiency: 0,
+    unbound_answer_citations_count: 0, verified_claims_used_count: 0,
+  }
+  const render = (metrics: Partial<ResearchMetrics>) => renderToStaticMarkup(<ReportEvidence run={attachRunResult(record, {
+    run_id: record.runId, status: 'completed', answer: 'A report.', references: [], top_sources: [], top_claims: [],
+    metrics: { ...stored, ...metrics },
+  })} />)
+  // Expected words are spelled out: a reworded or swapped text must fail here.
+  const providerBasis = 'Die Angaben des Suchanbieters zu den zitierten Quellen; die Seiten selbst wurden nicht gelesen.'
+
+  it('names the basis and the ceiling of a clean run the depth gap capped, without a status code', () => {
+    const html = render({
+      evidence_contract_status: 'clean', evidence_contract_causes: [], confidence_cap: 6,
+      confidence_cap_reasons: ['no_cross_checked_claims', 'majority_single_source_claims'],
+      evidence_basis: 'provider_context', cited_reference_count: 3, provider_only_reference_count: 3,
+    })
+    expect(html).toContain('>Grundlage</p>')
+    expect(html).toContain(`>${providerBasis}</p>`)
+    expect(html).toContain('>Obergrenze der Konfidenz</p>')
+    expect(html).toContain('>6 / 10: keine der gestützten Aussagen zählt als gegengeprüft; die meisten gestützten Aussagen nennen nur eine Quelle</p>')
+    for (const code of ['Evidence Contract', 'clean', 'no_cross_checked_claims', 'majority_single_source_claims']) {
+      expect(html).not.toContain(code)
+    }
+  })
+
+  it.each([
+    [{ evidence_basis: 'provider_context' }, providerBasis],
+    [{ evidence_basis: 'evidence', cited_reference_count: 4, provider_only_reference_count: 0 },
+      'Das gespeicherte Material der zitierten Quellen, nicht allein die Angaben des Suchanbieters.'],
+    [{ evidence_basis: 'evidence', cited_reference_count: 5, provider_only_reference_count: 2 },
+      'Das gespeicherte Material der zitierten Quellen, nicht allein die Angaben des Suchanbieters. Zitierte Quellen nur mit den Angaben des Suchanbieters: 2 von 5.'],
+    [{ evidence_basis: 'none' }, 'Keine, der Bericht zitiert keine Quelle.'],
+  ])('reads the basis %j as the server line does', (metrics, words) => {
+    // The whole cell text: a pure basis must not grow a mixed count.
+    expect(render(metrics)).toContain(`>${words}</p>`)
+  })
+
+  it('shows nothing invented for a result stored before the fields', () => {
+    // The stored needs_review may stand for the depth gap alone: no cause,
+    // no ceiling and no basis are read into it.
+    const html = render({})
+    expect(html).toContain('>Grundlage</p>')
+    expect(html).toContain('>Nicht erfasst.</p>')
+    expect(html).not.toContain('Obergrenze der Konfidenz')
+    expect(html).not.toContain('needs_review')
+  })
+
+  it('leaves out a reason it has no words for instead of showing its code', () => {
+    const html = render({
+      confidence_cap: 6, confidence_cap_reasons: ['citation_without_claim', 'reason_without_words'],
+      evidence_basis: 'provider_context',
+    })
+    expect(html).toContain('>6 / 10: zu einer zitierten Quelle ist keine Aussage erfasst</p>')
+    expect(html).not.toContain('reason_without_words')
+  })
+
+  it('lets the fifth figure fill its row and keeps it a figure', () => {
+    // Two columns hold four figures; the wide cells follow the fifth, so it
+    // would stand alone in its row. It spans the grid in the figure style.
+    const html = render({ evidence_basis: 'provider_context' })
+    const cell = (label: string) => html.match(
+      new RegExp(`<div class="([^"]*)"><p class="[^"]*">${label}</p><p class="([^"]*)">`),
+    )
+    const coverage = cell('Teilfragen-Abdeckung')
+    expect(coverage?.[1]).toContain('sm:col-span-2')
+    expect(coverage?.[2]).toContain('font-semibold')
+    for (const label of ['Konfidenz', 'Quellen', 'Quellenqualität', 'Aussagenqualität']) {
+      const figure = cell(label)
+      expect(figure, label).not.toBeNull()
+      expect(figure?.[1], label).not.toContain('sm:col-span-2')
+    }
   })
 })
 

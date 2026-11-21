@@ -8,7 +8,7 @@ describe('runSetupSummary', () => {
   it('names engine, permission and the Stufe — the cost class of the turn', () => {
     const t = translations.de
     const text = runSetupSummary(
-      { autonomy: 'balanced', engineMode: 'agent_kernel', tierMode: 'gruendlich' },
+      { autonomy: 'balanced', tierMode: 'gruendlich' },
       t,
     )
     expect(text).toBe(
@@ -21,13 +21,13 @@ describe('runSetupSummary', () => {
     const t = translations.en
     expect(
       runSetupSummary(
-        { autonomy: 'autonomous', engineMode: 'workspace_agent', tierMode: null },
+        { autonomy: 'autonomous', tierMode: null },
         t,
       ),
-    ).toBe(`${t.agent.overview.brainMission} · ${t.agent.composer.autonomyAutonomous}`)
+    ).toBe(`${t.agent.composer.engineAuto} · ${t.agent.composer.autonomyAutonomous}`)
     expect(
       runSetupSummary(
-        { autonomy: 'strict', engineMode: 'agent_kernel', tierMode: 'tief' },
+        { autonomy: 'strict', tierMode: 'tief' },
         t,
       ).split(' · '),
     ).toHaveLength(3)
@@ -46,7 +46,6 @@ describe('runSetupSummary shows an armed response form', () => {
     const t = translations.de
     const base = {
       autonomy: 'balanced',
-      engineMode: 'agent_kernel' as const,
       tierMode: 'gruendlich' as const,
     }
     expect(runSetupSummary({ ...base, responseForm: 'canvas' }, t))
@@ -62,7 +61,6 @@ describe('runSetupSummary shows an armed response form', () => {
     const t = translations.en
     const base = {
       autonomy: 'balanced',
-      engineMode: 'agent_kernel' as const,
       tierMode: 'gruendlich' as const,
     }
     const withoutForm = runSetupSummary(base, t)

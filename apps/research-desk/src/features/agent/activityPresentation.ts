@@ -166,50 +166,6 @@ export function activityStepDisplayText(
   )
 }
 
-/** Return the one terminal activity error already rendered by task detail.
- * Earlier matching failures remain in the operation history as retry evidence. */
-export function terminalActivityErrorIndex(
-  history: readonly Pick<AgentActivityRecord, 'error' | 'status'>[],
-  terminalError: string | undefined,
-): number {
-  const normalized = terminalError?.trim()
-  if (!normalized) return -1
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    const activity = history[index]
-    if (
-      activity?.status === 'failed'
-      && activity.error?.trim() === normalized
-    ) return index
-  }
-  return -1
-}
-
-export function discoveryProbeDisplay(
-  probe: Record<string, unknown>,
-  t: TranslationDictionary,
-): { detail: string; title: string } {
-  const rawKind = typeof probe.kind === 'string' ? probe.kind : ''
-  const operation = normalizeAgentOperation(probe.operation) ?? normalizeAgentOperation(rawKind)
-  const detail = typeof probe.query === 'string' ? probe.query.trim() : ''
-  return {
-    detail,
-    title: operation ? operationLabel(operation, t) : rawKind || t.agent.activity.execution,
-  }
-}
-
-const ROLE_OPERATIONS = new Set(['review_role', 'section_role'])
-
-/**
- * Whether a delegation row belongs to an internal ROLE of the kernel (such as
- * the Deep review, or the writer of one memo section too large for a single
- * call). A role child reports phases like a mission does, but it has no
- * plan, no tasks and no sections: its row keeps the one-line presenter, and the
- * mission card is never drawn for it.
- */
-export function isRoleOperation(tool: string | undefined): boolean {
-  return tool !== undefined && ROLE_OPERATIONS.has(tool)
-}
-
 /** Human label of a kernel wire tool id for gate cards. Unknown ids stay
  * visible verbatim — an unmapped tool must never hide behind a guess. */
 export function kernelToolLabel(
@@ -224,14 +180,16 @@ export function kernelToolLabel(
     case 'run_web_research':
       return t.agent.tools.webResearch
     case 'run_deep_mission':
+      // Retired: the delegation tool of stored kernel runs to the retired
+      // mission engine; their rows keep its name.
       return t.agent.tools.deepMission
     case 'review_role':
       // Not a model tool: the Deep review runs as a bounded role child, and
       // its delegation row rides the same tool-row protocol.
       return t.agent.tools.reviewRole
     case 'section_role':
-      // Not a model tool either: one memo section written by a role that
-      // reads its evidence, on the same tool-row protocol as the review.
+      // A stored run of the retired mission engine: one memo section
+      // written by a role, on the same tool-row protocol as the review.
       return t.agent.tools.sectionRole
     case 'delegate_batch':
       return t.agent.tools.delegateBatch
@@ -243,6 +201,8 @@ export function kernelToolLabel(
       return t.agent.tools.readProjectDocument
     case 'cite_document_passages':
       return t.agent.tools.citeDocumentPassages
+    case 'analyze_document':
+      return t.agent.tools.analyzeDocument
     case 'read_editor_document':
       return t.agent.tools.readEditorDocument
     case 'search_editor_document':

@@ -1,0 +1,49 @@
+{
+  "schema_version": "inqtrix-copied-code-v1",
+  "copied_code": [
+    {
+      "name": "shadcn/ui",
+      "source": "https://github.com/shadcn-ui/ui",
+      "license": "MIT",
+      "license_file": "apps/research-desk/src/components/ui/LICENSE-shadcn-ui.md",
+      "origin": "Components of the new-york style of the Tailwind CSS 3 registry (apps/www/registry/new-york/ui), partly changed in this project. The commit of the original copy is not recorded; compared against 84bd724d97005f98b54d064aed5883b79aac1fd3, the last commit that holds this registry.",
+      "paths": [
+        "apps/research-desk/src/components/ui/badge.tsx",
+        "apps/research-desk/src/components/ui/button.tsx",
+        "apps/research-desk/src/components/ui/dropdown-menu.tsx",
+        "apps/research-desk/src/components/ui/input.tsx",
+        "apps/research-desk/src/components/ui/progress.tsx",
+        "apps/research-desk/src/components/ui/resizable.tsx",
+        "apps/research-desk/src/components/ui/scroll-area.tsx",
+        "apps/research-desk/src/components/ui/select.tsx",
+        "apps/research-desk/src/components/ui/separator.tsx",
+        "apps/research-desk/src/components/ui/skeleton.tsx",
+        "apps/research-desk/src/components/ui/switch.tsx",
+        "apps/research-desk/src/components/ui/tabs.tsx",
+        "apps/research-desk/src/components/ui/textarea.tsx",
+        "apps/research-desk/src/components/ui/tooltip.tsx"
+      ]
+    },
+    {
+      "name": "Lucide icon data",
+      "source": "https://github.com/lucide-icons/lucide",
+      "license": "ISC AND MIT",
+      "license_file": "apps/research-desk/src/components/icons/LICENSE-lucide.md",
+      "origin": "SVG path data of the icons built with createIcon, and the shape of the icon component of lucide-react. 63 of the icons are those of lucide-react v0.554.0 that also lie in apps/research-desk/src/assets/icons/lucide; the version of the others is not recorded.",
+      "paths": [
+        "apps/research-desk/src/components/icons/createIcon.tsx",
+        "apps/research-desk/src/components/icons/index.tsx"
+      ]
+    },
+    {
+      "name": "Lucide icon files",
+      "source": "https://github.com/lucide-icons/lucide",
+      "license": "ISC AND MIT",
+      "license_file": "apps/research-desk/src/assets/icons/lucide/LICENSE.md",
+      "origin": "SVG files of lucide-react v0.554.0.",
+      "paths": [
+        "apps/research-desk/src/assets/icons/lucide"
+      ]
+    }
+  ]
+}

@@ -514,6 +514,8 @@ describe('the share flush locks before it reads (source pins)', () => {
   )
   const body = source.slice(source.indexOf('const flushDocumentForShare'))
     .slice(0, 2400)
+  const lock = source.slice(source.indexOf('const withFlushLock'))
+    .slice(0, 1600)
 
   it('takes only a documentId — never a caller-frozen record', () => {
     expect(body).toContain('documentId: string')
@@ -521,20 +523,24 @@ describe('the share flush locks before it reads (source pins)', () => {
   })
 
   it('waits for the in-flight flush, acquires the lock, THEN reads live', () => {
-    const waits = body.indexOf('while (flushingRef.current)')
-    const locks = body.indexOf('flushingRef.current = true')
-    const reads = body.indexOf('documentsRef.current[documentId]')
+    const waits = lock.indexOf('while (flushingRef.current)')
+    const locks = lock.indexOf('flushingRef.current = true')
+    const works = lock.indexOf('await work()')
     expect(waits).toBeGreaterThan(-1)
     expect(locks).toBeGreaterThan(waits)
-    expect(reads).toBeGreaterThan(locks)
+    expect(works).toBeGreaterThan(locks)
+    // The flush reads the record inside the work it hands to the lock.
+    const holds = body.indexOf('withFlushLock(')
+    const reads = body.indexOf('documentsRef.current[documentId]')
+    expect(holds).toBeGreaterThan(-1)
+    expect(reads).toBeGreaterThan(holds)
   })
 })
 
-describe('rebased-then-retry reaches saved (pure composition)', () => {
-  // The pre-fix loop: a frozen snapshot re-sent revision N+1 forever.
-  // The fix re-reads the live record — after the concurrent writer won
-  // and the 409 path rebased the base, a retry MUST compute a payload
-  // the server CAS accepts (current + 1).
+describe('a merged record saves on top of the server revision (pure composition)', () => {
+  // A frozen snapshot re-sent revision N+1 forever. After a concurrent writer
+  // won and its version was merged into the LIVE record, a save of that record
+  // computes a payload the server's revision guard accepts (current + 1).
   it('a snapshot payload stays stale; a live-read payload advances', async () => {
     const { researchDeskReducer } = await import('@/features/researchDesk/state')
     const { serverDocumentPayload } = await import('./editorSync')
@@ -548,6 +554,7 @@ describe('rebased-then-retry reaches saved (pure composition)', () => {
     }
     // Concurrent autosave wins: server (and live record) move to 4.
     state = researchDeskReducer(state, {
+      contentMarkdown: snapshot.contentMarkdown,
       documentId: snapshot.id,
       revision: 4,
       type: 'adoptEditorDocumentRevision',
@@ -555,18 +562,25 @@ describe('rebased-then-retry reaches saved (pure composition)', () => {
     // The frozen snapshot would re-send base+1 = 4 against a server at 4
     // (base 4 requires payload 5) — exactly the never-succeeding retry.
     expect(serverDocumentPayload(snapshot).revision).toBe(4)
-    // The 409 path rebases the LIVE record onto the server base ...
+    // Another writer saved revision 5; its version is merged into the LIVE
+    // record ...
     state = researchDeskReducer(state, {
-      contentMarkdown: '# Server-Stand',
+      at: '2026-07-15T08:05:00.000Z',
+      conflictCopy: { id: 'document-copy', title: 'Draft (Konfliktkopie).md' },
       documentId: snapshot.id,
-      pushedContentMarkdown: snapshot.contentMarkdown,
-      revision: 4,
-      type: 'rebaseServerEditorDocument',
+      observed: { folderId: null, title: snapshot.title },
+      server: {
+        contentMarkdown: '# Draft\n\nServer-Stand\n',
+        folderId: null,
+        revision: 5,
+        title: snapshot.title,
+      },
+      type: 'mergeServerEditorDocument',
     })
     // ... and a live re-read now computes the accepted payload.
     const live = state.editorDocuments[snapshot.id]
-    expect(live.revision).toBe(4)
-    expect(serverDocumentPayload(live).revision).toBe(5)
+    expect(live.revision).toBe(5)
+    expect(serverDocumentPayload(live).revision).toBe(6)
   })
 })
 

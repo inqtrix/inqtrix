@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from inqtrix.agents.critic_phase import uncovered_criteria
 from inqtrix.agents.kernel.deps import KernelDeps
 from inqtrix.agents.kernel.review_edits import (
     FindingResult,
@@ -35,10 +34,10 @@ def ref(label, identity):
 
 
 def locate(findings, outputs, *, allowed_references=None, criteria_count=0):
-    """Locate model findings; every reference an output holds is a source basis."""
+    """Locate findings; every reference an output holds is a source basis."""
     allowed = allowed_references if allowed_references is not None else {key: [] for key in outputs}
     return locate_findings(
-        [("model", item) for item in findings], outputs,
+        list(findings), outputs,
         source_basis_ids={
             key: {"source:a", *(
                 f"source:{KernelDeps.ledger_id(item)}" for item in allowed.get(key, [])
@@ -138,7 +137,7 @@ def test_edits_use_the_original_positions_even_if_replacement_duplicates_an_anch
 def test_ground_from_a_different_output_cannot_justify_a_finding(kind, basis_id):
     outputs = {"doc": "Falsch.", "other": "Falsch."}
     _located, named = locate_findings(
-        [("model", finding(kind=kind, basis_ids=[basis_id]))], outputs,
+        [finding(kind=kind, basis_ids=[basis_id])], outputs,
         source_basis_ids={"doc": {"source:b"}, "other": {"source:a"}},
         diagnostic_basis_ids={"doc": {"diagnostic:b"}, "other": {"diagnostic:a"}},
         allowed_references={"doc": [], "other": []}, criteria_count=0,
@@ -520,7 +519,7 @@ def test_a_basis_maps_only_to_an_unambiguous_label_of_its_target(item, reference
 def test_a_result_cannot_carry_a_reason_outside_the_closed_set(state, reason):
     with pytest.raises(ValueError, match="cannot carry the reason"):
         FindingResult(
-            finding_id="finding_1", origin="model", output_id="doc", kind="run_diagnostic",
+            finding_id="finding_1", output_id="doc", kind="run_diagnostic",
             criterion=None, finding="x", quote="y", state=state, reason=reason,
         )
 
@@ -529,7 +528,7 @@ def test_a_finding_record_carries_its_recheck():
     """Only an applied edit can have held its re-check, and the record says
     which applied edits held."""
     fields = {
-        "finding_id": "finding_1", "origin": "model", "output_id": "doc",
+        "finding_id": "finding_1", "output_id": "doc",
         "kind": "run_diagnostic", "criterion": None, "finding": "x", "quote": "y",
     }
     record = FindingResult(**fields, state="applied", recheck="held").record()
@@ -543,7 +542,7 @@ def test_a_finding_record_carries_why_its_edit_stayed_unverified():
     is told; a named finding, a held edit and a code outside the closed set
     cannot carry one."""
     fields = {
-        "finding_id": "finding_1", "origin": "model", "output_id": "doc",
+        "finding_id": "finding_1", "output_id": "doc",
         "kind": "run_diagnostic", "criterion": None, "finding": "x", "quote": "y",
     }
     record = FindingResult(**fields, state="applied", recheck_reason="no_source_text").record()
@@ -557,54 +556,10 @@ def test_a_finding_record_carries_why_its_edit_stayed_unverified():
     assert record["recheck_reason"] == "no_source_text"
 
 
-def test_missing_fact_and_editorial_criterion_take_different_paths():
-    from inqtrix.agents.algorithm import _critic_open_points
-
-    # The stored decision of a mission review: unmet criteria with their owner.
-    payload = {
-        "verdict": "research", "criteria_covered": [],
-        "criteria_uncovered": [
-            {"text": "Welcher Referenzzeitraum gilt?", "kind": "information"},
-            {"text": "At most 350 words.", "kind": "output_requirement"},
-        ],
-    }
-    assert uncovered_criteria(payload, kind="information") == ["Welcher Referenzzeitraum gilt?"]
-    assert uncovered_criteria(payload, kind="output_requirement") == ["At most 350 words."]
-    block = _critic_open_points(payload)
-    assert "Welcher Referenzzeitraum gilt?" in block
-    assert "350" not in block
-    assert _critic_open_points({"criteria_uncovered": [payload["criteria_uncovered"][1]]}) == ""
-
-
-def test_unclassified_history_never_becomes_research(caplog):
-    old = {"criteria_uncovered": ["A free-text format or factual criterion."]}
-    assert uncovered_criteria(old, kind="information") == []
-    assert "has no valid classification" in caplog.text
-    assert uncovered_criteria(old) == ["Unclassified: A free-text format or factual criterion."]
-
-
 def test_context_check_uses_the_existing_estimate_without_trimming():
     llm = SimpleNamespace(context_window_tokens=3000, _default_max_tokens=100)
     assert review_context_fits(llm, model=None, prompt="small", schema="{}", fallback_window=10)
     assert not review_context_fits(llm, model=None, prompt="x" * 16000, schema="{}", fallback_window=10)
-
-
-@pytest.mark.parametrize("criteria", [
-    ["Unclassified persisted criterion."],
-    [{"text": "At most 350 words.", "kind": "output_requirement"}],
-])
-def test_resumed_critic_route_cannot_research_without_an_information_gap(monkeypatch, criteria):
-    import inqtrix.agents.algorithm as algorithm
-
-    events = []
-    # No planner, provider or store is supplied: the route must stop before
-    # touching any of them, including when restoring an older checkpoint.
-    deps = SimpleNamespace(cancelled=lambda: False, emit=lambda *args: events.append(args))
-    monkeypatch.setattr(algorithm, "_deps", lambda: deps)
-    state = {"route": "critic_research", "critic": {"criteria_uncovered": criteria}}
-    result = algorithm._node_plan(state)
-    assert result["route"] == "critic_research_exhausted"
-    assert events[0][1]["kind"] == "critic_research_exhausted"
 
 
 @pytest.mark.parametrize("initial_revision,concurrent_edit", [(1, False), (4, False), (4, True)])
@@ -715,7 +670,7 @@ def test_the_revision_evidence_is_narrowed_to_the_bases_the_findings_name():
 def test_review_revision_cannot_introduce_an_internal_reference_id():
     outputs = {"doc": "Old statement [W1]."}
     references = [{"label": "W1", "reference_id": "opaque-evidence-key"}]
-    located = [{"finding_id": "finding_1", "origin": "model", "output_id": "doc",
+    located = [{"finding_id": "finding_1", "output_id": "doc",
                 "kind": "run_diagnostic", "finding": "Fix.", "criterion": None,
                 "quote": "Old statement", "start": 0, "end": len("Old statement"),
                 "keep": [], "remove": [], "may_add": []}]
@@ -732,9 +687,9 @@ def test_review_revision_cannot_introduce_an_internal_reference_id():
 def test_a_revision_may_keep_but_not_introduce_an_identifier():
     """A revision owns its replacement, not the passage it found.
 
-    A guard that read only the references' ``reference_id`` would check
-    the mission's revisions against empty strings, because a mission
-    reference has none. With the full identifier set the check works,
+    A guard that read only the references' ``reference_id`` would check a
+    revision against empty strings for a reference that carries none. With
+    the full identifier set the check works,
     and it has to tell an id the edit ADDS from one it inherited with the
     sentence it is rewriting.
 
@@ -1039,7 +994,7 @@ def test_knowledge_mode_lifts_the_label_rule_and_nothing_else(knowledge_mode, re
         "Das gilt immer.", target="chat", artifact_id="", kind="output_requirement", basis_ids=(),
     )
     located, named = locate_findings(
-        [("model", item)], outputs,
+        [item], outputs,
         source_basis_ids={"chat": set()}, diagnostic_basis_ids={"chat": set()},
         allowed_references={"chat": []}, criteria_count=0, knowledge_mode=knowledge_mode,
     )
@@ -1061,7 +1016,7 @@ UNSTORED = frozenset({"source:w7", "source:w8", "source:w11"})
 def locate_web(findings, outputs, *, unstored=UNSTORED, knowledge_mode=False):
     """Locate model findings on outputs citing WEB, *unstored* holding no stored text."""
     return locate_findings(
-        [("model", item) for item in findings], outputs,
+        list(findings), outputs,
         source_basis_ids={key: {f"source:{KernelDeps.ledger_id(r)}" for r in WEB} for key in outputs},
         diagnostic_basis_ids={key: {"diagnostic:b"} for key in outputs},
         allowed_references={key: list(WEB) for key in outputs},
@@ -1134,7 +1089,7 @@ def test_a_marked_finding_is_no_revision_decision():
 
     item = finding("Der Bonus beträgt 16 Prozent.", kind="evidence_error", basis_ids=["source:w7"])
     _located, named = locate_web([item], {"doc": BONUS})
-    assert not is_counted("model", named[0].reason)
+    assert not is_counted(named[0].reason)
     assert revision_state(named) == "none"
 
 
@@ -1229,7 +1184,7 @@ def test_a_correction_from_general_knowledge_may_change_a_number_never_drop_one(
         kind="output_requirement", basis_ids=(),
     )
     located, named = locate_findings(
-        [("model", item)], outputs,
+        [item], outputs,
         source_basis_ids={"chat": set()}, diagnostic_basis_ids={"chat": set()},
         allowed_references={"chat": []}, criteria_count=0, knowledge_mode=True,
     )

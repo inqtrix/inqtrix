@@ -547,7 +547,7 @@ services use configuration only and do not start the bundled profile.
 | **Nothing** (default) | Research, chat, cited reports, OpenAI-compatible API | persistence, login, sharing | in-memory, zero infra |
 | **Postgres** | Durable runs, login, multi-user, sharing, file uploads, prompt templates | memory-mode server records do not survive restart | required by the full Compose stack |
 | **Collaboration service** | Live editor co-authoring, carets, suggestions, and durable acknowledgements | shared editor documents remain read-only projections | `--profile collaboration` plus Postgres and cookie auth |
-| **Qdrant** | Knowledge / RAG over your documents; hybrid dense + BM25 retrieval | in-memory, dense-only, lost on restart | `--profile knowledge` |
+| **Qdrant** | Knowledge / RAG over your documents; hybrid dense + BM25 retrieval | knowledge only as a one-process trial: in memory, dense-only, lost on restart | `--profile knowledge` |
 | **Valkey + worker** | Scaled, queued, restart-surviving runs | in-process queue only | `--profile workers` |
 | **Object store (S3)** | Shared file storage across replicas | local volume only | managed/native S3: configuration only; bundled SeaweedFS: additionally `--profile s3` |
 | **OIDC** | Enterprise SSO | single-operator auth only | external IdP: configuration only; bundled Dex development reference: additionally `--profile oidc` |
@@ -556,7 +556,7 @@ Each component, and the role it plays:
 
 - **Postgres:** durable run rows, identity, knowledge metadata, prompt templates. The Compose deployment defaults to it; the `migrate` service applies the schema once before the API starts.
 - **Collaboration service:** a private, single-replica Node/Hocuspocus coordinator for Yjs synchronization. FastAPI remains the identity and persistence authority, and the sidecar has neither a public port nor database credentials.
-- **Qdrant:** the persistent vector + document store; the only backend with hybrid dense+BM25 retrieval (BM25 runs inside the Qdrant server itself, no client-side model). Without it the knowledge engine uses an in-memory, dense-only store.
+- **Qdrant:** the persistent vector + document store; the only backend with hybrid dense+BM25 retrieval (BM25 runs inside the Qdrant server itself, no client-side model). Without `INQTRIX_VECTOR_BACKEND=qdrant` the knowledge engine keeps its vectors in memory, which suits a trial only: dense-only, inside one process, without a size limit, and empty after every restart. The start is refused when that index would have to serve workers (`INQTRIX_QUEUE_BACKEND=valkey`) or more than one replica (`INQTRIX_REPLICA_COUNT`), and beside Postgres it starts with a warning. Memory is never a fallback: when a configured Qdrant is down, knowledge is reported unavailable until Qdrant answers again.
 - **Valkey + worker:** dispatches native runs to separate worker processes for horizontal scaling and restart survival. The worker refuses to start without both Postgres and Valkey.
 - **Object store:** storage for uploaded file blobs; a local volume by default, or any S3 endpoint (SeaweedFS is the bundled reference).
 - **OIDC IdP:** browser SSO. An external enterprise provider is configured

@@ -1,4 +1,4 @@
-"""Checkpointer wiring for the workspace-agent phase machine.
+"""Checkpointer wiring for agent runs.
 
 Checkpoints retain resumable messages, tool state and cumulative usage. The
 kernel preserves product originals in the control store before clearing this
@@ -19,8 +19,8 @@ the sync saver over the same tables is the working equivalent
 
 The volatile escape (``INQTRIX_AGENT_ALLOW_VOLATILE``) uses langgraph's
 ``InMemorySaver``: interrupted runs then die with the process — the
-container logs a WARNING and capabilities report
-``workspace_agent_durable: false`` so nothing degrades silently.
+container logs a WARNING and capabilities report ``agent.durable: false``
+so nothing degrades silently.
 
 Both savers load only LangGraph's safe types plus :data:`CHECKPOINT_TYPES`,
 whatever ``LANGGRAPH_STRICT_MSGPACK`` says. Anything else loads as raw data,
@@ -56,10 +56,10 @@ pooling mitigation; the psycopg pool gets the equivalent through its
 CHECKPOINT_TYPES: frozenset[tuple[str, str]] = frozenset()
 """Types beyond LangGraph's safe set (``SAFE_MSGPACK_TYPES``) a checkpoint may hold.
 
-Empty: both workflows that share the checkpointer keep plain data and
-LangChain messages in their state, and every checkpoint their tests write
-and the stored ones read back with nothing outside the safe set. The list
-is part of the workflow fingerprint; changing it is a contract break."""
+Empty: the kernel keeps plain data and LangChain messages in its state, and
+every checkpoint its tests write and the stored ones read back with nothing
+outside the safe set. The list is part of the workflow fingerprint; changing
+it is a contract break."""
 
 _blocked_types: ContextVar[list[tuple[str, str]] | None] = ContextVar(
     "inqtrix_blocked_checkpoint_types", default=None
@@ -148,12 +148,28 @@ def _psycopg_conninfo(database_url: str) -> str:
     return urlunsplit(parts._replace(query=urlencode(kept)))
 
 
-def cleanup_run_checkpoint(handle: "CheckpointerHandle | None", run_id: str, mode: str) -> None:
-    """Remove agent execution caches inside an already-authorized delete gate."""
-    from inqtrix.core.constants import AGENT_MODE_IDS
+def cleanup_run_checkpoint(
+    handle: "CheckpointerHandle | None",
+    run_id: str,
+    mode: str,
+    *,
+    never_claimed: bool = False,
+) -> None:
+    """Remove agent execution caches inside an already-authorized delete gate.
+
+    Every mode whose runs are or were agent runs keeps its threads deletable,
+    retired modes included. A run that was never claimed has no thread; its
+    deletion does not need the checkpoint store. Without the flag the run is
+    taken as claimed: a caller that cannot tell deletes, or fails visibly.
+
+    Raises:
+        RunCleanupFailed: The thread of a claimed agent run could not be
+            deleted; the run is retained for retry.
+    """
+    from inqtrix.core.constants import AGENT_RUN_MODE_IDS
     from inqtrix.exceptions import RunCleanupFailed
 
-    if mode not in AGENT_MODE_IDS:
+    if mode not in AGENT_RUN_MODE_IDS or never_claimed:
         return
     try:
         if handle is None:
@@ -197,7 +213,7 @@ class CheckpointerHandle:
                 from langgraph.checkpoint.memory import InMemorySaver
 
                 log.warning(
-                    "Workspace agent uses a VOLATILE checkpointer "
+                    "Agent runs use a VOLATILE checkpointer "
                     "(INQTRIX_AGENT_ALLOW_VOLATILE); interrupted runs do not survive a "
                     "restart."
                 )
@@ -259,16 +275,17 @@ class CheckpointerHandle:
 
 
 def build_checkpointer_handle(settings: Any) -> CheckpointerHandle | None:
-    """Settings bridge deciding whether the workspace agent registers.
+    """Settings bridge deciding whether agent runs are set up on this server.
 
-    Returns ``None`` when the workspace agent must NOT register (no
-    Postgres and no volatile escape) — the container surfaces that as
-    ``features.workspace_agent: false``.
+    Returns ``None`` when they are not: agent features switched off, the
+    checkpointer libraries missing (the ``agent`` extra), or neither Postgres
+    nor the volatile escape — the container surfaces that as
+    ``features.agent_desk: false``, and the kernel does not register.
     """
     if not settings.agent_platform.enabled:
         log.info(
-            "Workspace agent disabled: INQTRIX_AGENT_ENABLED=false; "
-            "features.workspace_agent remains false."
+            "Agent runs disabled: INQTRIX_AGENT_ENABLED=false; "
+            "features.agent_desk remains false."
         )
         return None
     if settings.storage.backend == "postgres" and settings.storage.database_url.strip():
@@ -277,8 +294,8 @@ def build_checkpointer_handle(settings: Any) -> CheckpointerHandle | None:
             import psycopg_pool  # noqa: F401
         except ImportError:
             log.warning(
-                "Workspace agent disabled: the 'agent' extra is not installed (uv sync "
-                "--extra agent); features.workspace_agent remains false."
+                "Agent runs disabled: the 'agent' extra is not installed (uv sync "
+                "--extra agent); features.agent_desk remains false."
             )
             return None
         return CheckpointerHandle(
@@ -290,16 +307,16 @@ def build_checkpointer_handle(settings: Any) -> CheckpointerHandle | None:
             import langgraph.checkpoint.memory  # noqa: F401
         except ImportError:
             log.warning(
-                "Workspace agent disabled: langgraph checkpointer could not be "
-                "imported."
+                "Agent runs disabled: langgraph checkpointer could not be "
+                "imported; features.agent_desk remains false."
             )
             return None
         return CheckpointerHandle(database_url=None, max_connections=0)
     log.warning(
-        "Workspace agent disabled: no durable checkpointer because "
+        "Agent runs disabled: no durable checkpointer because "
         "INQTRIX_STORAGE_BACKEND is not 'postgres' (or INQTRIX_DATABASE_URL is empty) "
         "and INQTRIX_AGENT_ALLOW_VOLATILE is false. Set "
         "INQTRIX_STORAGE_BACKEND=postgres or enable the volatile opt-in for Agent Desk;"
-        " features.workspace_agent remains false."
+        " features.agent_desk remains false."
     )
     return None

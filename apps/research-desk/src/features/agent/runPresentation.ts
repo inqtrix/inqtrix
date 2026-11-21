@@ -6,12 +6,10 @@ import { effortLevelLabel } from '@/lib/modelCard'
 import type {
   AgentArtifactRecord,
   AgentClaimMark,
-  AgentPlanTaskRecord,
   AgentRunOutcome,
   AgentRunRecord,
   AgentStepEntry,
 } from './model'
-import { effectiveAgentTaskStatus } from './plan/taskPresentation'
 import {
   normalizeAgentExecutionSnapshot,
   type AgentExecutionSnapshot,
@@ -137,9 +135,6 @@ export type AgentRunCompletionRecap = {
   elapsedSeconds: number | undefined
   referenceCount: number
   outcome: AgentRecapOutcome
-  synthesized: boolean
-  taskCount: number
-  tasksCompleted: number
 }
 
 /** Add only runs observed before the authoritative listing settled to the
@@ -179,10 +174,7 @@ export function agentRunCompletionRecap(
     | 'lastSequence'
     | 'outcome'
     | 'status'
-    | 'stepLog'
-    | 'taskStates'
   >,
-  tasks: readonly AgentPlanTaskRecord[],
   memo: AgentArtifactRecord | undefined,
 ): AgentRunCompletionRecap {
   // The words are the record's: both engines send one, and a phase or an
@@ -202,17 +194,23 @@ export function agentRunCompletionRecap(
     elapsedSeconds: run.elapsedSeconds,
     referenceCount: memo?.refsCount ?? 0,
     outcome,
-    synthesized: Boolean(memo) || run.stepLog.some(
-      (entry) => entry.kind === 'phase' && entry.phase === 'synthesis',
-    ),
-    taskCount: tasks.length,
-    tasksCompleted: tasks.filter(
-      (task) => effectiveAgentTaskStatus(
-        task,
-        run.taskStates[task.taskId],
-      ) === 'completed',
-    ).length,
   }
+}
+
+/**
+ * What a run calls its Stufe, in the header of its question and in its
+ * settings line: the recorded Stufe first. A run without one that ran with
+ * the legacy deep depth says "Deep" — that depth had no budgets of a Stufe,
+ * so "Tief" would claim budgets the run never had. Otherwise nothing.
+ * `deep` marks the deep end of the ladder for the header's accent.
+ */
+export function runTierBadge(
+  run: Pick<AgentRunRecord, 'agentTier' | 'depth'>,
+  t: TranslationDictionary,
+): { deep: boolean; label: string } | null {
+  const tier = agentTierIdOf(run.agentTier)
+  if (tier) return { deep: tier === 'tief', label: tierLabel(tier, t) }
+  return run.depth === 'deep' ? { deep: true, label: t.agent.composer.deep } : null
 }
 
 /**
@@ -222,6 +220,8 @@ export function agentRunCompletionRecap(
  * server admitted — never a guess: without a snapshot only permission and
  * Stufe remain, without a model there is no model part, and a source that
  * was available but unused reads as "0 searches" rather than vanishing.
+ * The engine part names the kernel only: a stored run of the retired
+ * mission engine says nothing about an engine the desk no longer offers.
  */
 export function runSettingsSummary(
   run: Pick<
@@ -232,14 +232,10 @@ export function runSettingsSummary(
 ): string[] {
   const execution = normalizeAgentExecutionSnapshot(run.snapshot)
   const parts: string[] = []
-  const mode = execution?.effectiveMode
-  if (mode === 'agent_kernel' || mode === 'workspace_agent') {
-    parts.push(engineModeLabel(mode, t))
-  }
+  if (execution?.effectiveMode === 'agent_kernel') parts.push(engineModeLabel(t))
   if (run.autonomy) parts.push(autonomyModeLabel(run.autonomy, t))
-  const tier = agentTierIdOf(run.agentTier)
-  if (tier) parts.push(tierLabel(tier, t))
-  else if (run.depth === 'deep') parts.push(t.agent.composer.deep)
+  const tier = runTierBadge(run, t)
+  if (tier) parts.push(tier.label)
   const model = execution?.model ?? run.modelResolution?.model
   if (model) parts.push(model)
   const effort = execution?.reasoningEffort ?? run.modelResolution?.effort
@@ -256,7 +252,7 @@ export function runSettingsSummary(
   )
   if (execution.sourcePolicy.knowledge === 'available') {
     const searches = countLabel(
-      execution.toolUseCounts.knowledge,
+      knowledgeSearchTotal(execution).searches,
       t.agent.timeline.recapKnowledgeSearchOne,
       t.agent.timeline.recapKnowledgeSearches,
     )
@@ -269,39 +265,65 @@ export function runSettingsSummary(
 }
 
 /**
- * The web part of the line: the searches the provider ran, beside the
- * research the run delegated. A delegation is ONE web call of the parent
- * and no search; its searches are the ones the child's provider executed,
- * from the child's typed snapshot. A child that records no searches (a
- * mission, a role, a research that has not searched yet) adds nothing —
- * never a guess.
+ * The web searches of a run as its surfaces count them: the research the
+ * run delegated and the searches run for it. A delegation is ONE web call
+ * of the parent and no search; its searches are the ones the child's
+ * provider executed, from the child's typed snapshot. A child that records
+ * no searches (a mission, a role, a research that has not searched yet)
+ * adds nothing — never a guess. The settings line and the status menu both
+ * count here, so they cannot disagree.
  */
+export function webSearchTotals(
+  execution: Pick<AgentExecutionSnapshot, 'toolUseCounts' | 'webSearches'>,
+  children: AgentRunRecord['children'] | undefined,
+): { research: number; searches: number } {
+  const kids = Object.values(children ?? {})
+  if (execution.webSearches === null) {
+    // A snapshot from before the count: its counter of source uses and
+    // the children's planned queries are all it recorded.
+    return {
+      research: 0,
+      searches: execution.toolUseCounts.web + kids.reduce(
+        (total, child) => total + Math.max(0, child.snapshot?.total_queries ?? 0),
+        0,
+      ),
+    }
+  }
+  const research = kids.filter(
+    (child) => typeof child.snapshot?.executed_queries === 'number',
+  )
+  return {
+    research: research.length,
+    searches: execution.webSearches + research.reduce(
+      (total, child) => total + Math.max(0, child.snapshot?.executed_queries ?? 0),
+      0,
+    ),
+  }
+}
+
+/**
+ * The searches of the knowledge base a run ran. The counter of source uses
+ * takes a document read like a search, so it is no count of them; the run
+ * reports its searches beside it. `recorded` is false for a snapshot that
+ * carries no such count (a mission, a run from before the count): its
+ * counter of source uses is then all there is.
+ */
+export function knowledgeSearchTotal(
+  execution: Pick<AgentExecutionSnapshot, 'knowledgeSearches' | 'toolUseCounts'>,
+): { recorded: boolean; searches: number } {
+  return execution.knowledgeSearches === null
+    ? { recorded: false, searches: execution.toolUseCounts.knowledge }
+    : { recorded: true, searches: execution.knowledgeSearches }
+}
+
+/** The web part of the settings line (:func:`webSearchTotals` in its words). */
 function webSearchesLabel(
   execution: Pick<AgentExecutionSnapshot, 'toolUseCounts' | 'webSearches'>,
   children: AgentRunRecord['children'] | undefined,
   t: TranslationDictionary,
 ): string {
-  const kids = Object.values(children ?? {})
-  if (execution.webSearches === null) {
-    // A snapshot from before the count: its budget counter and the
-    // children's planned queries are all it recorded.
-    return countLabel(
-      execution.toolUseCounts.web + kids.reduce(
-        (total, child) => total + Math.max(0, child.snapshot?.total_queries ?? 0),
-        0,
-      ),
-      t.agent.timeline.recapWebSearchOne,
-      t.agent.timeline.recapWebSearches,
-    )
-  }
-  const research = kids.filter(
-    (child) => typeof child.snapshot?.executed_queries === 'number',
-  )
-  const searches = execution.webSearches + research.reduce(
-    (total, child) => total + Math.max(0, child.snapshot?.executed_queries ?? 0),
-    0,
-  )
-  if (research.length === 0) {
+  const { research, searches } = webSearchTotals(execution, children)
+  if (research === 0) {
     return countLabel(
       searches,
       t.agent.timeline.recapWebSearchOne,
@@ -310,7 +332,7 @@ function webSearchesLabel(
   }
   return t.agent.timeline.recapWebResearch
     .replace('{research}', () => countLabel(
-      research.length,
+      research,
       t.agent.timeline.recapResearchOne,
       t.agent.timeline.recapResearches,
     ))
@@ -319,6 +341,63 @@ function webSearchesLabel(
       t.agent.timeline.recapSearchOne,
       t.agent.timeline.recapSearches,
     ))
+}
+
+/**
+ * One "used" row of the run overview: the value of its pill and, where the
+ * pill cannot hold it, one line under the row.
+ */
+export type SourceUseRow = { hint?: string; value: string }
+
+/**
+ * The overview's "web used" row, or `null` where the run did not use the
+ * web. It counts where the settings line counts (:func:`webSearchTotals`),
+ * so a delegated research never reads as one search: the pill holds the
+ * searches and the research stands on the line under it. The pill is
+ * narrow; both counts in it would be cut at two-digit numbers, and in
+ * English already at one research.
+ */
+export function webUseRow(
+  execution: Pick<AgentExecutionSnapshot, 'toolUseCounts' | 'webSearches'>,
+  children: AgentRunRecord['children'] | undefined,
+  t: TranslationDictionary,
+): SourceUseRow | null {
+  const { research, searches } = webSearchTotals(execution, children)
+  if (research === 0 && searches === 0 && execution.toolUseCounts.web === 0) {
+    return null
+  }
+  const o = t.agent.overview
+  const value = countLabel(searches, o.toolUseCountOne, o.toolUseCount)
+  if (research === 0) return { value }
+  return {
+    hint: o.toolUseResearchHint.replace('{research}', () => countLabel(
+      research,
+      t.agent.timeline.recapResearchOne,
+      t.agent.timeline.recapResearches,
+    )),
+    value,
+  }
+}
+
+/**
+ * The overview's "knowledge used" row, or `null` where the run did not use
+ * the knowledge base (:func:`knowledgeSearchTotal`). A run that used it and
+ * searched nothing itself says exactly that: it read documents, or its
+ * subtasks asked the project knowledge, and a row of "0 searches" under
+ * "used" would read as a contradiction.
+ */
+export function knowledgeUseRow(
+  execution: Pick<AgentExecutionSnapshot, 'knowledgeSearches' | 'toolUseCounts'>,
+  t: TranslationDictionary,
+): SourceUseRow | null {
+  const { recorded, searches } = knowledgeSearchTotal(execution)
+  const o = t.agent.overview
+  if (searches > 0) {
+    return { value: countLabel(searches, o.toolUseCountOne, o.toolUseCount) }
+  }
+  return recorded && execution.toolUseCounts.knowledge > 0
+    ? { value: o.toolKnowledgeNoOwnSearch }
+    : null
 }
 
 /** The boundary a knowledge search ran against — only when the server

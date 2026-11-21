@@ -1,33 +1,28 @@
-"""The outcome record of an agent run — a mission or a conversational kernel run: what its review did, what stayed open, why.
+"""The outcome record of a conversational kernel run: what its review did, what stayed open, why.
 
 One record per run segment that reaches a decision of the algorithm
 (completed, cancelled or failed), sent as ``inqtrix.agent.outcome`` through
-:func:`send_outcome` by both senders: ``WorkspaceAgentAlgorithm.run`` for a
-mission, ``KernelAgentAlgorithm.run`` for a conversational kernel run (a
-kernel role run sends none). ``final`` is the algorithm's own decision, not
-the run's terminal status: a cancel that races a normal return, or a
-publication failure after the algorithm, can still end the run otherwise.
-Runs cancelled while parked or waiting, and runs that fail before the graph
-starts, have no record.
+:func:`send_outcome` by ``KernelAgentAlgorithm.run`` (a kernel role run sends
+none). ``final`` is the algorithm's own decision, not the run's terminal
+status: a cancel that races a normal return, or a publication failure after
+the algorithm, can still end the run otherwise. Runs cancelled while parked or
+waiting, and runs that fail before the graph starts, have no record.
 
-Built here, pure over one input for both engines: the review report in the
-shape the review pass writes
-(:func:`~inqtrix.agents.kernel.review_pass.report_facts`), the ``critic``
-dict beside ``last_review``. The mission reads both from its checkpointed
-state, the codes from the prospect it stored and from the run's readings;
-the kernel builds them from its segment's review. Every finding the text did
-not take over is a line with its reason code. A field the report does not
-carry is never read as complete or as revised; a review report written
-before it carried its round, revision and accounting, before its lines
-carried their reasons, before it carried its reach, or before its findings
-carried why the re-check left them unverified (a checkpoint resumed across
-a deploy), is built with a WARNING, since its record then reads ``round`` 0
-beside a completed review, a finding line without its reason, or a summary
-without the review's reach or those reasons.
+Built here, pure over one input: the review report in the shape the review
+pass writes (:func:`~inqtrix.agents.kernel.review_pass.report_facts`), the
+``critic`` dict beside ``last_review``, which the kernel builds from its
+segment's review. Every finding the text did not take over is a line with its
+reason code. A field the report does not carry is never read as complete or as
+revised; a review report written before it carried its round, revision and
+accounting, before its lines carried their reasons, before it carried its
+reach, or before its findings carried why the re-check left them unverified (a
+checkpoint resumed across a deploy), is built with a WARNING, since its record
+then reads ``round`` 0 beside a completed review, a finding line without its
+reason, or a summary without the review's reach or those reasons.
 
 The record also carries its summary in reader words
 (:func:`outcome_words`), built from its counts and states only, never from
-a line's text: it is the one sentence that crosses to a delegating parent.
+a line's text: the final review narration reads it word for word.
 A review that counted the delivered statements
 (:mod:`~inqtrix.agents.kernel.claim_states`) reads as that count, and what
 it did besides stands in the record's details (:func:`outcome_details`).
@@ -41,13 +36,13 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from inqtrix.agents.kernel.claim_states import STATES
-from inqtrix.agents.kernel.review_edits import RECHECK_REASONS, is_counted
-from inqtrix.agents.research_prospect import extraction_limited, readings_of
+from inqtrix.agents.kernel.review_edits import RECHECK_REASONS
 from inqtrix.exceptions import AgentCancelled, AgentTokenBudgetExceeded
 from inqtrix.i18n import t, t_count
 from inqtrix.harness.contracts.events import OUTCOME_EVENT
 
 log = logging.getLogger(__name__)
+
 
 REPORT_FACTS = ("round", "revision", "accounting")
 """The review report's own facts the record reads; a report without them
@@ -65,24 +60,29 @@ def build_outcome(
     and the summary pass.
 
     ``review`` is ``completed``, ``unavailable``, ``waived`` (the run's Stufe
-    skips the review) or ``not_run``; ``round`` the review round (0 without
+    skips the review) or ``not_run``; an ``unavailable`` one carries its
+    ``unavailable_reason`` and, when that is ``inconsistent``, the flags the
+    verdict gave no reason for in ``unexplained``. ``basis`` is what the
+    server decided an assessed verdict could check against (``evidence``,
+    ``knowledge`` or ``provider_context``); a record without an assessed
+    verdict reads ``evidence``. ``round`` is the review round (0 without
     one); ``revision`` ``none``, ``verified`` (every edit applied and held
     by the re-check), ``unverified`` (every edit applied, at least one not
     held by the re-check), ``partially_discarded`` (some findings applied,
     some named) or ``discarded``; ``accounting`` ``complete`` only for a
-    completed review that settled every criterion; ``applied`` the counted
+    completed review that settled every criterion; ``applied`` the
     findings whose edit was applied, ``verified`` those of them the re-check
-    held. ``limits`` names why research stopped, ``codes`` why no research
-    could reach more; every open information criterion carries both, and a
-    named finding's line carries its reason code. ``open.by_kind`` counts
+    held. ``limits``, ``codes`` and ``open.by_code`` stay empty: a kernel
+    run has no research route, so nothing names why research stopped (a
+    stored mission run's record carries them). A named finding's line
+    carries its reason code. ``open.by_kind`` counts
     an unmet output requirement as ``text_defect``, or as ``revised`` when
-    at least one counted model finding concerns it and every such finding
+    at least one counted finding concerns it and every such finding
     was applied, held by the re-check or not (its entry's ``state``,
     ``revised`` or ``verified``; an entry without one reads open).
-    ``reach`` is the review's re-read and cited counts. An
-    ``extraction_limit`` code adds a ``limit`` line. A ``marked`` line is a
-    passage that stays as written with its mark, counted apart from the
-    findings no revision applied. ``claims`` counts each delivered output's
+    ``reach`` is the review's re-read and cited counts. A ``marked`` line
+    is a passage that stays as written with its mark, counted apart from
+    the findings no revision applied. ``claims`` counts each delivered output's
     statements by state, ``marks`` names every insufficiently supported one
     with its passage and its note (the note passes *guard*, the passage is
     the delivered text's own); both only when the review counted any.
@@ -107,15 +107,6 @@ def build_outcome(
     review = str(
         last_review.get("status") or ("completed" if state.get("critic") else "not_run")
     )
-    codes = [
-        *[str(code) for code in critic.get("prospect_codes") or []],
-        *(["extraction_limit"] if extraction_limited(readings_of(state.get("outcomes"))) else []),
-    ]
-    limits = [
-        str(limit)
-        for limit in critic.get("research_limits") or []
-        if limit != "no_prospect"
-    ]
     uncovered = [
         entry for entry in critic.get("criteria_uncovered") or [] if isinstance(entry, Mapping)
     ]
@@ -171,14 +162,10 @@ def build_outcome(
             "checkpoint from before the report carried it); the summary names "
             "no reach."
         )
-    information = by_kind["information"]
-    reasons = [*limits, *codes]
     applied = [
         finding
         for finding in critic.get("findings") or []
-        if isinstance(finding, Mapping)
-        and finding.get("state") == "applied"
-        and is_counted(str(finding.get("origin") or ""), str(finding.get("reason") or ""))
+        if isinstance(finding, Mapping) and finding.get("state") == "applied"
     ]
     if any("recheck_reason" not in finding for finding in applied):
         log.warning(
@@ -201,48 +188,45 @@ def build_outcome(
             if review == "completed" and critic.get("accounting") == "complete"
             else "incomplete"
         ),
-        # A report from before the basis was recorded reads as a review with
-        # sources, worded as before.
-        "basis": "knowledge" if critic.get("basis") == "knowledge" else "evidence",
+        # What the server decided the assessed verdict could check against:
+        # a completed review carries it in its report, a contradictory one
+        # beside its reason. A record without an assessed verdict (no review
+        # owed, none run, none returned) and a report from before the basis
+        # was recorded read ``evidence``, worded as before.
+        "basis": next(
+            (
+                str(source["basis"])
+                for source in (critic, last_review)
+                if source.get("basis") in ("knowledge", "provider_context")
+            ),
+            "evidence",
+        ),
+        # Why a review owed no usable verdict, and for an inconsistent one the
+        # flags it gave no reason for: the reader text names them.
+        **(
+            {"unavailable_reason": str(last_review.get("reason") or "")}
+            if review == "unavailable" else {}
+        ),
+        **(
+            {"unexplained": [str(flag) for flag in last_review["unexplained"]]}
+            if review == "unavailable" and last_review.get("unexplained") else {}
+        ),
         "applied": len(applied),
         "verified": sum(1 for finding in applied if finding.get("recheck") == "held"),
         "unverified_reasons": {
             reason: unverified[reason] for reason in RECHECK_REASONS if unverified[reason]
         },
         **({"reach": reach} if reach is not None else {}),
-        "codes": codes,
-        "limits": limits,
-        "open": {
-            "by_code": {reason: information for reason in reasons} if information else {},
-            "by_kind": by_kind,
-        },
+        "codes": [],
+        "limits": [],
+        "open": {"by_code": {}, "by_kind": by_kind},
         "lines": [
-            *(
-                {
-                    "kind": str(entry.get("kind") or ""),
-                    "text": guard(str(entry.get("text") or "")),
-                    "reasons": (
-                        [str(entry["reason"])]
-                        if entry.get("reason")
-                        else list(reasons) if entry.get("kind") == "information" else []
-                    ),
-                }
-                for entry in lines
-            ),
-            # Documents read to the end held more passages than the analysis
-            # took over: a claim about what they do not say may rest on a
-            # passage it never took over.
-            *(
-                [{
-                    "kind": "limit",
-                    "text": guard(
-                        t({"language": language}, "agent_research_prospect_extraction_detail")
-                    ),
-                    "reasons": ["extraction_limit"],
-                }]
-                if "extraction_limit" in codes
-                else []
-            ),
+            {
+                "kind": str(entry.get("kind") or ""),
+                "text": guard(str(entry.get("text") or "")),
+                "reasons": [str(entry["reason"])] if entry.get("reason") else [],
+            }
+            for entry in lines
         ],
         **({"claims": claims} if claims else {}),
         **({"marks": marks} if marks else {}),
@@ -282,7 +266,7 @@ def outcome_words(record: Mapping[str, Any], language: str) -> str:
     if review == "waived":
         return t(words, "outcome_waived")
     if review == "unavailable":
-        return t(words, "outcome_unavailable")
+        return _unavailable_words(record, words)
     if review == "not_run":
         return t(
             words,
@@ -291,10 +275,7 @@ def outcome_words(record: Mapping[str, Any], language: str) -> str:
         )
     if review != "completed":
         raise ValueError(f"Outcome record with an unknown review state {review!r}.")
-    head = t(
-        words,
-        "outcome_reviewed_knowledge" if record.get("basis") == "knowledge" else "outcome_reviewed",
-    )
+    head = t(words, _REVIEWED_HEAD.get(str(record.get("basis") or ""), "outcome_reviewed"))
     totals = _claim_totals(record)
     if totals["total"]:
         return " · ".join([head, t(
@@ -328,10 +309,38 @@ def _claim_totals(record: Mapping[str, Any]) -> Counter[str]:
     return totals
 
 
+_REVIEWED_HEAD = {
+    "knowledge": "outcome_reviewed_knowledge",
+    "provider_context": "outcome_reviewed_provider",
+}
+"""The head of a completed review by its basis; the provider's limit is named
+here once, so no part repeats it."""
+
+_UNAVAILABLE_WORDS = {
+    "failed": "outcome_review_failed",
+    "budget_exhausted": "outcome_review_budget",
+}
+
+
+def _unavailable_words(record: Mapping[str, Any], words: dict[str, Any]) -> str:
+    """Why a review left no usable verdict, in reader words: an inconsistent
+    verdict names the flags it gave no reason for, a failed review and one
+    stopped at its budget say so, every other reason reads "not usable"."""
+    reason = str(record.get("unavailable_reason") or "")
+    flags = [str(flag) for flag in record.get("unexplained") or []]
+    if reason == "inconsistent" and flags:
+        return t(
+            words,
+            "outcome_review_inconsistent",
+            flags=", ".join(t(words, f"review_flag_{flag}") for flag in flags),
+        )
+    return t(words, _UNAVAILABLE_WORDS.get(reason, "outcome_unavailable"))
+
+
 def _review_parts(record: Mapping[str, Any], words: dict[str, Any]) -> list[str]:
     """The parts of a completed review's summary after its head: each kind
-    that stayed open with its count, or "ohne Befund", then the reading
-    limit, the reach and the references with provider context alone."""
+    that stayed open with its count, or "ohne Befund", then the reach and
+    the references with provider context alone."""
     by_kind: Mapping[str, int] = record["open"]["by_kind"]
     verified = int(record.get("verified") or 0)
     knowledge = record.get("basis") == "knowledge"
@@ -358,8 +367,6 @@ def _review_parts(record: Mapping[str, Any], words: dict[str, Any]) -> list[str]
         parts.append(part)
     if not parts:
         parts.append(t(words, "outcome_no_findings"))
-    if "extraction_limit" in (record.get("codes") or []):
-        parts.append(t(words, "outcome_extraction_limit"))
     reach: Mapping[str, int] = record.get("reach") or {}
     if reach.get("cited"):
         parts.append(t(
@@ -368,7 +375,7 @@ def _review_parts(record: Mapping[str, Any], words: dict[str, Any]) -> list[str]
             read=reach.get("reread", 0),
             cited=t_count(words, "review_coverage_cited", reach["cited"]),
         ))
-    if reach.get("provider_only"):
+    if reach.get("provider_only") and record.get("basis") != "provider_context":
         # One aggregated line, never one finding per statement: how many cited
         # references rest on the search provider's context alone.
         parts.append(t_count(words, "outcome_provider_only", reach["provider_only"]))

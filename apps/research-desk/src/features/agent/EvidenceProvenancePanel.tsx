@@ -135,7 +135,11 @@ function WebSearchRecord({
   const { locale, t } = useLocale()
   const citation = search.citation
   const safeUrl = safeEvidenceHttpUrl(citation?.url ?? null)
-  const mappingCopy = citation
+  // The mapping hint of a single place speaks of "this" place; a list of
+  // places has a hint of its own.
+  const mappingCopy = search.places.length > 1
+    ? t.agent.canvas.providerCitedPlacesMapping
+    : citation
     ? citation.mappingStatus === 'provider_answer_context'
       ? t.agent.canvas.providerAnswerContextMapping
       : citation.mappingStatus === 'provider_citation_marker'
@@ -179,7 +183,30 @@ function WebSearchRecord({
           />
         </EvidenceMetadata>
 
-        {citation?.groundedSupport && (
+        {search.places.length > 1 ? (
+          // A source the answer cites at several places: every place, in
+          // the order of the answer. Each is drawn on its own, so the
+          // characters of two places never pair up into one construct.
+          <section className="rounded-lg border border-brand/20 bg-brand-subtle/30 px-3 py-2.5">
+            <h3 className="t-caption uppercase tracking-wide text-muted-foreground">
+              {t.agent.canvas.providerCitedPlaces.replace(
+                '{count}',
+                String(search.places.length),
+              )}
+            </h3>
+            <ol className="mt-1 list-decimal space-y-1.5 pl-5 text-foreground/90 marker:text-muted-foreground">
+              {search.places.map((place, placeIndex) => (
+                <li
+                  className="break-words pl-1"
+                  data-cited-place={placeIndex + 1}
+                  key={placeIndex}
+                >
+                  <MarkdownRenderer markdown={place} variant="report" />
+                </li>
+              ))}
+            </ol>
+          </section>
+        ) : citation?.groundedSupport && (
           <section className="rounded-lg border border-brand/20 bg-brand-subtle/30 px-3 py-2.5">
             <h3 className="t-caption uppercase tracking-wide text-muted-foreground">
               {citation.mappingStatus === 'provider_citation_marker'

@@ -19,7 +19,9 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple, Sequence, TypeVar
+from typing import (
+    TYPE_CHECKING, Any, Callable, Iterator, Mapping, NamedTuple, Sequence, TypeVar,
+)
 
 from openai import OpenAIError
 
@@ -86,8 +88,10 @@ from inqtrix.providers.base import (
     get_llm_provider_capabilities,
     get_search_provider_capabilities,
     is_model_capacity_error,
+    verbosity_kwargs,
 )
 from inqtrix.report_profiles import AnswerSectionSpec, ReportProfile, evidence_limits_section_index
+from inqtrix.result import research_references
 from inqtrix.runtime_logging import (
     forensic_enabled,
     make_record_id,
@@ -99,10 +103,11 @@ from inqtrix.model_cards import (
     llm_context_window_tokens,
     llm_default_output_tokens,
 )
-from inqtrix.model_routing import describe_resolution, describe_unresolved_resolution
+from inqtrix.model_routing import describe_resolution, describe_unresolved_resolution, prose_verbosity
 from inqtrix.scoring import SUPPORTED_STATUSES, append_score_snapshot, claim_assessments
 from inqtrix.settings import AgentSettings
 from inqtrix.state import (
+    RESEARCH_DONE_MARKER,
     append_iteration_log,
     check_cancel_event,
     emit_progress,
@@ -140,49 +145,225 @@ log = logging.getLogger(__name__)
 
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 _ALLOWED_FINISH_REASONS = {"", "stop", "end_turn"}
-_SOURCE_TIER_SORT_ORDER = {
-    "primary": 0,
-    "mainstream": 1,
-    "stakeholder": 2,
-    "unknown": 3,
-    "low": 4,
-}
-_ADDITIONAL_LINK_LIMIT = 10
 _LATER_ROUND_QUERY_MIN = 6
 _EVIDENCE_DEPTH_MIN_SUPPORTED_CLAIMS = 3
 
 # Single canonical confidence ceiling per evidence-contract status. The answer
 # node computes the contract once, stores it on state, and clamps confidence via
-# this table -- no per-status if/else scattered across the node. Ordering
-# encodes evidence strength: algorithm_failed (synthesis unusable) < source-
-# context-only (no claim-grounded sentence) < needs_review (a cited URL has no
-# backing record) < clean (uncapped). Statuses absent here ("clean", "unknown")
-# impose no cap.
+# the ceiling _evidence_contract returns -- no per-status if/else scattered
+# across the node. Ordering encodes evidence strength: algorithm_failed
+# (synthesis unusable) < source-context-only (no claim-grounded sentence) <
+# needs_review (a binding cause or a failed step named by _evidence_contract) <
+# clean. Statuses absent here ("clean", "unknown") impose no cap of their own.
 _CONTRACT_CONFIDENCE_CAP: dict[str, int] = {
     "algorithm_failed": 3,
     "source_context_only": 4,
     "needs_review": 6,
 }
 
+# The ceiling an active evidence-depth gap puts on a claim-bound answer
+# (``clean`` or ``needs_review``). The gap says how deep the support of the
+# statements is, not whether the answer is bound to them, so it is no cause of
+# needs_review; it holds the confidence instead. A second reason beside the
+# table, joined to its ceiling with ``min``.
+_EVIDENCE_DEPTH_CONFIDENCE_CAP = 6
+
+
+class EvidenceContract(NamedTuple):
+    """The evidence contract of one answer, with the reasons behind it."""
+
+    status: str
+    """``algorithm_failed``, ``unknown``, ``source_context_only``,
+    ``needs_review`` or ``clean``."""
+    causes: list[str]
+    """What holds the contract at ``needs_review``, each entry sufficient on
+    its own: ``unknown_citation``, ``citation_without_claim``,
+    ``algorithm_failure``. Empty for every other status, which is its own
+    reason."""
+    confidence_cap: int | None
+    """The ceiling the status or an active evidence-depth gap of a
+    claim-bound answer puts on the confidence, or ``None``."""
+    cap_reasons: list[str]
+    """Why the ceiling applies: the status itself below ``needs_review``;
+    for a claim-bound answer (``needs_review`` or ``clean``) its causes,
+    then the reasons of an active depth gap instead of one blanket word."""
+
+
+def _evidence_contract(
+    *,
+    blocked: bool,
+    citable: bool,
+    matched_claims: int,
+    unknown_citations: int,
+    citations_without_claim: int,
+    failures: bool,
+    depth_gap: Mapping[str, Any],
+) -> EvidenceContract:
+    """Decide the evidence contract of an answer and name what decided it.
+
+    The contract follows the claim-level binding (does a cited answer
+    sentence plausibly carry a consolidated claim?), not the coarser
+    URL-level audit. Tiers are ordered strictly by severity, monotonic to
+    ``_CONTRACT_CONFIDENCE_CAP``:
+
+    - *blocked*: report synthesis was blocked -> ``algorithm_failed``.
+    - not *citable*: the body had no citable evidence to ground in at all
+      (direct answer, empty search) -> ``unknown``, uncapped. Keyed on
+      whether evidence existed, not on whether the body cited any: an
+      answer that ignores gathered evidence and cites nothing falls through
+      to the next tier instead of escaping uncapped.
+    - no *matched_claims*: no cited sentence carries a claim ->
+      ``source_context_only``.
+    - bound, and at least one cause holds -> ``needs_review``: a cited link
+      without a record (*unknown_citations*), a cited record without a claim
+      (*citations_without_claim*) or a non-blocking algorithm failure
+      (*failures*). A background citation whose claim sits in the ledger is
+      tolerated and is no cause.
+    - bound and no cause -> ``clean``.
+
+    An active *depth_gap* (see _evidence_depth_gap) is no cause: it caps a
+    bound answer, ``clean`` or ``needs_review``, at
+    ``_EVIDENCE_DEPTH_CONFIDENCE_CAP`` and names its own reasons after the
+    causes. ``active`` decides, as the gap records it.
+    """
+    if blocked:
+        status = "algorithm_failed"
+    elif not citable:
+        status = "unknown"
+    elif not matched_claims:
+        status = "source_context_only"
+    else:
+        status = "clean"
+
+    bound = status == "clean"
+    causes: list[str] = []
+    gap_reasons: list[str] = []
+    if bound:
+        if unknown_citations:
+            causes.append("unknown_citation")
+        if citations_without_claim:
+            causes.append("citation_without_claim")
+        if failures:
+            causes.append("algorithm_failure")
+        if causes:
+            status = "needs_review"
+    depth_capped = bound and bool(depth_gap.get("active"))
+    if depth_capped:
+        # An active gap always carries its reasons (_evidence_depth_gap).
+        gap_reasons = [
+            reason
+            for reason in str(depth_gap.get("reason") or "").split(",")
+            if reason
+        ]
+
+    ceilings = [
+        cap
+        for cap in (
+            _CONTRACT_CONFIDENCE_CAP.get(status),
+            _EVIDENCE_DEPTH_CONFIDENCE_CAP if depth_capped else None,
+        )
+        if cap is not None
+    ]
+    confidence_cap = min(ceilings) if ceilings else None
+    if confidence_cap is None:
+        cap_reasons: list[str] = []
+    elif bound:
+        cap_reasons = causes + gap_reasons
+    else:
+        cap_reasons = [status]
+    return EvidenceContract(status, causes, confidence_cap, cap_reasons)
+
+
+# The reader's text for each cause of needs_review. A cause without a text
+# raises in _answer_evidence_notice instead of borrowing another cause's text.
+_EVIDENCE_NOTICE_TEXT_KEYS = {
+    "unknown_citation": "answer_evidence_notice_unbound",
+    "citation_without_claim": "answer_evidence_notice_citation_without_claim",
+    "algorithm_failure": "answer_evidence_notice_algorithm_failure",
+}
+
+
+def _answer_evidence_notice(s: dict[str, Any], contract: EvidenceContract) -> str:
+    """The evidence notice under the answer, or ``""`` when none is due.
+
+    Only a finding that differs between runs gets the heading: at
+    ``needs_review`` one text per cause, in the order of the contract's
+    causes; at ``source_context_only`` the text that the answer rests on
+    source context alone. A clean answer and one capped by the depth gap
+    alone carry no notice; the basis line describes them.
+    """
+    if contract.status == "needs_review":
+        texts = [t(s, _EVIDENCE_NOTICE_TEXT_KEYS[cause]) for cause in contract.causes]
+    elif contract.status == "source_context_only":
+        texts = [t(s, "answer_evidence_notice_source_context")]
+    else:
+        return ""
+    return "\n\n".join([t(s, "answer_evidence_notice_heading"), *texts])
+
+
+def _answer_evidence_basis_line(
+    s: dict[str, Any],
+    depth_gap: Mapping[str, Any],
+    *,
+    tiering: Any,
+) -> str:
+    """The quiet line under the answer: what its cited sources rest on.
+
+    The basis comes from :func:`inqtrix.result.research_references`, the
+    derivation the result reports, in the words the research note of a
+    parent run uses; a mixed basis names how many cited sources carry only
+    what the search provider returned. With supported statements the line
+    adds how many of them cite more than one source (distinct addresses).
+    No line when nothing is cited, which includes a blocked report: it
+    keeps no references.
+    """
+    references = research_references(s, tiering=tiering)
+    if references.evidence_basis == "provider_context":
+        parts = [t(s, "answer_evidence_basis_provider_context")]
+    elif references.evidence_basis == "evidence":
+        parts = [t(s, "answer_evidence_basis_evidence")]
+        if references.provider_only_reference_count:
+            parts.append(
+                t(
+                    s,
+                    "answer_evidence_basis_provider_only",
+                    provider_only=references.provider_only_reference_count,
+                    cited=references.cited_reference_count,
+                )
+            )
+    else:
+        return ""
+    supported = int(depth_gap.get("supported_count") or 0)
+    if supported > 0:
+        single = int(depth_gap.get("single_source_count") or 0)
+        parts.append(
+            t(
+                s,
+                "answer_evidence_depth_numbers",
+                multi=supported - single,
+                supported=supported,
+            )
+        )
+    return " ".join(parts)
+
 
 class AnswerAppendixSections(NamedTuple):
     sections: list[str]
     references: list[dict[str, str]]
-    additional_links: list[str]
 
 # Crosscheck-Planner bonus applied to consolidated claims whose
 # ``verification_basis == "quality_source"``.
 #
 # Rationale: that basis is set in ``DefaultClaimConsolidator.consolidate()``
 # (`strategies/_claim_consolidation.py`) for claims whose only support is
-# one mainstream source. The claim is supported (verified when the source's
-# own text was checked, attributed when only the provider ties it to the
-# source), but the *next* research round should actively try to
-# corroborate it with an independent second source. This bonus, stacked on
-# the generic +5 for any supported claim with ``citation_count < 2`` further
-# down in :func:`_select_crosscheck_targets`, gives single-quality-source
-# claims a total ranking score of +9, putting them at the front of the
-# crosscheck-target queue.
+# one mainstream source. The claim is supported (verified when the search
+# provider's excerpt of the source was checked, attributed when only the
+# provider ties it to the source), but the *next* research round should
+# actively try to corroborate it with an independent second source. This
+# bonus, stacked on the generic +5 for any supported claim with
+# ``citation_count < 2`` further down in :func:`_select_crosscheck_targets`,
+# gives single-quality-source claims a total ranking score of +9, putting
+# them at the front of the crosscheck-target queue.
 #
 # Coupled to: ``quality_source`` structure in ``consolidate()``.
 # Changing one without the other will misalign the crosscheck planner
@@ -295,7 +476,8 @@ def _evidence_depth_gap(s: dict[str, Any]) -> dict[str, Any]:
     """
     consolidated = claim_assessments(s)
     # Supported claims, verified and attributed alike: the depth of the
-    # support structure, not whether a provider returned source text.
+    # support structure, not whether a claim was checked against the search
+    # provider's excerpt.
     supported_claims = [
         claim for claim in consolidated
         if claim.get("status") in SUPPORTED_STATUSES
@@ -643,8 +825,8 @@ def _trace_evidence_overview(
             semconv.OBSERVATION_LEVEL_WARNING
         )
         attributes[semconv.LANGFUSE_OBSERVATION_STATUS_MESSAGE] = (
-            f"{overview.omitted_record_count} Belege ausserhalb des "
-            f"Evidenz-Budgets ({budget_chars} Zeichen)"
+            f"{overview.omitted_record_count} sources outside the evidence "
+            f"budget ({budget_chars} characters)"
         )
     enrich_current_span(attributes)
     if overview.omitted_record_count <= 0:
@@ -714,9 +896,13 @@ def _emit_node_model_resolution_warning(
     reason: str,
     message: str,
 ) -> None:
-    """Surface a model-resolution fallback on every visible diagnostics channel."""
+    """Surface a model-resolution fallback on every visible diagnostics channel.
+
+    *message* is the English log line for operators; the reader's step says
+    the same in the run's language, without the internal names.
+    """
     log.warning(message)
-    emit_progress(s, f"Warnung: {message}", severity="warning")
+    emit_progress(s, t(s, "node_model_unresolved"), severity="warning")
     append_iteration_log(
         s,
         {
@@ -1033,6 +1219,7 @@ def _check_llm_context_capacity(
                     required=required_floor,
                     estimated=estimated_required_tokens,
                 ),
+                severity="warning",
             )
             _append_forensic_event(
                 s,
@@ -1062,6 +1249,7 @@ def _check_llm_context_capacity(
                 window=context_window_tokens,
                 required=required_tokens,
             ),
+            severity="warning",
         )
         _record_algorithm_failure(
             s,
@@ -1571,22 +1759,44 @@ def _finish_reason_indicates_limit(finish_reason: str) -> bool:
     return (finish_reason or "").strip().lower() not in _ALLOWED_FINISH_REASONS
 
 
-def _collect_truncation_signals(
-    answer: str,
-    *,
-    subject_label: str,
+class _TruncationSignal(NamedTuple):
+    """One sign that a written text was cut off.
+
+    ``key`` names the reader's text (``answer_incomplete_reason_<key>``);
+    ``detail`` is the provider's stop reason or the missing headings.
+    """
+
+    key: str
+    detail: str = ""
+
+
+# Logs, forensic events and the iteration log name the signals in English;
+# the reader gets them in the run's language.
+_LOG_LANGUAGE = "en"
+
+
+def _truncation_reason_texts(
+    signals: list[_TruncationSignal], language: str | None
 ) -> list[str]:
+    """The signals as text in ``language``, in their order."""
+    return [
+        _answer_text(language, f"answer_incomplete_reason_{signal.key}", detail=signal.detail)
+        for signal in signals
+    ]
+
+
+def _collect_truncation_signals(answer: str) -> list[_TruncationSignal]:
     """Collect content-based truncation signals independent of provider metadata."""
-    reasons: list[str] = []
+    signals: list[_TruncationSignal] = []
     stripped = answer.rstrip()
     if not stripped:
-        reasons.append(f"{subject_label} ist leer")
-        return reasons
+        signals.append(_TruncationSignal("empty"))
+        return signals
 
     if stripped.count("**") % 2 == 1:
-        reasons.append(f"Unbalancierte Markdown-Fettschrift am Ende {subject_label.lower()}")
+        signals.append(_TruncationSignal("open_bold"))
     if stripped.count("```") % 2 == 1:
-        reasons.append(f"Offener Markdown-Codeblock am Ende {subject_label.lower()}")
+        signals.append(_TruncationSignal("open_code"))
 
     last_line = stripped.splitlines()[-1].strip()
     plain_last_line = re.sub(r"[*_`#>-]", "", last_line).strip()
@@ -1597,10 +1807,8 @@ def _collect_truncation_signals(
         and plain_last_line[-1].isalnum()
         and not re.search(r"[.!?:;\)\]]$", plain_last_line)
     ):
-        reasons.append(
-            f"{subject_label} ends in a short fragment without sentence closure"
-        )
-    return reasons
+        signals.append(_TruncationSignal("fragment"))
+    return signals
 
 
 def _normalize_generated_section(answer: str, heading: str) -> str:
@@ -1628,16 +1836,16 @@ def _detect_incomplete_section(
     answer: str,
     *,
     finish_reason: str,
-) -> tuple[list[str], bool]:
-    """Return hard truncation reasons and whether a provider limit was hit."""
-    reasons = _collect_truncation_signals(answer, subject_label="section")
+) -> tuple[list[_TruncationSignal], bool]:
+    """Return hard truncation signals and whether a provider limit was hit."""
+    signals = _collect_truncation_signals(answer)
     limit_hit = _finish_reason_indicates_limit(finish_reason)
-    if limit_hit and reasons:
-        reasons.insert(
-            0, f"provider stop reason: {(finish_reason or '').strip().lower()}"
+    if limit_hit and signals:
+        signals.insert(
+            0, _TruncationSignal("stop", (finish_reason or "").strip().lower())
         )
 
-    return _dedupe_reasons(reasons), limit_hit
+    return _dedupe_reasons(signals), limit_hit
 
 
 def _join_rendered_sections(sections: list[str]) -> str:
@@ -1650,9 +1858,9 @@ def _join_rendered_sections(sections: list[str]) -> str:
     return "\n\n".join(section.strip() for section in sections if section.strip())
 
 
-def _dedupe_reasons(reasons: list[str]) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
+def _dedupe_reasons(reasons: list[_TruncationSignal]) -> list[_TruncationSignal]:
+    deduped: list[_TruncationSignal] = []
+    seen: set[_TruncationSignal] = set()
     for reason in reasons:
         if reason not in seen:
             seen.add(reason)
@@ -1690,6 +1898,12 @@ def _compose_answer_sections(
     # is not repeated on the retry.
     answer_model = model or ""
     answer_effort = reasoning_effort or ""
+    # The sections are prose for a reader. They ask for the verbosity the card
+    # of the model that writes them names, whichever model that is (the
+    # routed one or the fallback), and only a provider that sends it gets it.
+    answer_verbosity = verbosity_kwargs(
+        providers.llm, prose_verbosity("answer", answer_model), model=answer_model
+    )
     # ``section_focus_record_cap`` only controls the size of the soft
     # ``section_focus_labels`` hint in the user prompt. The LLM still sees
     # the FULL evidence overview in the system prompt -- the hint is a
@@ -1817,14 +2031,16 @@ def _compose_answer_sections(
                 reasoning_effort=answer_effort,
                 max_output_tokens=None,
                 timeout=settings.reasoning_timeout,
+                **answer_verbosity,
             )
         finish_reason = str(getattr(response, "finish_reason", "") or "")
         section_body = _normalize_generated_section(response.content, section_heading)
         section_body = _repair_answer_markdown_tail(section_body)
-        section_reasons, limit_hit = _detect_incomplete_section(
+        section_signals, limit_hit = _detect_incomplete_section(
             section_body,
             finish_reason=finish_reason,
         )
+        section_reasons = _truncation_reason_texts(section_signals, _LOG_LANGUAGE)
         section_prompt_tokens = int(getattr(response, "prompt_tokens", 0) or 0)
         section_completion_tokens = int(getattr(response, "completion_tokens", 0) or 0)
         # Provider-reported effective max_tokens (post-clamp). Falls back to
@@ -1913,6 +2129,7 @@ def _compose_answer_sections(
                     request_max=section_request_max_tokens,
                     completion=section_completion_tokens,
                 ),
+                severity="warning",
             )
             log.warning(
                 "TRACE section %d/%d: token limit hit "
@@ -1932,8 +2149,11 @@ def _compose_answer_sections(
                     s,
                     "compose_section_truncation",
                     heading=section_heading,
-                    reasons=", ".join(section_reasons),
+                    reasons=", ".join(
+                        _truncation_reason_texts(section_signals, s.get("language"))
+                    ),
                 ),
+                severity="warning",
             )
             log.warning(
                 "TRACE section %d/%d: truncation signals detected "
@@ -1973,6 +2193,7 @@ def _compose_answer_sections(
                         n=consecutive_empty,
                         heading=section_heading,
                     ),
+                    severity="warning",
                 )
                 log.warning(
                     "TRACE compose: aborting after %d consecutive empty sections "
@@ -2008,47 +2229,50 @@ def _compose_answer_sections(
     )
 
 
-def _missing_terminal_sections(answer: str, profile: ReportProfile) -> list[str]:
-    """Return expected closing sections that are absent from the answer."""
-    if profile is ReportProfile.DEEP:
-        expected = (
-            "## Perspektiven / Positionen",
-            "## Risiken / Unsicherheiten",
-            "## Fazit / Ausblick",
-        )
-    else:
-        expected = ("## Einordnung / Ausblick",)
-    return [section for section in expected if section not in answer]
+# The closing sections a cut-off answer is checked for, by section key. A
+# report is checked for those its own section plan holds, under the headings
+# the composer wrote: the quick plan holds none of them.
+_CLOSING_SECTION_KEYS = frozenset({"perspectives", "risks", "conclusion", "context_outlook"})
+
+
+def _missing_terminal_sections(
+    answer: str,
+    sections: tuple[AnswerSectionSpec, ...],
+    language: str | None,
+) -> list[str]:
+    """Return the headings of planned closing sections absent from the answer."""
+    expected = [
+        section.heading(language)
+        for section in sections
+        if section.key in _CLOSING_SECTION_KEYS
+    ]
+    return [heading for heading in expected if f"## {heading}" not in answer]
 
 
 def _detect_incomplete_answer(
     answer: str,
     *,
     finish_reason: str,
-    report_profile: ReportProfile,
-) -> list[str]:
-    """Return diagnostic reasons when the answer appears truncated."""
-    reasons = _collect_truncation_signals(answer, subject_label="answer")
-    if _finish_reason_indicates_limit(finish_reason) and reasons:
-        reasons.insert(
-            0, f"provider stop reason: {(finish_reason or '').strip().lower()}"
+    sections: tuple[AnswerSectionSpec, ...],
+    language: str | None,
+) -> list[_TruncationSignal]:
+    """Return the signals that the answer appears truncated.
+
+    ``sections`` and ``language`` are the plan and the heading language the
+    composer wrote the answer with.
+    """
+    signals = _collect_truncation_signals(answer)
+    if _finish_reason_indicates_limit(finish_reason) and signals:
+        signals.insert(
+            0, _TruncationSignal("stop", (finish_reason or "").strip().lower())
         )
 
-    if reasons:
-        missing_sections = _missing_terminal_sections(answer, report_profile)
+    if signals:
+        missing_sections = _missing_terminal_sections(answer, sections, language)
         if missing_sections:
-            reasons.append(
-                "Fehlende Abschlussabschnitte: "
-                + ", ".join(missing_sections)
-            )
+            signals.append(_TruncationSignal("missing_sections", ", ".join(missing_sections)))
 
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for reason in reasons:
-        if reason not in seen:
-            seen.add(reason)
-            deduped.append(reason)
-    return deduped
+    return _dedupe_reasons(signals)
 
 
 def _answer_text(language: str | None, key: str, **kwargs: Any) -> str:
@@ -2094,6 +2318,7 @@ def _format_report_reference_records(
     entries: list[tuple[str, str]],
     strategies: StrategyContext,
     *,
+    language: str | None,
     tier_by_url: dict[str, str] | None = None,
     title_by_url: dict[str, str] | None = None,
     cited_urls: set[str] | None = None,
@@ -2109,6 +2334,7 @@ def _format_report_reference_records(
     the title with the citation. ``cited`` says whether the
     answer body cites the source (``## Referenzen``) or only saw it
     (``## Weitere geprüfte Quellen``); ``None`` marks every entry cited.
+    An entry without a label gets the source label of ``language``.
     """
     records: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
@@ -2120,7 +2346,7 @@ def _format_report_reference_records(
             continue
         seen_urls.add(url)
         record: dict[str, Any] = {
-            "label": str(label or "Quelle"),
+            "label": str(label or _answer_text(language, "answer_reference_label")),
             "url": url,
             "tier": known_tiers.get(url) or strategies.source_tiering.tier_for_url(url),
             "cited": True if cited_urls is None else url in cited_urls,
@@ -2151,8 +2377,8 @@ class _LedgerReferenceFacts(NamedTuple):
     """URL -> the placement fields (``tier``, ``tier_reason``, ``role_reason``)."""
     statements_by_url: dict[str, list[dict[str, Any]]]
     """URL -> every statement the evidence layer ties to the source, in
-    ledger order, once each: ``text``, ``status`` and ``checked`` (this
-    source's own text was checked and states it)."""
+    ledger order, once each: ``text``, ``status`` and ``checked`` (the
+    search provider's excerpt of this source was checked and states it)."""
 
 
 def _reference_facts_from_evidence_ledger(
@@ -2219,8 +2445,13 @@ def _append_uncited_allowed_references(
     *,
     allowed_citations: list[str],
     label_urls: dict[str, str],
+    language: str | None,
 ) -> list[tuple[str, str]]:
-    """Append every rendered online evidence source missing from references."""
+    """Append every rendered online evidence source missing from references.
+
+    A source without an evidence label is numbered under the source label of
+    ``language``.
+    """
     merged = list(entries)
     seen_urls = {normalize_url(url) for _, url in merged if normalize_url(url)}
     label_by_url: dict[str, str] = {}
@@ -2232,88 +2463,14 @@ def _append_uncited_allowed_references(
         if url:
             label_by_url.setdefault(url, label)
 
+    source_label = _answer_text(language, "answer_reference_label")
     for index, raw_url in enumerate(allowed_citations, 1):
         url = normalize_url(str(raw_url))
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
-        merged.append((label_by_url.get(url, f"Quelle {index}"), url))
+        merged.append((label_by_url.get(url, f"{source_label} {index}"), url))
     return merged
-
-
-def _select_additional_links(
-    citations: list[str],
-    *,
-    excluded_urls: set[str],
-    prompt_citation_urls: set[str],
-    strategies: StrategyContext,
-    limit: int = _ADDITIONAL_LINK_LIMIT,
-) -> list[str]:
-    """Select a curated set of additional links not used in the report body.
-
-    Note:
-        This is intentionally separate from
-        :meth:`ClaimConsolidationStrategy.select_answer_citations`. The
-        latter ranks by claim score for in-prompt citations; this helper
-        ranks raw citations by source tier with strict domain diversity for
-        the post-answer "Weiterfuehrende Links" section. They share the
-        per-domain diversity idea but produce different orderings on
-        purpose — keep them aligned by behaviour, not by code path.
-    """
-    ranked_candidates: list[tuple[int, int, int, str, str]] = []
-    seen_urls: set[str] = set()
-
-    for index, raw_url in enumerate(citations):
-        normalized = normalize_url(str(raw_url))
-        if not normalized or normalized in excluded_urls or normalized in seen_urls:
-            continue
-        seen_urls.add(normalized)
-        tier = strategies.source_tiering.tier_for_url(normalized)
-        if tier == "low":
-            continue
-        ranked_candidates.append(
-            (
-                _SOURCE_TIER_SORT_ORDER.get(tier, _SOURCE_TIER_SORT_ORDER["unknown"]),
-                0 if normalized in prompt_citation_urls else 1,
-                index,
-                domain_from_url(normalized),
-                normalized,
-            )
-        )
-
-    ranked_candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-
-    selected: list[str] = []
-    deferred: list[tuple[int, int, int, str, str]] = []
-    seen_domains: set[str] = set()
-
-    for candidate in ranked_candidates:
-        _, _, _, domain, url = candidate
-        if domain and domain in seen_domains:
-            deferred.append(candidate)
-            continue
-        selected.append(url)
-        if domain:
-            seen_domains.add(domain)
-        if len(selected) >= limit:
-            return selected
-
-    for candidate in deferred:
-        selected.append(candidate[4])
-        if len(selected) >= limit:
-            break
-
-    return selected
-
-
-def _format_additional_links(urls: list[str], strategies: StrategyContext) -> str:
-    """Render a deterministic markdown section for curated extra links."""
-    lines = ["## Weiterfuehrende Links"]
-    for url in urls:
-        domain = domain_from_url(url) or url
-        tier = strategies.source_tiering.tier_for_url(url)
-        lines.append(f"- [{domain}]({url}) — Tier: {tier}")
-    return "\n".join(lines)
 
 
 def _evidence_omission_note(
@@ -2349,7 +2506,6 @@ def _build_answer_appendix_sections(
     strategies: StrategyContext,
     incomplete_reasons: list[str],
     finish_reason: str,
-    answer_contract: str = "general",
     tier_by_url: dict[str, str] | None = None,
     title_by_url: dict[str, str] | None = None,
     omitted_by_query: list[dict[str, Any]] | None = None,
@@ -2364,8 +2520,8 @@ def _build_answer_appendix_sections(
 
     ``allowed_citations`` is the EvidenceOverview-derived citation allowlist
     (the union of visible source-block URLs). References are the links the
-    answer body actually used; additional links are allowlist sources the
-    body left uncited. ``omitted_by_query`` (the overview's budget cut per
+    answer body actually used; every allowlist source the body left uncited
+    is listed as examined. ``omitted_by_query`` (the overview's budget cut per
     search) becomes a completeness note that names how many sources of
     which searches the report did not evaluate — a reader must never take
     a budget cut for "nothing found".
@@ -2411,19 +2567,20 @@ def _build_answer_appendix_sections(
         cited_entries,
         allowed_citations=allowed_citations,
         label_urls=label_urls or {},
+        language=language,
     )
     uncited_entries = all_entries[cited_count:]
 
     reference_records = _format_report_reference_records(
         all_entries,
         strategies,
+        language=language,
         tier_by_url=tier_by_url,
         title_by_url=title_by_url,
         cited_urls={normalize_url(url) for _, url in cited_entries},
         placement_by_url=placement_by_url,
         statements_by_url=statements_by_url,
     )
-    reference_urls: set[str] = {record["url"] for record in reference_records}
 
     references_heading = _answer_text(language, "answer_references_heading")
     if cited_entries:
@@ -2441,21 +2598,9 @@ def _build_answer_appendix_sections(
             )
         )
 
-    additional_links: list[str] = []
-    if answer_contract not in {"claim_check", "data_extraction"}:
-        additional_links = _select_additional_links(
-            allowed_citations,
-            excluded_urls=reference_urls,
-            prompt_citation_urls=allowed_citation_urls,
-            strategies=strategies,
-        )
-        if additional_links:
-            sections.append(_format_additional_links(additional_links, strategies))
-
     return AnswerAppendixSections(
         sections=sections,
         references=reference_records,
-        additional_links=additional_links,
     )
 
 
@@ -2511,8 +2656,8 @@ def _build_answer_claim_bindings(
     """Map final answer-body links to the claims and sources they support.
 
     The function scans only ``answer_body`` (the prose produced by the
-    LLM, captured **before** any appendix sections such as references
-    or further-reading lists were appended). Each markdown link inside
+    LLM, captured **before** the appendix sections, the references and
+    the further examined sources, were appended). Each markdown link inside
     a body segment is matched against the consolidated claim ledger
     using :func:`_claim_plausible_in_segment`. A claim that shares a
     URL with the citation only becomes ``binding_status="matched"``
@@ -3368,7 +3513,6 @@ def plan(
         BedrockAPIError,
     ) as exc:
         _exc_label = type(exc).__name__
-        _failure_reason = f"Planung fehlgeschlagen ({_exc_label})"
         emit_progress(s, t(s, "plan_failed", label=_exc_label), severity="warning")
         _record_algorithm_failure(
             s,
@@ -3376,7 +3520,10 @@ def plan(
             node="plan",
             phase="plan_query_generation",
             reason=f"provider_{_exc_label}",
-            message=f"{_failure_reason}; verwende Fallback-Query",
+            message=(
+                f"Search planning failed ({_exc_label}); the search falls back "
+                "to the original question"
+            ),
             blocking=False,
             details={"fallback": "original_question"},
         )
@@ -3430,7 +3577,10 @@ def plan(
             node="plan",
             phase="plan_query_generation",
             reason=_query_parse_status,
-            message=f"{_failure_reason}; verwende Fallback-Query",
+            message=(
+                "Search planning returned no readable list of search queries; "
+                "the search falls back to the original question"
+            ),
             blocking=False,
             details={"fallback": "original_question"},
         )
@@ -3453,7 +3603,10 @@ def plan(
             node="plan",
             phase="plan_query_generation",
             reason="fallback_original_question",
-            message=f"{_failure_reason}; verwende Fallback-Query",
+            message=(
+                "Search planning returned no search query of its own; the "
+                "search falls back to the original question"
+            ),
             blocking=False,
             details={"fallback": "original_question"},
         )
@@ -4300,6 +4453,11 @@ def search(
             _claim_valid_empty,
             len(_claim_inputs),
         )
+        # An info step, not a warning: a page that states nothing the
+        # question needs is the ordinary yield of a search, and one such
+        # extraction in a round is common. The operator keeps the WARNING
+        # above; what the reader must know about thin evidence reaches the
+        # report through the evidence contract and its notice.
         emit_progress(
             s,
             t(
@@ -5105,7 +5263,7 @@ def _citation_published_date(
 def has_report_bundles(claims: list[dict[str, Any]]) -> bool:
     """Whether the consolidated *claims* give an answer something to stand
     on: a supported claim (verified or attributed) or a contested one. A
-    provider that returns no source text attributes every claim; that is
+    provider that returns no excerpts attributes every claim; that is
     still a report basis, so the guardrail reads support, not checking."""
     return any(
         claim.get("status") in (*SUPPORTED_STATUSES, "contested")
@@ -5467,9 +5625,10 @@ def evaluate(
         f"attributed={claim_counts.get('attributed', 0)}, "
         f"contested={claim_counts.get('contested', 0)}, "
         f"unverified={claim_counts.get('unverified', 0)}.\n"
-        "- verified: a source's own text was checked and states the claim. "
-        "attributed: the search provider's answer attributes the claim to its "
-        "sources and no source text was checked. Attributed claims suffice for "
+        "- verified: the search provider's excerpt of a source was checked and "
+        "states the claim. attributed: the search provider's answer attributes "
+        "the claim to its sources; the search provider's excerpt does not state "
+        "it, or there is none. Attributed claims suffice for "
         "an answer that attributes them to their sources; on their own they are "
         "no reason for INSUFFICIENT.\n"
         f"- Claim quality score: {claim_quality:.2f} (0-1).\n"
@@ -5615,7 +5774,7 @@ def evaluate(
     # with a unit, statutes, official decisions) with none of them supported —
     # not a word list over the question, which fired on every cost question.
     # Support, verified or attributed alike: the guardrail must not fire only
-    # because a provider returns no source text.
+    # because a provider returns no excerpts.
     needs_primary = (
         int(s.get("claim_needs_primary_total", 0) or 0) > 0
         and int(s.get("claim_needs_primary_supported", 0) or 0) == 0
@@ -5791,9 +5950,9 @@ def evaluate(
     # but the configured min_rounds floor is not reached yet AND we are still
     # below max_rounds, suppress the stop. ``max_rounds`` always wins so a
     # mis-configured ``min_rounds > max_rounds`` cannot extend the loop
-    # beyond the user-specified hard cap. Greift einheitlich für alle
-    # Stop-Heuristiken (confidence, plateau, utility, stagnation,
-    # falsification) — kein per-Heuristik-Sondercode noetig.
+    # beyond the user-specified hard cap. It holds for every stop heuristic
+    # alike (confidence, plateau, utility, stagnation, falsification), so
+    # none of them needs code of its own for the floor.
     _min_rounds = max(1, int(getattr(settings, "min_rounds", 1) or 1))
     if (
         s["done"]
@@ -5842,10 +6001,11 @@ def evaluate(
         )
         emit_progress(
             s,
-            (
-                "Evidenzlage noch zu duenn "
-                f"({report_eligible_evidence_count}/{tuning.min_report_eligible_evidence} "
-                "report-faehige Records); weitere Recherche."
+            t(
+                s,
+                "evaluate_evidence_too_thin",
+                count=report_eligible_evidence_count,
+                minimum=tuning.min_report_eligible_evidence,
             ),
         )
         _stop_cascade["suppressed_by_report_evidence"] = True
@@ -6163,7 +6323,6 @@ def answer(
         "answer_contract": s.get("answer_contract", "general"),
         "competing_events": s.get("competing_events", ""),
         "history": s.get("history", ""),
-        "report_profile": str(settings.report_profile),
     }
     s.update(
         {
@@ -6234,15 +6393,27 @@ def answer(
     answer_fallback_reason = ""
     composition_result = _AnswerCompositionResult(answer="", finish_reason="", section_logs=[])
 
+    # Whether an answer without a written report has gathered material to
+    # show: its header and its steps say so only when there is some.
+    fallback_outcome = t(
+        s,
+        "answer_fallback_outcome_material"
+        if evidence_overview_markdown
+        else "answer_fallback_outcome_no_material",
+    )
+
     def _answer_warning_header(reason: str) -> str:
         """Render a visible warning header for fallback answers.
 
         The header is the first thing the operator and any downstream
         consumer (UI, parity tooling, exported markdown) sees, so a
         silent degradation cannot pass unnoticed even when the iteration
-        log is not consulted.
+        log is not consulted. It says that the gathered material follows
+        only when there is some.
         """
-        return t(s, "research_answer_fallback_warning", reason=reason)
+        if evidence_overview_markdown:
+            return t(s, "research_answer_fallback_warning", reason=reason)
+        return t(s, "research_answer_fallback_warning_no_material", reason=reason)
 
     def _build_fallback_answer(reason: str, *, no_context_message: str) -> str:
         if evidence_overview_markdown:
@@ -6275,6 +6446,7 @@ def answer(
         emit_progress(
             s,
             t(s, "algorithm_failure_report_blocked", count=len(failures)),
+            severity="warning",
         )
         s["final_confidence"] = min(int(s.get("final_confidence", 0) or 0) or 3, 3)
         s["answer"] = _build_algorithm_failure_report(
@@ -6366,7 +6538,11 @@ def answer(
                     "TRACE answer fallback (error_code=%s)",
                     type(exc_timeout).__name__,
                 )
-                emit_progress(s, t(s, "answer_timeout_fallback"), severity="warning")
+                emit_progress(
+                    s,
+                    t(s, "answer_timeout_fallback", outcome=fallback_outcome),
+                    severity="warning",
+                )
                 s["answer"] = _build_fallback_answer(
                     answer_fallback_reason,
                     no_context_message=t(s, "research_no_context_timeout"),
@@ -6443,7 +6619,12 @@ def answer(
                     )
                     emit_progress(
                         s,
-                        t(s, "answer_fallback_model_failed", error=fallback_error_label),
+                        t(
+                            s,
+                            "answer_fallback_model_failed",
+                            error=fallback_error_label,
+                            outcome=fallback_outcome,
+                        ),
                         severity="warning",
                     )
                     s["answer"] = _build_fallback_answer(
@@ -6469,6 +6650,7 @@ def answer(
                         s,
                         "answer_provider_failed_no_fallback",
                         error=provider_error_label,
+                        outcome=fallback_outcome,
                     ),
                     severity="warning",
                 )
@@ -6482,11 +6664,13 @@ def answer(
     finish_reason = str(composition_result.finish_reason or "")
     section_logs = list(composition_result.section_logs)
     s["answer_finish_reason"] = finish_reason
-    incomplete_reasons = _detect_incomplete_answer(
+    incomplete_signals = _detect_incomplete_answer(
         s.get("answer", ""),
         finish_reason=finish_reason,
-        report_profile=settings.report_profile,
+        sections=tuple(settings.report_tuning.answer_sections),
+        language=heading_language,
     )
+    incomplete_reasons = _truncation_reason_texts(incomplete_signals, _LOG_LANGUAGE)
     s["answer_incomplete"] = bool(incomplete_reasons)
     s["answer_incomplete_reasons"] = list(incomplete_reasons)
     if incomplete_reasons:
@@ -6526,7 +6710,6 @@ def answer(
     if algorithm_report_blocked:
         appendix_sections = []
         reference_link_count = 0
-        additional_link_count = 0
         s["report_references"] = []
     else:
         ledger_facts = _reference_facts_from_evidence_ledger(evidence_ledger)
@@ -6535,9 +6718,10 @@ def answer(
             allowed_citations=allowed_citations,
             label_urls=state_data.get("evidence_label_urls", {}) or {},
             strategies=strategies,
-            incomplete_reasons=incomplete_reasons,
+            incomplete_reasons=_truncation_reason_texts(
+                incomplete_signals, s.get("language")
+            ),
             finish_reason=finish_reason,
-            answer_contract=s.get("answer_contract", "general"),
             tier_by_url=ledger_facts.tier_by_url,
             title_by_url=ledger_facts.title_by_url,
             omitted_by_query=evidence_overview.omitted_by_query,
@@ -6547,7 +6731,6 @@ def answer(
         )
         appendix_sections = appendix.sections
         reference_link_count = len(appendix.references)
-        additional_link_count = len(appendix.additional_links)
         s["report_references"] = appendix.references
     answer_body = s.get("answer", "")
     if appendix_sections:
@@ -6596,9 +6779,9 @@ def answer(
         if binding.get("binding_status") == "matched"
     )
     # The contract is decided by the claim-level binding (does a cited answer
-    # sentence plausibly carry a verified/contested consolidated claim?), not by
-    # the coarser URL-level evidence audit (does the URL resolve to a record
-    # with any verified claim?).
+    # sentence plausibly carry a consolidated claim, whatever its status?), not
+    # by the coarser URL-level evidence audit (does the URL resolve to a record
+    # with a supported or contested claim?).
     _matched_claim_count = sum(
         1
         for binding in answer_claim_bindings
@@ -6613,88 +6796,58 @@ def answer(
         for binding in answer_claim_bindings
         if binding.get("binding_status") == "citation_without_claim"
     )
-    # Tiers ordered strictly by severity, monotonic to _CONTRACT_CONFIDENCE_CAP
-    # (algorithm_failed 3 < source_context_only 4 < needs_review 6 < clean):
-    #   no citable evidence base at all              -> unknown (audit N/A, uncapped)
-    #   no claim-bound sentence at all               -> source_context_only
-    #   bound, but a cited target is unsubstantiated -> needs_review
-    #     (unknown_citation: no record; citation_without_claim: record w/o claim)
-    #   bound and nothing unsubstantiated            -> clean
-    # `unknown` keys on whether the body HAD citable evidence to ground in
-    # (allowed_citations), not on whether it happened to cite any. Keying it on
-    # empty bindings let an answer that ignores real gathered evidence and cites
-    # nothing escape to uncapped `unknown` -- while the appendix still appended
-    # references, making the report look sourced. Such an ungrounded body now
-    # falls to source_context_only (cap 4) like any other claimless answer; only
-    # a run with no citable evidence at all (direct-LLM / empty search) is
-    # `unknown`. A `source_only_binding` (background citation whose claim sits in
-    # the ledger) is deliberately tolerated and never downgrades the tier.
-    _evidence_contract_status = (
-        "algorithm_failed"
-        if algorithm_report_blocked
-        else "unknown"
-        if not allowed_citations
-        else "source_context_only"
-        if not _matched_claim_count
-        else "needs_review"
-        if (_unknown_citation_count or _citation_without_claim_count)
-        else "clean"
+    # One reading of the evidence-depth gap for the contract and the basis
+    # line: the gap the last plan, search or evaluate pass stored, which the
+    # writer's prompt and the result's gap fields read too. Claims are only
+    # written in search, before each of those passes computes the gap, so it
+    # describes every supported claim the research collected, not only those
+    # this answer cites.
+    depth_gap = s.get("evidence_depth_gap") or {}
+    _contract = _evidence_contract(
+        blocked=algorithm_report_blocked,
+        citable=bool(allowed_citations),
+        matched_claims=_matched_claim_count,
+        unknown_citations=_unknown_citation_count,
+        citations_without_claim=_citation_without_claim_count,
+        failures=bool(s.get("algorithm_failures")),
+        depth_gap=depth_gap,
     )
-    if s.get("algorithm_failures") and _evidence_contract_status == "clean":
-        _evidence_contract_status = "needs_review"
-    # A run where almost every "verified" claim rests on a single quality
-    # source is not a clean hard-fact report -- downgrade so the
-    # Evidenzhinweis appendix + confidence cap fire even when the URL audit
-    # itself looks fine.
-    if (
-        _evidence_contract_status == "clean"
-        and (s.get("evidence_depth_gap") or {}).get("active")
-    ):
-        _evidence_contract_status = "needs_review"
+    _evidence_contract_status = _contract.status
 
-    # Single source of truth: persist the canonical contract so result.py and
-    # scoring.py read it instead of each recomputing a divergent copy.
+    # Single source of truth: persist the canonical contract with its causes
+    # and its ceiling so result.py and scoring.py read it instead of each
+    # recomputing a divergent copy.
     s["evidence_contract_status"] = _evidence_contract_status
+    s["evidence_contract_causes"] = list(_contract.causes)
+    s["confidence_cap"] = _contract.confidence_cap
+    s["confidence_cap_reasons"] = list(_contract.cap_reasons)
 
-    # One confidence ceiling, keyed on the contract (see _CONTRACT_CONFIDENCE_CAP).
-    _confidence_cap = _CONTRACT_CONFIDENCE_CAP.get(_evidence_contract_status)
-    if _confidence_cap is not None:
+    # One confidence ceiling, the one the contract decided.
+    if _contract.confidence_cap is not None:
         s["final_confidence"] = min(
-            int(s.get("final_confidence", 0) or 0), _confidence_cap
+            int(s.get("final_confidence", 0) or 0), _contract.confidence_cap
         )
 
-    if _evidence_contract_status in {"needs_review", "source_context_only"}:
-        if _evidence_contract_status == "needs_review":
-            emit_progress(s, t(s, "evidence_contract_needs_review"))
-        else:
-            emit_progress(s, t(s, "evidence_contract_source_context_only"))
-        if s.get("answer"):
-            depth_gap_active_now = bool(
-                (s.get("evidence_depth_gap") or {}).get("active")
+    # The step carries its severity itself, so a reworded text keeps it.
+    if _evidence_contract_status == "needs_review":
+        emit_progress(s, t(s, "evidence_contract_needs_review"), severity="warning")
+    elif _evidence_contract_status == "source_context_only":
+        emit_progress(
+            s, t(s, "evidence_contract_source_context_only"), severity="warning"
+        )
+    if s.get("answer"):
+        closing = [
+            part
+            for part in (
+                _answer_evidence_notice(s, _contract),
+                _answer_evidence_basis_line(
+                    s, depth_gap, tiering=strategies.source_tiering
+                ),
             )
-            if _evidence_contract_status == "source_context_only":
-                evidence_notice = t(s, "answer_evidence_notice_source_context")
-            elif depth_gap_active_now:
-                # Recomputed from the claims, never read from a stored dict
-                # whose keys an older state may lack.
-                gap = _evidence_depth_gap(s)
-                evidence_notice = t(
-                    s,
-                    "answer_evidence_notice_single_source",
-                    single=gap["single_source_count"],
-                    supported=gap["supported_count"],
-                    ratio=int(gap["single_source_ratio"] * 100),
-                    cross=gap["cross_checked_count"],
-                )
-            else:
-                evidence_notice = t(s, "answer_evidence_notice_unbound")
-            s["answer"] = (
-                s["answer"].rstrip()
-                + "\n\n"
-                + t(s, "answer_evidence_notice_heading")
-                + "\n\n"
-                + evidence_notice
-            )
+            if part
+        ]
+        if closing:
+            s["answer"] = s["answer"].rstrip() + "\n\n" + "\n\n".join(closing)
 
     for binding in answer_evidence_bindings:
         _append_forensic_event(
@@ -6758,62 +6911,52 @@ def answer(
     attributed_claim_count = sum(
         1 for claim in consolidated_claims if claim.get("status") == "attributed"
     )
-    # "Cross-checked" in the footer means checked: two independent source
-    # texts. Corroborated attribution is part of the attributed count.
+    # The footer's cross-check count is the verified statements whose basis
+    # is cross-checked: two independent witnesses, and the search provider's
+    # excerpt checked. Corroborated attribution is part of the attributed count.
     cross_checked_claim_count = sum(
         1 for claim in consolidated_claims
         if claim.get("status") == "verified"
         and claim.get("verification_basis") == "cross_checked"
     )
+    failed_step_count = len(s.get("algorithm_failures", []) or [])
 
+    # Every piece is reader text in the run's language. The contract status
+    # stands in the result and, where it limits the report, in the notice.
     stats_parts = []
     if n_sources:
-        stats_parts.append(t(s, "answer_stats_sources", n=n_sources))
+        stats_parts.append(t_count(s, "answer_stats_sources", n_sources))
     if rendered_record_count:
         stats_parts.append(t_count(s, "answer_stats_evidence_prompt", rendered_record_count))
     if allowed_link_count:
-        stats_parts.append(t(s, "answer_stats_linked", n=allowed_link_count))
+        stats_parts.append(t_count(s, "answer_stats_linked", allowed_link_count))
     if verified_claim_count:
-        stats_parts.append(t(s, "answer_stats_verified", n=verified_claim_count))
+        stats_parts.append(t_count(s, "answer_stats_verified", verified_claim_count))
     if attributed_claim_count:
         stats_parts.append(t_count(s, "answer_stats_attributed", attributed_claim_count))
     if cross_checked_claim_count:
-        stats_parts.append(t(s, "answer_stats_cross_checked", n=cross_checked_claim_count))
-    # When the evidence-depth gap is active, surface the single-source share
-    # of the supported claims so the footer makes the imbalance visible at a
-    # glance instead of hiding it behind a generic count.
-    _depth_gap_footer = _evidence_depth_gap(s)
-    if _depth_gap_footer["active"] and _depth_gap_footer["supported_count"]:
-        ratio_pct = int(_depth_gap_footer["single_source_ratio"] * 100)
-        stats_parts.append(
-            f"{_depth_gap_footer['single_source_count']}/"
-            f"{_depth_gap_footer['supported_count']} single-source ({ratio_pct}%)"
-        )
+        stats_parts.append(t_count(s, "answer_stats_cross_checked", cross_checked_claim_count))
     if omitted_record_count:
         stats_parts.append(t_count(s, "answer_stats_omitted", omitted_record_count))
-    if _evidence_contract_status != "unknown":
-        stats_parts.append(f"Evidence-Contract: {_evidence_contract_status}")
-    if s.get("algorithm_failures"):
-        stats_parts.append(
-            f"ALGO-FAIL: {len(s.get('algorithm_failures', []) or [])}"
-        )
+    if failed_step_count:
+        stats_parts.append(t_count(s, "answer_stats_failed_steps", failed_step_count))
     if n_queries:
-        stats_parts.append(t(s, "answer_stats_searches", n=n_queries))
+        stats_parts.append(t_count(s, "answer_stats_searches", n_queries))
     if n_rounds:
         stats_parts.append(t_count(s, "answer_stats_round", n_rounds))
     stats_parts.append(time_str)
     if conf:
-        stats_parts.append(f"Confidence {conf}/10")
+        stats_parts.append(t(s, "answer_stats_confidence", conf=conf))
 
     stats_line = " · ".join(stats_parts)
     s["answer"] += f"\n\n---\n*{stats_line}*"
 
     log.info(
         "TRACE answer: length=%d sources=%d rendered_records=%d omitted_records=%d "
-        "linked=%d refs=%d extra_links=%d sections=%d rounds=%d elapsed=%.1fs "
+        "linked=%d refs=%d sections=%d rounds=%d elapsed=%.1fs "
         "confidence=%d finish_reason=%s incomplete=%s",
         len(s["answer"]), n_sources, rendered_record_count, omitted_record_count,
-        allowed_link_count, reference_link_count, additional_link_count, len(section_logs),
+        allowed_link_count, reference_link_count, len(section_logs),
         n_rounds, elapsed, conf, finish_reason or "", bool(incomplete_reasons),
     )
 
@@ -6837,7 +6980,6 @@ def answer(
         "expanded_evidence_label_links": expanded_evidence_label_links,
         "allowed_link_count": allowed_link_count,
         "reference_link_count": reference_link_count,
-        "additional_link_count": additional_link_count,
         "answer_claim_binding_count": len(answer_claim_bindings),
         "answer_claim_bindings": answer_claim_bindings[:20],
         "answer_evidence_binding_count": len(answer_evidence_bindings),
@@ -6866,5 +7008,5 @@ def answer(
         "confidence": conf,
     }, testing_mode=settings.testing_mode)
 
-    emit_progress(s, "done")
+    emit_progress(s, RESEARCH_DONE_MARKER)
     return s

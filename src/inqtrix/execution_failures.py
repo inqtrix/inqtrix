@@ -2,9 +2,8 @@
 
 Provider adapters expose several concrete exception families while native
 run stores need one small, durable vocabulary.  This module is the single
-translation boundary: the in-memory runner, durable worker, and workspace
-agent retry policy all consume the same classification instead of each
-guessing from exception text.
+translation boundary: the in-memory runner and the durable worker consume
+the same classification instead of each guessing from exception text.
 """
 
 from __future__ import annotations
@@ -28,21 +27,6 @@ from inqtrix.exceptions import (
     _ProviderAPIError,
 )
 from inqtrix.urls import sanitize_error
-
-
-RETRYABLE_AGENT_TASK_ORCHESTRATION_CODES = frozenset(
-    {
-        "queue_dispatch_failed",
-        "child_submit_failed",
-        "child_wake_failed",
-    }
-)
-"""Failures eligible for a whole Agent-Desk task retry.
-
-Provider-level timeout, rate-limit, transport, and 5xx errors are absent on
-purpose: their provider has already exhausted the shared three-attempt
-operation budget, so replaying the complete task would stack retry layers.
-"""
 
 
 _PROVIDER_TIMEOUT_TYPES = frozenset(

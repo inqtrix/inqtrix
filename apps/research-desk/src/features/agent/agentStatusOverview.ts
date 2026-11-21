@@ -22,7 +22,7 @@ export type ApprovalRow = {
   /** Known ids map to translated labels; unknown gated tools surface
    * under their raw name so a policy addition is never silently
    * missing from the overview. */
-  id: 'plan' | 'web_search' | 'knowledge_search' | 'research' | 'skill_activation' | 'editor_patch' | string
+  id: 'web_search' | 'knowledge_search' | 'research' | 'skill_activation' | 'editor_patch' | string
   state: ApprovalRowState
   /** True when the gate applies only conditionally (e.g. only the
    * UN-scoped project-wide search asks). */
@@ -35,12 +35,10 @@ export type ToolAvailabilityRow = {
 }
 
 export type AgentOverview = {
-  brain: 'workspace_agent' | 'agent_kernel'
-  /** Whether the SECOND engine exists on this deployment at all —
-   * `active` (selected), `selectable` (offered, not selected), or
-   * `unavailable` (the operator did not enable it). Always rendered:
-   * an absent picker alone would hide that the feature exists. */
-  kernel: 'active' | 'selectable' | 'unavailable'
+  /** Whether the kernel runs on this deployment — `active`, or
+   * `unavailable` when the server did not register it. Always rendered:
+   * an absent row would hide that the engine exists. */
+  kernel: 'active' | 'unavailable'
   /** Why the kernel is unavailable, as the server names it
    * (`feature_status.agent_kernel.reason_code`); null otherwise. */
   kernelReason: string | null
@@ -54,39 +52,10 @@ export type AgentOverview = {
   limits: AgentLimitCapabilities | null
 }
 
-export type AgentToolUseCounts = {
-  web: number
-  knowledge: number
-}
-
-/** Counts completed source-bearing plan tasks. A direct kernel run may not
- * expose task rows; zero then means "not available", never "not used". */
-export function countAgentToolUse({
-  tasks,
-  taskStates,
-}: {
-  tasks: Array<{ taskId: string; toolKind: string }>
-  taskStates: Record<string, { status: string }>
-}): AgentToolUseCounts {
-  return tasks.reduce<AgentToolUseCounts>(
-    (counts, task) => {
-      if (taskStates[task.taskId]?.status !== 'completed') return counts
-      if (task.toolKind === 'web_instant' || task.toolKind === 'web_research') {
-        counts.web += 1
-      } else if (task.toolKind === 'rag_query') {
-        counts.knowledge += 1
-      }
-      return counts
-    },
-    { web: 0, knowledge: 0 },
-  )
-}
-
 const KERNEL_ROW_BY_TOOL: Record<string, ApprovalRow['id']> = {
   web_instant: 'web_search',
   search_project_knowledge: 'knowledge_search',
   run_web_research: 'research',
-  run_deep_mission: 'research',
   delegate_batch: 'research',
   load_skill: 'skill_activation',
   propose_editor_patch: 'editor_patch',
@@ -130,18 +99,10 @@ function kernelApprovalRows(entry: AgentPermissionModeEntry): ApprovalRow[] {
   })
 }
 
-function phaseMachineApprovalRows(entry: AgentPermissionModeEntry): ApprovalRow[] {
-  return [
-    { id: 'plan', state: entry.plan_gate ? 'asks' : 'free' },
-    { id: 'web_search', state: entry.web_replan_regate ? 'asks' : 'free' },
-    { id: 'editor_patch', state: entry.patch_gate ? 'always' : 'free' },
-  ]
-}
-
 /** The structural subset of `capabilities.agent` the overview reads —
  * the demo provides this shape without faking the full block. */
 export type AgentOverviewSource = {
-  default_mode?: string
+  default_mode?: string | null
   durable: boolean
   tools: AgentToolManifestEntry[]
   permission_modes?: Record<string, AgentPermissionModeEntry>
@@ -183,7 +144,6 @@ export function sourceAvailabilityFromOverviewSource(
   }
 }
 
-export type AgentEngineMode = 'workspace_agent' | 'agent_kernel'
 export type AgentDepth = 'normal' | 'deep'
 
 /** Resolve one depth value for both composer display and run submission.
@@ -209,17 +169,24 @@ export function effectiveAgentAutonomy(
   return !agent?.autonomy_modes || agent.autonomy_modes.includes(selected) ? selected : fallback
 }
 
-/** The engine a fresh composer starts on: the server's published default,
- * but ONLY when the kernel feature flag confirms it is registered — a
- * default the server cannot run must never preselect. */
-export function defaultEngineMode(
-  agent: AgentOverviewSource | null,
-  features: InqtrixCapabilities['features'] | null,
-): AgentEngineMode {
-  return agent?.default_mode === 'agent_kernel'
-    && features?.agent_kernel === true
-    ? 'agent_kernel'
-    : 'workspace_agent'
+/** The Agent Desk shows where the server set up agent runs
+ * (`features.agent_desk`), or in demo mode. Without the kernel it stays
+ * and names the reason; it never falls back to another engine. */
+export function agentDeskVisible(
+  features: InqtrixCapabilities['features'] | null | undefined,
+  demo: boolean,
+): boolean {
+  return demo || features?.agent_desk === true
+}
+
+/** Whether a run can start: on a server only with the registered kernel;
+ * without it the composer shows the server's reason and sends nothing. The
+ * demo always can. */
+export function agentRunsAvailable(
+  features: InqtrixCapabilities['features'] | null | undefined,
+  serverEnabled: boolean,
+): boolean {
+  return !serverEnabled || features?.agent_kernel === true
 }
 
 export function buildAgentOverview({
@@ -227,32 +194,20 @@ export function buildAgentOverview({
   autonomy,
   kernelReason = null,
   kernelSelectable,
-  mode,
 }: {
   agent: AgentOverviewSource | null
   autonomy: string
   /** The server's reason while the kernel is not registered. */
   kernelReason?: string | null
   /** True when the server registered the kernel (`features.agent_kernel`)
-   * — feeds the availability row, independent of the selection. */
+   * — feeds the availability row. */
   kernelSelectable: boolean
-  /** The SELECTED engine (composer state) — the caller gates
-   * availability; the overview describes exactly what would run. */
-  mode: AgentEngineMode
 }): AgentOverview {
-  const brain = mode
-  const kernel: AgentOverview['kernel'] =
-    mode === 'agent_kernel'
-      ? 'active'
-      : kernelSelectable
-        ? 'selectable'
-        : 'unavailable'
+  // A kernel the server did not register is unavailable, so its reason
+  // shows.
+  const kernel: AgentOverview['kernel'] = kernelSelectable ? 'active' : 'unavailable'
   const entry = agent?.permission_modes?.[autonomy] ?? null
-  const approvals = entry
-    ? brain === 'agent_kernel'
-      ? kernelApprovalRows(entry)
-      : phaseMachineApprovalRows(entry)
-    : null
+  const approvals = entry ? kernelApprovalRows(entry) : null
   const manifestIds = new Set(
     (agent?.tools ?? []).map((tool: AgentToolManifestEntry) => tool.id),
   )
@@ -268,7 +223,6 @@ export function buildAgentOverview({
         : manifestIds.has(TOOL_CAPABILITY_IDS[id]),
   }))
   return {
-    brain,
     kernel,
     kernelReason: kernel === 'unavailable' ? kernelReason : null,
     durable: agent?.durable === true,

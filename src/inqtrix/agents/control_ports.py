@@ -1,9 +1,10 @@
-"""Contracts of the agent control store (plans, approvals, clarifications,
-artifacts).
+"""Contracts of the agent control store (stored plans, approvals,
+clarifications, artifacts).
 
-The control tables are the SOURCE OF TRUTH for everything a workspace-agent
-run negotiates with its user: plan versions, human-in-the-loop approvals and
-clarifications, and the artifact documents the canvas renders.
+The control tables are the SOURCE OF TRUTH for everything an agent run
+negotiates with its user: human-in-the-loop approvals and
+clarifications, and the artifact documents the canvas renders. Plan rows are
+the stored plans of older mission runs; no run writes one.
 Run events are signals only — clients reconcile via the REST reads over this
 store.
 
@@ -18,40 +19,44 @@ run/share boundary again in the same transaction as the control write.
 
 Retention: all control rows are children of their run row (``ON DELETE
 CASCADE`` in Postgres, mirrored in memory) — the durable run retention window
-is the single retention authority. The session memo artifact survives across
-turns because every turn re-anchors it onto the newest run via
-:meth:`AgentControlStore.upsert_artifact`.
+is the single retention authority. A session-scoped artifact outlives the
+turn that created it because every agent write re-anchors it onto the
+writing run via :meth:`AgentControlStore.upsert_artifact`.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field, replace
-from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from inqtrix.i18n import t
 from inqtrix.agents.context_archive import (
     ARCHIVE_READ_WINDOW_CHARS, ArchiveCatalogueEntry, ArchiveWindow,
 )
 
 PLAN_STATUSES = ("draft", "proposed", "approved", "rejected", "superseded")
-"""Lifecycle of one plan VERSION. ``superseded`` marks a version replaced by
-a newer one (user edit or replan); at most one version per run is not
-superseded/rejected."""
+"""The status values a stored plan VERSION holds. ``superseded`` marks a
+version a newer one replaced (a user's edit or a replan); at most one version
+per run is neither superseded nor rejected."""
 
 APPROVAL_KINDS = ("discovery", "plan", "patch", "replan", "tool")
-"""What the run is asking permission for.
+"""What a run asked permission for: the values an approval row may hold.
 
 ``tool`` is the kernel's per-call policy gate: the payload carries
 ``actions: [{tool, args, summary}]`` with the web query VERBATIM in
 ``args`` — the args ARE the approval content the user reviews. Edit
 decisions are allowed for exactly one action (the HITL
-``edited_action`` contract)."""
+``edited_action`` contract). The other kinds are stored rows of runs of the
+retired mission workflow (see :data:`DECIDABLE_APPROVAL_KINDS`)."""
+
+DECIDABLE_APPROVAL_KINDS = frozenset({"tool"})
+"""The approval kinds a run still creates and a user still decides. A stored
+approval of another kind of :data:`APPROVAL_KINDS` is listed and read as it
+was stored, never created anew or decided."""
 
 APPROVAL_STATUSES = ("pending", "approved", "rejected", "edited")
-"""``edited`` is the approve-with-changes outcome: the decision carried a
-revised plan, which became the new approved plan version."""
+"""``edited`` is the approve-with-changes outcome: the decision carried
+revised actions (a stored mission approval: a revised plan)."""
 
 APPROVAL_DECISIONS = ("approve", "reject", "edit")
 
@@ -80,7 +85,7 @@ ARTIFACT_KINDS = (
     "context_archive",
 )
 """``answer`` is the run-local chat-form deliverable: rendered
-inline in the agent timeline instead of the session memo canvas. Added
+inline in the agent timeline instead of a canvas. Added
 to the DB CHECK by migration 0039 together with the structured
 clarification columns in one migration.
 
@@ -148,28 +153,11 @@ TASK_STATUSES = (
     "insufficient_evidence",
     "skipped",
 )
-TASK_TERMINAL_STATUSES = frozenset(
-    {"cancelled", "completed", "failed", "insufficient_evidence", "skipped"}
-)
 TASK_RESULT_SUMMARY_MAX_WORDS = 300
 
 
 class PlanNotFound(KeyError):
     """Raised when a run has no plan (yet) or the version is unknown."""
-
-
-class PlanTaskNotFound(KeyError):
-    """Raised when a task is not part of the addressed plan version."""
-
-
-class PlanTaskCancellationConflict(Exception):
-    """Raised when an immutable or synthesis task cannot be cancelled."""
-
-    def __init__(self, task: "PlanTaskRecord") -> None:
-        super().__init__(
-            f"task {task.task_id} cannot be cancelled from {task.status}"
-        )
-        self.task = task
 
 
 class ApprovalNotFound(KeyError):
@@ -186,36 +174,6 @@ class ApprovalAlreadyDecided(Exception):
     def __init__(self, approval: "ApprovalRecord") -> None:
         super().__init__(f"approval {approval.approval_id} already decided")
         self.approval = approval
-
-
-class DecisionWithoutRequirementParts(Exception):
-    """A plan decision stores a composed requirement without its parts.
-
-    Every decision keeps the composed text and the parts it was made of
-    together; one without parts predates that and cannot be carried
-    forward (HTTP 409 at a later gate, a failed resume in the mission).
-    """
-
-    def __init__(self, approval_id: str) -> None:
-        super().__init__(
-            f"Plan decision {approval_id} stores a requirement without its parts; "
-            "it predates stored parts and cannot be carried forward."
-        )
-        self.approval_id = approval_id
-
-
-def decided_requirement_parts(
-    payload: Mapping[str, Any], *, approval_id: str
-) -> dict[str, Any]:
-    """The requirement parts a plan decision stored with its composed text.
-
-    Raises:
-        DecisionWithoutRequirementParts: the decision carries none.
-    """
-    parts = payload.get("report_requirement")
-    if not isinstance(parts, Mapping):
-        raise DecisionWithoutRequirementParts(approval_id)
-    return dict(parts)
 
 
 class ClarificationNotFound(KeyError):
@@ -288,7 +246,9 @@ class ArtifactPublicationFenced(Exception):
 
 @dataclass(frozen=True)
 class PlanTaskRecord:
-    """One task row of a plan version.
+    """One task row of a stored plan version of a mission run (read only).
+
+    No run writes plan rows; the attributes say what a stored row holds.
 
     Attributes:
         task_id: Stable id (``task-...``), unique within the plan version;
@@ -299,26 +259,25 @@ class PlanTaskRecord:
         ordinal: Display/served order (0-based, stable).
         title: User-facing task label (German, like all agent surface text).
         tool_kind: One of :data:`TASK_TOOL_KINDS`.
-        objective: What the task must produce, for the executing child.
-        queries: Concrete search/ask strings the task starts from.
-        gap_ids: Discovery gaps this task covers (empty for synthesis).
-        depends_on: Task ids that must complete first (wave scheduling).
-        budget: Deprecated read-only bridge for historic rows. New planner
-            and edit writes store ``{}``; operator quotas and profile
-            timeouts are the only execution authority.
+        objective: What the task had to produce.
+        queries: Concrete search/ask strings the task started from.
+        gap_ids: The discovery gaps the task covered (empty for synthesis).
+        depends_on: Task ids that had to complete before it.
+        budget: ``{}``, or the per-task caps a historic row stored; no code
+            reads them.
         params: Tool tuning (``profile``/``recency``/
-            ``collection_ids``), validated by the plan schema.
+            ``collection_ids``).
         expected_output: Short description of the deliverable shape.
-        status: One of :data:`TASK_STATUSES`; execution state written by the
-            scheduler. ``cancel_requested`` is non-terminal and means a
-            synchronous provider call may still be unwinding.
-        child_run_id: The spawned child run for ``web_research`` tasks.
-        result_summary: Compact result the supervisor keeps (<= 300 words).
-        result_payload: Internal checkpoint-recovery fields that are not
-            represented by the authoritative scalar columns (evidence,
-            claims, usage, complete answer Markdown and failure detail). This
-            field is not exposed by the HTTP plan contract; the authenticated
-            lazy task-result surface projects the complete value separately.
+        status: One of :data:`TASK_STATUSES`, the task's last recorded
+            execution state. ``cancel_requested`` is non-terminal: a
+            synchronous provider call was still unwinding when it was
+            recorded.
+        child_run_id: The spawned child run of a ``web_research`` task.
+        result_summary: Compact result (<= 300 words).
+        result_payload: The fields the scalar columns do not hold
+            (evidence, claims, usage, complete answer Markdown and failure
+            detail); the kernel builds its reading records of an older
+            mission from them. Not exposed over HTTP.
     """
 
     task_id: str
@@ -340,366 +299,25 @@ class PlanTaskRecord:
     result_payload: dict[str, Any] = field(default_factory=dict)
 
 
-def transitioned_plan_task(
-    current: PlanTaskRecord,
-    *,
-    status: str,
-    child_run_id: str | None = None,
-    result_summary: str | None = None,
-    result_payload: dict[str, Any] | None = None,
-) -> PlanTaskRecord:
-    """Validate and materialize one idempotent task-state transition.
-
-    A running retry may replace its child id. Once terminal, status, child id,
-    summary, and recovery payload are frozen; an identical replay returns the
-    existing record.
-    """
-    if status not in TASK_STATUSES:
-        raise ValueError(f"unknown task status: {status!r}")
-    normalized_summary: str | None = None
-    if result_summary is not None:
-        normalized_summary = " ".join(str(result_summary).split())
-        if len(normalized_summary.split()) > TASK_RESULT_SUMMARY_MAX_WORDS:
-            raise ValueError(
-                f"task result_summary exceeds "
-                f"{TASK_RESULT_SUMMARY_MAX_WORDS} words"
-            )
-        if status not in TASK_TERMINAL_STATUSES:
-            raise ValueError(
-                "task result_summary may only be written with a terminal status"
-            )
-    normalized_payload: dict[str, Any] | None = None
-    if result_payload is not None:
-        normalized_payload = dict(result_payload)
-        if status not in TASK_TERMINAL_STATUSES:
-            raise ValueError(
-                "task result_payload may only be written with a terminal status"
-            )
-    allowed = {
-        "pending": {"running", "skipped", "cancelled"},
-        "running": {"running", "cancel_requested", *TASK_TERMINAL_STATUSES},
-        "cancel_requested": {"cancel_requested", "cancelled"},
-    }
-    if current.status in TASK_TERMINAL_STATUSES:
-        if status != current.status:
-            raise ValueError(
-                f"task {current.task_id} is terminal ({current.status})"
-            )
-        if child_run_id is not None and child_run_id != current.child_run_id:
-            raise ValueError(
-                f"task {current.task_id} already belongs to child "
-                f"{current.child_run_id}"
-            )
-        if (
-            normalized_summary is not None
-            and normalized_summary != current.result_summary
-        ):
-            raise ValueError(
-                f"task {current.task_id} already has a different result"
-            )
-        if (
-            normalized_payload is not None
-            and normalized_payload != current.result_payload
-        ):
-            raise ValueError(
-                f"task {current.task_id} already has a different result payload"
-            )
-        return current
-    elif status != current.status and status not in allowed.get(
-        current.status, set()
-    ):
-        raise ValueError(
-            f"task {current.task_id} cannot transition "
-            f"{current.status} -> {status}"
-        )
-    if (
-        child_run_id is not None
-        and current.status == "pending"
-        and status != "running"
-    ):
-        raise ValueError(
-            f"task {current.task_id} cannot attach a child before running"
-        )
-    next_child = current.child_run_id
-    if child_run_id is not None:
-        if next_child is not None and next_child != child_run_id:
-            if current.status != "running" or status != "running":
-                raise ValueError(
-                    f"task {current.task_id} already belongs to child "
-                    f"{next_child}"
-                )
-        next_child = child_run_id
-    next_summary = current.result_summary
-    if normalized_summary is not None:
-        if next_summary and next_summary != normalized_summary:
-            raise ValueError(
-                f"task {current.task_id} already has a different result"
-            )
-        next_summary = normalized_summary
-    next_payload = current.result_payload
-    if normalized_payload is not None:
-        if next_payload and next_payload != normalized_payload:
-            raise ValueError(
-                f"task {current.task_id} already has a different result payload"
-            )
-        next_payload = normalized_payload
-    return replace(
-        current,
-        status=status,
-        child_run_id=next_child,
-        result_summary=next_summary,
-        result_payload=next_payload,
-    )
-
-
-def requested_task_cancellation(current: PlanTaskRecord) -> PlanTaskRecord:
-    """Apply the atomic task-cancellation state machine.
-
-    Pending source work ends immediately. Running source work records an
-    honest request until its synchronous operation or child run unwinds.
-    Already cancelled requests are idempotent; every other terminal result
-    and synthesis are immutable conflicts.
-    """
-    if current.tool_kind == "synthesis":
-        raise PlanTaskCancellationConflict(current)
-    if current.status in {"cancel_requested", "cancelled"}:
-        return current
-    if current.status == "pending":
-        return transitioned_plan_task(
-            current,
-            status="cancelled",
-            result_summary="Aufgabe vor der Ausfuehrung abgebrochen.",
-            result_payload={
-                "failure_code": "task_cancelled",
-                "failure_reason": "user_requested_task_cancel",
-            },
-        )
-    if current.status == "running":
-        return transitioned_plan_task(current, status="cancel_requested")
-    raise PlanTaskCancellationConflict(current)
-
-
-def additive_replan_errors(
-    previous_tasks: list[PlanTaskRecord],
-    candidate_tasks: list[PlanTaskRecord],
-) -> list[str]:
-    """Validate stable task identities across an additive replan.
-
-    Only terminal source tasks are immutable execution results. They must
-    remain present under the same id and with the same definition. A changed
-    operation therefore needs a new task id; otherwise the checkpointed
-    outcome map would make the changed operation look already completed.
-    Synthesis is deliberately excluded because every plan version synthesizes
-    the complete, newly available evidence again.
-    """
-    previous = {
-        task.task_id: task
-        for task in previous_tasks
-        if task.tool_kind != "synthesis"
-        and task.status in TASK_TERMINAL_STATUSES
-    }
-    candidate = {task.task_id: task for task in candidate_tasks}
-    errors: list[str] = []
-    missing = sorted(set(previous) - set(candidate))
-    if missing:
-        errors.append(
-            "An additive replan must not remove completed tasks: "
-            + ", ".join(missing)
-            + "."
-        )
-    changed = sorted(
-        task_id
-        for task_id in set(previous) & set(candidate)
-        if _task_definition(previous[task_id])
-        != _task_definition(candidate[task_id])
-    )
-    if changed:
-        errors.append(
-            "An additive replan must not reuse completed task ids for a "
-            "changed task; keep them unchanged and assign new ids for: "
-            + ", ".join(changed)
-            + "."
-        )
-    return errors
-
-
-def carry_forward_terminal_task_results(
-    previous_tasks: list[PlanTaskRecord],
-    candidate_tasks: list[PlanTaskRecord],
-) -> list[PlanTaskRecord]:
-    """Carry immutable source-task results into a validated plan version."""
-    errors = additive_replan_errors(previous_tasks, candidate_tasks)
-    if errors:
-        raise ValueError("; ".join(errors))
-    previous = {
-        task.task_id: task
-        for task in previous_tasks
-        if task.tool_kind != "synthesis"
-        and task.status in TASK_TERMINAL_STATUSES
-    }
-    return [
-        replace(
-            task,
-            status=prior.status,
-            child_run_id=prior.child_run_id,
-            result_summary=prior.result_summary,
-            result_payload=dict(prior.result_payload),
-        )
-        if (prior := previous.get(task.task_id)) is not None
-        else task
-        for task in candidate_tasks
-    ]
-
-
-def _task_definition(task: PlanTaskRecord) -> tuple[Any, ...]:
-    """Execution definition protected by a stable task id."""
-    return (
-        task.tool_kind,
-        task.objective,
-        tuple(task.queries),
-        tuple(task.gap_ids),
-        tuple(task.depends_on),
-        _freeze_json(task.params),
-        task.expected_output,
-    )
-
-
-def _freeze_json(value: Any) -> Any:
-    """Canonical immutable comparison form for JSON-compatible values."""
-    if isinstance(value, dict):
-        return tuple(
-            (str(key), _freeze_json(item))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_json(item) for item in value)
-    return value
-
-
-async def settle_cancelled_plan_tasks(
-    store: "AgentControlStore", run_id: str, *, language: str | None = None
-) -> None:
-    """Close every unfinished task when its parent run is cancelled.
-
-    Pending rows were never dispatched and become ``skipped``. Running rows
-    may already have caused an external side effect, so they become ``failed``
-    instead of claiming they were not executed. Terminal rows are immutable.
-
-    ``language`` is the run's answer language where the caller holds it; see
-    :func:`settle_terminal_plan_tasks` for why it is optional here.
-    """
-    await settle_terminal_plan_tasks(
-        store, run_id, status="cancelled", language=language
-    )
-
-
-async def settle_terminal_plan_tasks(
-    store: "AgentControlStore",
-    run_id: str,
-    *,
-    status: str,
-    language: str | None = None,
-) -> None:
-    """Reconcile unfinished plan rows after a terminal run transition.
-
-    This is the idempotent recovery boundary for a run that can no longer
-    re-enter its graph. Cancellation and infrastructure failure use distinct
-    summaries, while the task-state semantics stay identical: undispatched
-    work is skipped and begun work fails. Completed task results are never
-    rewritten.
-
-    These summaries are what a user reads after pressing Stop, so they
-    follow the run's answer language. ``language`` is OPTIONAL rather than
-    mandatory because this function has two kinds of caller: the graph,
-    which holds the language and passes it, and the HTTP recovery boundary
-    for a run cancelled while waiting or queued, which holds only a run id.
-    That second caller omits it and gets English -- the same fallback an
-    unresolved language gets everywhere else, never a silent German default.
-
-    Args:
-        store: Authoritative agent control store.
-        run_id: Terminal agent run whose latest plan is reconciled.
-        status: ``cancelled`` or ``failed``.
-        language: Answer language of the run, where the caller knows it.
-
-    Raises:
-        ValueError: If a non-terminal status reaches this boundary.
-    """
-    if status not in {"cancelled", "failed"}:
-        raise ValueError(f"unsupported terminal plan status: {status}")
-    try:
-        _plan, tasks = await store.get_plan(run_id)
-    except PlanNotFound:
-        return
-    words = {"language": language or ""}
-    pending_summary = t(
-        words,
-        "agent_task_settled_skipped_cancelled"
-        if status == "cancelled"
-        else "agent_task_settled_skipped_failed",
-    )
-    running_summary = t(
-        words,
-        "agent_task_settled_running_cancelled"
-        if status == "cancelled"
-        else "agent_task_settled_running_failed",
-    )
-    for task in tasks:
-        if task.status == "pending":
-            await store.transition_plan_task(
-                run_id=task.run_id,
-                plan_id=task.plan_id,
-                task_id=task.task_id,
-                status="skipped",
-                result_summary=pending_summary,
-            )
-        elif task.status == "running":
-            await store.transition_plan_task(
-                run_id=task.run_id,
-                plan_id=task.plan_id,
-                task_id=task.task_id,
-                status="failed",
-                child_run_id=task.child_run_id,
-                result_summary=running_summary,
-            )
-        elif task.status == "cancel_requested":
-            await store.transition_plan_task(
-                run_id=task.run_id,
-                plan_id=task.plan_id,
-                task_id=task.task_id,
-                status="cancelled",
-                child_run_id=task.child_run_id,
-                result_summary=t(
-                    words, "agent_task_settled_cancel_requested"
-                ),
-                result_payload={
-                    "failure_code": "task_cancelled",
-                    "failure_reason": "user_requested_task_cancel",
-                },
-            )
-
-
 @dataclass(frozen=True)
 class PlanRecord:
-    """One plan VERSION of a run (append-only versioning).
+    """One stored plan VERSION of a mission run (read only).
 
     Attributes:
         plan_id: Row id (``plan-...``).
         run_id: The run this plan belongs to.
-        version: 1-based, unique per run; a user edit or replan appends
-            version+1 and supersedes the previous one.
+        version: 1-based, unique per run; a later version (a user's edit or
+            a replan) superseded the previous one.
         status: One of :data:`PLAN_STATUSES`.
         created_by: ``agent`` (planner output) or ``user`` (edit decision).
-        summary_markdown: The plan's one-paragraph intent, rendered above the
-            task list.
-        assumptions: Non-blocking open points the plan proceeds on.
-        success_criteria: Measurable criteria (German) the critic later
-            checks the memo against.
+        summary_markdown: The plan's one-paragraph intent.
+        assumptions: Non-blocking open points the plan proceeded on.
+        success_criteria: Measurable criteria (German) the critic checked
+            the memo against.
         reason: Why this version exists — empty for the initial plan,
-            ``critic_research``/``replan`` for current agent-generated
-            revisions, or ``user_edit`` afterwards. The unconstrained string
-            deliberately accepts older persisted reason values; new versions
-            carry only the reasons listed here.
+            ``critic_research``/``replan`` for an agent revision, or
+            ``user_edit``. The unconstrained string accepts every persisted
+            reason value.
         created_at: Unix seconds.
     """
 
@@ -724,29 +342,23 @@ class ApprovalRecord:
         run_id: The asking run.
         kind: One of :data:`APPROVAL_KINDS`.
         status: One of :data:`APPROVAL_STATUSES`.
-        subject_type/subject_id: What is being approved (``plan`` +
-            plan_id for plan/replan approvals; probe list payload for
-            discovery).
+        subject_type/subject_id: What is being approved (empty for a tool
+            gate; ``plan`` + plan_id on a stored plan/replan approval).
         payload: Kind-specific request context shown to the user (for
-            discovery: the planned probes; for ``plan``/``replan``:
-            ``plan_id`` and ``plan_version`` — the plan itself is fetched
-            via its own endpoint — and for ``replan`` additionally
-            ``reason`` (``critic_research`` or ``replan``) and
-            ``new_tasks``, the not yet executed non-synthesis tasks of
-            that version as ``task_id``/``ordinal``/``title``/
-            ``tool_kind``, so a gate card can say what the extension
-            adds; for ``tool``: the actions).
+            ``tool``: the actions; a stored mission approval keeps what its
+            gate showed, for ``plan``/``replan`` ``plan_id`` and
+            ``plan_version``, for ``replan`` additionally ``reason`` and
+            ``new_tasks``).
         decision: The verb that resolved it (``approve``/``reject``/
             ``edit``), empty while pending.
-        decision_payload: The edited plan/actions for ``edit`` decisions;
-            decision-scoped keys may ride it (on plan gates the composed
-            ``report_guidance`` the mission's resume renders plus the
-            ``report_requirement`` parts it was composed from;
-            ``approval_scope: "run"`` on tool gates — a plain
-            approve-once stays ``{}`` so its replay identity is
-            unchanged). Part of replay identity: a retry with a
-            different payload conflicts. Every reader outside the
-            mission sees :func:`public_decision_payload` instead.
+        decision_payload: The edited actions for ``edit`` decisions;
+            decision-scoped keys may ride it (``approval_scope: "run"`` on
+            tool gates — a plain approve-once stays ``{}`` so its replay
+            identity is unchanged; a stored plan decision also holds the
+            composed ``report_guidance`` and the ``report_requirement``
+            parts it was composed from). Part of replay identity: a retry
+            with a different payload conflicts. Every reader sees
+            :func:`public_decision_payload` instead.
         note: Optional free-text the decider attached.
         decided_by_user_id: Verified subject that decided.
         interrupt_key: Checkpoint correlation key for resuming the
@@ -770,12 +382,28 @@ class ApprovalRecord:
     decided_at: float | None = None
 
 
-def public_decision_payload(approval: ApprovalRecord) -> dict[str, Any]:
-    """The decision payload as every reader outside the mission sees it.
+def check_creatable_approval(approval: ApprovalRecord) -> None:
+    """Refuse an approval of a kind no run asks for any more.
 
-    A plan-gate decision stores the COMPOSED requirement under
-    ``report_guidance`` because the mission's resume renders it into the
-    writing prompts. That text carries the full bodies of the attached
+    Both stores call this before they write a new approval row.
+
+    Raises:
+        ValueError: *approval* is not of a :data:`DECIDABLE_APPROVAL_KINDS`
+            kind.
+    """
+    if approval.kind not in DECIDABLE_APPROVAL_KINDS:
+        raise ValueError(
+            f"An approval of kind {approval.kind} is not created any more; a run "
+            "asks only for tool approvals."
+        )
+
+
+def public_decision_payload(approval: ApprovalRecord) -> dict[str, Any]:
+    """The decision payload as every reader sees it.
+
+    A stored plan-gate decision of a mission run holds the COMPOSED
+    requirement under ``report_guidance``, the text the mission rendered into
+    its writing prompts. That text carries the full bodies of the attached
     library rules, and an approval outlives the rules it was decided
     under: handing it out would keep a deleted, edited or no longer
     shared rule readable to everyone who can read the run or its
@@ -846,13 +474,12 @@ class ArtifactRecord:
 
     Attributes:
         artifact_id: Row id (``art_...``).
-        run_id: The run that currently anchors the artifact. The session
-            memo is re-anchored to the newest run on every turn (upsert by
-            ``(session_id, kind='memo')``), so its retention follows the
-            LATEST run.
-        session_id: Agent-desk session for cross-run artifacts (the memo);
-            ``None`` for run-local diagnostics (critic report, evidence
-            bundle).
+        run_id: The run that currently anchors the artifact. Every agent
+            write re-anchors a session-scoped artifact onto the writing run,
+            so its retention follows the LATEST run that wrote it.
+        session_id: Agent-desk session for cross-run artifacts (canvas
+            documents; the memo of a stored mission run); ``None`` for
+            run-local artifacts (answer, evidence bundle, context archive).
         kind: One of :data:`ARTIFACT_KINDS`.
         title: Display title.
         status: ``writing`` (agent streams, user edits rejected with 409)
@@ -862,8 +489,8 @@ class ArtifactRecord:
         updated_by: ``agent`` or ``user`` — who wrote the current revision.
         content_markdown: The document body (markdown with ``[K#]``/``[W#]``
             citation labels).
-        payload: Kind-specific structured data (e.g. the critic report
-            JSON); the memo keeps it empty.
+        payload: Kind-specific structured data (e.g. a canvas's
+            ``deliverable_kind``, a stored critic report's JSON).
         refs: Evidence references backing the content (citation label ->
             source descriptor).
         created_at/updated_at: Unix seconds.
@@ -892,22 +519,11 @@ class ArtifactRecord:
     lines_removed: int | None = None
 
 
-def session_memo_artifact_id(session_id: str | None, run_id: str) -> str:
-    """THE id of a session's one memo (``uq_run_artifacts_session_memo``).
-
-    Every engine that writes or looks up the memo derives the id here —
-    the mission when it flushes sections, the kernel when it hands a
-    mission's memo on as the deliverable. A session-less run keeps a
-    run-scoped memo.
-    """
-    return f"art_{(session_id or run_id)[-12:]}_memo"
-
-
 def artifact_event_payload(record: ArtifactRecord) -> dict[str, Any]:
     """Uniform ``artifact.created/updated`` payload of an agent write.
 
     ONE builder for every agent-side emitter (kernel write_canvas,
-    mission memo flush, deep-revision batch, answer publisher) so the
+    deep-revision batch, answer publisher) so the
     durable payloads never drift apart again: they all carry title and
     updated_by, plus the write's line delta when the store counted it —
     absent fields mean "honestly not counted", never zero. The user PUT
@@ -940,10 +556,11 @@ class ArtifactRevisionRecord:
             computed client-side from two full bodies).
         created_at: Unix seconds.
         status: The artifact status the write carried: ``writing`` for a
-            streaming flush (a memo growing section by section), ``ready``
-            for a finished write or a user edit. Streaming snapshots stay
-            in the history for diffs and recovery but are not versions a
-            reader picks from.
+            write the agent had not finished (the empty answer artifact a
+            publication starts with; in a stored mission run, each memo
+            flush), ``ready`` for a finished write or a user edit.
+            ``writing`` snapshots stay in the history for diffs and recovery
+            but are not versions a reader picks from.
     """
 
     artifact_id: str
@@ -982,70 +599,21 @@ class AgentControlStore(Protocol):
 
     # -- plans --------------------------------------------------------- #
 
-    async def save_plan(
-        self,
-        *,
-        run_id: str,
-        plan: PlanRecord,
-        tasks: list[PlanTaskRecord],
-    ) -> PlanRecord:
-        """Append one plan version with its tasks.
-
-        The version must be exactly ``latest + 1`` (or 1 for the first);
-        any non-rejected older versions flip to ``superseded`` in the same
-        write. Raises ``ValueError`` on version gaps.
-        """
-        ...
-
     async def get_plan(
         self, run_id: str, *, version: int | None = None
     ) -> tuple[PlanRecord, list[PlanTaskRecord]]:
-        """One plan version (latest when ``version`` is None) with its
-        tasks ordered by ordinal; :class:`PlanNotFound` when absent."""
-        ...
-
-    async def list_plan_versions(self, run_id: str) -> list[PlanRecord]:
-        """All versions newest-first, WITHOUT tasks (version picker)."""
-        ...
-
-    async def transition_plan_task(
-        self,
-        *,
-        run_id: str,
-        plan_id: str,
-        task_id: str,
-        status: str,
-        child_run_id: str | None = None,
-        result_summary: str | None = None,
-        result_payload: dict[str, Any] | None = None,
-    ) -> PlanTaskRecord:
-        """Move one task through its idempotent execution lifecycle.
-
-        Terminal writes persist the compact public summary and the internal
-        checkpoint-recovery payload in the same store transition.
-        """
-        ...
-
-    async def request_plan_task_cancel(
-        self,
-        *,
-        run_id: str,
-        plan_id: str,
-        task_id: str,
-        authorize: Any,
-    ) -> tuple[PlanTaskRecord, str | None]:
-        """Request task cancellation under the run's live edit authority.
-
-        ``authorize(control_write)`` composes the task-row CAS with the run
-        store. The callback receives the backend transaction and a child-run
-        cancellation function, so a missing/unauthorized child rolls the task
-        row back instead of being reported as already terminal.
-        """
+        """One stored plan version of a mission run (latest when ``version``
+        is None) with its tasks ordered by ordinal; :class:`PlanNotFound`
+        when absent. Plans are read only: the kernel reads the readings of
+        an older mission's plan, and no run writes one."""
         ...
 
     # -- approvals ------------------------------------------------------ #
 
-    async def create_approval(self, approval: ApprovalRecord) -> ApprovalRecord: ...
+    async def create_approval(self, approval: ApprovalRecord) -> ApprovalRecord:
+        """Write one new approval; ``ValueError`` for a kind outside
+        :data:`DECIDABLE_APPROVAL_KINDS` (:func:`check_creatable_approval`)."""
+        ...
 
     async def list_approvals(self, run_id: str) -> list[ApprovalRecord]:
         """All approvals of the run, newest-first."""
@@ -1066,8 +634,6 @@ class AgentControlStore(Protocol):
         note: str,
         decided_by_user_id: uuid.UUID | None,
         resume: Any,
-        edited_plan: PlanRecord | None = None,
-        edited_tasks: list[PlanTaskRecord] | None = None,
     ) -> tuple[ApprovalRecord, dict[str, Any]]:
         """Record the decision AND resume the waiting run — atomically per
         backend.
@@ -1078,13 +644,8 @@ class AgentControlStore(Protocol):
         memory store hands ``resume`` a synchronous writer executed under the
         shared authority/run lock; the Postgres store hands it a coroutine
         writer executed in the run transaction. Both perform the decision CAS
-        — and the ``edit`` decision's new plan version — INSIDE the run store's
-        ``waiting -> queued`` boundary, so no observer can see one without the
-        other.
-
-        ``edit`` decisions carry *edited_plan* (``version`` assigned by the
-        store as latest+1; older versions flip to ``superseded``) and
-        *edited_tasks*.
+        INSIDE the run store's ``waiting -> queued`` boundary, so no observer
+        can see one without the other.
 
         Raises:
             ApprovalNotFound: Unknown approval for the run.
@@ -1181,20 +742,6 @@ class AgentControlStore(Protocol):
         """
         ...
 
-    async def get_session_artifact(
-        self, session_id: str, kind: str
-    ) -> ArtifactRecord | None:
-        """The current session-scoped artifact of *kind*, or ``None``.
-
-        This cross-run read supports session-memo lineage: a follow-up
-        turn is a NEW run, so :meth:`get_artifact` (run-scoped)
-        cannot reach the prior turn's memo — this resolves it by the
-        durable ``(session_id, kind)`` key and returns the LATEST revision
-        with its body, so the agent continues from (and never clobbers)
-        the user's most recent edit.
-        """
-        ...
-
     async def put_context_archive(
         self, *, run_id: str, title: str, text: str,
         transcript: dict[str, Any] | None = None,
@@ -1282,7 +829,7 @@ class AgentControlStore(Protocol):
         The session-context builder lists every deliverable of
         the session so a follow-up turn can name and target the right
         one; bodies stay out (the registry is a prompt-sized index, the
-        body read stays :meth:`get_session_artifact`).
+        body read stays :meth:`get_session_artifact_by_id`).
         """
         ...
 

@@ -31,6 +31,9 @@ declare global {
     __collaborationRenderSnapshots?: Record<string, unknown>[]
     __commentScaleFirstInteractiveMs?: number
     __commentScaleSelectionMs?: number
+    /** The concurrent-writers page: a server version merged and a keystroke
+     * made, in one task. */
+    __mergeAndType?: (server: Record<string, unknown>, text: string) => void
     __requestPaths?: string[]
     __setCollaborationCanEdit?: (canEdit: boolean) => void
     __slashCollaborationServerUpdate?: number[]
@@ -38,5 +41,12 @@ declare global {
     __slashCollaborationUpdates?: number[][]
     __slashStructureUpdateDetections?: unknown[]
     __slashSuggestionBoundaryDetections?: unknown[]
+    /** The Markdown source page: every text the view handed its host, with
+     * the text it was typed on. */
+    __sourceChanges?: { base: string; text: string }[]
+    /** The Markdown source page: the interface language switches. */
+    __switchLanguage?: () => void
+    /** The Markdown source page: another writer's text reaches the record. */
+    __takeRecordText?: (text: string) => void
   }
 }

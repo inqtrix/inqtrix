@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState, useEffect } from 'react'
+import { useMemo, useRef, useState, useEffect } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import type { FormEvent } from 'react'
 import type { JSONContent } from '@tiptap/core'
@@ -22,7 +22,6 @@ import {
   ShieldCheck,
   Sparkles,
   WandSparkles,
-  Waypoints,
   Workflow,
   X,
 } from '@/components/icons'
@@ -76,11 +75,7 @@ import { useLocale } from '@/i18n/LocaleProvider'
 import { countLabel } from '@/i18n/plural'
 import { cn } from '@/lib/utils'
 import { AgentStatusMenu } from './AgentStatusMenu'
-import type {
-  AgentEngineMode,
-  AgentOverview,
-  AgentToolUseCounts,
-} from './agentStatusOverview'
+import type { AgentOverview } from './agentStatusOverview'
 import {
   COMPOSER_COMMAND_OPTIONS,
   detectSkillSlash,
@@ -93,7 +88,6 @@ import {
   agentMentionPick,
   agentMentionRows,
   agentMentionTarget,
-  engineRefusesAttachments,
   pickableCount,
   pillKindsKeptAfterSend,
   pillKindsKeptByAnswer,
@@ -116,6 +110,7 @@ import {
   type AgentExecutionSnapshot,
   type AgentSourcePolicy,
 } from './executionPolicy'
+import type { AgentRunRecord } from './model'
 import { ComposerDisclosureHint } from '@/features/composer/ComposerDisclosureHint'
 import { SourceToggle } from './SourceToggle'
 import {
@@ -169,9 +164,6 @@ export type AgentComposerSubmit = {
   collectionIds: string[]
   /** Target editor document for a patch assignment; at most one. */
   documentId?: string
-  /** The selected engine: the deterministic mission machine or
-   * the conversational kernel. Callers gate availability server-side. */
-  engineMode: AgentEngineMode
   /** Explicitly attached skill chips; server-admitted. */
   skillIds: string[]
   /** Source availability for this message: web as switched for the
@@ -227,7 +219,6 @@ export function AgentComposer({
   tierMode = null,
   tiers = null,
   onTierModeChange,
-  engineMode = 'workspace_agent',
   kernelSelectable = false,
   memoryEnabled = false,
   modelPicker = null,
@@ -235,7 +226,6 @@ export function AgentComposer({
   submitError = null,
   onAutonomyChange,
   onDepthModeChange,
-  onEngineModeChange,
   onDraftQuestionChange,
   onEditCanvasComment,
   onRemoveCanvasComment,
@@ -264,11 +254,11 @@ export function AgentComposer({
   selectedDocumentId = null,
   selectedSkillIds = [],
   statusExecution = null,
+  statusChildRuns,
   sourcePolicy,
   knowledgeSwitch,
   onKnowledgeSwitchChange,
   sourceAvailability = { web: true, knowledge: true },
-  toolUseCounts = { web: 0, knowledge: 0 },
   maxAttachedSkills = 3,
   slashSkills = [],
 }: {
@@ -346,10 +336,8 @@ export function AgentComposer({
    * replaces the legacy depth toggle with the Stufe control. */
   tiers?: AgentTierCapability[] | null
   onTierModeChange?: (tier: AgentTierId | null) => void
-  /** The selected engine; caller-owned like `autonomy`. */
-  engineMode?: AgentEngineMode
   /** True only when the server registered the kernel
-   * (`features.agent_kernel`) — the picker hides otherwise. */
+   * (`features.agent_kernel`) — the engine row hides otherwise. */
   kernelSelectable?: boolean
   /** Account preference `enable_agent_memory`, shown in the run overview. */
   memoryEnabled?: boolean
@@ -363,7 +351,6 @@ export function AgentComposer({
   onAutonomyChange: (autonomy: string) => void
   onDepthModeChange?: (mode: 'normal' | 'deep') => void
   onDraftQuestionChange: (draft: string) => void
-  onEngineModeChange?: (mode: AgentEngineMode) => void
   onRemoveCanvasComment?: (id: string) => void
   onSelectedCollectionIdsChange: (ids: string[]) => void
   onSelectedDocumentIdChange?: (id: string | null) => void
@@ -385,6 +372,9 @@ export function AgentComposer({
   /** Accepted run facts for the read-only overview. The source dock still
    * reflects the next message's composer state. */
   statusExecution?: AgentExecutionSnapshot | null
+  /** The accepted run's delegated children, for the overview's count of
+   * the web searches a research ran. */
+  statusChildRuns?: AgentRunRecord['children']
   sourcePolicy: AgentSourcePolicy
   /** The session knowledge switch; absent until `/wissen` switched it on. */
   knowledgeSwitch?: AgentKnowledgeSwitch
@@ -397,7 +387,6 @@ export function AgentComposer({
      * `store_unreachable`). */
     knowledgeReason?: string | null
   }
-  toolUseCounts?: AgentToolUseCounts
   /** `capabilities.agent.skills.max_attached` (soft gate; the server
    * enforces the hard one). */
   maxAttachedSkills?: number
@@ -405,7 +394,6 @@ export function AgentComposer({
   slashSkills?: { id: string; label: string; description: string; argument_hint: string }[]
 }) {
   const { locale, t } = useLocale()
-  const engineRefusalId = useId()
   const inputRef = useRef<AgentInlineInputHandle | null>(null)
   const [question, setQuestion] = useState(draftQuestion)
   const [mention, setMention] = useState<CollectionMentionState | null>(null)
@@ -479,7 +467,6 @@ export function AgentComposer({
       selectedDocumentId,
       canvasDocuments: offeredCanvasDocuments,
       pinnedCanvasDocumentId,
-      engine: engineMode,
       reports: reportOptions,
       reportIds,
       reportLimit,
@@ -494,7 +481,6 @@ export function AgentComposer({
       answerMode,
       collections,
       documents,
-      engineMode,
       onReportIdsChange,
       onSelectedRuleIdsChange,
       offeredCanvasDocuments,
@@ -534,7 +520,7 @@ export function AgentComposer({
   )
   // `@rules:` and `@research:` read as a scope HERE, in this composer's
   // own resolution — the shared detector stays a plain query for the
-  // knowledge composer and the plan-gate editor.
+  // knowledge composer.
   const mentionTarget = useMemo(
     () => (mention ? agentMentionTarget(mention.query, mentionScope) : null),
     [mention, mentionScope],
@@ -549,7 +535,6 @@ export function AgentComposer({
   const mentionEmpty = mentionTarget && mentionRows.length === 0
     ? agentMentionEmptyState({
       categories: contextCategories,
-      engine: engineMode,
       filter: mentionTarget.filter,
       scope: mentionTarget.scope,
     })
@@ -624,18 +609,6 @@ export function AgentComposer({
         primary: t.agent.composer.mentionNoRulesTitle,
         secondary: t.agent.composer.mentionNoRulesHint,
         tone: 'success',
-      }
-    }
-    if (empty.kind === 'kernelOnly') {
-      return {
-        ...base,
-        icon: categoryIcon(empty.scope),
-        primary: t.agent.composer.mentionKernelOnly.replace(
-          '{engine}',
-          () => engineModeLabel('agent_kernel', t),
-        ),
-        secondary: categoryLabel(empty.scope),
-        tone: categoryTone(empty.scope),
       }
     }
     if (empty.kind === 'emptyCategory') {
@@ -743,33 +716,16 @@ export function AgentComposer({
   // backend instructs the model to address every comment, so an empty
   // input may send. The visible default question below keeps the
   // transcript honest (nothing travels silently).
-  // Reports and canvas context feed the kernel only: under the mission
-  // engine the server would refuse the send, so the capsules say it and the
-  // send waits, like a document that is gone.
-  const engineRefusal = engineRefusesAttachments({
-    canvasAttached: canvasComments.length > 0 || pinnedCanvasDocument !== null,
-    engine: engineMode,
-    reportCount: reportIds.length,
-  })
-  const engineRefusalText = t.agent.composer.kernelOnlyAttached.replace(
-    '{engine}',
-    () => engineModeLabel('agent_kernel', t),
-  )
   const unavailableKey = unavailablePills.join('|')
-  /** What a capsule cannot know itself: whether the engine refuses its kind
-   * (warning tone, described by the notice above the input), and whether its
-   * document is gone. */
+  /** What a capsule cannot know itself: whether its document is gone. */
   const pillState = useMemo<CommandPillState>(() => ({
-    refusalNoticeId: engineRefusalId,
-    refusedKinds: engineRefusal ? ['report', 'canvas'] : [],
     unavailable: unavailableKey ? unavailableKey.split('|') : [],
-  }), [engineRefusal, engineRefusalId, unavailableKey])
+  }), [unavailableKey])
   const canSubmit =
     !disabled
     && !submitting
     && (answerMode || !running)
     && unavailablePills.length === 0
-    && !engineRefusal
     && (question.trim().length > 0 || canvasComments.length > 0)
   const placeholder = answerMode
     ? t.agent.timeline.answerPlaceholder
@@ -1101,7 +1057,6 @@ export function AgentComposer({
         // Resolved against the current options — a selection whose document
         // vanished (deleted / sync toggled off) must not submit a stale id.
         documentId: selectedDocument?.id,
-        engineMode,
         question: submittedQuestion,
         responseForm: submitResponseForm,
         skillIds: selectedSkillIds,
@@ -1283,15 +1238,6 @@ export function AgentComposer({
             role="alert"
           >
             {t.agent.composer.submitRefused.replace('{message}', () => submitError)}
-          </div>
-        )}
-        {engineRefusal && (
-          <div
-            className="mb-1.5 rounded-md border border-warning/25 bg-warning-subtle px-2 py-1 t-meta-sm font-semibold text-warning"
-            data-testid="agent-engine-refusal"
-            id={engineRefusalId}
-          >
-            {engineRefusalText}
           </div>
         )}
         {unavailablePills.length > 0 && (
@@ -1548,7 +1494,7 @@ export function AgentComposer({
                           already names it, right next to this button. The
                           menu header below keeps it — it is only visible
                           while the menu is open, where the chip is not. */}
-                      {runSetupSummary({ autonomy, engineMode, tierMode }, t)}
+                      {runSetupSummary({ autonomy, tierMode }, t)}
                     </span>
                   </Button>
                 </DropdownMenuTrigger>
@@ -1564,7 +1510,7 @@ export function AgentComposer({
                   <OptionMenuHeader
                     count={0}
                     title={t.agent.composer.runSetup}
-                    value={runSetupSummary({ autonomy, engineMode, responseForm, tierMode }, t)}
+                    value={runSetupSummary({ autonomy, responseForm, tierMode }, t)}
                   />
                   <div className="py-1">
                     <p className="px-2.5 pb-1 pt-1.5 t-caption text-muted-foreground/65">
@@ -1582,29 +1528,28 @@ export function AgentComposer({
                         onSelect={() => onAutonomyChange(mode)}
                       />
                     ))}
-                    <DropdownMenuSeparator className="mx-0 my-1" />
-                    <p className="px-2.5 pb-1 pt-1.5 t-caption text-muted-foreground/65">
-                      {t.agent.composer.engine}
-                    </p>
-                    {(kernelSelectable
-                      ? (['agent_kernel', 'workspace_agent'] as const)
-                      : (['workspace_agent'] as const)
-                    ).map((mode) => (
-                      <OptionMenuItem
-                        active={engineMode === mode}
-                        description={
-                          mode === 'agent_kernel'
-                            ? t.agent.composer.engineKernelHint
-                            : t.agent.composer.engineMissionHint
-                        }
-                        descriptionLines={2}
-                        icon={mode === 'agent_kernel' ? BrainCircuit : Waypoints}
-                        keepOpen
-                        key={mode}
-                        label={engineModeLabel(mode, t)}
-                        onSelect={() => onEngineModeChange?.(mode)}
-                      />
-                    ))}
+                    {kernelSelectable ? (
+                      <>
+                        <DropdownMenuSeparator className="mx-0 my-1" />
+                        <p className="px-2.5 pb-1 pt-1.5 t-caption text-muted-foreground/65">
+                          {t.agent.composer.engine}
+                        </p>
+                        {/* The one engine: shown, not chosen. Text, not a menu
+                            item: a focus stop that does nothing would be a
+                            dead end for a keyboard. */}
+                        <div className="flex items-center gap-2.5 px-2.5 py-1.5" data-run-setup-engine>
+                          <BrainCircuit aria-hidden="true" className="icon-md shrink-0 text-brand" />
+                          <span className="min-w-0 flex-1 text-left">
+                            <span className="block truncate t-list text-foreground">
+                              {engineModeLabel(t)}
+                            </span>
+                            <span className="block line-clamp-2 t-meta-sm text-muted-foreground">
+                              {t.agent.composer.engineKernelHint}
+                            </span>
+                          </span>
+                        </div>
+                      </>
+                    ) : null}
                     {onResponseFormChange ? (
                       <>
                         <DropdownMenuSeparator className="mx-0 my-1" />
@@ -1672,9 +1617,10 @@ export function AgentComposer({
                               {t.agent.composer.tierTitle}
                             </p>
                             {/* No extra "no tier" entry: the composer always
-                                submits the effective Stufe (selected ?? the
-                                published default), so the active mark on the
-                                default IS the honest state. */}
+                                submits the effective Stufe (a pick on this
+                                page, else the user's last pick, else the
+                                published default), so the active mark IS the
+                                honest state. */}
                             {tiers.map((tier) => (
                               <OptionMenuItem
                                 active={tierMode === tier.id}
@@ -1753,6 +1699,7 @@ export function AgentComposer({
                 autonomyHint={autonomyModeHint(autonomy, t)}
                 depthDeep={tierMode ? tierMode === 'tief' : depthMode === 'deep'}
                 autonomyLabel={autonomyModeLabel(autonomy, t)}
+                childRuns={statusChildRuns}
                 disabled={disabled}
                 memoryEnabled={memoryEnabled}
                 modelValue={agentModelOverviewValue(modelPicker, t)}
@@ -1760,10 +1707,8 @@ export function AgentComposer({
                 responseFormValue={responseFormLabel(responseForm, t)}
                 responseForm={responseForm}
                 tier={tierMode}
-                tiers={tiers}
                 execution={statusExecution}
                 sourcePolicy={sourcePolicy}
-                toolUseCounts={toolUseCounts}
               />
             )}
             {running && !answerMode ? (

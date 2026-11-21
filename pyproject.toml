@@ -26,7 +26,7 @@ dependencies = [
     "starlette>=1.3.1,<2.0",
     "uvicorn[standard]>=0.42,<1.0",
     "openai>=2.0,<3.0",
-    "langgraph>=1.2.5,<2.0",
+    "langgraph>=1.2.14,<2.0",
     "cachetools>=5.5,<6.0",
     "pydantic-settings>=2.14.2,<3.0",
     "python-dotenv>=1.2,<2.0",
@@ -42,7 +42,8 @@ dependencies = [
     "pyreadline3>=3.4 ; sys_platform == 'win32'",
     "perplexityai>=0.34.0",
     # Platform persistence layer (identity schema, RLS). SQLAlchemy 2.1
-    # is still beta as of mid-2026 — stay on 2.0.x until it stabilizes.
+    # is generally available since September 2026; this range stays on the
+    # 2.0 series, and moving to 2.1 is a separate upgrade.
     "sqlalchemy[asyncio]>=2.0.50,<2.1",
     "asyncpg>=0.31,<1.0",
     "alembic>=1.18,<2.0",
@@ -85,9 +86,10 @@ dependencies = [
 # downloads at runtime.
 # The floor tracks the bundled server minor: Qdrant's supported upgrade
 # order is SDK first, then server, and an older client against a newer
-# server is the unsupported direction.
+# server is the unsupported direction. The client also warns at startup
+# when the server is more than one minor version away from it.
 knowledge-qdrant = [
-    "qdrant-client>=1.19,<2.0",
+    "qdrant-client>=1.20,<2.0",
 ]
 # Valkey-Streams job queue for durable run dispatch (INQTRIX_QUEUE_BACKEND=valkey).
 queue-valkey = [
@@ -109,9 +111,9 @@ observability = [
     "opentelemetry-sdk>=1.45.1,<2.0",
     "opentelemetry-exporter-otlp-proto-http>=1.45.1,<2.0",
 ]
-# Agent runtimes (mode=workspace_agent, mode=agent_kernel): the kernel runs on
-# LangChain's agent loop, and the Postgres checkpointer keeps interrupted runs
-# resumable across workers.
+# Agent runtime (mode=agent_kernel): the kernel runs on LangChain's agent loop,
+# and the Postgres checkpointer keeps interrupted runs resumable across
+# workers.
 agent = [
     "langchain>=1.3.11,<2.0",
     "langchain-core>=1.6.3,<2.0",

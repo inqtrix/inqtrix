@@ -25,6 +25,8 @@ from inqtrix.agents.artifact_names import (
     assign_artifact_file_names,
 )
 from inqtrix.agents.clarification import round_qa_lines
+from inqtrix.agents.context_sources import encode_source
+from inqtrix.untrusted_content import neutralize_fence_delimiters, untrusted_fence
 from inqtrix.pagination import decode_cursor
 
 if TYPE_CHECKING:
@@ -57,8 +59,30 @@ verbatim path uses, because a bare ellipsis reads like something the
 user typed."""
 
 _CUT_MARKER = "\n[... shortened]"
+_DATA_LEFT_OUT = "\n[... the stored answer and clarifications of this turn left out]"
+"""What stands in place of a turn's fence when the owner's question leaves no
+room for any stored data of the turn."""
 _TRIMMED_HEADER = "[... older parts of the conversation shortened]\n\n"
+
+USER_CONTINUATION_PREFIX = "  | "
+"""Prefix of every continuation line of the owner's question outside the fence;
+readers of the history (the writer guard's projection) strip it again."""
 _QUESTION_CUT_MARKER = " [... question shortened]"
+
+
+def _question_cut_marker(run_id: str, cite: bool) -> str:
+    """The marker a shortened question of *run_id* ends in.
+
+    Always visible. Where the run can read conversation sources it also
+    names that question's original, per line: the ``question``
+    source :mod:`inqtrix.services.agent_source_service` lists for every
+    earlier run of the session. The id is server data, so it may stand
+    outside a fence.
+    """
+    if not cite or not run_id:
+        return _QUESTION_CUT_MARKER
+    source = encode_source("question", run_id, "", "request")
+    return f' [... question shortened; full text: read_context(source_id="{source}")]'
 
 _TERMINAL_WORDS = {
     "completed": "completed",
@@ -103,6 +127,7 @@ def build_session_context(
     run_async: Callable[[Awaitable[Any]], Any],
     visible_to: Any,
     current_run_id: str,
+    cite_questions: bool = False,
 ) -> SessionContextPack:
     """Compose the pack from durable rows (never raises — a context
     failure must not kill the run; it degrades VISIBLY to empty).
@@ -115,6 +140,9 @@ def build_session_context(
         visible_to: The owner's resolved visibility — the context
             can only ever contain what the OWNER may see.
         current_run_id: Excluded (the turn being answered).
+        cite_questions: Whether this run can read conversation sources
+            (``search_context``/``read_context``): a shortened question
+            then names its original (:func:`_question_cut_marker`).
     """
     try:
         return _build(
@@ -124,6 +152,7 @@ def build_session_context(
             run_async=run_async,
             visible_to=visible_to,
             current_run_id=current_run_id,
+            cite_questions=cite_questions,
         )
     except Exception:  # noqa: BLE001 — degrade visibly, never kill intake
         log.warning(
@@ -143,6 +172,7 @@ def _build(
     run_async: Callable[[Awaitable[Any]], Any],
     visible_to: Any,
     current_run_id: str,
+    cite_questions: bool = False,
 ) -> SessionContextPack:
     summaries = [
         summary
@@ -252,10 +282,13 @@ def _build(
                     control=control,
                     run_async=run_async,
                     visible_to=visible_to,
+                    question_cut=_question_cut_marker(run_id, cite_questions),
                 )
             )
         else:
-            turns.append(_one_liner(summary))
+            turns.append(
+                _one_liner(summary, _question_cut_marker(run_id, cite_questions))
+            )
     return SessionContextPack(
         history_block=_within_budget(turns),
         artifact_registry=registry,
@@ -269,18 +302,51 @@ def _build(
 class _VerbatimTurn:
     """One rendered turn, kept in parts so the budget can spend the right one.
 
-    ``head`` is the user's question plus the clarifications and notes of that
-    turn; ``body`` is the agent's answer line. Only the body is squeezable.
+    ``head`` is the owner's question, outside the fence (their own words,
+    defused). ``data_head`` holds the turn's clarifications and notes and
+    ``body`` the agent's answer line; both are stored text and render inside
+    one ``session-history`` fence, built after any squeeze so a cut can never
+    break the closing line. Only the body is squeezable. A one-liner of an
+    older turn is the owner's question alone and stays outside.
     """
 
     head: str
     body: str
+    data_head: str = ""
+    body_is_data: bool = True
+    question_cut: str = _QUESTION_CUT_MARKER
+    """What a head too long for the budget ends in (:func:`_question_cut_marker`)."""
 
-    def render(self, body_cap: int | None = None) -> str:
+    def render(self, body_cap: int | None = None, data_cap: int | None = None) -> str:
+        """The turn as it stands in the block.
+
+        *body_cap* squeezes the answer alone. *data_cap* squeezes everything
+        the fence holds, the record of the clarifications included, for a
+        turn whose question leaves less room than that record needs.
+        """
         body = self.body
         if body_cap is not None and len(body) > body_cap:
             body = body[:body_cap].rstrip() + _CUT_MARKER
-        return f"{self.head}\n{body}" if self.head else body
+        if not self.body_is_data:
+            return f"{self.head}\n{body}" if self.head else body
+        stored = "\n".join(part for part in (self.data_head, body) if part)
+        if data_cap is not None and len(stored) > data_cap:
+            stored = stored[:data_cap].rstrip() + _CUT_MARKER
+        data = untrusted_fence(stored, "session-history")
+        return f"{self.head}\n{data}" if self.head else data
+
+
+def _owner_text(text: str) -> str:
+    """The owner's own words outside a fence: defused, and every continuation
+    line prefixed so pasted text cannot pose as a heading of the message.
+
+    A line ends wherever a reader of lines ends it: at a line feed, a carriage
+    return, a line or paragraph separator and the other breaks ``splitlines``
+    knows. Each of them becomes a line feed followed by the prefix.
+    """
+    return ("\n" + USER_CONTINUATION_PREFIX).join(
+        neutralize_fence_delimiters(text).splitlines()
+    )
 
 
 def _full_question(
@@ -326,6 +392,7 @@ def _verbatim_turn(
     control: "AgentControlStore",
     run_async: Callable[[Awaitable[Any]], Any],
     visible_to: Any,
+    question_cut: str = _QUESTION_CUT_MARKER,
 ) -> _VerbatimTurn:
     # The question is NOT capped here, and it is read from the durable
     # payload rather than the list row, which the display projection cuts
@@ -337,7 +404,7 @@ def _verbatim_turn(
     question = _full_question(
         summary, run_id=run_id, run_store=run_store, visible_to=visible_to
     )
-    lines = [f"User: {question}"]
+    lines: list[str] = []
     try:
         for record in reversed(
             run_async(control.list_clarifications(run_id))
@@ -374,26 +441,32 @@ def _verbatim_turn(
     status = str(summary.get("status", ""))
     if status == "completed":
         body = _answer_body(run_id, run_store, visible_to)
-        if body:
-            lines.append(f"Agent: {body}")
-        else:
-            lines.append("Agent: (result no longer available)")
+        agent_line = f"Agent: {body}" if body else "Agent: (result no longer available)"
     else:
         word = _TERMINAL_WORDS.get(status, status)
-        lines.append(f"Agent: run {word}.")
-    return _VerbatimTurn(head="\n".join(lines[:-1]), body=lines[-1])
+        agent_line = f"Agent: run {word}."
+    return _VerbatimTurn(
+        head=f"User: {_owner_text(question)}",
+        data_head="\n".join(lines),
+        body=agent_line,
+        question_cut=question_cut,
+    )
 
 
-def _one_liner(summary: dict[str, Any]) -> _VerbatimTurn:
+def _one_liner(
+    summary: dict[str, Any], question_cut: str = _QUESTION_CUT_MARKER
+) -> _VerbatimTurn:
     question = str(summary.get("question", "")).strip()
     note = ""
     if len(question) > ONE_LINER_QUESTION_CHARS:
         question = question[:ONE_LINER_QUESTION_CHARS].rstrip()
-        note = _QUESTION_CUT_MARKER
+        note = question_cut
     status = str(summary.get("status", ""))
     word = _TERMINAL_WORDS.get(status, status)
     return _VerbatimTurn(
-        head="", body=f'Earlier: "{question}"{note} — run {word}.'
+        head="",
+        body=f'Earlier: "{_owner_text(question)}"{note} — run {word}.',
+        body_is_data=False,
     )
 
 
@@ -419,11 +492,13 @@ def _within_budget(turns: list[_VerbatimTurn]) -> str:
     on that floor do whole older turns drop, and only after that does the
     single surviving body shrink below the floor.
 
-    A user's question is the last thing to go, and it never goes silently:
-    the block's own header marks dropped turns, a squeezed body carries the
-    cut marker, and a question that truly cannot fit ends in
-    ``[... question shortened]`` rather than a bare ellipsis that reads like
-    something the user typed.
+    A user's question is the last thing to go, and nothing goes silently:
+    the block's own header marks dropped turns, a squeezed answer and a
+    squeezed record of clarifications carry the cut marker inside their
+    fence, a turn whose stored data had to go entirely says so in its place,
+    and a question that truly cannot fit ends in ``[... question
+    shortened]`` rather than a bare ellipsis that reads like something the
+    user typed. A question that fits is never marked as shortened.
 
     The budget counts CHARACTERS, not tokens. That is a proxy, deliberately:
     a tokenizer here would make a pure function depend on the provider, and a
@@ -449,9 +524,11 @@ def _within_budget(turns: list[_VerbatimTurn]) -> str:
 
     # 2. drop whole older turns
     trimmed = False
+    # The header that marks dropped turns counts against the budget too.
     while (
         kept_from < len(turns) - 1
-        and len(rendered(kept_from)) > TOTAL_HISTORY_CHAR_BUDGET
+        and (len(_TRIMMED_HEADER) if kept_from else 0) + len(rendered(kept_from))
+        > TOTAL_HISTORY_CHAR_BUDGET
     ):
         kept_from += 1
         trimmed = True
@@ -464,12 +541,22 @@ def _within_budget(turns: list[_VerbatimTurn]) -> str:
     # 3. the single surviving turn is still too large: squeeze its body to
     #    whatever is left, so its question survives whole.
     last = turns[-1]
-    room = TOTAL_HISTORY_CHAR_BUDGET - len(prefix) - len(last.head) - 1
-    if room > len(_CUT_MARKER):
-        return prefix + last.render(room - len(_CUT_MARKER))
+    # Everything but the body, fence lines and cut marker included.
+    room = TOTAL_HISTORY_CHAR_BUDGET - len(prefix) - len(last.render(0))
+    if room > 0:
+        return prefix + last.render(room)
 
-    # 4. the question alone exceeds the budget. Cut it, and say so.
-    available = (
-        TOTAL_HISTORY_CHAR_BUDGET - len(prefix) - len(_QUESTION_CUT_MARKER)
-    )
-    return prefix + last.head[: max(0, available)] + _QUESTION_CUT_MARKER
+    # 4. the answer is gone and the turn still does not fit: the record of
+    #    its clarifications is stored data too and is cut next, in the fence.
+    room = TOTAL_HISTORY_CHAR_BUDGET - len(prefix) - len(last.render(data_cap=0))
+    if room > 0:
+        return prefix + last.render(data_cap=room)
+
+    # 5. the question leaves no room for stored data. The data is left out
+    #    and the block says so. The question itself is cut only when it
+    #    alone exceeds the budget, and then carries its own marker.
+    available = TOTAL_HISTORY_CHAR_BUDGET - len(prefix) - len(_DATA_LEFT_OUT)
+    if len(last.head) <= available:
+        return prefix + last.head + _DATA_LEFT_OUT
+    available -= len(last.question_cut)
+    return prefix + last.head[: max(0, available)] + last.question_cut + _DATA_LEFT_OUT

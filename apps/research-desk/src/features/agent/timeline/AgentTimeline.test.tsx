@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import type { ResearchRunStatus } from '@/features/researchRuns/types'
 import { translations } from '@/i18n/translations'
 import { agentRunFromSummary, type AgentRunOutcome } from '../model'
 import { activityText, AgentRunTurn, EvidenceReadGroup, type AgentTimelineActions } from './AgentTimeline'
@@ -33,7 +34,7 @@ function run() {
     mode: 'agent_kernel', kind: 'agent', agent_overrides: { autonomy: 'balanced' },
     created_at: 1_700_000_000, started_at: 1_700_000_001, finished_at: null,
     elapsed_seconds: null, snapshot: { current_node: 'agent_kernel', last_message: '' },
-    error: null, events_url: '/v1/runs/run_activity/events', result_url: '/v1/runs/run_activity/result',
+    error: null, events_url: '/v1/runs/run_activity/events',
   })
 }
 
@@ -93,6 +94,57 @@ describe('the failure line of a turn', () => {
   })
 })
 
+describe('the Stufe in the header of the question', () => {
+  const tierOf = (html: string) =>
+    html.match(/data-testid="agent-run-tier"[^>]*>([^<]*)</)?.[1] ?? null
+  const turn = (overrides: Record<string, unknown>, status: ResearchRunStatus = 'running') => {
+    const record = agentRunFromSummary({
+      run_id: 'run_tier', status, queue_position: null,
+      question: 'Welche Fristen gelten?', stack: 'default',
+      access: { mode: 'owner' },
+      mode: 'agent_kernel', kind: 'agent',
+      agent_overrides: { autonomy: 'balanced', ...overrides },
+      created_at: 1_700_000_000, started_at: 1_700_000_001, finished_at: null,
+      elapsed_seconds: null, snapshot: { current_node: 'agent_kernel', last_message: '' },
+      error: null, events_url: '/v1/runs/run_tier/events',
+    })
+    return renderToStaticMarkup(<AgentRunTurn actions={actions} historical run={record} />)
+  }
+  afterEach(() => {
+    localeState.locale = 'de'
+  })
+
+  it.each(['running', 'queued', 'waiting_for_input'] as const)('names the Stufe while the run is %s', (status) => {
+    // The settings line appears only once a turn has ended; the header is
+    // where a running turn shows what it was started with.
+    expect(tierOf(turn({ agent_tier: 'schnell' }, status))).toBe('Schnell')
+  })
+
+  it('names the Stufe of a finished run as well', () => {
+    expect(tierOf(turn({ agent_tier: 'gruendlich' }, 'completed'))).toBe('Gründlich')
+  })
+
+  it('calls a Tief run "Tief", not "Deep"', () => {
+    // The server records depth "deep" for every Tief run; the Stufe names it.
+    const html = turn({ agent_tier: 'tief', depth: 'deep' })
+    expect(tierOf(html)).toBe('Tief')
+    expect(html).not.toContain('>Deep<')
+  })
+
+  it('keeps "Deep" for a stored run that ran deep without a Stufe', () => {
+    expect(tierOf(turn({ depth: 'deep' }))).toBe('Deep')
+  })
+
+  it('shows nothing for a run without Stufe or depth', () => {
+    expect(tierOf(turn({}))).toBeNull()
+  })
+
+  it('names the Stufe in English for an English desk', () => {
+    localeState.locale = 'en'
+    expect(tierOf(turn({ agent_tier: 'schnell' }))).toBe('Quick')
+  })
+})
+
 describe('run settings in the transcript', () => {
   const settingsRun = (status: 'completed' | 'failed') => {
     const record = agentRunFromSummary({
@@ -115,7 +167,7 @@ describe('run settings in the transcript', () => {
         },
       },
       error: status === 'failed' ? { message: 'boom', type: 'run_failed' } : null,
-      events_url: '/v1/runs/run_settings/events', result_url: '/v1/runs/run_settings/result',
+      events_url: '/v1/runs/run_settings/events',
     })
     record.phase = status === 'completed' ? 'done' : 'failed'
     return record
@@ -246,38 +298,6 @@ describe('the rules a turn ran under', () => {
   it('shows no line for a turn without rules', () => {
     const html = renderToStaticMarkup(<AgentRunTurn actions={actions} run={run()} historical />)
     expect(line(html)).toBeNull()
-  })
-})
-
-describe('a failed turn', () => {
-  const failedTask = (taskId: string, ordinal: number) => ({
-    taskId, ordinal, title: `Aufgabe ${taskId}`, toolKind: 'rag_query' as const, objective: '', queries: [],
-    gapIds: [], dependsOn: [], budget: {}, params: {}, expectedOutput: '', status: 'failed' as const,
-    childRunId: null, resultSummary: '',
-  })
-
-  it.each([
-    ['de', 1, '0/1 abgeschlossen · 1 mit Aufmerksamkeit'],
-    ['en', 1, '0/1 completed · 1 needs attention'],
-    ['en', 2, '0/2 completed · 2 need attention'],
-  ] as const)('counts the tasks that need attention (%s, %i)', (locale, count, line) => {
-    // One failed task reads "1 needs attention", never "1 need attention".
-    localeState.locale = locale
-    try {
-      const record = run()
-      record.status = 'failed'
-      record.phase = 'failed'
-      record.error = 'boom'
-      const tasks = Array.from({ length: count }, (_, index) => failedTask(`t${index + 1}`, index))
-      record.plan = {
-        planId: 'p', version: 1, status: 'approved', createdBy: 'agent', reason: '', createdAt: 0,
-        summaryMarkdown: '', assumptions: [], successCriteria: [], tasks, versions: [],
-      }
-      const html = renderToStaticMarkup(<AgentRunTurn actions={actions} run={record} historical />)
-      expect(html).toContain(line)
-    } finally {
-      localeState.locale = 'de'
-    }
   })
 })
 
@@ -490,20 +510,13 @@ describe('agent activity transcript', () => {
 
 describe('a finished task in the transcript', () => {
   const RESULT = 'EU-Leitlinien vom 02.09. sind veröffentlicht.'
-  function taskRun(summary: string) {
+  function taskRun(summary: string, title: string | null = 'Regulierung erfassen') {
     const record = run()
-    record.plan = {
-      planId: 'plan_1', version: 1, status: 'approved', createdBy: 'agent', reason: '', createdAt: 1,
-      summaryMarkdown: '', assumptions: [], successCriteria: [], versions: [],
-      tasks: [{
-        taskId: 't1', ordinal: 0, title: 'Regulierung erfassen', toolKind: 'rag_query', objective: '',
-        queries: [], gapIds: [], dependsOn: [], budget: {}, params: {}, expectedOutput: '',
-        status: 'completed', childRunId: null, resultSummary: summary,
-      }],
-    }
-    record.taskStates = { t1: { attempt: 1, status: 'completed' } }
     record.stepLog = [
-      { seq: 1, at: 1, kind: 'task_finished', taskId: 't1' },
+      {
+        seq: 1, at: 1, kind: 'task_finished', taskId: 't1', status: 'completed',
+        ...(title ? { title } : {}), ...(summary ? { result: summary } : {}),
+      },
       { seq: 2, at: 2, kind: 'narration', narrationId: 'n-task-t1', detail: 'task', text: `Regulierung erfassen: ${RESULT}` },
     ]
     return record
@@ -518,6 +531,14 @@ describe('a finished task in the transcript', () => {
   it('keeps the narration when the row has no result to show', () => {
     const html = renderToStaticMarkup(<AgentRunTurn actions={actions} run={taskRun('')} historical />)
     expect(html).toContain(`Regulierung erfassen: ${RESULT}`)
+  })
+
+  it('names a task stored without its title by its result line, once', () => {
+    // A run stored before task events carried titles: the result line opens
+    // with the title, and where that title ends cannot be read back.
+    const html = renderToStaticMarkup(<AgentRunTurn actions={actions} run={taskRun(RESULT, null)} historical />)
+    expect(html.split(`Regulierung erfassen: ${RESULT}`)).toHaveLength(2)
+    expect(html).not.toContain('>t1<')
   })
 })
 

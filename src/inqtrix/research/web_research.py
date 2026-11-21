@@ -100,9 +100,9 @@ class WebResearchAlgorithm:
         context: "RunContext",
     ) -> AgentResult:
         """Execute the research graph and wrap its raw result."""
-        from inqtrix.agents.source_policy import require_task_allowed
+        from inqtrix.agents.source_policy import require_web_research_allowed
 
-        require_task_allowed("web_research", policy=request.source_policy)
+        require_web_research_allowed(policy=request.source_policy)
         raw = _execute_graph(request, context)
         return AgentResult(
             answer=str(raw.get("answer", "")),

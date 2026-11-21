@@ -39,7 +39,7 @@ from inqtrix.auth.sessions import (
     LoginFlow,
     new_session_id,
 )
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import error_response, read_json_object
 
 if TYPE_CHECKING:
     from inqtrix.auth.gateway import GatewayAuthProvider
@@ -411,21 +411,6 @@ def _login_throttle_key(
     return f"{mode}:{identifier.strip().lower()}:{ip}"
 
 
-async def _read_json_object(request: Request):
-    """Parse a JSON object body, or return ``(None, error_response)``."""
-    try:
-        body = await request.json()
-    except Exception:
-        return None, error_response(
-            400, "Invalid JSON body", "invalid_request_error"
-        )
-    if not isinstance(body, dict):
-        return None, error_response(
-            400, "Invalid JSON body", "invalid_request_error"
-        )
-    return body, None
-
-
 def _build_password_auth_router(
     provider,
     principal_dependency: Callable[..., "Principal"],
@@ -537,7 +522,7 @@ def _build_password_auth_router(
         @router.post("/api/setup/owner", status_code=201)
         async def setup_owner(request: Request):
             """Create the first owner exactly once, then lock permanently."""
-            body, error = await _read_json_object(request)
+            body, error = await read_json_object(request)
             if error is not None:
                 return error
             parsed, error = _validate_email_password(body)
@@ -589,7 +574,7 @@ def _build_password_auth_router(
         @router.post("/api/auth/login/local")
         async def login_local(request: Request):
             """Email/password login -> the same session+CSRF cookies as OIDC."""
-            body, error = await _read_json_object(request)
+            body, error = await read_json_object(request)
             if error is not None:
                 return error
             # The credential form posts "identifier"; "email" stays
@@ -685,7 +670,7 @@ def _build_password_auth_router(
                     "Password changes are available only for local accounts",
                     "invalid_request_error",
                 )
-            body, parse_error = await _read_json_object(request)
+            body, parse_error = await read_json_object(request)
             if parse_error is not None:
                 return parse_error
             current = str(body.get("current_password", ""))

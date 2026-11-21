@@ -41,7 +41,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, NamedTuple, NotRequired, TypedDict
 
@@ -51,9 +51,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.types import Command
 
+from inqtrix import aio
+from inqtrix.agents.clarification import run_clarifications
 from inqtrix.agents.context_archive import archived_result_id
 from inqtrix.agents.context_sources import SOURCE_COVERAGE, coverage_records_from_artifact
-from inqtrix.agents.kernel.deps import kernel_deps
+from inqtrix.agents.kernel.deps import kernel_deps, run_coro
 from inqtrix.agents.kernel.middleware import (
     KERNEL_SUMMARY_PROMPT,
     message_text,
@@ -480,7 +482,7 @@ def render_summary_message(
     *,
     assignment: str,
     question: str,
-    answers: list[str],
+    clarifications: Sequence[Any],
     summary: str,
     archive_refs: list[str],
     archive_prefix: str,
@@ -491,10 +493,17 @@ def render_summary_message(
 
     A compaction must not change what is instruction and what is data. The
     summary condenses tool outputs, so it goes back fenced. The assignment,
-    the user's answers and the instructions of loaded skills travel next to
-    it, verbatim and outside the fence, read from the run, never from the
-    summary.
+    the user's own answers to the run's questions and the instructions of
+    loaded skills travel next to it, verbatim and outside the fence, read
+    from the run, never from the summary. The run's questions and the wording
+    of a chosen option are the model's own text: they come back as the
+    record of the clarifications, in its fence
+    (:func:`~inqtrix.agents.prompts.clarifications_section`).
+    *clarifications* are the entries
+    :func:`~inqtrix.agents.clarification.run_clarifications` builds from the
+    control store's records.
     """
+    from inqtrix.agents.prompts import clarifications_section
     from inqtrix.untrusted_content import untrusted_fence
 
     parts: list[str] = []
@@ -510,8 +519,13 @@ def render_summary_message(
         )
         if question:
             parts.append(f"Your task (restated from the run):\n{question}")
-    if answers:
-        parts.append("The user's answers to your questions in this run:\n" + "\n\n".join(answers))
+    clarified = clarifications_section(clarifications)
+    if clarified:
+        # The record keeps the two voices apart. What the user typed directs
+        # the work and outranks an attached rule, so it stands outside every
+        # fence; the questions and the wording of a chosen option are stored
+        # text of the model's and stay data.
+        parts.append(clarified)
     if skills:
         parts.append(
             "Instructions of the skills you loaded in this run, verbatim (they still apply):\n"
@@ -671,8 +685,19 @@ class InqtrixCompactionMiddleware(AgentMiddleware):
                 reason=ModelCapacityReason.CONTEXT_WINDOW,
             )
 
+    @staticmethod
+    def _clarification_request(deps: Any) -> Any:
+        """The store read of the run's clarifications, not yet awaited."""
+        return deps.control.list_clarifications(deps.run_id)
+
     def _fold(
-        self, request: Any, deps: Any, plan: CompactionPlan, summary: str, refs: list[str]
+        self,
+        request: Any,
+        deps: Any,
+        plan: CompactionPlan,
+        summary: str,
+        refs: list[str],
+        clarifications: Sequence[Any],
     ) -> CompactionRecord:
         record = request.state.get(COMPACTION_STATE)
         messages = list(request.messages)
@@ -680,11 +705,7 @@ class InqtrixCompactionMiddleware(AgentMiddleware):
         message = render_summary_message(
             assignment=run_assignment(messages),
             question=str(getattr(deps, "question", "") or "").strip(),
-            answers=[
-                str(answer).strip()
-                for answer in getattr(deps, "clarified_answers", None) or []
-                if str(answer).strip()
-            ],
+            clarifications=clarifications,
             summary=summary,
             archive_refs=archive_refs,
             archive_prefix=deps.context_archive_prefix,
@@ -716,7 +737,13 @@ class InqtrixCompactionMiddleware(AgentMiddleware):
     def _hold(deps: Any, plan: CompactionPlan) -> None:
         deps.compaction_hold_tokens = plan.tokens + regrowth(int(deps.context_trigger_tokens or 0))
 
-    def _can_shrink(self, request: Any, deps: Any, plan: CompactionPlan) -> bool:
+    def _can_shrink(
+        self,
+        request: Any,
+        deps: Any,
+        plan: CompactionPlan,
+        clarifications: Sequence[Any],
+    ) -> bool:
         """Whether a summary could shrink the view: the summary message without one must.
 
         Checked before the archive and the paid call, so a compaction that
@@ -726,7 +753,9 @@ class InqtrixCompactionMiddleware(AgentMiddleware):
         warn_if_the_assignment_crowds_the_trigger(
             run_assignment(list(request.messages)), int(deps.context_trigger_tokens or 0)
         )
-        floor = self._fold(request, deps, plan, "", [unwritten_section(deps.context_archive_prefix)])
+        floor = self._fold(
+            request, deps, plan, "", [unwritten_section(deps.context_archive_prefix)], clarifications
+        )
         _, size = self._view_after(request, deps, floor)
         if size < plan.tokens:
             return True
@@ -799,7 +828,13 @@ class InqtrixCompactionMiddleware(AgentMiddleware):
         plan = self._plan(request, deps)
         if plan.stalled:
             self._warn_stalled(deps, plan)
-        if not plan.compact or not self._can_shrink(request, deps, plan):
+        if not plan.compact:
+            return handler(request.override(messages=plan.view))
+        # Read from the control store, once per compaction: the record keeps
+        # the user's own words apart from the wording of a chosen option,
+        # which a transcript of the answered questions does not.
+        clarifications = run_clarifications(run_coro(self._clarification_request(deps)))
+        if not self._can_shrink(request, deps, plan, clarifications):
             return handler(request.override(messages=plan.view))
         before = request.state.get(COMPACTION_STATE)
         prompt = summary_request(before["summary"] if before else "", plan.summarized)
@@ -807,7 +842,9 @@ class InqtrixCompactionMiddleware(AgentMiddleware):
         refs = self._archive(deps, plan.evicted)
         with bind_purpose(COMPACTION_PURPOSE):
             reply = request.model.invoke(prompt)
-        new = self._fold(request, deps, plan, _summary_text(reply, deps.model or "kernel"), refs)
+        new = self._fold(
+            request, deps, plan, _summary_text(reply, deps.model or "kernel"), refs, clarifications
+        )
         view = self._settle(request, deps, plan, new)
         if view is None:
             return handler(request.override(messages=plan.view))
@@ -824,7 +861,12 @@ class InqtrixCompactionMiddleware(AgentMiddleware):
         plan = self._plan(request, deps)
         if plan.stalled:
             self._warn_stalled(deps, plan)
-        if not plan.compact or not self._can_shrink(request, deps, plan):
+        if not plan.compact:
+            return await handler(request.override(messages=plan.view))
+        clarifications = run_clarifications(
+            await aio.on_process_loop(self._clarification_request(deps))
+        )
+        if not self._can_shrink(request, deps, plan, clarifications):
             return await handler(request.override(messages=plan.view))
         before = request.state.get(COMPACTION_STATE)
         prompt = summary_request(before["summary"] if before else "", plan.summarized)
@@ -834,7 +876,9 @@ class InqtrixCompactionMiddleware(AgentMiddleware):
         refs = await asyncio.to_thread(self._archive, deps, plan.evicted)
         with bind_purpose(COMPACTION_PURPOSE):
             reply = await request.model.ainvoke(prompt)
-        new = self._fold(request, deps, plan, _summary_text(reply, deps.model or "kernel"), refs)
+        new = self._fold(
+            request, deps, plan, _summary_text(reply, deps.model or "kernel"), refs, clarifications
+        )
         view = self._settle(request, deps, plan, new)
         if view is None:
             return await handler(request.override(messages=plan.view))

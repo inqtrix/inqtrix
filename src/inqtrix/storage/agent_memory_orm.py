@@ -1,4 +1,4 @@
-"""SQLAlchemy Core definition of the workspace-agent memory candidate schema."""
+"""SQLAlchemy Core definition of the agent memory candidate schema."""
 
 from __future__ import annotations
 
@@ -103,4 +103,4 @@ agent_feedback = Table(
         "created_at",
     ),
 )
-"""User-scoped feedback history for workspace-agent runs."""
+"""User-scoped feedback history for agent runs."""

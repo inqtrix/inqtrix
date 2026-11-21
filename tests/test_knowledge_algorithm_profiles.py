@@ -296,8 +296,8 @@ def run_followup(
             mode="knowledge",
             question="Und die Haftung?",
             history=(
-                "Nutzer: Wie ist der Rahmenvertrag geregelt?\n"
-                "Assistent: Der Rahmenvertrag nennt den Auftragswert."
+                "User: Wie ist der Rahmenvertrag geregelt?\n"
+                "Assistant: Der Rahmenvertrag nennt den Auftragswert."
             ),
             knowledge_filters={"profile": "schnell"},
         ),
@@ -525,7 +525,7 @@ class TestProfileEvent:
             RunRequest(
                 mode="knowledge",
                 question="Und die Haftung?",
-                history="Nutzer: Was steht im Vertrag?",
+                history="User: Was steht im Vertrag?",
                 knowledge_filters={
                     "profile": "gruendlich",
                     "collection_ids": [],

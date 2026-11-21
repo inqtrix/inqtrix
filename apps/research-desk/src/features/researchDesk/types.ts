@@ -1,5 +1,9 @@
 import type { Locale } from '@/i18n/translations'
-import type { ResearchRunAccess, ResearchRunStatus } from '@/features/researchRuns/types'
+import type {
+  AgentOverrides,
+  ResearchRunAccess,
+  ResearchRunStatus,
+} from '@/features/researchRuns/types'
 
 export type LocalizedText = Record<Locale, string>
 
@@ -52,6 +56,9 @@ export type ResearchJob = {
   }
   phaseVisitCounts: Record<JobPhase, number>
   queueNote?: LocalizedText
+  /** The report profile the run was asked for, as its record stores it;
+   * absent for a run started without one, which gets no label. */
+  reportProfile?: NonNullable<AgentOverrides['reportProfile']>
   score?: string
   startedAtIso?: string
   startedAt?: string

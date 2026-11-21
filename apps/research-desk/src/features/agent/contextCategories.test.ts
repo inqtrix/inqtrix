@@ -10,7 +10,6 @@ import {
   agentMentionTarget,
   agentRuleSources,
   attachedReportsMax,
-  engineRefusesAttachments,
   mentionEmptyOpensLibrary,
   pickableCount,
   pillKindsKeptAfterSend,
@@ -39,7 +38,6 @@ const sources: AgentContextSources = {
   canvasDocuments: [{ artifactId: 'a1', name: 'memo.md', title: 'Memo' }],
   collections: [{ id: 'c1', title: 'EU-AI-Act-vec' }, { id: 'c2', title: 'Verträge' }],
   documents: [{ id: 'd1', title: 'Untitled.md' }],
-  engine: 'agent_kernel',
   pinnedCanvasDocumentId: null,
   reportIds: [],
   reportLimit: 3,
@@ -128,13 +126,6 @@ describe('agentContextCategories', () => {
     expect(category?.capUnchecked).toBe(true)
     // Control: a published cap is pre-checked, and nothing says otherwise.
     expect(reportCategory(sources)?.capUnchecked).toBeUndefined()
-  })
-
-  it('offers reports and canvas documents to the kernel engine only', () => {
-    // The server refuses both on a mission run; offering them there sent
-    // the user into a 400 after the click.
-    const mission = agentContextCategories({ ...sources, engine: 'workspace_agent' })
-    expect(mission.map((c) => c.id)).toEqual(['rule', 'document', 'collection'])
   })
 
   it('keeps a context pack with linked files visible, but not pickable, with its reason', () => {
@@ -405,38 +396,33 @@ describe('agentMentionEmptyState', () => {
   const categories = agentContextCategories(sources)
 
   it('names the query and where it searched', () => {
-    expect(agentMentionEmptyState({ categories, engine: 'agent_kernel', filter: 'zzz', scope: null }))
+    expect(agentMentionEmptyState({ categories, filter: 'zzz', scope: null }))
       .toEqual({ kind: 'noMatch', query: 'zzz', scope: null })
-    expect(agentMentionEmptyState({ categories, engine: 'agent_kernel', filter: 'zzz', scope: 'rule' }))
+    expect(agentMentionEmptyState({ categories, filter: 'zzz', scope: 'rule' }))
       .toEqual({ kind: 'noMatch', query: 'zzz', scope: 'rule' })
   })
 
   it('says how to enable a rule when none is offered', () => {
-    expect(agentMentionEmptyState({ categories: [], engine: 'agent_kernel', filter: '', scope: 'rule' }))
+    expect(agentMentionEmptyState({ categories: [], filter: '', scope: 'rule' }))
       .toEqual({ kind: 'noRules' })
   })
 
   it('says every enabled rule is attached instead of "none enabled"', () => {
     const attachedAll = agentContextCategories({ ...sources, ruleIds: ['pt_brief'] })
-    expect(agentMentionEmptyState({ categories: attachedAll, engine: 'agent_kernel', filter: '', scope: 'rule' }))
+    expect(agentMentionEmptyState({ categories: attachedAll, filter: '', scope: 'rule' }))
       .toEqual({ kind: 'blocked', reason: 'allAttached', scope: 'rule' })
   })
 
   it('names the reason of a blocked category', () => {
     const answering = agentContextCategories({ ...sources, answerMode: true })
-    expect(agentMentionEmptyState({ categories: answering, engine: 'agent_kernel', filter: '', scope: 'rule' }))
+    expect(agentMentionEmptyState({ categories: answering, filter: '', scope: 'rule' }))
       .toEqual({ kind: 'blocked', reason: 'answerMode', scope: 'rule' })
   })
 
-  it('says that reports need the kernel engine', () => {
-    expect(agentMentionEmptyState({ categories, engine: 'workspace_agent', filter: '', scope: 'report' }))
-      .toEqual({ kind: 'kernelOnly', scope: 'report' })
-  })
-
   it('never claims a missing collection for an empty root', () => {
-    expect(agentMentionEmptyState({ categories: [], engine: 'agent_kernel', filter: '', scope: null }))
+    expect(agentMentionEmptyState({ categories: [], filter: '', scope: null }))
       .toEqual({ kind: 'nothingAttachable' })
-    expect(agentMentionEmptyState({ categories, engine: 'agent_kernel', filter: '', scope: 'document' }))
+    expect(agentMentionEmptyState({ categories, filter: '', scope: 'document' }))
       .toEqual({ kind: 'emptyCategory', scope: 'document' })
   })
 })
@@ -482,7 +468,7 @@ describe('agentMentionPick', () => {
       kind: 'item',
     }])
     expect(agentMentionRows(attachedAll, 'rule', '')).toEqual([])
-    expect(agentMentionEmptyState({ categories: attachedAll, engine: 'agent_kernel', filter: '', scope: 'rule' }))
+    expect(agentMentionEmptyState({ categories: attachedAll, filter: '', scope: 'rule' }))
       .toEqual({ kind: 'blocked', reason: 'allAttached', scope: 'rule' })
   })
 
@@ -512,18 +498,6 @@ describe('agentMentionPick', () => {
     // No library to open on this surface: no action either.
     expect(agentMentionPick(undefined, blocked('allAttached'), { libraryAvailable: false }))
       .toEqual({ kind: 'none' })
-  })
-})
-
-describe('engineRefusesAttachments', () => {
-  it('flags reports and canvas context before a mission send, never for the kernel', () => {
-    // The server refuses both on a mission run with 400; attached under
-    // the kernel and then switched, the chips stayed and the send failed.
-    const none = { canvasAttached: false, reportCount: 0 }
-    expect(engineRefusesAttachments({ ...none, engine: 'workspace_agent', reportCount: 1 })).toBe(true)
-    expect(engineRefusesAttachments({ ...none, canvasAttached: true, engine: 'workspace_agent' })).toBe(true)
-    expect(engineRefusesAttachments({ ...none, engine: 'workspace_agent' })).toBe(false)
-    expect(engineRefusesAttachments({ canvasAttached: true, engine: 'agent_kernel', reportCount: 2 })).toBe(false)
   })
 })
 

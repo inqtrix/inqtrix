@@ -76,11 +76,7 @@ import {
   mergeRunSummary,
   VECTOR_INDEX_HISTORY_LIMIT,
 } from '@/features/project/types'
-import {
-  acknowledgeAgentTaskCancellation,
-  applyAgentRunEvent,
-} from '@/features/agent/events'
-import type { AgentPlanDraft as AgentPlanDraftState } from '@/features/agent/plan/usePlanApproval'
+import { applyAgentRunEvent } from '@/features/agent/events'
 import {
   agentApprovalFromWire,
   sessionArtifactMetaFromWire,
@@ -88,8 +84,6 @@ import {
   mergeAgentRunClarifications,
   agentArtifactFromWire,
   agentClarificationFromWire,
-  agentPatchFromWire,
-  agentPlanFromWire,
   DERIVED_AGENT_SESSION_UPDATED_AT,
   isAgentRunSummary,
   mergeAgentRunSummary,
@@ -110,8 +104,6 @@ import type {
   AgentArtifactDetailWire,
   AgentArtifactMetaWire,
   AgentClarificationWire,
-  AgentPatchWire,
-  AgentPlanWire,
   ServerAgentSession,
   ServerAgentSessionGroup,
 } from '@/features/agent/types'
@@ -128,6 +120,11 @@ import {
   type CanvasViewDescriptor,
 } from '@/features/canvas/types'
 import { moveItem } from '@/features/composer/reorder'
+import {
+  mergeMarkdownRevisions,
+  sameMarkdownText,
+  type MarkdownMergeResult,
+} from '@/features/editor/markdownMerge'
 import {
   knowledgeAnswerFromRunResult,
   knowledgeAnswerWithRunProgress,
@@ -149,6 +146,12 @@ export type EditorDocumentRecoveryCapture = {
   contentMarkdown: string
   documentId: string
 }
+
+/** The id and title of a conflict copy, made by the caller. */
+export type EditorConflictCopyIdentity = { id: string; title: string }
+
+/** A document's title and folder as this tab last saw them on the server. */
+export type EditorObservedServerMetadata = { folderId: string | null; title: string }
 
 import { initialSessionTitle, reconcileTitle, titleFromWire, titleWire, type TitleKind, type TitleWire, type TitledRecord } from '@/features/sessionTitle/model'
 
@@ -230,7 +233,14 @@ export type ResearchDeskAction =
       }>
       type: 'acknowledgeEditorCommentOutbox'
     }
-  | { group: EditorSuggestionGroupRecord; suggestions: EditorSuggestionRecord[]; type: 'createEditorSuggestionGroup' }
+  | {
+      group: EditorSuggestionGroupRecord
+      /** Set by an instruction run only: the new group replaces the open
+       * suggestions of the instruction run before it on the document. */
+      replacesPreviousInstructionRun?: boolean
+      suggestions: EditorSuggestionRecord[]
+      type: 'createEditorSuggestionGroup'
+    }
   | {
       anchor: EditorCommentThreadRecord['anchor']
       commentId: string
@@ -253,10 +263,17 @@ export type ResearchDeskAction =
     type: 'updateEditorSuggestionProposal'
     warnings?: string[]
   }
-  | { groupId: string; type: 'acceptEditorSuggestionGroup' }
   | { groupId: string; type: 'rejectEditorSuggestionGroup' }
   | { commentId: string | null; type: 'selectEditorComment' }
-  | { documentId: string; contentMarkdown: string; type: 'updateEditorDocumentMarkdown' }
+  | {
+      /** The record's text the editor showed when it made this text: the
+       * text it loaded, the last one it took over, or the last one it sent.
+       * A record that moved on since is merged with, not overwritten. */
+      baseContentMarkdown: string
+      contentMarkdown: string
+      documentId: string
+      type: 'updateEditorDocumentMarkdown'
+    }
   | { isVisible: boolean; type: 'setEditorAssistantVisible' }
   | { isVisible: boolean; type: 'setEditorCommentPanelVisible' }
   | { isVisible: boolean; type: 'setEditorTreeVisible' }
@@ -283,16 +300,6 @@ export type ResearchDeskAction =
     }
   | { type: 'appendApiRunEvents'; events: ResearchRunEvent[] }
   | { select?: boolean; summary: ResearchRunSummary; type: 'upsertAgentRunSummary' }
-  | { summary: ResearchRunSummary; type: 'upsertInspectedAgentChild' }
-  | { plan: AgentPlanWire | null; runId: string; type: 'setAgentRunPlan' }
-  | { runId: string; type: 'markAgentRunPlanStale' }
-  | {
-    childRunId: string | null
-    runId: string
-    status: 'cancel_requested' | 'cancelled'
-    taskId: string
-    type: 'ackAgentTaskCancel'
-  }
   | { approvals: AgentApprovalWire[]; runId: string; type: 'setAgentRunApprovals' }
   | { clarifications: AgentClarificationWire[]; runId: string; type: 'setAgentRunClarifications' }
   | {
@@ -307,8 +314,7 @@ export type ResearchDeskAction =
   | { artifacts: AgentArtifactMetaWire[]; sessionId: string; type: 'setAgentSessionArtifacts' }
   | { message: string; sessionId: string; type: 'markAgentSessionArtifactsError' }
   | { artifact: AgentArtifactDetailWire; runId: string; type: 'setAgentRunArtifactDetail' }
-  | { patch: AgentPatchWire; runId: string; type: 'setAgentRunPatch' }
-  | { childRunId?: string; message: string; runId: string; surface?: 'plan' | 'approvals' | 'clarifications' | 'artifacts' | 'answer' | 'patch' | 'child_gates'; type: 'markAgentRunError' }
+  | { childRunId?: string; message: string; runId: string; surface?: 'approvals' | 'clarifications' | 'artifacts' | 'answer' | 'child_gates'; type: 'markAgentRunError' }
   | { session: AgentSessionRecord; type: 'createAgentSession' }
   | { sessionId: string; sourcePolicy: AgentSourcePolicy; type: 'setAgentSessionSourcePolicy' }
   | { sessionId: string; knowledgeSwitch: AgentKnowledgeSwitch; type: 'setAgentSessionKnowledgeSwitch' }
@@ -328,8 +334,8 @@ export type ResearchDeskAction =
       sessions: ServerAgentSession[]
       type: 'upsertServerAgentSessions'
     }
-  | { draft: AgentPlanDraftState | null; runId: string; type: 'setAgentPlanDraft' }
   | { descriptor: CanvasViewDescriptor; source: CanvasOpenSource; type: 'openAgentCanvasView' }
+  | { type: 'openAgentCanvas' }
   | { key: string; type: 'activateAgentCanvasTab' }
   | { key: string; type: 'closeAgentCanvasTab' }
   | { key: string; type: 'pinAgentCanvasTab' }
@@ -368,6 +374,15 @@ export type ResearchDeskAction =
   | { documents: EditorDocumentRecord[]; type: 'upsertServerEditorDocuments' }
   | {
       documents: EditorDocumentRecord[]
+      /** Documents whose text this tab holds: the loaded ones, on the first
+       * hydration also those from the project file. A list row carries no
+       * text, so for a Markdown document among them only metadata is taken
+       * from it; text, revision, base and updatedAt stay local. */
+      localTextDocumentIds?: string[]
+      /** The title and folder this tab last saw on the server, per document:
+       * a local value still equal to it takes the server's new value, a
+       * different one is an open local change and stays. */
+      observedMetadata?: Record<string, EditorObservedServerMetadata>
       recoveryCaptures?: EditorDocumentRecoveryCapture[]
       /** Synchronously retired by the sync lifecycle before this reducer
        * transition so autosave cannot race the React render. */
@@ -381,19 +396,59 @@ export type ResearchDeskAction =
       type: 'activateEditorDocumentCollaboration'
     }
   | { document: EditorDocumentRecord; type: 'setServerEditorDocumentDetail' }
-  | { contentMarkdown: string; documentId: string; type: 'setServerEditorDocumentBody' }
-  | { documentId: string; revision: number; type: 'adoptEditorDocumentRevision' }
+  | {
+      contentMarkdown: string
+      documentId: string
+      /** The revision the text belongs to; both become the base. */
+      revision: number
+      type: 'setServerEditorDocumentBody'
+    }
+  | {
+      /** The text the save sent: the base of the new revision. Keystrokes
+       * made while the save ran are newer than that base. */
+      contentMarkdown: string
+      documentId: string
+      revision: number
+      type: 'adoptEditorDocumentRevision'
+    }
   | {
       documentId: string
       metadataRevision: number
       type: 'adoptEditorDocumentMetadataRevision'
     }
   | {
-      contentMarkdown: string
+      /** When the merge happens: the updatedAt of a record left with changes
+       * to save, and the creation time of a conflict copy. */
+      at: string
+      /** The copy that keeps this tab's version when the two versions
+       * overlap. The caller makes its id and title, so the reducer stays
+       * pure. */
+      conflictCopy: EditorConflictCopyIdentity
       documentId: string
-      pushedContentMarkdown: string
-      revision: number
-      type: 'rebaseServerEditorDocument'
+      observed: EditorObservedServerMetadata | null
+      /** The version another writer saved, with its text. */
+      server: {
+        contentMarkdown: string
+        folderId: string | null
+        revision: number
+        title: string
+      }
+      type: 'mergeServerEditorDocument'
+    }
+  | {
+      at: string
+      conflictCopy: EditorConflictCopyIdentity
+      documentId: string
+      /** The text the conversion took over, compared with the local text
+       * when the base is unknown. */
+      projectionMarkdown: string
+      type: 'copyEditorDocumentBeforeConversion'
+    }
+  | {
+      at: string
+      conflictCopy: EditorConflictCopyIdentity
+      documentId: string
+      type: 'copyPendingEditorConflictVersion'
     }
   | { folders: EditorFolderRecord[]; type: 'upsertServerEditorFolders' }
   | { comments: EditorCommentThreadRecord[]; type: 'upsertServerEditorComments' }
@@ -1282,8 +1337,36 @@ export function researchDeskReducer(
     }
   }
   if (action.type === 'updateEditorDocumentMarkdown') {
+    // The editor sends its whole text with the record text it was made on.
+    // While the record still holds that text, the editor's text replaces it.
+    // A merge can change the record before the editor shows the result (a
+    // keystroke in that moment is made on the text before): then the
+    // editor's text is merged with the record's (mergeMarkdownRevisions), so
+    // neither the keystroke nor the other writer's change is dropped. When
+    // the two overlap, the record keeps its version and the editor's text
+    // waits as the pending conflict version, which the sync hook keeps in a
+    // conflict copy at once.
     const document = state.editorDocuments[action.documentId]
     if (!document || document.contentMarkdown === action.contentMarkdown) return state
+    let contentMarkdown = action.contentMarkdown
+    if (document.contentMarkdown !== action.baseContentMarkdown) {
+      const merge = mergeMarkdownRevisions(
+        action.baseContentMarkdown,
+        action.contentMarkdown,
+        document.contentMarkdown,
+      )
+      if (merge.kind === 'conflict') {
+        return {
+          ...state,
+          editorDocuments: {
+            ...state.editorDocuments,
+            [document.id]: { ...document, pendingConflictMarkdown: action.contentMarkdown },
+          },
+        }
+      }
+      if (merge.contentMarkdown === document.contentMarkdown) return state
+      contentMarkdown = merge.contentMarkdown
+    }
     const updatedAt = new Date().toISOString()
     return {
       ...state,
@@ -1292,7 +1375,7 @@ export function researchDeskReducer(
         ...state.editorDocuments,
         [document.id]: {
           ...document,
-          contentMarkdown: action.contentMarkdown,
+          contentMarkdown,
           // revision is the last-synced server base and stays put across
           // local edits; the save sends base+1 and the CAS is against that
           // base, so a stale writer whose base is behind the server 409s
@@ -1450,6 +1533,7 @@ export function researchDeskReducer(
   }
   if (action.type === 'createEditorSuggestionGroup') {
     const now = new Date().toISOString()
+    // A new suggestion for a note replaces the open one of the same note.
     const commentIds = new Set(
       action.suggestions
         .map((suggestion) => suggestion.origin.commentId)
@@ -1460,7 +1544,12 @@ export function researchDeskReducer(
       commentIds,
       now,
     )
-    if (action.group.origin.kind === 'global_run' && !action.group.origin.commentId) {
+    // Beyond that, a new group replaces nothing unless an instruction run says
+    // so: whether the group is an instruction run is never read from its
+    // origin or its suggestions. The groups mirrored from agent patches carry
+    // the origin of a Markdown instruction run, and creating one must clear
+    // neither what an instruction run left open nor another agent patch.
+    if (action.replacesPreviousInstructionRun) {
       editorSuggestions = retireActiveDocumentInstructionSuggestions(
         editorSuggestions,
         action.group.documentId,
@@ -1582,17 +1671,15 @@ export function researchDeskReducer(
       },
     }
   }
-  if (action.type === 'acceptEditorSuggestionGroup' || action.type === 'rejectEditorSuggestionGroup') {
-    const status = action.type === 'acceptEditorSuggestionGroup' ? 'accepted' : 'rejected'
+  if (action.type === 'rejectEditorSuggestionGroup') {
     const now = new Date().toISOString()
     const editorSuggestions = { ...state.editorSuggestions }
     let changed = false
     for (const suggestion of Object.values(state.editorSuggestions)) {
-      // A suggestion whose passage changed can still be rejected, never accepted.
-      const decidable = suggestion.status === 'pending'
-        || (status === 'rejected' && suggestion.status === 'stale')
+      // A suggestion whose passage changed can still be rejected.
+      const decidable = suggestion.status === 'pending' || suggestion.status === 'stale'
       if (suggestion.groupId !== action.groupId || !decidable) continue
-      editorSuggestions[suggestion.id] = { ...suggestion, status, updatedAt: now }
+      editorSuggestions[suggestion.id] = { ...suggestion, status: 'rejected', updatedAt: now }
       changed = true
     }
     if (!changed) return state
@@ -1771,49 +1858,13 @@ export function researchDeskReducer(
     }
   }
   if (action.type === 'upsertAgentRunSummary') {
+    // A child run stays internal to its parent here as on the API path: a
+    // session deletion removes only the session's own runs.
+    if (action.summary.kind === 'agent_child') return state
     // Server-derived rows: never dirty (session-scoped, not project files).
     return withAgentRunSummary(state, action.summary, Boolean(action.select), {
       retitle: true,
     })
-  }
-  if (action.type === 'upsertInspectedAgentChild') {
-    const summary = action.summary
-    if (summary.kind !== 'agent_child') return state
-    const owner = summary.root_run_id ?? summary.parent_run_id
-    if (!owner || !state.agentRuns[owner]) return state
-    return {
-      ...state,
-      agentRuns: {
-        ...state.agentRuns,
-        [summary.run_id]: mergeAgentRunSummary(state.agentRuns[summary.run_id], summary),
-      },
-    }
-  }
-  if (action.type === 'setAgentRunPlan') {
-    // `plan: null` = the server has no plan yet (pre-planning 404); the
-    // stale flag still clears so the fetch effect cannot loop.
-    return updateAgentRun(state, action.runId, (run) => ({
-      ...run,
-      plan: action.plan ? agentPlanFromWire(action.plan) : run.plan,
-      planStale: false,
-    }))
-  }
-  if (action.type === 'markAgentRunPlanStale') {
-    // View-open re-flags the plan through the ONE background fetch path
-    // (useAgentControlApi); idempotent while already flagged, and never
-    // `dirty` (server-derived state).
-    return updateAgentRun(state, action.runId, (run) =>
-      run.planStale ? run : { ...run, planStale: true })
-  }
-  if (action.type === 'ackAgentTaskCancel') {
-    return updateAgentRun(state, action.runId, (run) => (
-      acknowledgeAgentTaskCancellation(
-        run,
-        action.taskId,
-        action.status,
-        action.childRunId,
-      )
-    ))
   }
   if (action.type === 'setAgentRunApprovals') {
     // Reconcile instead of replace: a stale full-list refetch (racing the
@@ -2012,14 +2063,6 @@ export function researchDeskReducer(
       }
     })
   }
-  if (action.type === 'setAgentRunPatch') {
-    return updateAgentRun(state, action.runId, (run) => ({
-      ...run,
-      patch: agentPatchFromWire(action.patch),
-      patchId: action.patch.patch_id,
-      patchStale: false,
-    }))
-  }
   if (action.type === 'markAgentRunError') {
     // A failed control fetch clears its stale flag: retrying on the next
     // render would hammer the endpoint in a tight loop — the next SSE
@@ -2027,13 +2070,11 @@ export function researchDeskReducer(
     return updateAgentRun(state, action.runId, (run) => ({
       ...run,
       error: action.message,
-      ...(action.surface === 'plan' ? { planStale: false } : {}),
       ...(action.surface === 'approvals' ? { approvalsStale: false } : {}),
       ...(action.surface === 'clarifications'
         ? { clarificationsStale: false }
         : {}),
       ...(action.surface === 'artifacts' ? { artifactsStale: false } : {}),
-      ...(action.surface === 'patch' ? { patchStale: false } : {}),
       ...(action.surface === 'child_gates'
         && action.childRunId
         && run.childGates[action.childRunId]
@@ -2470,12 +2511,6 @@ export function researchDeskReducer(
       ui,
     }
   }
-  if (action.type === 'setAgentPlanDraft') {
-    const drafts = { ...state.agentPlanDrafts }
-    if (action.draft === null) delete drafts[action.runId]
-    else drafts[action.runId] = action.draft
-    return { ...state, agentPlanDrafts: drafts }
-  }
   if (action.type === 'openAgentCanvasView') {
     // Tab semantics live in the pure helpers (features/canvas/tabs.ts):
     // user opens create/focus pinned tabs, agent opens drive the one
@@ -2487,6 +2522,12 @@ export function researchDeskReducer(
     )
     if (next === state.agentCanvas) return state
     return { ...state, agentCanvas: next }
+  }
+  if (action.type === 'openAgentCanvas') {
+    // The panel without a view to show: a session without a run. The host
+    // renders its empty state until a run gives it a tab.
+    if (state.agentCanvas.open) return state
+    return { ...state, agentCanvas: { ...state.agentCanvas, open: true } }
   }
   if (action.type === 'activateAgentCanvasTab') {
     const next = activateCanvasTab(state.agentCanvas, action.key)
@@ -2720,13 +2761,24 @@ export function researchDeskReducer(
       }
     }
     const newIds: string[] = []
+    const enteredCollaborationIds: string[] = []
+    const localTextDocumentIds = new Set(action.localTextDocumentIds ?? [])
     for (const incoming of action.documents) {
       const local = editorDocuments[incoming.id]
       if (local) {
-        editorDocuments[incoming.id] = mergeServerEditorDocumentMetadata(
+        editorDocuments[incoming.id] = withPendingConflictVersionOf(
           local,
-          incoming,
+          keepsLocalEditorText(incoming, localTextDocumentIds)
+            ? mergeServerEditorDocumentMetadataOnly(
+                local,
+                incoming,
+                action.observedMetadata?.[incoming.id] ?? null,
+              )
+            : mergeServerEditorDocumentMetadata(local, incoming),
         )
+        if (entersCollaborationMode(local, editorDocuments[incoming.id])) {
+          enteredCollaborationIds.push(incoming.id)
+        }
       } else {
         editorDocuments[incoming.id] = {
           ...incoming,
@@ -2806,9 +2858,13 @@ export function researchDeskReducer(
         }
       }
       const recoverySuggestionId = createId('editor-suggestion')
+      // The copy is local work and takes no server identity along. An agent
+      // patch's suggestion is decided there like any local one: its patch
+      // row went with the deleted document.
       const localSuggestion = { ...suggestion }
       delete localSuggestion.collaborationPublication
       delete localSuggestion.privateDraft
+      delete localSuggestion.serverPatch
       editorSuggestions[recoverySuggestionId] = {
         ...localSuggestion,
         documentId: recovery.id,
@@ -2816,6 +2872,12 @@ export function researchDeskReducer(
         id: recoverySuggestionId,
         origin,
       }
+    }
+    // A document converted elsewhere drops its agent patch suggestions here
+    // as one converted in this editor does.
+    let suggestionMaps: EditorSuggestionMaps = { editorSuggestionGroups, editorSuggestions }
+    for (const documentId of enteredCollaborationIds) {
+      suggestionMaps = withoutAgentPatchSuggestions(suggestionMaps, documentId)
     }
     const openDocumentIds = state.editorUi.openDocumentIds.flatMap((documentId) => {
       if (!retiredDocumentIds.has(documentId)) return [documentId]
@@ -2850,8 +2912,8 @@ export function researchDeskReducer(
       editorComments,
       editorDocumentOrder,
       editorDocuments,
-      editorSuggestionGroups,
-      editorSuggestions,
+      editorSuggestionGroups: suggestionMaps.editorSuggestionGroups,
+      editorSuggestions: suggestionMaps.editorSuggestions,
       editorUi: {
         ...state.editorUi,
         activeDocumentId,
@@ -2877,13 +2939,17 @@ export function researchDeskReducer(
     if (action.documents.length === 0) return state
     const editorDocuments = { ...state.editorDocuments }
     const newIds: string[] = []
+    const enteredCollaborationIds: string[] = []
     for (const incoming of action.documents) {
       const local = editorDocuments[incoming.id]
       if (local) {
-        editorDocuments[incoming.id] = mergeServerEditorDocumentMetadata(
+        editorDocuments[incoming.id] = withPendingConflictVersionOf(
           local,
-          incoming,
+          mergeServerEditorDocumentMetadata(local, incoming),
         )
+        if (entersCollaborationMode(local, editorDocuments[incoming.id])) {
+          enteredCollaborationIds.push(incoming.id)
+        }
       } else {
         editorDocuments[incoming.id] = {
           ...incoming,
@@ -2898,7 +2964,19 @@ export function researchDeskReducer(
     const editorDocumentOrder = sortedNew.length > 0
       ? [...sortedNew, ...state.editorDocumentOrder]
       : state.editorDocumentOrder
-    return { ...state, editorDocumentOrder, editorDocuments }
+    // A document converted elsewhere drops its agent patch suggestions here
+    // as one converted in this editor does.
+    let suggestionMaps: EditorSuggestionMaps = state
+    for (const documentId of enteredCollaborationIds) {
+      suggestionMaps = withoutAgentPatchSuggestions(suggestionMaps, documentId)
+    }
+    return {
+      ...state,
+      editorDocumentOrder,
+      editorDocuments,
+      editorSuggestionGroups: suggestionMaps.editorSuggestionGroups,
+      editorSuggestions: suggestionMaps.editorSuggestions,
+    }
   }
   if (action.type === 'activateEditorDocumentCollaboration') {
     const document = state.editorDocuments[action.documentId]
@@ -2918,12 +2996,15 @@ export function researchDeskReducer(
           serverSynced: true,
         },
       },
+      ...withoutAgentPatchSuggestions(state, document.id),
     }
   }
   if (action.type === 'setServerEditorDocumentBody') {
-    // Load-on-open: fill a document's body from the server. Never changes
-    // updatedAt (so the autosave does not read it back as a local edit)
-    // and never sets dirty.
+    // Load-on-open: fill a document's body from the server, with the
+    // revision it belongs to; the pair is the base the next save and any
+    // merge build on. The revision of the list may be older than the text.
+    // Never changes updatedAt (so the autosave does not read it back as a
+    // local edit) and never sets dirty.
     const document = state.editorDocuments[action.documentId]
     if (!document) return state
     return {
@@ -2933,16 +3014,19 @@ export function researchDeskReducer(
         [action.documentId]: {
           ...document,
           contentMarkdown: action.contentMarkdown,
+          revision: action.revision,
+          syncBase: { contentMarkdown: action.contentMarkdown, revision: action.revision },
         },
       },
     }
   }
   if (action.type === 'adoptEditorDocumentRevision') {
     // A successful save advanced the server to this revision; adopt it as the
-    // new base. Revision-only — never touches content/updatedAt/dirty, so a
-    // live keystroke made during the save keeps its newer body and the flush
-    // fingerprint (updatedAt) stays put. No-op if the revision did not move
-    // forward (a late/duplicate adopt must not rewind a fresher base).
+    // new base, with the text the save sent. Never touches content/updatedAt/
+    // dirty, so a live keystroke made during the save keeps its newer body,
+    // stays outside the base, and the flush fingerprint (updatedAt) stays
+    // put. No-op if the revision did not move forward (a late/duplicate
+    // adopt must not rewind a fresher base).
     const document = state.editorDocuments[action.documentId]
     if (
       !document
@@ -2950,6 +3034,8 @@ export function researchDeskReducer(
       || (
         action.revision === document.revision
         && document.serverSynced === true
+        && document.syncBase?.revision === action.revision
+        && document.syncBase.contentMarkdown === action.contentMarkdown
       )
     ) return state
     return {
@@ -2958,8 +3044,9 @@ export function researchDeskReducer(
         ...state.editorDocuments,
         [action.documentId]: {
           ...document,
-          revision: Math.max(document.revision, action.revision),
+          revision: action.revision,
           serverSynced: true,
+          syncBase: { contentMarkdown: action.contentMarkdown, revision: action.revision },
         },
       },
     }
@@ -2988,47 +3075,118 @@ export function researchDeskReducer(
       },
     }
   }
-  if (action.type === 'rebaseServerEditorDocument') {
-    // Autosave lost the server's revision guard (a concurrent writer —
-    // typically an agent patch apply — advanced the document). Two cases,
-    // distinguished by whether the user kept typing during the PUT->GET
-    // window (pushedContentMarkdown is what the failed PUT carried):
+  if (action.type === 'mergeServerEditorDocument') {
+    // Another writer saved a newer version of a Markdown document: a second
+    // tab, an accepted agent patch, a save that won the revision guard. Its
+    // text is merged with the local text at the moment of this action, so
+    // every keystroke up to here counts, against the base both were written
+    // on (mergeMarkdownRevisions, line by line as Git merges):
+    //
+    // - no own changes, or none left after the merge: the record takes the
+    //   server's text and revision; nothing to save;
+    // - own changes merged cleanly: the merged text on the server's
+    //   revision, with updatedAt moved so the autosave writes it as the next
+    //   revision;
+    // - the changes overlap: the record takes the server's version, and the
+    //   local version becomes a new document right before it (the conflict
+    //   copy) that the caller saves at once. Nothing pauses and nothing is
+    //   deleted.
+    //
+    // An unknown base (none, or one of another revision) merges only equal
+    // texts; any other text is kept in a copy. The version the record already
+    // stands on, reported again, changes nothing, so two ways that report the
+    // same version neither double text nor make a conflict out of it. A
+    // server version at the record's revision or behind it that is not that
+    // version (a restored database) is no newer version of the record's base:
+    // it merges like one of an unknown base, so the record's text is kept
+    // and the record moves to the server's revision. A document in
+    // collaboration mode by now belongs to the collaboration, which never
+    // takes Markdown merges.
     const document = state.editorDocuments[action.documentId]
-    if (!document) return state
-    if (document.contentMarkdown === action.pushedContentMarkdown) {
-      // No local edit since the failed push: adopt the server body +
-      // revision. Never touches updatedAt / dirty (mirror of
-      // setServerEditorDocumentBody) — this window is now in sync.
+    if (!document || document.contentMode === 'collaboration') return state
+    const standingOn = knownSyncBase(document)
+    if (
+      action.server.revision === document.revision
+      && standingOn
+      && sameMarkdownText(standingOn.contentMarkdown, action.server.contentMarkdown)
+    ) return state
+    const base = action.server.revision > document.revision ? standingOn : null
+    const merge: MarkdownMergeResult = base
+      ? mergeMarkdownRevisions(base.contentMarkdown, document.contentMarkdown, action.server.contentMarkdown)
+      : sameMarkdownText(document.contentMarkdown, action.server.contentMarkdown)
+        ? { contentMarkdown: action.server.contentMarkdown, kind: 'merged' }
+        : { kind: 'conflict', reason: 'overlap' }
+    const metadata = adoptObservedServerMetadata(document, action.server, action.observed)
+    const contentMarkdown = merge.kind === 'merged'
+      ? merge.contentMarkdown
+      : action.server.contentMarkdown
+    // A record that differs from the server's version, in its text or in an
+    // open rename or move, has something to save.
+    const changesToSave = contentMarkdown !== action.server.contentMarkdown
+      || metadata.title !== action.server.title
+      || metadata.folderId !== action.server.folderId
+    const merged: EditorDocumentRecord = {
+      ...document,
+      ...metadata,
+      contentMarkdown,
+      revision: action.server.revision,
+      serverSynced: true,
+      syncBase: { contentMarkdown: action.server.contentMarkdown, revision: action.server.revision },
+      ...(changesToSave ? { updatedAt: action.at } : {}),
+    }
+    const editorDocuments = { ...state.editorDocuments, [merged.id]: merged }
+    if (merge.kind === 'merged') {
       return {
         ...state,
-        editorDocuments: {
-          ...state.editorDocuments,
-          [action.documentId]: {
-            ...document,
-            contentMarkdown: action.contentMarkdown,
-            revision: action.revision,
-            serverSynced: true,
-          },
-        },
+        dirty: changesToSave ? true : state.dirty,
+        editorDocuments,
       }
     }
-    // The user typed during the window: those keystrokes are a genuinely
-    // newer local edit. KEEP them and rebase the revision onto the server
-    // (the base), so the next flush re-pushes the live edit as base+1 — the
-    // interactive user wins over the concurrent writer for this narrow
-    // overlap, and nothing is silently discarded.
-    return {
+    return withEditorConflictCopy(
+      { ...state, editorDocuments },
+      merged,
+      document.contentMarkdown,
+      action.conflictCopy,
+      action.at,
+    )
+  }
+  if (action.type === 'copyEditorDocumentBeforeConversion') {
+    // The document was converted to collaboration elsewhere: the server
+    // refuses Markdown saves now, and the converted text replaces the
+    // record next. Own changes — the local text differs from the base, or,
+    // with the base unknown, from the converted text — go to a conflict
+    // copy first. Without own changes nothing happens.
+    const document = state.editorDocuments[action.documentId]
+    if (!document) return state
+    const base = knownSyncBase(document)
+    const ownChanges = !sameMarkdownText(
+      document.contentMarkdown,
+      base ? base.contentMarkdown : action.projectionMarkdown,
+    )
+    if (!ownChanges) return state
+    return withEditorConflictCopy(
+      state,
+      document,
+      document.contentMarkdown,
+      action.conflictCopy,
+      action.at,
+    )
+  }
+  if (action.type === 'copyPendingEditorConflictVersion') {
+    // The editor's text overlapped a version that reached the record before
+    // the editor showed it (see updateEditorDocumentMarkdown): it becomes a
+    // conflict copy right before the record, and the record keeps its text.
+    const document = state.editorDocuments[action.documentId]
+    const pending = document?.pendingConflictMarkdown
+    if (!document || pending === undefined) return state
+    const record: EditorDocumentRecord = { ...document }
+    delete record.pendingConflictMarkdown
+    const cleared: ResearchDeskState = {
       ...state,
-      dirty: true,
-      editorDocuments: {
-        ...state.editorDocuments,
-        [action.documentId]: {
-          ...document,
-          revision: action.revision,
-          serverSynced: true,
-        },
-      },
+      editorDocuments: { ...state.editorDocuments, [record.id]: record },
     }
+    if (sameMarkdownText(pending, record.contentMarkdown)) return cleared
+    return withEditorConflictCopy(cleared, record, pending, action.conflictCopy, action.at)
   }
   if (action.type === 'upsertServerEditorFolders') {
     if (action.folders.length === 0) return state
@@ -3054,12 +3212,31 @@ export function researchDeskReducer(
   if (action.type === 'setServerEditorDocumentDetail') {
     const existing = state.editorDocuments[action.document.id]
     if (!existing) return state
+    // A document converted elsewhere drops its agent patch suggestions here
+    // as one converted in this editor does.
+    let suggestionMaps: EditorSuggestionMaps = state
+    if (entersCollaborationMode(existing, action.document)) {
+      suggestionMaps = withoutAgentPatchSuggestions(suggestionMaps, action.document.id)
+    }
+    // An exact Markdown detail is a server state with known text: it is the
+    // base. A collaboration document has no Markdown base.
+    const document: EditorDocumentRecord = action.document.contentMode === 'collaboration'
+      ? action.document
+      : {
+          ...action.document,
+          syncBase: {
+            contentMarkdown: action.document.contentMarkdown,
+            revision: action.document.revision,
+          },
+        }
     return {
       ...state,
       editorDocuments: {
         ...state.editorDocuments,
-        [action.document.id]: action.document,
+        [action.document.id]: withPendingConflictVersionOf(existing, document),
       },
+      editorSuggestionGroups: suggestionMaps.editorSuggestionGroups,
+      editorSuggestions: suggestionMaps.editorSuggestions,
     }
   }
   if (action.type === 'upsertServerEditorComments') {
@@ -6353,6 +6530,122 @@ function mergeServerEditorDocumentMetadata(
   }
 }
 
+/** Whether a refresh of the document list keeps a document's local text:
+ * this tab holds its text, and the server still has it in Markdown mode. A
+ * document converted elsewhere follows the collaboration lifecycle as
+ * before. The sync hook seeds its save fingerprints by the same rule. */
+export function keepsLocalEditorText(
+  incoming: EditorDocumentRecord,
+  localTextDocumentIds: ReadonlySet<string>,
+): boolean {
+  return localTextDocumentIds.has(incoming.id) && incoming.contentMode !== 'collaboration'
+}
+
+/** A list row for a document whose text this tab holds. The row carries no
+ * text, so taking its revision would put a revision under a text it does not
+ * belong to, and the next save would overwrite the other writer: only
+ * metadata is taken. Text, revision, base and updatedAt stay local; the sync
+ * hook merges the newer text itself. */
+function mergeServerEditorDocumentMetadataOnly(
+  local: EditorDocumentRecord,
+  incoming: EditorDocumentRecord,
+  observed: EditorObservedServerMetadata | null,
+): EditorDocumentRecord {
+  const titleAndFolder = observed
+    ? adoptObservedServerMetadata(local, incoming, observed)
+    : pickTitleAndFolder(incoming.updatedAt > local.updatedAt ? incoming : local)
+  const record: EditorDocumentRecord = {
+    ...mergeServerEditorDocumentMetadata(local, incoming),
+    ...titleAndFolder,
+    contentMarkdown: local.contentMarkdown,
+    revision: local.revision,
+    updatedAt: local.updatedAt,
+  }
+  if (local.syncBase) {
+    record.syncBase = local.syncBase
+  } else {
+    delete record.syncBase
+  }
+  return record
+}
+
+/** Title and folder after a look at the server: a local value still equal to
+ * what this tab last saw there takes the server's value; a different one is
+ * an open local rename or move and stays. Without an observation the local
+ * values stay. */
+function adoptObservedServerMetadata(
+  local: Pick<EditorDocumentRecord, 'folderId' | 'title'>,
+  server: Pick<EditorDocumentRecord, 'folderId' | 'title'>,
+  observed: EditorObservedServerMetadata | null,
+): Pick<EditorDocumentRecord, 'folderId' | 'title'> {
+  return {
+    folderId: observed && local.folderId === observed.folderId ? server.folderId : local.folderId,
+    title: observed && local.title === observed.title ? server.title : local.title,
+  }
+}
+
+function pickTitleAndFolder(
+  document: Pick<EditorDocumentRecord, 'folderId' | 'title'>,
+): Pick<EditorDocumentRecord, 'folderId' | 'title'> {
+  return { folderId: document.folderId, title: document.title }
+}
+
+/** `next` with the pending conflict version of `previous`: a record taken
+ * from the server must not drop the editor text the sync hook has not kept
+ * in a copy yet. */
+function withPendingConflictVersionOf(
+  previous: EditorDocumentRecord,
+  next: EditorDocumentRecord,
+): EditorDocumentRecord {
+  return previous.pendingConflictMarkdown === undefined
+    ? next
+    : { ...next, pendingConflictMarkdown: previous.pendingConflictMarkdown }
+}
+
+/** The base of the local text, or `null` when that text's base is unknown. */
+function knownSyncBase(
+  document: EditorDocumentRecord,
+): NonNullable<EditorDocumentRecord['syncBase']> | null {
+  return document.syncBase?.revision === document.revision ? document.syncBase : null
+}
+
+/** The state with a conflict copy holding `contentMarkdown` right before
+ * `original` in the document order: an ordinary document in the original's
+ * folder, not a recovery copy. Nothing opens it; the caller saves it at once,
+ * and its title says what it is once this session is gone. */
+function withEditorConflictCopy(
+  state: ResearchDeskState,
+  original: EditorDocumentRecord,
+  contentMarkdown: string,
+  identity: EditorConflictCopyIdentity,
+  at: string,
+): ResearchDeskState {
+  const copy: EditorDocumentRecord = {
+    contentMarkdown,
+    createdAt: at,
+    folderId: original.folderId,
+    id: identity.id,
+    // Base 0 = never on the server; the first save creates revision 1.
+    revision: 0,
+    source: original.source,
+    ...(original.sourceRunId ? { sourceRunId: original.sourceRunId } : {}),
+    title: identity.title,
+    updatedAt: at,
+  }
+  const originalIndex = state.editorDocumentOrder.indexOf(original.id)
+  const editorDocumentOrder = [...state.editorDocumentOrder]
+  editorDocumentOrder.splice(Math.max(0, originalIndex), 0, copy.id)
+  return {
+    ...state,
+    dirty: true,
+    editorDocumentOrder,
+    editorDocuments: {
+      ...state.editorDocuments,
+      [copy.id]: copy,
+    },
+  }
+}
+
 function withEditorDocument(
   state: ResearchDeskState,
   document: EditorDocumentRecord,
@@ -7199,23 +7492,74 @@ function reconcilePrivateSuggestionDraftRecords(
     : state
 }
 
-/** Whether the next instruction run on *documentId* replaces *suggestion*.
- * The editor assistant names these before it is asked again. */
+/** Whether the next instruction run on *documentId* replaces *suggestion*:
+ * an open suggestion of the instruction run before it. The editor assistant
+ * names these before it is asked again, and an instruction run replaces them
+ * when it creates its group (`replacesPreviousInstructionRun`). */
 export function isReplacedByNextInstructionRun(
   suggestion: EditorSuggestionRecord,
   documentId: string,
 ): boolean {
-  // Genau die Vorschlaege des VORIGEN Anweisungslaufs, nicht mehr.
-  // 'global_run' ohne Traeger ist der Markdown-Modus; 'assistant_edit'
-  // ist der Kollaborationsmodus. Ein 'global_run' MIT commentId stammt
-  // dagegen aus einer Sammel-Notiz des Nutzers und geht diesen Lauf
-  // nichts an -- ihn mitzuverwerfen hiesse, offene Arbeit des Nutzers
-  // stillschweigend wegzuraeumen.
+  // An agent patch's suggestion carries the origin of a Markdown run's, but
+  // it ends only with the server's decision on its patch, never because an
+  // instruction run came after it.
+  if (suggestion.serverPatch) return false
+  // Exactly the suggestions of the PREVIOUS instruction run, no more:
+  // 'global_run' without a commentId in Markdown mode, 'assistant_edit' (on
+  // its carrier row) in collaboration mode. A 'global_run' WITH a commentId
+  // comes from a note of the user's and is none of the run's business;
+  // replacing it would silently clear the user's open work.
   const fromInstructionRun = suggestion.origin.kind === 'assistant_edit'
     || (suggestion.origin.kind === 'global_run' && !suggestion.origin.commentId)
   return suggestion.documentId === documentId
     && fromInstructionRun
     && (suggestion.status === 'pending' || suggestion.status === 'stale')
+}
+
+type EditorSuggestionMaps = Pick<ProjectState, 'editorSuggestionGroups' | 'editorSuggestions'>
+
+/** Whether *next*, the document as the server now shows it, takes *previous*
+ * from Markdown into collaboration mode: the document was converted, here or
+ * elsewhere. */
+function entersCollaborationMode(
+  previous: EditorDocumentRecord,
+  next: EditorDocumentRecord,
+): boolean {
+  return previous.contentMode !== 'collaboration' && next.contentMode === 'collaboration'
+}
+
+/** The suggestions and groups of *maps* without those mirrored from the
+ * agent patches of *documentId*, for a document that enters collaboration
+ * mode, by a conversion in this editor or one the server shows, in its
+ * document metadata or in the document's detail. Such a document takes no
+ * agent patch, so its patches leave the review undecided: their rows stay
+ * pending on the server, where only their creator still sees them. Without
+ * such suggestions both maps stay as they are. */
+function withoutAgentPatchSuggestions(
+  maps: EditorSuggestionMaps,
+  documentId: string,
+): EditorSuggestionMaps {
+  const groupIds = new Set<string>()
+  const editorSuggestions = Object.fromEntries(
+    Object.entries(maps.editorSuggestions).filter(([, suggestion]) => {
+      if (suggestion.documentId !== documentId || !suggestion.serverPatch) return true
+      groupIds.add(suggestion.groupId)
+      return false
+    }),
+  )
+  if (groupIds.size === 0) {
+    return {
+      editorSuggestionGroups: maps.editorSuggestionGroups,
+      editorSuggestions: maps.editorSuggestions,
+    }
+  }
+  const keptGroupIds = new Set(Object.values(editorSuggestions).map((suggestion) => suggestion.groupId))
+  const editorSuggestionGroups = Object.fromEntries(
+    Object.entries(maps.editorSuggestionGroups).filter(([groupId]) => (
+      !groupIds.has(groupId) || keptGroupIds.has(groupId)
+    )),
+  )
+  return { editorSuggestionGroups, editorSuggestions }
 }
 
 function retireActiveDocumentInstructionSuggestions(
@@ -7325,12 +7669,10 @@ export function replaceApiRunSummaries(
     merged.ui.selectedJobId,
   )
 
-  // The paginated root listing intentionally does not hydrate child summaries.
-  // Keep already-loaded descendants while their root remains visible; if the
-  // root disappears (delete/share revoke), prune every descendant with it.
-  const retainedAgentIds = retainedAgentTreeIds(merged.agentRuns, visibleAgentIds)
+  // An agent run the listing no longer carries (deleted, share revoked)
+  // leaves the desk.
   const agentRuns = Object.fromEntries(
-    Object.entries(merged.agentRuns).filter(([runId]) => retainedAgentIds.has(runId)),
+    Object.entries(merged.agentRuns).filter(([runId]) => visibleAgentIds.has(runId)),
   )
   const agentSessions = Object.fromEntries(
     merged.agentSessionOrder.flatMap((sessionId) => {
@@ -7456,29 +7798,9 @@ export function adoptImportedApiRun(
   }
 }
 
-function retainedAgentTreeIds(
-  agentRuns: Readonly<Record<string, AgentRunRecord>>,
-  visibleRootIds: ReadonlySet<string>,
-): Set<string> {
-  const retained = new Set(visibleRootIds)
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const [runId, run] of Object.entries(agentRuns)) {
-      if (retained.has(runId) || run.kind !== 'agent_child') continue
-      const rootVisible = run.rootRunId !== undefined
-        && visibleRootIds.has(run.rootRunId)
-      const parentRetained = run.parentRunId !== undefined
-        && retained.has(run.parentRunId)
-      if (rootVisible || parentRetained) {
-        retained.add(runId)
-        changed = true
-      }
-    }
-  }
-  return retained
-}
-
+/** The runs a session deletion removes: the session's turns. Desk records
+ * are root runs only (both summary upserts refuse a child), so there are no
+ * descendants to follow. */
 function agentRunIdsForDeletedSession(
   agentRuns: Readonly<Record<string, AgentRunRecord>>,
   sessionId: string,
@@ -7487,20 +7809,6 @@ function agentRunIdsForDeletedSession(
   const removed = new Set(directRunIds)
   for (const [runId, run] of Object.entries(agentRuns)) {
     if (run.sessionId === sessionId) removed.add(runId)
-  }
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const [runId, run] of Object.entries(agentRuns)) {
-      if (removed.has(runId)) continue
-      if (
-        (run.rootRunId !== undefined && removed.has(run.rootRunId))
-        || (run.parentRunId !== undefined && removed.has(run.parentRunId))
-      ) {
-        removed.add(runId)
-        changed = true
-      }
-    }
   }
   return removed
 }
@@ -7512,12 +7820,7 @@ function matchesCompletedAgentSessionDeletion(
   const receipts = state.agentSessionDeletionReceipts
   if (!receipts) return false
   if (summary.session_id && receipts[summary.session_id]) return true
-  const candidates = [summary.run_id, summary.root_run_id, summary.parent_run_id]
-    .filter((value): value is string => Boolean(value))
-  return Object.values(receipts).some((receipt) => {
-    const removed = new Set(receipt.runIds)
-    return candidates.some((runId) => removed.has(runId))
-  })
+  return Object.values(receipts).some((receipt) => receipt.runIds.includes(summary.run_id))
 }
 
 /** Merge an agent-run summary and keep its session's turn list in sync.
@@ -7526,7 +7829,7 @@ function matchesCompletedAgentSessionDeletion(
 /**
  * The canvas slice to carry when the selected agent session becomes
  * *nextSessionId*. The canvas is a workspace-global slice whose tabs
- * address ONE session's runs (plan/run/document by runId); the timeline
+ * address ONE session's runs (run/document by runId); the timeline
  * is strictly per-session. So EVERY transition that changes the selected
  * session to a different value must clear the canvas — otherwise a
  * pinned tab from the previous session keeps rendering its content

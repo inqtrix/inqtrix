@@ -10,16 +10,24 @@ not enforced here.
 from __future__ import annotations
 
 import uuid
+from inqtrix.agents.tier_policy import AGENT_TIERS
 from inqtrix.model_routing import TIER_NAMES
 from inqtrix.project.account_preferences_ports import (
     AccountPreferences,
     AccountPreferencesStore,
 )
+from inqtrix.report_profiles import ReportProfile
 
 _VALID_MODEL_TIER = frozenset(TIER_NAMES) | {""}
 """Tier domain for the per-surface model preference, derived from the routing
 table rather than re-spelled here — a second literal list would drift from the
 tiers the resolver actually knows. ``''`` means "no preference"."""
+
+_VALID_LAST_RESEARCH_PROFILE = frozenset(profile.value for profile in ReportProfile) | {""}
+"""The report profiles a research run accepts, plus ``''`` for no pick yet."""
+
+_VALID_LAST_AGENT_TIER = frozenset(AGENT_TIERS) | {""}
+"""The Stufen of the tier table, plus ``''`` for no pick yet."""
 
 _VALID_CONTRAST = frozenset({"standard", "high"})
 _VALID_LOCALE = frozenset({"de", "en"})
@@ -67,6 +75,8 @@ class AccountPreferencesService:
         enable_agent_memory=False,
         chat_model_tier="",
         agent_model_tier="",
+        last_research_profile="",
+        last_agent_tier="",
     ) -> AccountPreferences:
         if contrast_mode not in _VALID_CONTRAST:
             raise AccountPreferencesValidationError(f"unknown contrast mode: {contrast_mode!r}")
@@ -88,9 +98,18 @@ class AccountPreferencesService:
             raise AccountPreferencesValidationError(
                 f"unknown agent model tier: {agent_model_tier!r}"
             )
+        if last_research_profile not in _VALID_LAST_RESEARCH_PROFILE:
+            raise AccountPreferencesValidationError(
+                f"unknown last report profile: {last_research_profile!r}"
+            )
+        if last_agent_tier not in _VALID_LAST_AGENT_TIER:
+            raise AccountPreferencesValidationError(
+                f"unknown last agent tier: {last_agent_tier!r}"
+            )
         return await self._store.upsert_preferences(
             user_id=user_id, contrast_mode=contrast_mode, locale=locale, theme=theme,
             theme_preset=theme_preset, user_bubble_tone=user_bubble_tone,
             updated_at=updated_at, enable_agent_memory=bool(enable_agent_memory),
             chat_model_tier=chat_model_tier, agent_model_tier=agent_model_tier,
+            last_research_profile=last_research_profile, last_agent_tier=last_agent_tier,
         )

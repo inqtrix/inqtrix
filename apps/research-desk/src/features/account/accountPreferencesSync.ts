@@ -8,6 +8,11 @@
  * tiny snake_case<->camelCase bridge; the enum normalization defends against a
  * malformed row (the server CHECK-constrains these, but the client stays
  * defensive like the other converters).
+ *
+ * The last report profile and Stufe follow the account: a row that carries
+ * the two fields decides, an empty value included, so a pick another account
+ * left on this device does not carry over. A server row without the fields,
+ * or a project file without picks, leaves the current pick as it is.
  */
 
 import type {
@@ -15,8 +20,14 @@ import type {
   ServerAccountPreferences,
 } from '@/api/inqtrixClient'
 import type { Locale } from '@/i18n/translations'
+import { agentTierIdOf } from '@/features/agent/runSetupLabels'
 import type { ProjectPreferences } from '@/features/project/types'
-import type { ModelTierPreference } from '@/features/researchRuns/types'
+import { reportProfileOf } from '@/features/researchDesk/components/Composer'
+import type {
+  LastAgentTier,
+  LastResearchProfile,
+  ModelTierPreference,
+} from '@/features/researchRuns/types'
 import type {
   ContrastMode,
   ThemeMode,
@@ -48,6 +59,32 @@ function modelTierOrFallback(
   return VALID_MODEL_TIER.has(value) ? (value as ModelTierPreference) : fallback
 }
 
+/** A stored or received value as the last report profile: one of the
+ * profiles the research composer offers, otherwise no pick. */
+export function lastResearchProfileOf(value: unknown): LastResearchProfile {
+  return reportProfileOf(value) ?? ''
+}
+
+/** A stored or received value as the last Stufe: one of the Stufen the
+ * desk knows, otherwise no pick. */
+export function lastAgentTierOf(value: unknown): LastAgentTier {
+  return agentTierIdOf(value) ?? ''
+}
+
+/** A project file's preferences, keeping the current last picks where the file
+ * names none: an older file, or one saved before any pick, must not undo
+ * them. */
+export function preferencesWithLastChoicesKept(
+  incoming: ProjectPreferences,
+  current: ProjectPreferences,
+): ProjectPreferences {
+  return {
+    ...incoming,
+    lastAgentTier: incoming.lastAgentTier || current.lastAgentTier,
+    lastResearchProfile: incoming.lastResearchProfile || current.lastResearchProfile,
+  }
+}
+
 /** One server row -> local preferences, falling back per field to the given
  * defaults when a value is out of domain (so a corrupt row never breaks the UI). */
 export function preferencesFromServer(
@@ -66,6 +103,17 @@ export function preferencesFromServer(
     contrastMode: VALID_CONTRAST.has(server.contrast_mode)
       ? (server.contrast_mode as ContrastMode)
       : fallback.contrastMode,
+    // The row decides for its account: an empty or unknown value is no
+    // pick, so a pick another account left on this device does not carry
+    // over. Only a row without the fields keeps the device's pick.
+    lastAgentTier:
+      server.last_agent_tier == null
+        ? fallback.lastAgentTier
+        : lastAgentTierOf(server.last_agent_tier),
+    lastResearchProfile:
+      server.last_research_profile == null
+        ? fallback.lastResearchProfile
+        : lastResearchProfileOf(server.last_research_profile),
     locale: VALID_LOCALE.has(server.locale) ? (server.locale as Locale) : fallback.locale,
     theme: VALID_THEME.has(server.theme) ? (server.theme as ThemeMode) : fallback.theme,
     themePreset: VALID_PRESET.has(server.theme_preset)
@@ -95,6 +143,8 @@ export function serverAccountPreferencesPayload(
     enable_agent_memory: preferences.agentMemoryEnabled,
     chat_model_tier: preferences.chatModelTier,
     agent_model_tier: preferences.agentModelTier,
+    last_research_profile: preferences.lastResearchProfile,
+    last_agent_tier: preferences.lastAgentTier,
     updated_at: updatedAt,
   }
 }
@@ -115,5 +165,7 @@ export function preferencesFingerprint(preferences: ProjectPreferences): string 
     preferences.agentMemoryEnabled ? 'mem:on' : 'mem:off',
     `chat:${preferences.chatModelTier}`,
     `agent:${preferences.agentModelTier}`,
+    `profile:${preferences.lastResearchProfile}`,
+    `stufe:${preferences.lastAgentTier}`,
   ].join('|')
 }

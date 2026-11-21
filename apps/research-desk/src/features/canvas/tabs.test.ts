@@ -13,14 +13,8 @@ import {
   type CanvasViewDescriptor,
 } from './types'
 
-const PLAN: CanvasViewDescriptor = { runId: 'r1', view: 'plan' }
 const RUN: CanvasViewDescriptor = { runId: 'r1', view: 'run' }
-const TASK: CanvasViewDescriptor = { runId: 'r1', taskId: 't1', view: 'run' }
-const RUN_RETURNING_TO_TASK: CanvasViewDescriptor = {
-  focusTaskId: 't1',
-  runId: 'r1',
-  view: 'run',
-}
+const NEXT_RUN: CanvasViewDescriptor = { runId: 'r2', view: 'run' }
 const DOC: CanvasViewDescriptor = {
   artifactId: 'a1',
   runId: 'r1',
@@ -55,51 +49,45 @@ describe('openCanvasTab (user)', () => {
   })
 
   it('opens a new pinned tab, focuses it and pins follow-mode', () => {
-    const state = openCanvasTab(EMPTY_CANVAS_STATE, PLAN, 'user')
+    const state = openCanvasTab(EMPTY_CANVAS_STATE, NEXT_RUN, 'user')
     expect(state.open).toBe(true)
     expect(state.pinned).toBe(true)
     expect(state.tabs).toEqual([
-      { descriptor: PLAN, key: canvasTabKey(PLAN), pinned: true },
+      { descriptor: NEXT_RUN, key: canvasTabKey(NEXT_RUN), pinned: true },
     ])
-    expect(state.activeTabId).toBe(canvasTabKey(PLAN))
+    expect(state.activeTabId).toBe(canvasTabKey(NEXT_RUN))
   })
 
   it('focuses an existing key instead of duplicating the tab', () => {
-    const first = openCanvasTab(EMPTY_CANVAS_STATE, PLAN, 'user')
+    const first = openCanvasTab(EMPTY_CANVAS_STATE, NEXT_RUN, 'user')
     const second = openCanvasTab(first, RUN, 'user')
-    const refocused = openCanvasTab(second, PLAN, 'user')
+    const refocused = openCanvasTab(second, NEXT_RUN, 'user')
     expect(refocused.tabs).toHaveLength(2)
-    expect(refocused.activeTabId).toBe(canvasTabKey(PLAN))
+    expect(refocused.activeTabId).toBe(canvasTabKey(NEXT_RUN))
   })
 
   it('claims the preview tab as pinned when opening its key', () => {
-    const preview = openCanvasTab(OPEN, TASK, 'agent')
+    const preview = openCanvasTab(OPEN, RUN, 'agent')
     expect(preview.tabs[0].pinned).toBe(false)
-    const claimed = openCanvasTab(preview, TASK, 'user')
+    const claimed = openCanvasTab(preview, RUN, 'user')
     expect(claimed.tabs).toHaveLength(1)
     expect(claimed.tabs[0].pinned).toBe(true)
   })
 
-  it('drills into a task inside the existing run tab', () => {
-    const run = openCanvasTab(EMPTY_CANVAS_STATE, RUN, 'user')
-    const task = openCanvasTab(run, TASK, 'user')
-    expect(task.tabs).toHaveLength(1)
-    expect(task.tabs[0].descriptor).toEqual(TASK)
-    const back = openCanvasTab(task, RUN_RETURNING_TO_TASK, 'user')
-    expect(back.tabs).toHaveLength(1)
-    expect(back.tabs[0].descriptor).toEqual(RUN_RETURNING_TO_TASK)
-    expect(back.tabs[0].key).toBe(canvasTabKey(RUN))
+  it('keys a run by its id alone: one tab per run', () => {
+    expect(canvasTabKey(RUN)).toBe('run:r1')
+    expect(canvasTabKey(NEXT_RUN)).toBe('run:r2')
   })
 })
 
 describe('openCanvasTab (agent, follow rules)', () => {
   it('is ignored while follow is pinned', () => {
     const pinned = { ...OPEN, pinned: true }
-    expect(openCanvasTab(pinned, TASK, 'agent')).toBe(pinned)
+    expect(openCanvasTab(pinned, RUN, 'agent')).toBe(pinned)
   })
 
   it('never opens a closed canvas except the one document auto-open', () => {
-    expect(openCanvasTab(EMPTY_CANVAS_STATE, TASK, 'agent')).toBe(
+    expect(openCanvasTab(EMPTY_CANVAS_STATE, RUN, 'agent')).toBe(
       EMPTY_CANVAS_STATE,
     )
     const opened = openCanvasTab(EMPTY_CANVAS_STATE, DOC, 'agent')
@@ -111,15 +99,15 @@ describe('openCanvasTab (agent, follow rules)', () => {
   })
 
   it('drives ONE preview slot: replaces it instead of sprawling tabs', () => {
-    const one = openCanvasTab(OPEN, TASK, 'agent')
-    const two = openCanvasTab(one, PLAN, 'agent')
+    const one = openCanvasTab(OPEN, RUN, 'agent')
+    const two = openCanvasTab(one, NEXT_RUN, 'agent')
     expect(two.tabs).toHaveLength(1)
     expect(two.tabs[0]).toEqual({
-      descriptor: PLAN,
-      key: canvasTabKey(PLAN),
+      descriptor: NEXT_RUN,
+      key: canvasTabKey(NEXT_RUN),
       pinned: false,
     })
-    expect(two.activeTabId).toBe(canvasTabKey(PLAN))
+    expect(two.activeTabId).toBe(canvasTabKey(NEXT_RUN))
   })
 
   it('keeps pinned tabs intact and appends the preview beside them', () => {
@@ -127,12 +115,12 @@ describe('openCanvasTab (agent, follow rules)', () => {
     // before the agent may drive the preview slot again.
     const user = openCanvasTab(OPEN, DOC, 'user')
     const following = { ...user, pinned: false }
-    const withPreview = openCanvasTab(following, TASK, 'agent')
+    const withPreview = openCanvasTab(following, RUN, 'agent')
     expect(withPreview.tabs.map((tab) => tab.pinned)).toEqual([true, false])
-    const swapped = openCanvasTab(withPreview, PLAN, 'agent')
+    const swapped = openCanvasTab(withPreview, NEXT_RUN, 'agent')
     expect(swapped.tabs.map((tab) => tab.key)).toEqual([
       canvasTabKey(DOC),
-      canvasTabKey(PLAN),
+      canvasTabKey(NEXT_RUN),
     ])
   })
 
@@ -150,9 +138,9 @@ describe('openCanvasTab (agent, follow rules)', () => {
   })
 
   it('focuses an existing pinned tab with the same key (no duplicate)', () => {
-    const user = openCanvasTab(OPEN, PLAN, 'user')
+    const user = openCanvasTab(OPEN, NEXT_RUN, 'user')
     const unpinnedFollow = { ...user, pinned: false }
-    const followed = openCanvasTab(unpinnedFollow, PLAN, 'agent')
+    const followed = openCanvasTab(unpinnedFollow, NEXT_RUN, 'agent')
     expect(followed.tabs).toHaveLength(1)
     expect(followed.tabs[0].pinned).toBe(true)
   })
@@ -160,31 +148,31 @@ describe('openCanvasTab (agent, follow rules)', () => {
 
 describe('activate/close/pin', () => {
   it('activating a tab pins follow-mode but not the tab itself', () => {
-    const preview = openCanvasTab(OPEN, TASK, 'agent')
-    const activated = activateCanvasTab(preview, canvasTabKey(TASK))
+    const preview = openCanvasTab(OPEN, RUN, 'agent')
+    const activated = activateCanvasTab(preview, canvasTabKey(RUN))
     expect(activated.pinned).toBe(true)
     expect(activated.tabs[0].pinned).toBe(false)
     expect(activateCanvasTab(preview, 'missing')).toBe(preview)
   })
 
   it('closing the active tab activates the right neighbor, else the last', () => {
-    let state = openCanvasTab(OPEN, PLAN, 'user')
+    let state = openCanvasTab(OPEN, NEXT_RUN, 'user')
     state = openCanvasTab(state, RUN, 'user')
     state = openCanvasTab(state, DOC, 'user')
     state = activateCanvasTab(state, canvasTabKey(RUN))
     const closed = closeCanvasTab(state, canvasTabKey(RUN))
     expect(closed.tabs.map((tab) => tab.key)).toEqual([
-      canvasTabKey(PLAN),
+      canvasTabKey(NEXT_RUN),
       canvasTabKey(DOC),
     ])
     expect(closed.activeTabId).toBe(canvasTabKey(DOC))
     const closedLast = closeCanvasTab(closed, canvasTabKey(DOC))
-    expect(closedLast.activeTabId).toBe(canvasTabKey(PLAN))
+    expect(closedLast.activeTabId).toBe(canvasTabKey(NEXT_RUN))
   })
 
   it('closing the last tab closes the panel', () => {
-    const one = openCanvasTab(OPEN, PLAN, 'user')
-    const closed = closeCanvasTab(one, canvasTabKey(PLAN))
+    const one = openCanvasTab(OPEN, NEXT_RUN, 'user')
+    const closed = closeCanvasTab(one, canvasTabKey(NEXT_RUN))
     expect(closed.open).toBe(false)
     expect(closed.tabs).toEqual([])
     expect(closed.activeTabId).toBeNull()
@@ -192,9 +180,9 @@ describe('activate/close/pin', () => {
   })
 
   it('pinCanvasTab claims the preview slot', () => {
-    const preview = openCanvasTab(OPEN, TASK, 'agent')
-    const pinned = pinCanvasTab(preview, canvasTabKey(TASK))
+    const preview = openCanvasTab(OPEN, RUN, 'agent')
+    const pinned = pinCanvasTab(preview, canvasTabKey(RUN))
     expect(pinned.tabs[0].pinned).toBe(true)
-    expect(pinCanvasTab(pinned, canvasTabKey(TASK))).toBe(pinned)
+    expect(pinCanvasTab(pinned, canvasTabKey(RUN))).toBe(pinned)
   })
 })

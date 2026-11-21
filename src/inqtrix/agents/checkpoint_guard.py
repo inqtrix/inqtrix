@@ -1,4 +1,4 @@
-"""Fail-closed restart guard shared by both agent engines.
+"""Fail-closed restart guard of the agent kernel.
 
 LangGraph checkpoints are a resumability cache; durable control rows and
 child runs are the evidence that execution already started.  A missing
@@ -9,8 +9,6 @@ was read successfully and all of them are empty.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
-
-from inqtrix.agents.control_ports import PlanNotFound
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -43,21 +41,15 @@ def ensure_checkpoint_restart_safe(
 
     Args:
         run_id: Root agent run whose checkpoint is absent.
-        control: Canonical plan, gate, and artifact store.
+        control: Canonical gate, clarification and artifact store.
         run_store: Canonical child-run store.
-        run_async: Sync bridge used by the calling engine's worker thread.
+        run_async: Sync bridge used by the kernel's worker thread.
 
     Raises:
         CheckpointRestartUnsafe: Negotiated/executed state exists, or any
             source could not be read with certainty.
     """
     try:
-        try:
-            run_async(control.get_plan(run_id))
-            has_plan = True
-        except PlanNotFound:
-            has_plan = False
-
         approvals = run_async(control.list_approvals(run_id))
         clarifications = run_async(control.list_clarifications(run_id))
         artifacts, _cursor = run_async(
@@ -70,7 +62,7 @@ def ensure_checkpoint_restart_safe(
             "will not be restarted because its prior state is uncertain.")
         ) from exc
 
-    if has_plan or approvals or clarifications or artifacts or children:
+    if approvals or clarifications or artifacts or children:
         raise CheckpointRestartUnsafe(
             ("The checkpoint for this agent run was lost; the run cannot resume. Start "
             "the assignment as a new run; control and artifact data are retained.")

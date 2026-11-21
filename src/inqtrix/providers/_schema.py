@@ -5,10 +5,8 @@ contract. The OpenAI/Azure strict variant requires, for every object node, that
 ``required`` lists EVERY property key and that ``additionalProperties`` is
 ``false``, and it rejects the ``default`` keyword. Pydantic's
 ``model_json_schema()`` only marks default-free fields ``required`` and emits
-``default`` for the rest, so a model with any defaulted field (e.g. the shared
-:class:`~inqtrix.agents.plan_models.ExecutionPlanModel`, which legitimately
-carries defaults for its approval-edit/validator role) produces a schema the
-strict endpoint rejects.
+``default`` for the rest, so a model with any defaulted field produces a
+schema the strict endpoint rejects.
 
 This module is the ONE place that adapts a canonical, provider-agnostic schema to
 that contract. Providers speaking the strict OpenAI json_schema protocol call it

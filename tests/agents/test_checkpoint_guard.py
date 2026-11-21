@@ -1,4 +1,4 @@
-"""Shared fail-closed checkpoint restart contract for both agent engines."""
+"""Fail-closed checkpoint restart contract of the agent kernel."""
 
 from __future__ import annotations
 
@@ -12,22 +12,14 @@ from inqtrix.agents.checkpoint_guard import (
     CheckpointRestartUnsafe,
     ensure_checkpoint_restart_safe,
 )
-from inqtrix.agents.control_ports import PlanNotFound
 
 
 @dataclass
 class _ProbeControl:
-    plan: bool = False
     approvals: list[Any] | None = None
     clarifications: list[Any] | None = None
     artifacts: list[Any] | None = None
     fail_at: str = ""
-
-    async def get_plan(self, run_id: str) -> tuple[Any, list[Any]]:
-        self._raise_if("plan")
-        if not self.plan:
-            raise PlanNotFound(run_id)
-        return object(), []
 
     async def list_approvals(self, run_id: str) -> list[Any]:
         self._raise_if("approvals")
@@ -82,13 +74,12 @@ def test_complete_empty_probe_allows_fresh_start() -> None:
 @pytest.mark.parametrize(
     ("control", "runs"),
     [
-        (_ProbeControl(plan=True), _ProbeRuns()),
         (_ProbeControl(approvals=[object()]), _ProbeRuns()),
         (_ProbeControl(clarifications=[object()]), _ProbeRuns()),
         (_ProbeControl(artifacts=[object()]), _ProbeRuns()),
         (_ProbeControl(), _ProbeRuns(rows=[{"run_id": "child"}])),
     ],
-    ids=["plan", "approval", "clarification", "artifact-only", "child-only"],
+    ids=["approval", "clarification", "artifact-only", "child-only"],
 )
 def test_any_durable_execution_evidence_blocks_restart(
     control: _ProbeControl, runs: _ProbeRuns
@@ -100,12 +91,11 @@ def test_any_durable_execution_evidence_blocks_restart(
 @pytest.mark.parametrize(
     "control",
     [
-        _ProbeControl(fail_at="plan"),
         _ProbeControl(fail_at="approvals"),
         _ProbeControl(fail_at="clarifications"),
         _ProbeControl(fail_at="artifacts"),
     ],
-    ids=["plan", "approvals", "clarifications", "artifacts"],
+    ids=["approvals", "clarifications", "artifacts"],
 )
 def test_any_control_store_uncertainty_fails_closed(
     control: _ProbeControl,

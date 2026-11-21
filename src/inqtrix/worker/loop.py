@@ -1268,10 +1268,11 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     body.get("token_budget", 0) or 0
                 ) or None
                 if claimed.kind == "agent_child" and requested_token_budget:
-                    # Pre-0043 mission planners embedded their own tiny caps in
-                    # child replay payloads. Children now inherit only the
-                    # operator's global run cap; trusted root overrides remain
-                    # available for non-child runs.
+                    # A token budget in an agent child's replay payload is
+                    # never an execution limit (the kernel submits its
+                    # children without one): children run under the
+                    # operator's global run cap only; trusted root overrides
+                    # remain available for non-child runs.
                     log.warning(
                         "Legacy token budget in agent child %s ignored; operator limits"
                         " remain authoritative.",

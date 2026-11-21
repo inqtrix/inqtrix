@@ -474,7 +474,7 @@ def test_marker_from_other_tool_never_mints_a_receipt() -> None:
             self.name = name
             self.content = content
 
-    deps = SimpleNamespace(editor_read_receipts={})
+    deps = SimpleNamespace(editor_read_receipts={}, editor_read_modes={})
     snapshot = SimpleNamespace(
         values={
             "messages": [
@@ -497,6 +497,8 @@ def test_marker_from_other_tool_never_mints_a_receipt() -> None:
     )
     _reactivate_editor_read_receipts(deps, snapshot)  # type: ignore[arg-type]
     assert deps.editor_read_receipts == {"ed_real": 7}
+    # None of these messages carries a reader's record: no mode is known.
+    assert deps.editor_read_modes == {}
 
 
 def test_a_later_turn_reaches_the_editor_material_of_an_earlier_turn() -> None:

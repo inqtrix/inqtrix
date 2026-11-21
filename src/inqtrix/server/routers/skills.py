@@ -31,7 +31,7 @@ from inqtrix.content.skills import (
     SkillNotFound,
     SkillRecord,
 )
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.request_parsing import error_response, read_json_object
 from inqtrix.services.skill_service import SkillValidationError
 
 if TYPE_CHECKING:
@@ -92,13 +92,6 @@ def build_router(container: "AppContainer") -> APIRouter:
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
 
-    async def _parsed_body(req: Request):
-        try:
-            body = await req.json()
-        except Exception:
-            return None
-        return body if isinstance(body, dict) else None
-
     @router.get("/v1/skills")
     async def list_skills(
         principal: Principal = Depends(principal_dep),
@@ -123,11 +116,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
     ):
         """Create one skill; scoped principals own what they create."""
-        body = await _parsed_body(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         try:
             record = await service.create(
                 body,
@@ -178,8 +169,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         the file shape; the service validator stays the single gate for
         every policy rule (placeholder coupling, enums, point limits).
         """
-        body = await _parsed_body(req)
-        if body is None or not isinstance(body.get("markdown"), str):
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
+        if not isinstance(body.get("markdown"), str):
             return error_response(
                 400,
                 "Field 'markdown' (string) is missing",
@@ -225,11 +218,9 @@ def build_router(container: "AppContainer") -> APIRouter:
 
         ``expected_revision`` is mandatory; a stale value yields 409.
         """
-        body = await _parsed_body(req)
-        if body is None:
-            return error_response(
-                400, "Invalid JSON body", "invalid_request_error"
-            )
+        body, error = await read_json_object(req)
+        if error is not None:
+            return error
         raw_expected = body.get("expected_revision")
         if (
             isinstance(raw_expected, bool)

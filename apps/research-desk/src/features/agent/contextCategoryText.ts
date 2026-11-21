@@ -54,7 +54,7 @@ export function agentContextText(
     canvas: () => t.agent.composer.canvasSlotTaken,
     document: () => t.agent.composer.editTargetSlotTaken,
     report: (max) => t.agent.composer.reportCap.replace('{max}', String(max)),
-    rule: (max) => t.agent.plan.reportRulesCap.replace('{max}', String(max)),
+    rule: (max) => t.agent.composer.ruleCap.replace('{max}', String(max)),
   }
   const capOf: Record<CappedCategoryId, number | null> = {
     canvas: 1,
@@ -63,7 +63,7 @@ export function agentContextText(
     rule: caps.rule,
   }
   const capUncheckedText = (id: AgentContextCategoryId): string =>
-    id === 'rule' ? t.agent.plan.reportRulesCapUnchecked : t.agent.composer.reportCapUnchecked
+    id === 'rule' ? t.agent.composer.ruleCapUnchecked : t.agent.composer.reportCapUnchecked
   const limitsLabel = (category: AgentContextCategory): string | undefined => {
     const parts = [
       ...(category.budget ? [budgetLabel(category.budget)] : []),
@@ -104,7 +104,7 @@ export function agentContextText(
       : id === 'collection'
         ? t.knowledge.collectionMenuHandle
         : id === 'document'
-          ? t.agent.patch.title
+          ? t.agent.composer.documentPatch
           : id === 'canvas'
             ? t.agent.composer.canvasDocChip
             : item.secondary || t.agent.composer.reportChip

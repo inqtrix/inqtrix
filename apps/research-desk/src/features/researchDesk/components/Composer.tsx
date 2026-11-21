@@ -40,10 +40,12 @@ import {
   DEEP_RESEARCH_FIRST_ROUND_QUERIES,
   DEEP_RESEARCH_MAX_ROUNDS,
   type CreateResearchRunRequest,
+  type LastResearchProfile,
 } from '@/features/researchRuns/types'
 import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
 import { QuotaMeter } from '@/features/quota/QuotaMeter'
 import { useLocale } from '@/i18n/LocaleProvider'
+import type { TranslationDictionary } from '@/i18n/translations'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import { ComposerDisclosureHint } from '@/features/composer/ComposerDisclosureHint'
@@ -52,6 +54,9 @@ type ComposerProps = {
   form: ComposerFormState
   isSubmitting?: boolean
   onHide: () => void
+  /** The user picked a report profile in the menu: it becomes the profile
+   * the composer starts with next time. */
+  onReportProfileChange?: (profile: ComposerFormState['reportProfile']) => void
   onSubmit: (request: CreateResearchRunRequest) => Promise<boolean>
   reduceMotion: boolean | null
   selectedStack: string
@@ -113,6 +118,92 @@ export function applyComposerReportProfilePreset(
 export const defaultComposerFormState: ComposerFormState = {
   ...composerReportProfilePresets.deep,
   question: '',
+}
+
+/** The report profile a stored or received value names, or null. The presets
+ * above are the one list of profiles the desk offers. */
+export function reportProfileOf(value: unknown): ComposerFormState['reportProfile'] | null {
+  return typeof value === 'string' && Object.hasOwn(composerReportProfilePresets, value)
+    ? value as ComposerFormState['reportProfile']
+    : null
+}
+
+/** A report profile's name, shared by the composer and the run card so both
+ * call the same profile the same word. */
+export function reportProfileLabel(
+  profile: ComposerFormState['reportProfile'],
+  t: TranslationDictionary,
+): string {
+  if (profile === 'schnell') return t.composer.schnell
+  if (profile === 'compact') return t.composer.compact
+  return t.composer.deep
+}
+
+/** Everything of the form but the question: the profile and its settings. */
+export type ComposerProfileSettings = Omit<ComposerFormState, 'question'>
+
+/** The settings the composer opens with: the preset of the profile the user
+ * picked last, or the default form's without a pick. */
+export function composerSettingsForLastProfile(last: LastResearchProfile): ComposerProfileSettings {
+  return { ...composerReportProfilePresets[last || defaultComposerFormState.reportProfile] }
+}
+
+/** Where the form stands towards the profile the user picked last.
+ *
+ * The form opens on that profile's preset. That pick may arrive or change
+ * later: the account row comes after the first paint, and another tab may
+ * pick a profile. Until the form is the user's, it follows. It becomes the
+ * user's in this mount once one of its settings changes, or once a draft is
+ * restored; from then on nothing overrides it. Typing the question does not
+ * count. */
+export type LastProfileFollow = {
+  /** The settings the form took from the last profile. */
+  followed: ComposerProfileSettings
+  /** The form is the user's; it no longer follows. */
+  touched: boolean
+}
+
+export function startLastProfileFollow(last: LastResearchProfile): LastProfileFollow {
+  return { followed: composerSettingsForLastProfile(last), touched: false }
+}
+
+/** The follow state after the form changed: a setting that left the followed
+ * preset makes the form the user's, for good. */
+export function lastProfileFollowAfterEdit(
+  follow: LastProfileFollow,
+  form: ComposerFormState,
+): LastProfileFollow {
+  if (follow.touched || sameProfileSettings(form, follow.followed)) return follow
+  return { ...follow, touched: true }
+}
+
+/** A draft restored after a sign-in is the user's, even where it equals the
+ * preset: the pick that arrives next is often the older one. */
+export function lastProfileFollowAfterRestore(follow: LastProfileFollow): LastProfileFollow {
+  return follow.touched ? follow : { ...follow, touched: true }
+}
+
+/** The form for a last profile that arrived or changed: a form that still
+ * follows takes that profile's preset and keeps its question. */
+export function composerFormForLastProfile(
+  follow: LastProfileFollow,
+  form: ComposerFormState,
+  last: LastResearchProfile,
+): { follow: LastProfileFollow; form: ComposerFormState } {
+  if (follow.touched) return { follow, form }
+  const followed = composerSettingsForLastProfile(last)
+  return {
+    follow: { followed, touched: false },
+    form: sameProfileSettings(form, followed) ? form : { ...form, ...followed },
+  }
+}
+
+function sameProfileSettings(form: ComposerProfileSettings, settings: ComposerProfileSettings) {
+  return form.reportProfile === settings.reportProfile
+    && form.confidenceStop === settings.confidenceStop
+    && form.firstRoundQueries === settings.firstRoundQueries
+    && form.maxRounds === settings.maxRounds
+    && form.minRounds === settings.minRounds
 }
 
 type ComposerMenuKey =
@@ -220,6 +311,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
     form,
     isSubmitting = false,
     onHide,
+    onReportProfileChange,
     onSubmit,
     reduceMotion,
     selectedStack,
@@ -394,10 +486,12 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                 label={t.composer.reportProfile}
                 menuKey="report"
                 onOpenMenuChange={setOpenMenu}
-                onValueChange={(value) => setForm((currentForm) => applyComposerReportProfilePreset(
-                  currentForm,
-                  value as ComposerFormState['reportProfile'],
-                ))}
+                onValueChange={(value) => {
+                  const profile = reportProfileOf(value)
+                  if (!profile) return
+                  setForm((currentForm) => applyComposerReportProfilePreset(currentForm, profile))
+                  onReportProfileChange?.(profile)
+                }}
                 openMenu={openMenu}
                 options={reportProfileOptions}
                 showValue
@@ -577,12 +671,6 @@ function ComposerStatusMenu({
   selectedStack: string
 }) {
   const { t } = useLocale()
-  const reportProfileLabel =
-    reportProfile === 'schnell'
-      ? t.composer.schnell
-      : reportProfile === 'compact'
-        ? t.composer.compact
-        : t.composer.deep
 
   return (
     <DropdownMenu
@@ -627,7 +715,7 @@ function ComposerStatusMenu({
           <DropdownMenuSeparator className="mx-0 my-1" />
           <SummaryGroup label={t.composer.summaryStopAndOutput}>
             <StatusRow label={t.composer.confidenceTarget} value={`${confidenceStop} / 10`} />
-            <StatusRow label={t.composer.reportProfile} value={reportProfileLabel} />
+            <StatusRow label={t.composer.reportProfile} value={reportProfileLabel(reportProfile, t)} />
           </SummaryGroup>
         </div>
       </DropdownMenuContent>

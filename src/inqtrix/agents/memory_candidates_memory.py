@@ -1,4 +1,4 @@
-"""In-memory store for workspace-agent memory candidates."""
+"""In-memory store for agent memory candidates."""
 
 from __future__ import annotations
 

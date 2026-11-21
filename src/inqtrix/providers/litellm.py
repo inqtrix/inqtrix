@@ -301,6 +301,7 @@ class LiteLLM(AsyncNativeLLMProvider):
             estimated_input_tokens=estimate_request_tokens(sent_openai_request(create_kwargs, provider="litellm")),
             max_output_tokens=int(create_kwargs.get(self._token_budget_parameter) or 0) or None,
             reasoning_effort=str(create_kwargs.get("reasoning_effort") or "") or None,
+            verbosity=str(create_kwargs.get("verbosity") or "") or None,
         )
 
     async def acomplete(
@@ -314,6 +315,7 @@ class LiteLLM(AsyncNativeLLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> str:
         """Generate text via LiteLLM and discard token metadata.
 
@@ -355,6 +357,7 @@ class LiteLLM(AsyncNativeLLMProvider):
                 state=state,
                 deadline=deadline,
                 reasoning_effort=reasoning_effort,
+                verbosity=verbosity,
             )
         ).content
 
@@ -369,6 +372,7 @@ class LiteLLM(AsyncNativeLLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
+        verbosity: str | None = None,
     ) -> LLMResponse:
         """Generate text and token metadata through the shared SDK client.
 
@@ -424,6 +428,8 @@ class LiteLLM(AsyncNativeLLMProvider):
                 max_output_tokens or self._default_max_tokens
             )
             self._apply_reasoning_effort(create_kwargs, reasoning_effort, model=use_model)
+            if verbosity:
+                create_kwargs["verbosity"] = verbosity
             r = await self._acreate_chat_completion(
                 create_kwargs=create_kwargs,
                 model=use_model,
@@ -516,6 +522,13 @@ class LiteLLM(AsyncNativeLLMProvider):
         unconditionally; a gateway model without tool support surfaces
         its own backend error on the first :meth:`chat` call (visible,
         never silently degraded)."""
+        return True
+
+    def supports_verbosity(self, *, model: str | None = None) -> bool:
+        """Both OpenAI APIs take a ``verbosity``; this adapter puts the one a
+        text call carries into its request. Which call sites ask for one, and
+        for which model, is decided before the call
+        (:func:`inqtrix.model_routing.prose_verbosity`)."""
         return True
 
     def reasoning_levels(self, *, model: str | None = None) -> list[str] | None:
@@ -696,6 +709,7 @@ class LiteLLM(AsyncNativeLLMProvider):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
         tool_choice: str | None = None,
+        verbosity: str | None = None,
     ) -> ChatTurn:
         """Run one native tool-calling chat turn.
 
@@ -725,6 +739,8 @@ class LiteLLM(AsyncNativeLLMProvider):
                 max_output_tokens or self._default_max_tokens
             )
             self._apply_reasoning_effort(create_kwargs, reasoning_effort, model=use_model)
+            if verbosity:
+                create_kwargs["verbosity"] = verbosity
             if tools:
                 create_kwargs["tools"] = list(tools)
             if tool_choice is not None:

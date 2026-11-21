@@ -231,8 +231,8 @@ export function useResearchRunApi({
   }, [replayTerminalEvents])
 
   const startStream = useCallback((summary: ResearchRunSummary) => {
-    // Child runs are projected through their parent stream. A child channel is
-    // opened only when its work unit is explicitly inspected.
+    // Child runs are projected through their parent stream; the desk opens
+    // no channel of their own.
     if (summary.kind === 'agent_child') return
     if (streamsRef.current.has(summary.run_id)) return
     if (terminalStatus(summary.status)) {

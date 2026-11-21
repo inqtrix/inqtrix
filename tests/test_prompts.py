@@ -1,21 +1,15 @@
-"""Tests for prompt variants used by the final answer node."""
+"""Tests for the per-section prompts of the final answer node."""
 
 from __future__ import annotations
-
-from types import SimpleNamespace
 
 import pytest
 
 from inqtrix.evidence import STANDING_TEXT
-from inqtrix.nodes import (
-    _domain_filter_for_query_text,
-    _select_additional_links,
-)
+from inqtrix.nodes import _domain_filter_for_query_text
 from inqtrix.prompt_language import OUTPUT_FORMAT_BLOCK, QUESTION_LANGUAGE_DIRECTIVE
 from inqtrix.prompts import (
     build_answer_section_system_prompt,
     build_answer_section_user_prompt,
-    build_answer_system_prompt,
     build_claim_extraction_prompt,
     build_knowledge_answer_prompt,
 )
@@ -25,10 +19,9 @@ from inqtrix.report_profiles import (
     evidence_limits_section_index,
     tuning_for_report_profile,
 )
-from inqtrix.strategies._source_tiering import DefaultSourceTiering
 
 
-def _base_state(report_profile: ReportProfile) -> dict[str, object]:
+def _base_state() -> dict[str, object]:
     return {
         "today_str": "2026-04-13",
         "answer_lang": "Deutsch",
@@ -36,18 +29,45 @@ def _base_state(report_profile: ReportProfile) -> dict[str, object]:
         "allowed_citations": [],
         "source_tier_counts": {},
         "claim_status_counts": {},
-        "report_profile": report_profile,
     }
 
 
-def test_build_answer_system_prompt_compact_profile():
-    prompt = build_answer_system_prompt(_base_state(ReportProfile.COMPACT))
+def _section(
+    state: dict[str, object],
+    *,
+    heading: str = "Kernaussagen",
+    owns_evidence_limits: bool = False,
+) -> str:
+    """One section's system prompt, the way the composer asks for it."""
+    return build_answer_section_system_prompt(
+        state,
+        heading=heading,
+        instruction="State the most important facts.",
+        length_guidance="short",
+        section_position=2,
+        section_total=4,
+        owns_evidence_limits=owns_evidence_limits,
+    )
 
-    assert "**Kurzfazit**" in prompt
-    assert "as extensive as question and evidence require" in prompt
-    assert "600-1200 Woerter" not in prompt
-    assert "Prioritise complete, cleanly closed sections" in prompt
-    assert "**Executive Summary**" not in prompt
+
+def _plan_section(state: dict[str, object], profile: ReportProfile, key: str) -> str:
+    """The system prompt of the section *key* of *profile*'s plan, built as
+    the composer builds it: heading in the answer language, position in the
+    plan, and ownership of the evidence limits from the plan."""
+    sections = tuning_for_report_profile(profile).answer_sections
+    owner = evidence_limits_section_index(sections)
+    for index, spec in enumerate(sections, 1):
+        if spec.key == key:
+            return build_answer_section_system_prompt(
+                state,
+                heading=spec.heading(state.get("answer_lang")),
+                instruction=spec.prompt_instruction,
+                length_guidance=spec.length_guidance,
+                section_position=index,
+                section_total=len(sections),
+                owns_evidence_limits=index == owner,
+            )
+    raise AssertionError(f"{profile} has no section {key!r}")
 
 
 def test_domain_filter_for_query_text_extracts_multiple_site_domains():
@@ -74,31 +94,20 @@ def test_domain_filter_for_query_text_has_no_default_blocklist():
     assert domain_filter == []
 
 
-def test_build_answer_system_prompt_deep_profile():
-    prompt = build_answer_system_prompt(_base_state(ReportProfile.DEEP))
-
-    assert "**Executive Summary**" in prompt
-    assert "as extensive as question and evidence require" in prompt
-    assert "1800-2400 Woerter" not in prompt
-    assert "Prioritise complete, cleanly closed sections" in prompt
-    assert "**Risiken / Unsicherheiten**" in prompt
-    assert "no reliable evidence exists" in prompt
-
-
-def test_build_answer_system_prompt_uses_runtime_managed_reference_sections():
-    state = _base_state(ReportProfile.DEEP)
+def test_section_prompt_uses_runtime_managed_reference_sections():
+    state = _base_state()
     state["evidence_overview"] = "RESEARCH RESULT R1\n[E1] Source"
     state["allowed_citations"] = ["https://example.com/report"]
 
-    prompt = build_answer_system_prompt(state)
+    prompt = _section(state)
 
     assert "Create NO own reference, source or link section" in prompt
     assert "[E1] [E2]" in prompt
     assert "Am Ende der Antwort fuege eine Quellenleiste ein" not in prompt
 
 
-def test_build_answer_system_prompt_includes_evidence_overview_contract():
-    state = _base_state(ReportProfile.COMPACT)
+def test_section_prompt_includes_evidence_overview_contract():
+    state = _base_state()
     state["allowed_citations"] = ["https://example.com/report", "https://example.com/check"]
     state["evidence_overview"] = (
         "RESEARCH RESULT R1\n"
@@ -109,7 +118,7 @@ def test_build_answer_system_prompt_includes_evidence_overview_contract():
         "  - Meta expects 115-135 USD billion capex."
     )
 
-    prompt = build_answer_system_prompt(state)
+    prompt = _section(state)
 
     assert "EVIDENCE OVERVIEW" in prompt
     for text in STANDING_TEXT.values():
@@ -120,48 +129,21 @@ def test_build_answer_system_prompt_includes_evidence_overview_contract():
     assert "RESEARCH RESULT R1" in prompt
 
 
-def test_build_answer_system_prompt_hint_when_no_evidence_overview():
-    state = _base_state(ReportProfile.COMPACT)
+def test_section_prompt_hint_when_no_evidence_overview():
+    state = _base_state()
     state["evidence_overview"] = ""
     state["allowed_citations"] = ["https://example.com/report"]
     state["claim_status_counts"] = {"verified": 0, "contested": 0, "unverified": 0}
     state["source_tier_counts"] = {"primary": 1, "mainstream": 0, "stakeholder": 0, "unknown": 0, "low": 0}
 
-    prompt = build_answer_system_prompt(state)
+    prompt = _section(state)
 
     assert "NOTE ON THE EVIDENCE" in prompt
     assert "source-attributed" in prompt
 
 
-def test_additional_links_skip_low_quality_domains():
-    class _LowMarkingTiering(DefaultSourceTiering):
-        def tier_for_url(self, url: str) -> str:
-            if "aitoolsrecap.com" in url or "toolscompare.ai" in url:
-                return "low"
-            return super().tier_for_url(url)
-
-    strategies = SimpleNamespace(source_tiering=_LowMarkingTiering())
-
-    links = _select_additional_links(
-        [
-            "https://aitoolsrecap.com/Blog/ai-news-may-2026",
-            "https://openai.com/index/introducing-gpt-5-5",
-            "https://toolscompare.ai/news/may-2026",
-            "https://techcrunch.com/2026/05/05/openai-releases-gpt-5-5-instant-a-new-default-model-for-chatgpt",
-        ],
-        excluded_urls=set(),
-        prompt_citation_urls=set(),
-        strategies=strategies,
-    )
-
-    assert "https://openai.com/index/introducing-gpt-5-5" in links
-    assert "https://techcrunch.com/2026/05/05/openai-releases-gpt-5-5-instant-a-new-default-model-for-chatgpt" in links
-    assert all("aitoolsrecap.com" not in url for url in links)
-    assert all("toolscompare.ai" not in url for url in links)
-
-
 def test_answer_prompt_explains_evidence_overview_beleglage_levels():
-    state = _base_state(ReportProfile.COMPACT)
+    state = _base_state()
     state["allowed_citations"] = ["https://example.com/report"]
     state["evidence_overview"] = (
         "RESEARCH RESULT R1\n"
@@ -170,17 +152,16 @@ def test_answer_prompt_explains_evidence_overview_beleglage_levels():
         f"  Date: 2026-05-01 | Tier: primary | Standing: {STANDING_TEXT['source-context']}"
     )
 
-    prompt = build_answer_system_prompt(state)
+    prompt = _section(state)
 
     assert f"`{STANDING_TEXT['cross-checked']}` and `{STANDING_TEXT['primary-source']}`" in prompt
     assert f"`{STANDING_TEXT['single-source verified']}`" in prompt
     assert f"`{STANDING_TEXT['contested']}`" in prompt
     assert f"`{STANDING_TEXT['source-context']}`" in prompt
-    assert "attribute inline" in prompt
 
 
 def test_answer_prompt_tells_model_to_use_per_source_substance():
-    state = _base_state(ReportProfile.COMPACT)
+    state = _base_state()
     state["allowed_citations"] = ["https://example.com/report"]
     state["evidence_overview"] = (
         "RESEARCH RESULT R1\n"
@@ -189,7 +170,7 @@ def test_answer_prompt_tells_model_to_use_per_source_substance():
         "  - 115-135 USD billion capex expected."
     )
 
-    prompt = build_answer_system_prompt(state)
+    prompt = _section(state)
 
     assert "concrete statements and excerpts" in prompt
     assert "not only titles" in prompt
@@ -197,16 +178,14 @@ def test_answer_prompt_tells_model_to_use_per_source_substance():
     assert "do not count it as another independent piece of evidence" in prompt
 
 
-@pytest.mark.parametrize("profile", list(ReportProfile))
-@pytest.mark.parametrize("section", [False, True])
-def test_answer_prompt_keeps_source_labels_separate_from_semantic_support(profile, section):
-    state = _base_state(profile)
+def test_answer_prompt_keeps_source_labels_separate_from_semantic_support():
+    state = _base_state()
     state["allowed_citations"] = ["https://example.com/report"]
     state["evidence_overview"] = f"[E1] Standing: {STANDING_TEXT['primary-source']}"
     prompt = build_answer_section_system_prompt(
         state, heading="Empfehlung", instruction="Ordne die Befunde ein.",
         length_guidance="Kurz", section_position=1, section_total=1,
-    ) if section else build_answer_system_prompt(state)
+    )
 
     assert "als gesicherte Fakten verwendbar" not in prompt
     assert "do not automatically confirm the statement in the finished sentence" in prompt
@@ -231,7 +210,7 @@ def test_section_prompt_contains_report_so_far_and_used_evidence_labels():
 
 
 def test_build_answer_section_system_prompt_reuses_common_rules():
-    state = _base_state(ReportProfile.DEEP)
+    state = _base_state()
     state["evidence_overview"] = "RESEARCH RESULT R1\n[E1] Source"
     state["allowed_citations"] = ["https://example.com/report"]
 
@@ -250,9 +229,9 @@ def test_build_answer_section_system_prompt_reuses_common_rules():
     assert "CLAIM CALIBRATION" not in prompt
 
 
-def _weak_evidence_state(report_profile: ReportProfile) -> dict[str, object]:
+def _weak_evidence_state() -> dict[str, object]:
     """State where TRANSPARENCY OBLIGATION and citation rules should fire."""
-    state = _base_state(report_profile)
+    state = _base_state()
     state["claim_status_counts"] = {"verified": 1, "contested": 0, "unverified": 5}
     state["claim_needs_primary_total"] = 3
     state["claim_needs_primary_supported"] = 1
@@ -271,7 +250,7 @@ def test_section_executive_summary_omits_unsicherheiten_subsection_directive():
     directive into every section would make the Executive Summary section
     add an unsolicited uncertainty bullet list where it does not belong.
     """
-    state = _weak_evidence_state(ReportProfile.DEEP)
+    state = _weak_evidence_state()
 
     prompt = build_answer_section_system_prompt(
         state,
@@ -292,7 +271,7 @@ def test_section_executive_summary_omits_unsicherheiten_subsection_directive():
 
 def test_section_risiken_keeps_unsicherheiten_subsection_directive():
     """The Risiken / Unsicherheiten section is the legitimate host."""
-    state = _weak_evidence_state(ReportProfile.DEEP)
+    state = _weak_evidence_state()
 
     prompt = build_answer_section_system_prompt(
         state,
@@ -316,7 +295,7 @@ def test_section_fazit_does_not_host_unsicherheiten_block():
     duplicate the block, producing two '## Unsicherheiten / Offene Punkte'
     sub-headings in the rendered answer.
     """
-    state = _weak_evidence_state(ReportProfile.DEEP)
+    state = _weak_evidence_state()
 
     prompt = build_answer_section_system_prompt(
         state,
@@ -334,7 +313,7 @@ def test_section_fazit_does_not_host_unsicherheiten_block():
 
 def test_section_einordnung_compact_hosts_unsicherheiten_block():
     """In COMPACT (no Risiken section) the closing 'Einordnung / Ausblick' hosts it."""
-    state = _weak_evidence_state(ReportProfile.COMPACT)
+    state = _weak_evidence_state()
 
     prompt = build_answer_section_system_prompt(
         state,
@@ -349,18 +328,9 @@ def test_section_einordnung_compact_hosts_unsicherheiten_block():
     assert "Add a section '### Unsicherheiten / Offene Punkte'" in prompt
 
 
-def test_monolithic_mode_keeps_legacy_unsicherheiten_directive():
-    """Backwards compatibility: the monolithic prompt path is unchanged."""
-    state = _weak_evidence_state(ReportProfile.DEEP)
-
-    prompt = build_answer_system_prompt(state)
-
-    assert "Add a section '## Unsicherheiten / Offene Punkte'" in prompt
-
-
 def test_section_citation_rules_use_per_section_wording():
-    """In section mode the citation rules use generic per-section wording."""
-    state = _weak_evidence_state(ReportProfile.DEEP)
+    """The citation rules use generic per-section wording."""
+    state = _weak_evidence_state()
 
     prompt = build_answer_section_system_prompt(
         state,
@@ -373,16 +343,6 @@ def test_section_citation_rules_use_per_section_wording():
 
     assert "CITATION RULES" in prompt
     assert "In this section" in prompt
-
-
-def test_monolithic_citation_rules_use_global_wording():
-    """Monolithic mode uses the report-wide citation wording."""
-    state = _weak_evidence_state(ReportProfile.DEEP)
-
-    prompt = build_answer_system_prompt(state)
-
-    assert "CITATION RULES" in prompt
-    assert "In the key points and the detailed sections" in prompt
 
 
 def test_knowledge_report_headings_do_not_expose_prompt_instructions():
@@ -469,7 +429,7 @@ def test_the_chunk_context_prompt_changes_only_with_its_version():
 def test_section_abdeckungsregel_has_inline_marker_for_non_risiken_section():
     """The coverage rule must not push the LLM to spawn a risks sub-block in
     a section that does not own the evidence limits."""
-    state = _weak_evidence_state(ReportProfile.DEEP)
+    state = _weak_evidence_state()
 
     prompt = build_answer_section_system_prompt(
         state,
@@ -482,9 +442,9 @@ def test_section_abdeckungsregel_has_inline_marker_for_non_risiken_section():
 
     assert "SUB-QUESTION COVERAGE" in prompt
     assert "mark them briefly inline with '(unbestätigt)'" in prompt
-    # The "name them under the risks heading" directive must not appear in
-    # this section because it does not own the evidence limits.
-    assert "name them transparently under" not in prompt
+    # The directive to name open sub-questions belongs to the section that
+    # owns the evidence limits; this one does not.
+    assert "name them transparently" not in prompt
 
 
 def test_language_directive_is_in_target_language_for_english():
@@ -492,10 +452,10 @@ def test_language_directive_is_in_target_language_for_english():
     because all other instructions in the system prompt are in German.
     The directive must therefore be repeated in the target language.
     """
-    state = _base_state(ReportProfile.COMPACT)
+    state = _base_state()
     state["answer_lang"] = "Englisch"
 
-    prompt = build_answer_system_prompt(state)
+    prompt = _section(state)
 
     assert "ALWAYS respond in English" in prompt
     # The legacy German-only directive must NOT appear when the answer
@@ -505,10 +465,10 @@ def test_language_directive_is_in_target_language_for_english():
 
 def test_language_directive_keeps_german_when_answer_lang_is_deutsch():
     """Default German answer keeps the German wording."""
-    state = _base_state(ReportProfile.COMPACT)
+    state = _base_state()
     state["answer_lang"] = "Deutsch"
 
-    prompt = build_answer_system_prompt(state)
+    prompt = _section(state)
 
     assert "Antworte IMMER auf Deutsch" in prompt
     # Without it, research reports can come back in ASCII German ("fuer",
@@ -518,20 +478,20 @@ def test_language_directive_keeps_german_when_answer_lang_is_deutsch():
 
 
 def test_language_directive_for_french():
-    state = _base_state(ReportProfile.COMPACT)
+    state = _base_state()
     state["answer_lang"] = "Franzoesisch"
 
-    prompt = build_answer_system_prompt(state)
+    prompt = _section(state)
 
     assert "Réponds TOUJOURS en français" in prompt
 
 
 def test_language_directive_falls_back_for_unknown_language():
     """Unknown language: an English directive names the supplied language."""
-    state = _base_state(ReportProfile.COMPACT)
+    state = _base_state()
     state["answer_lang"] = "Esperanto"
 
-    prompt = build_answer_system_prompt(state)
+    prompt = _section(state)
 
     assert "ALWAYS respond in Esperanto" in prompt
     assert "Antworte IMMER auf Esperanto" not in prompt
@@ -539,7 +499,7 @@ def test_language_directive_falls_back_for_unknown_language():
 
 def test_language_directive_applies_to_section_prompt_too():
     """The section composer must also enforce the target language."""
-    state = _base_state(ReportProfile.DEEP)
+    state = _base_state()
     state["answer_lang"] = "Englisch"
 
     prompt = build_answer_section_system_prompt(
@@ -612,23 +572,23 @@ def test_ambiguous_disclosure_ownership_is_rejected():
     {"evaluate_status": "insufficient"},
 ])
 def test_verified_claims_do_not_hide_unresolved_questions(evaluation):
-    state = _base_state(ReportProfile.SCHNELL)
+    state = _base_state()
     state["claim_status_counts"] = {"verified": 12, "contested": 0, "unverified": 0}
     state.update(evaluation)
-    prompt = build_answer_system_prompt(state)
-    assert "Add a section '## Unsicherheiten / Offene Punkte'" in prompt
+    prompt = _plan_section(state, ReportProfile.SCHNELL, "key_points")
+    assert "Add a section '### Unsicherheiten / Offene Punkte'" in prompt
 
 
 def test_attributed_support_is_support_not_weak_evidence():
-    """A provider without source text attributes every supported claim;
-    that must not read as more unsupported than supported claims (the
+    """A provider without excerpts attributes every supported claim; that
+    must not read as more unsupported than supported claims (the
     transparency block), while the writer still gets the attribution rule."""
-    state = _base_state(ReportProfile.SCHNELL)
+    state = _base_state()
     state.update(
         claim_status_counts={"verified": 0, "attributed": 12, "contested": 0, "unverified": 3},
         coverage_source="llm", uncovered_aspects=[], evaluate_status="sufficient",
     )
-    prompt = build_answer_system_prompt(state)
+    prompt = _plan_section(state, ReportProfile.SCHNELL, "key_points")
     assert "TRANSPARENCY OBLIGATION WITH UNCERTAIN EVIDENCE" not in prompt
     assert "Claim status (verified/attributed/contested/unverified): 0/12/0/3" in prompt
     assert "`attributed` statements are what the search provider's answer" in prompt
@@ -636,18 +596,18 @@ def test_attributed_support_is_support_not_weak_evidence():
 
 
 def test_complete_evidence_does_not_require_an_uncertainty_block():
-    state = _base_state(ReportProfile.SCHNELL)
+    state = _base_state()
     state.update(
         claim_status_counts={"verified": 12, "contested": 0, "unverified": 0},
         coverage_source="llm", uncovered_aspects=[], evaluate_status="sufficient",
     )
-    prompt = build_answer_system_prompt(state)
+    prompt = _plan_section(state, ReportProfile.SCHNELL, "key_points")
     assert "TRANSPARENCY OBLIGATION WITH UNCERTAIN EVIDENCE" not in prompt
 
 
 @pytest.mark.parametrize("prompt", [
     build_claim_extraction_prompt(),
-    build_answer_system_prompt(_base_state(ReportProfile.SCHNELL)),
+    _section(_base_state()),
 ], ids=["extraction", "answer"])
 def test_research_prompts_preserve_conditions_scope_and_current_status(prompt):
     # Literal requirements pin the consumer's prompt; an empty shared helper
@@ -662,17 +622,14 @@ def test_research_prompts_preserve_conditions_scope_and_current_status(prompt):
     assert "Run-internal evidence notes rest on run data, not on external sources." in prompt
 
 
-@pytest.mark.parametrize("section_mode", [False, True])
-def test_answers_without_evidence_explicitly_forbid_invented_citations(section_mode):
+def test_answers_without_evidence_explicitly_forbid_invented_citations():
     def build(state):
-        if not section_mode:
-            return build_answer_system_prompt(state)
         return build_answer_section_system_prompt(
             state, heading="Summary", instruction="Summarise with evidence labels.",
             length_guidance="short", section_position=1, section_total=2,
         )
 
-    empty = _base_state(ReportProfile.SCHNELL)
+    empty = _base_state()
     assert "There are no citable sources." in build(empty)
     assert "Create no source labels, source URLs or apparent evidence." in build(empty)
     sourced = {**empty, "evidence_overview": "[E1] A supported statement.",
@@ -684,50 +641,75 @@ def test_answers_without_evidence_explicitly_forbid_invented_citations(section_m
 # --- Language-resolved headings and markers ---------------------------------
 
 
-def test_full_answer_style_lists_the_profile_sections_in_the_answer_language():
-    """The monolithic style block is derived from the profile's section plan
-    and names the headings in the answer's language — no second copy of
-    the plan lives in the prompt text."""
-    german = build_answer_system_prompt({**_base_state(ReportProfile.DEEP), "answer_lang": "de"})
-    english = build_answer_system_prompt({**_base_state(ReportProfile.DEEP), "answer_lang": "en"})
-    for heading in ("Executive Summary", "Hintergrund / Kontext", "Risiken / Unsicherheiten", "Fazit / Ausblick"):
-        assert f"**{heading}** (## heading)" in german
-    for heading in ("Executive summary", "Background and context", "Risks and uncertainties", "Conclusion and outlook"):
-        assert f"**{heading}** (## heading)" in english
-    assert "Hintergrund" not in english
-    compact = build_answer_system_prompt({**_base_state(ReportProfile.COMPACT), "answer_lang": "en"})
-    assert "**Summary** (## heading)" in compact and "**Key points** (## heading)" in compact
-    assert "Executive summary" not in compact
+_PLAN_HEADINGS = {
+    ReportProfile.SCHNELL: {
+        "de": ("Kurzfazit", "Kernaussagen"),
+        "en": ("Summary", "Key points"),
+    },
+    ReportProfile.COMPACT: {
+        "de": ("Kurzfazit", "Kernaussagen", "Detailanalyse", "Einordnung / Ausblick"),
+        "en": ("Summary", "Key points", "Detailed analysis", "Context and outlook"),
+    },
+    ReportProfile.DEEP: {
+        "de": (
+            "Executive Summary", "Hintergrund / Kontext", "Analyse",
+            "Perspektiven / Positionen", "Risiken / Unsicherheiten", "Fazit / Ausblick",
+        ),
+        "en": (
+            "Executive summary", "Background and context", "Analysis",
+            "Perspectives and positions", "Risks and uncertainties", "Conclusion and outlook",
+        ),
+    },
+}
+
+
+@pytest.mark.parametrize("language", ["de", "en"])
+@pytest.mark.parametrize("profile", list(ReportProfile))
+def test_each_section_prompt_names_its_plan_heading_in_the_answer_language(profile, language):
+    """Every section of the profile's plan is asked for under its heading in
+    the answer's language, at its place in the plan; no second copy of the
+    plan lives in the prompt text."""
+    sections = tuning_for_report_profile(profile).answer_sections
+    expected = _PLAN_HEADINGS[profile][language]
+    assert len(sections) == len(expected)
+    state = {**_base_state(), "answer_lang": language}
+    for index, (spec, heading) in enumerate(zip(sections, expected), 1):
+        prompt = _plan_section(state, profile, spec.key)
+        assert f"- Current section: {index}/{len(sections)} - **{heading}**.\n" in prompt
+        assert f"- Do NOT add the main heading `## {heading}` yourself" in prompt
+        if language == "en":
+            assert "Hintergrund" not in prompt and "Kernaussagen" not in prompt
 
 
 def test_uncertainty_heading_and_marker_follow_the_answer_language():
-    state = _weak_evidence_state(ReportProfile.DEEP)
+    state = _weak_evidence_state()
     state["answer_lang"] = "en"
     owner = build_answer_section_system_prompt(
         state, heading="Risks and uncertainties", instruction="List the limits.",
         length_guidance="short", section_position=5, section_total=6, owns_evidence_limits=True,
     )
     assert "Add a section '### Uncertainties and open points'" in owner
-    assert "'Risks and uncertainties' or 'Uncertainties and open points'" in owner
+    assert "name them transparently in this section ('Risks and uncertainties')" in owner
     assert "(unconfirmed)" in owner and "(unbestätigt)" not in owner
     other = build_answer_section_system_prompt(
         state, heading="Analysis", instruction="Deepen.", length_guidance="as needed",
         section_position=3, section_total=6,
     )
     assert "mark them briefly inline with '(unconfirmed)'" in other
-    german = build_answer_system_prompt({**state, "answer_lang": "de"})
-    assert "Add a section '## Unsicherheiten / Offene Punkte'" in german
+    german = _section({**state, "answer_lang": "de"}, heading="Risiken / Unsicherheiten",
+                      owns_evidence_limits=True)
+    assert "Add a section '### Unsicherheiten / Offene Punkte'" in german
     assert "'(unbestätigt)'" in german and "unbestaetigt" not in german
 
 
 def test_answer_prompt_opens_with_the_directive_and_carries_the_format_block():
-    prompt = build_answer_system_prompt({**_base_state(ReportProfile.COMPACT), "answer_lang": "en"})
+    prompt = _section({**_base_state(), "answer_lang": "en"}, heading="Key points")
     assert prompt.startswith("ALWAYS respond in English")
     assert "Today's date: 2026-04-13." in prompt
     assert OUTPUT_FORMAT_BLOCK in prompt
     assert "Trennlinien" not in prompt and "horizontal rules" in OUTPUT_FORMAT_BLOCK
     section = build_answer_section_system_prompt(
-        {**_base_state(ReportProfile.COMPACT), "answer_lang": "de"},
+        {**_base_state(), "answer_lang": "de"},
         heading="Kernaussagen", instruction="Fakten.", length_guidance="kurz",
         section_position=2, section_total=4,
     )
@@ -737,28 +719,25 @@ def test_answer_prompt_opens_with_the_directive_and_carries_the_format_block():
 
 def test_unresolved_answer_language_gets_the_question_language_directive():
     """No silent default: without a resolved code the directive asks for the
-    question's language and the headings fall back to English."""
-    state = _base_state(ReportProfile.COMPACT)
+    question's language, and the headings and markers fall back to English."""
+    state = _weak_evidence_state()
     state["answer_lang"] = None
-    prompt = build_answer_system_prompt(state)
+    prompt = _plan_section(state, ReportProfile.COMPACT, "context_outlook")
     assert prompt.startswith(QUESTION_LANGUAGE_DIRECTIVE)
     assert "Antworte IMMER auf Deutsch" not in prompt
-    assert "**Summary** (## heading)" in prompt
+    assert "- Current section: 4/4 - **Context and outlook**.\n" in prompt
+    assert "Add a section '### Uncertainties and open points'" in prompt
+    assert "'(unconfirmed)'" in prompt
 
 
-@pytest.mark.parametrize("section_mode", [False, True])
-def test_requested_elements_are_produced_not_described(section_mode):
+def test_requested_elements_are_produced_not_described():
     """A report asked for a flowchart and a role table must produce them,
     not write what the diagram and the table 'should' show. The style
     block ranks an explicit request above the section's form guidance."""
-    state = _base_state(ReportProfile.SCHNELL)
-    prompt = (
-        build_answer_section_system_prompt(
-            state, heading="Kernaussagen", instruction="Bullet points.",
-            length_guidance="short", section_position=2, section_total=2,
-        )
-        if section_mode
-        else build_answer_system_prompt(state)
+    state = _base_state()
+    prompt = build_answer_section_system_prompt(
+        state, heading="Kernaussagen", instruction="Bullet points.",
+        length_guidance="short", section_position=2, section_total=2,
     )
     assert "produce that element in the section where it belongs instead of describing" in prompt
     assert "does not override such a request" in prompt

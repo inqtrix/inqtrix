@@ -20,7 +20,6 @@ from inqtrix.prompt_language import (
     heading_for,
     marker_for,
 )
-from inqtrix.report_profiles import ReportProfile, tuning_for_report_profile
 from inqtrix.scoring import SUPPORTED_STATUSES
 from inqtrix.untrusted_content import (
     neutralize_fence_delimiters,
@@ -213,13 +212,6 @@ def default_claims_prompt_view(
     return "\n".join(lines)
 
 
-def _coerce_report_profile(report_profile_raw: Any) -> ReportProfile:
-    try:
-        return ReportProfile(report_profile_raw)
-    except ValueError:
-        return ReportProfile.COMPACT
-
-
 _ANSWER_STYLE_HEADER = (
     "ANSWER STYLE (like a senior research analyst):\n"
     "- Answer DIRECTLY and precisely. No filler, no small talk, no self-reference "
@@ -229,45 +221,6 @@ _ANSWER_STYLE_HEADER = (
     "of describing what it should contain; the form guidance of a section "
     "(prose, bullet points) does not override such a request.\n"
 )
-
-
-def _build_full_answer_style(report_profile: ReportProfile, language: str | None) -> str:
-    """The monolithic answer's structure, derived from the profile's section plan.
-
-    The section headings are the same ones the composer writes, resolved to
-    ``language`` — the style block never carries its own copy of the plan.
-    """
-    sections = tuning_for_report_profile(report_profile).answer_sections
-    structure = "".join(
-        f"  {index}) **{spec.heading(language)}** (## heading): "
-        f"{spec.prompt_instruction} Length: {spec.length_guidance}.\n"
-        for index, spec in enumerate(sections, 1)
-    )
-    style = (
-        _ANSWER_STYLE_HEADER
-        + "- Structure:\n"
-        + structure
-        + "- Write well-founded and understandable: explain technical terms briefly "
-        "on first use.\n"
-        "- Overall length: as extensive as question and evidence require; do not "
-        "shorten or lengthen artificially.\n"
-        "- Prioritise complete, cleanly closed sections over maximum length.\n"
-    )
-    if report_profile is ReportProfile.DEEP:
-        style += (
-            "- Integrate every reliable figure, statistic and comparison value that "
-            "is relevant to the question.\n"
-            "- Set different perspectives against each other neutrally instead of "
-            "blurring them.\n"
-            "- Cover background, main arguments, counter-arguments and risks, "
-            "stakeholder views and alternatives or comparisons systematically.\n"
-            "- When no reliable evidence exists for an essential perspective, name "
-            "the gap explicitly instead of inventing it.\n"
-        )
-    return style + (
-        "- When the question asks for a decision or recommendation: give a clear "
-        "recommendation with the main trade-offs.\n\n"
-    )
 
 
 def _build_section_answer_style(
@@ -367,21 +320,19 @@ def build_answer_section_user_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Section-mode helpers
+# Per-section answer prompt
 # ---------------------------------------------------------------------------
 #
-# When the answer is composed section-by-section, several global instruction
-# blocks must NOT be emitted unconditionally for every section:
+# The answer is composed section by section, so several instruction blocks
+# must NOT be emitted unconditionally for every section:
 #
 # - The composer resolves one section as the owner of evidence limits via
-#   owns_evidence_limits. Only that section receives the disclosure block.
-#   Its disclosure uses H3 beneath the section's H2; monolithic answers use
-#   H2. Ownership does not depend on words in a section heading.
+#   owns_evidence_limits. Only that section receives the disclosure block
+#   (an H3 beneath the section's H2) and the instruction to name a thin
+#   cross-check. Ownership does not depend on words in a section heading.
 #
-# - The CITATION RULES block names specific sections ("In the key points ...
-#   In the detailed analysis ..."). In section mode those names are
-#   misleading — the LLM only sees the current section. Use generic
-#   per-section phrasing.
+# - The CITATION RULES block uses generic per-section phrasing: the LLM only
+#   sees the current section, so names of other sections would mislead.
 #
 # ---------------------------------------------------------------------------
 
@@ -422,40 +373,20 @@ def answer_contract_block(answer_contract: str) -> str:
     return _ANSWER_CONTRACT_BLOCKS.get(answer_contract, "")
 
 
-def build_answer_system_prompt(state_data: dict[str, Any]) -> str:
-    """Assemble the full system prompt for the final answer node.
-
-    *state_data* is a dict with the following keys (all optional where noted):
-
-    Required:
-        today_str, answer_lang (language code or ``None`` when unresolved)
-
-    Evidence (the single canonical view):
-        evidence_overview (str -- the rendered EvidenceLedger overview),
-        allowed_citations (list[str] -- citation allowlist URLs)
-
-    Quality / claim metadata:
-        source_tier_counts, source_quality_score,
-        claim_status_counts, claim_quality_score,
-        claim_needs_primary_total, claim_needs_primary_supported
-
-    Aspect / competing:
-        required_aspects, uncovered_aspects, competing_events
-
-    Conversation:
-        history
-    """
-    report_profile = _coerce_report_profile(
-        state_data.get("report_profile", ReportProfile.COMPACT)
-    )
-    return _build_answer_system_prompt_with_style(
-        state_data,
-        answer_style=_build_full_answer_style(
-            report_profile, state_data.get("answer_lang")
-        ),
-        section_heading=None,
-        owns_evidence_limits=True,
-    )
+_ATTRIBUTION_RULE = (
+    "ATTRIBUTION RULE (applies to every statement you attribute to a source):\n"
+    "- Name a source in plain words once per paragraph.\n"
+    "- In a list, name it once in the sentence that introduces the list; "
+    "in a table, once in the sentence that introduces the table.\n"
+    "- When that introduction does not name a source, name it at the first "
+    "item or row that uses it.\n"
+    "- Further statements of the same source in that paragraph, list or "
+    "table carry only its label.\n"
+    "- Dates and figures always carry the label.\n"
+)
+"""The one attribution rule of the report writer. The evidence overview
+carries it; CLAIM CALIBRATION, EVIDENCE DEPTH and TRANSPARENCY OBLIGATION
+refer to it, so it stands in every prompt that holds one of them."""
 
 
 def build_answer_section_system_prompt(
@@ -468,6 +399,34 @@ def build_answer_section_system_prompt(
     section_total: int,
     owns_evidence_limits: bool = False,
 ) -> str:
+    """Assemble the system prompt for one section of the final answer.
+
+    *state_data* is a dict; the builder reads these keys (all optional where
+    noted) and no others:
+
+    Required:
+        today_str, answer_lang (language code or ``None`` when unresolved)
+
+    Evidence (the single canonical view):
+        evidence_overview (str -- the rendered EvidenceLedger overview),
+        allowed_citations (list[str] -- citation allowlist URLs)
+
+    Claim metadata:
+        claim_status_counts, claim_quality_score,
+        claim_needs_primary_total, claim_needs_primary_supported,
+        evidence_depth_gap
+
+    Evaluation, aspects, answer form:
+        required_aspects, uncovered_aspects, coverage_source,
+        evaluate_status, gaps, answer_contract, competing_events
+
+    Conversation:
+        history
+
+    *owns_evidence_limits* comes from the section plan and assigns the
+    consolidated disclosure to exactly one section, independently of its
+    heading or language. Other sections preserve relevant limits inline.
+    """
     return _build_answer_system_prompt_with_style(
         state_data,
         answer_style=_build_section_answer_style(
@@ -477,7 +436,7 @@ def build_answer_section_system_prompt(
             section_position=section_position,
             section_total=section_total,
         ),
-        section_heading=heading,
+        heading=heading,
         owns_evidence_limits=owns_evidence_limits,
     )
 
@@ -486,24 +445,18 @@ def _build_answer_system_prompt_with_style(
     state_data: dict[str, Any],
     *,
     answer_style: str,
-    section_heading: str | None = None,
-    owns_evidence_limits: bool = True,
+    heading: str,
+    owns_evidence_limits: bool,
 ) -> str:
-    """Assemble the common answer-system prompt body with a supplied style block.
+    """Assemble the answer-system prompt body around a section's style block.
 
-    The caller provides the profile- or section-specific style block so the
-    shared calibration, citation, and context instructions stay identical.
-
-    *section_heading* selects section-scoped citation and formatting rules.
-    *owns_evidence_limits* comes from the section plan and assigns the
-    consolidated disclosure to exactly one section, independently of its
-    heading or language. Other sections preserve relevant limits inline.
+    The style block names the section; the calibration, citation and
+    context instructions are the same for every section, apart from what
+    the section that owns the evidence limits receives.
     """
-    is_section_mode = section_heading is not None
     today_str: str = state_data.get("today_str", "")
     answer_lang = state_data.get("answer_lang")
     unconfirmed = marker_for("unconfirmed", answer_lang)
-    risks_heading = heading_for("risks", answer_lang)
     uncertainties_heading = heading_for("uncertainties", answer_lang)
     # Single canonical evidence view: the record-driven EvidenceLedger
     # overview plus its derived citation allowlist. No parallel context /
@@ -559,14 +512,14 @@ def _build_answer_system_prompt_with_style(
             "  1) supported fact\n"
             "  2) actor claim (e.g. a statement by an association or party)\n"
             "  3) forecast / interpretation.\n"
-            "- Treat `verified` statements (a source's own text was checked) as "
-            "established within their scope.\n"
+            "- Treat `verified` statements (checked against the search provider's "
+            "excerpt of a source) as established within their scope.\n"
             "- `attributed` statements are what the search provider's answer "
-            "attributes to a source; no source text was checked. Write them with "
-            "inline attribution ('according to' the source, with its label), never "
-            "as the source's own wording or as 'the regulation text says', and give a "
-            "date or figure from them as that source's statement, not as "
-            "established fact.\n"
+            "attributes to a source; the search provider's excerpt of that source "
+            "does not state them, or there is none. Attribute them by the "
+            "ATTRIBUTION RULE, never as the source's own wording or as 'the "
+            "regulation text says', and give a date or figure from them as that "
+            "source's statement, not as established fact.\n"
             "- Present contested statements only as contested (with clear attribution).\n"
             "- Do not assert statements without a supporting source as fact; at most "
             "mark them as open or disputed.\n"
@@ -578,7 +531,8 @@ def _build_answer_system_prompt_with_style(
             f"{claim_counts.get('unverified', 0)}; claim quality={claim_quality:.2f}.\n"
             f"- Claims requiring a primary source, supported: {claim_np_supported}/{claim_np_total}.\n"
             "- When claims requiring a primary source are not supported, write "
-            "cautiously ('according to source X', 'contested', 'not conclusively supported').\n\n"
+            "them cautiously ('contested', 'not conclusively supported'); their "
+            "attribution follows the ATTRIBUTION RULE.\n\n"
         )
 
     # ------------------------------------------------------------------
@@ -597,18 +551,19 @@ def _build_answer_system_prompt_with_style(
             "settled merely because a section is written about it.\n\n"
         )
     if required_aspects:
-        if is_section_mode and not owns_evidence_limits:
-            # Drop the "name them under the risks heading" line in sections
-            # where that would invite the LLM to spawn a sub-block outside
-            # its scope.
+        # Open sub-questions are an evidence limit: the section the plan
+        # assigns the limits to names them, under its own heading. Every
+        # other section marks them inline and names no other section, so it
+        # cannot point at a section the profile does not have.
+        if not owns_evidence_limits:
             coverage_note = (
                 "- When sub-questions are relevant to THIS section but unsupported, "
                 f"mark them briefly inline with '{unconfirmed}'.\n\n"
             )
         else:
             coverage_note = (
-                "- When sub-questions remain open, name them transparently under "
-                f"'{risks_heading}' or '{uncertainties_heading}'.\n\n"
+                "- When sub-questions remain open, name them transparently in "
+                f"this section ('{heading}').\n\n"
             )
         open_line = (
             f"- Still open according to the evaluation: {json.dumps(uncovered_aspects, ensure_ascii=False)}\n"
@@ -628,7 +583,8 @@ def _build_answer_system_prompt_with_style(
     # Transparency obligation when evidence is weak (conditional)
     #
     # The section plan owns the consolidated disclosure. Other sections
-    # retain inline attribution without duplicating the structural block.
+    # attribute by the one attribution rule without duplicating the
+    # structural block.
     # ------------------------------------------------------------------
     depth_gap = state_data.get("evidence_depth_gap") or {}
     depth_gap_active = bool(depth_gap.get("active"))
@@ -645,22 +601,31 @@ def _build_answer_system_prompt_with_style(
         gap_cross = int(depth_gap["cross_checked_count"])
         gap_single = int(depth_gap["single_source_count"])
         gap_ratio = float(depth_gap["single_source_ratio"])
+        # The thin cross-check is an evidence limit: the section the plan
+        # assigns the limits to names it, under its own heading.
+        if owns_evidence_limits:
+            depth_limit_line = (
+                f"- This section ('{heading}') MUST name this thin cross-check "
+                "situation explicitly as an evidence limit of the report.\n\n"
+            )
+        else:
+            depth_limit_line = (
+                "- Add NO own block on this thin cross-check situation in THIS "
+                "section; the section responsible for the evidence limits names it.\n\n"
+            )
         system += (
             "EVIDENCE DEPTH -- IMPORTANT FOR THE TONE OF THE REPORT:\n"
             f"- Of {gap_supported} supported statements only {gap_cross} are "
             f"independently confirmed; {gap_single} ({int(gap_ratio * 100)}%) rest "
             "on a single source.\n"
             "- Treat only independently confirmed statements or statements from a "
-            "primary source as hard facts, and only where their own text was "
-            "checked; attributed statements are always attributed to their "
-            "source.\n"
-            "- Statements from a single source MUST be attributed inline "
-            "('according to [E12] ...') and kept in cautious wording "
-            "('reports', 'states', 'is said to').\n"
+            "primary source as hard facts, and only where they were checked "
+            "against the search provider's excerpt; attributed statements are "
+            "always attributed to their source.\n"
+            "- Attribute statements from a single source by the ATTRIBUTION RULE.\n"
             "- Do NOT present figures, actor attributions and causal statements "
             "that stem from a single source as established fact.\n"
-            f"- The section '{risks_heading}' MUST name this thin cross-check "
-            "situation explicitly as an evidence limit of the report.\n\n"
+            f"{depth_limit_line}"
         )
     if evidence_is_weak:
         emit_subsection_directive = owns_evidence_limits
@@ -674,9 +639,8 @@ def _build_answer_system_prompt_with_style(
         if emit_subsection_directive:
             # A composed section already owns an H2. Request an H3 inside it
             # so the normalizer does not treat the disclosure as spillover.
-            transparency_heading_level = "###" if is_section_mode else "##"
             transparency_lines.append(
-                f"- Add a section '{transparency_heading_level} {uncertainties_heading}' "
+                f"- Add a section '### {uncertainties_heading}' "
                 "with a few precise bullet points."
             )
         else:
@@ -685,8 +649,9 @@ def _build_answer_system_prompt_with_style(
                 "responsible for it gathers the open points."
             )
         transparency_lines.append(
-            "- Mark contested or only secondarily supported figures with attribution "
-            "('according to source X', 'not conclusively supported by a primary source')."
+            "- Mark contested and only secondarily supported figures as such "
+            "('contested', 'not conclusively supported by a primary source'); every "
+            "other statement follows the ATTRIBUTION RULE without such a mark."
         )
         system += "\n".join(transparency_lines) + "\n\n"
 
@@ -710,17 +675,6 @@ def _build_answer_system_prompt_with_style(
     # Single canonical evidence view + citation rules
     # ------------------------------------------------------------------
     if evidence_overview:
-        if is_section_mode:
-            section_citation_line = (
-                "- In this section: at least one citation-bound source directly at "
-                "every substantial statement; in subsections (###) 1-2 sources "
-                "directly at the relevant facts.\n"
-            )
-        else:
-            section_citation_line = (
-                "- In the key points and the detailed sections at least one "
-                "citation-bound source directly at the relevant fact each.\n"
-            )
         system += (
             "EVIDENCE OVERVIEW (the only canonical source base):\n"
             "- The overview is grouped by research results: every research result "
@@ -728,10 +682,11 @@ def _build_answer_system_prompt_with_style(
             "[E1], [E2], ...\n"
             "- Every source names title, date, tier and a 'Standing' that says "
             "what supports its statements.\n"
-            "- Statements under 'checked against this source's text' were checked "
-            "against text from the page itself. Statements under 'the search "
-            "provider attributes to this source' are the provider's attribution: "
-            "Inqtrix did not read the page.\n"
+            "- Statements under 'checked against the search provider's excerpt' "
+            "were checked against the excerpt the search provider returned for "
+            "that source. Statements under 'the search provider attributes to "
+            "this source' are the provider's attribution. Inqtrix reads no page "
+            "itself.\n"
             "- Use the concrete statements and excerpts of each source for "
             "substance -- not only titles.\n"
             "- The search answer of a research result is the search provider's "
@@ -744,15 +699,12 @@ def _build_answer_system_prompt_with_style(
             "standing; they do not automatically confirm the statement in the "
             "finished sentence.\n"
             f"- `{STANDING_TEXT['single-source verified']}`: use as a single piece "
-            "of evidence and attribute inline, without turning it into a stronger "
-            "statement or an additional source.\n"
+            "of evidence, attributed by the ATTRIBUTION RULE, without turning it "
+            "into a stronger statement or an additional source.\n"
             f"- `{STANDING_TEXT['provider-attributed']}`: the search provider's "
-            "answer attributes these statements to the source. Attribute them to "
-            "that source in plain words once per paragraph, table row or list item; "
-            "further statements of the same source there carry only its label. "
-            "Dates and figures always carry the label. Never present them as the "
-            "source's own wording, as a quotation, or as 'the regulation text "
-            "says'.\n"
+            "answer attributes these statements to the source. Attribute them by "
+            "the ATTRIBUTION RULE; never present them as the source's own wording, "
+            "as a quotation, or as 'the regulation text says'.\n"
             "- Mark your own derivations and recommendations as interpretation. "
             "Attribute a statement or recommendation to an institution only when "
             "the material at hand expressly carries that attribution; a source "
@@ -768,12 +720,13 @@ def _build_answer_system_prompt_with_style(
             "never state them as fact; name them only as unconfirmed where they "
             "matter.\n"
             f"- `{STANDING_TEXT['source-context']}`: source-based context of a "
-            "single source -- you MAY name these contents, but must attribute them "
-            "inline and not present them as confirmed several times.\n"
+            "single source -- you MAY name these contents, attributed by the "
+            "ATTRIBUTION RULE, but do not present them as confirmed several times.\n"
             "- Standings, block headings and the overview's working terms describe "
             "your material, not the answer: never quote them as terms. Tell the "
             "reader in plain words of the answer language what supports a "
             "statement.\n"
+            f"{_ATTRIBUTION_RULE}"
             "CITATION RULES:\n"
             "- Cite sources INLINE only with their label in square brackets, e.g. [E12]; "
             "write NO URL after it -- the links are attached automatically after the synthesis.\n"
@@ -784,7 +737,9 @@ def _build_answer_system_prompt_with_style(
             "- Ignore markers such as [unmapped:*] or [unrendered:*] as evidence; "
             "they only show that a provider citation cannot be cited as a visible "
             "source block.\n"
-            f"{section_citation_line}"
+            "- In this section: at least one citation-bound source directly at "
+            "every substantial statement; in subsections (###) 1-2 sources "
+            "directly at the relevant facts.\n"
             "- For contested or multi-perspective statements cite at least two "
             "sources of different actors or tiers.\n"
             "- Create NO own reference, source or link section at the end of the "
@@ -813,6 +768,11 @@ def _build_answer_system_prompt_with_style(
             "- Answer the question from general knowledge without claiming a research "
             "or source check. Name limits only where they matter for the answer.\n\n"
         )
+    if not evidence_overview and (claim_counts or depth_gap_active or evidence_is_weak):
+        # CLAIM CALIBRATION, EVIDENCE DEPTH and TRANSPARENCY attribute by the
+        # rule the evidence overview carries; without an overview it stands
+        # on its own, so no instruction points at a rule the prompt lacks.
+        system += f"{_ATTRIBUTION_RULE}\n"
 
     # ------------------------------------------------------------------
     # Conversation history (conditional)
@@ -978,15 +938,18 @@ def build_knowledge_followup_context_prompt(question: str, history: str) -> str:
 
     The rewrite is a retrieval aid only: it may resolve pronouns or
     references from prior turns, but it must not answer and must not
-    treat the history as evidence. The history is fenced as data: it holds
-    earlier answers and whatever sources they quoted.
+    treat the history as evidence. *history* arrives as
+    :func:`inqtrix.services.request_parsing.format_history` wrote it: the
+    user's turns outside, every other turn (earlier answers and whatever
+    sources they quoted) already in a ``client-history`` fence. A second
+    fence around it would defuse those delimiters into text.
     """
     return f"""You rewrite a follow-up question for a knowledge RAG system into a self-contained search question.
 
 The conversation history serves ONLY to clarify references, pronouns and omitted topics of the current question. It is NOT a source of evidence and must not smuggle new facts into the search question.
 
 CONVERSATION HISTORY:
-{untrusted_fence(history, "conversation-history")}
+{history}
 
 CURRENT QUESTION:
 {question}

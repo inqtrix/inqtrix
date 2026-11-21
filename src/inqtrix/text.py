@@ -99,6 +99,12 @@ log excerpt, an audit preview, a diagnostic, a planner summary, or a title
 or address in the evidence register, which carries no statement of its
 own."""
 
+QUESTION_CLIP_MARK = "…"
+"""What a clipped run question in a list row ends in. Readers that must say
+the cut is one (a prompt) strip exactly this, and only where the run
+summary's ``question_clipped`` says the row was cut: a user may end a
+question with the same mark."""
+
 PASSAGE_CUT_MARKER = " [shortened here; the passage continues]"
 """Closes a source passage a model reads shortened (an evidence register
 line, a discovery excerpt), so the reader never takes the cut passage for
@@ -179,14 +185,12 @@ def _is_word_boundary(
     )
 
 
-def _out_of_number(
-    position: int, numbers: list[tuple[int, int]], *, forward: bool
-) -> int:
-    """*position*, moved out of the number it falls strictly inside: back to
-    the number's start, or forward to its end."""
+def _out_of_number(position: int, numbers: list[tuple[int, int]]) -> int:
+    """*position*, moved back to the start of the number it falls strictly
+    inside."""
     for start, end in numbers:
         if start < position < end:
-            return end if forward else start
+            return start
     return position
 
 
@@ -226,42 +230,6 @@ def shorten_visibly(text: object, limit: int, *, marker: str) -> str:
         0,
     )
     if cut < room // 2:
-        cut = max(cut, _out_of_number(room, numbers, forward=False))
+        cut = max(cut, _out_of_number(room, numbers))
     kept = normalized[:cut].rstrip()
     return f"{kept}{marker}" if kept else marker.lstrip()
-
-
-def start_at_word(text: str, position: int, *, reach: int) -> int:
-    """Where a passage taken from *position* onward starts on a whole word.
-
-    The mirror of the cut in :func:`shorten_visibly`: the start moves
-    forward past the first word boundary at or after ``position - 1``
-    (whitespace outside every number, :func:`number_spans`) and the
-    whitespace after it, so the passage never opens inside a word or a
-    number. When no boundary lies within *reach* characters, a single
-    overlong word straddles *position*; the start then stays inside that
-    word but moves forward past any number it would split. A *position* of
-    0 or less returns 0.
-    """
-    if position <= 0:
-        return 0
-    position = min(position, len(text))
-    last = min(len(text), position + reach)
-    numbers = [
-        (start, end)
-        for start, end in number_spans(text)
-        if end >= position - 1 and start < last
-    ]
-    start = next(
-        (
-            index + 1
-            for index in range(position - 1, last)
-            if _is_word_boundary(text, index, numbers)
-        ),
-        None,
-    )
-    if start is None:
-        start = _out_of_number(position, numbers, forward=True)
-    while start < len(text) and text[start].isspace():
-        start += 1
-    return start

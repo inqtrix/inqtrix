@@ -143,8 +143,8 @@ class AgentSourceService:
     async def _origin(self, context, origin_id):
         """The run a source id names, under the reader's current authority.
 
-        An internal role run (a review, a section writer) is no source of
-        the conversation, by id exactly as in the catalogue: it holds only
+        An internal role run (a review) is no source of the conversation,
+        by id exactly as in the catalogue: it holds only
         material another run already read, and its handover carries that
         run's requirement with every rule body while it binds no rules of
         its own. Only the role run itself reads its own archives, which lie
@@ -207,8 +207,8 @@ class AgentSourceService:
 
         A transcript holds the full text of the rules its run worked under.
         A deleted, edited or no longer shared rule therefore closes it —
-        through the same catalog resolution the submit and the plan gate
-        use, and a missing catalog is never an implicit grant. Rules are
+        through the same catalog resolution the submit uses, and a missing
+        catalog is never an implicit grant. Rules are
         frozen per run, so a run's own parts are exempt when it reads its
         own archives: editing a template mid-run changes nothing the run
         works under. Every rule taken over from another run stays bound.

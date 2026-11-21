@@ -298,7 +298,6 @@ export function detachProjectResourceGraph(
   return {
     ...state,
     agentCanvas: EMPTY_CANVAS_STATE,
-    agentPlanDrafts: {},
     agentRuns: {},
     agentSessionArtifacts: {},
     agentSessionGroupOrder: state.agentSessionGroupOrder.map((id) => (

@@ -31,11 +31,6 @@ const PARENTHETICAL_PLURAL = /\w\((e|n|en|s|er|es)\)/
 
 /** Plural twins whose singular is not named `<key>One`. */
 const IRREGULAR_TWINS: Record<string, string> = {
-  'agent.task.instantMany': 'agent.task.instantOne',
-  'agent.task.knowledgeMany': 'agent.task.knowledgeOne',
-  'agent.timeline.childTasksFailed': 'agent.timeline.childTaskFailedOne',
-  'agent.timeline.childSearchesDone': 'agent.timeline.childSearchDoneOne',
-  'agent.timeline.childCheckRounds': 'agent.timeline.childCheckRoundOne',
   'agent.timeline.recapWebSearches': 'agent.timeline.recapWebSearchOne',
   'agent.timeline.recapKnowledgeSearches': 'agent.timeline.recapKnowledgeSearchOne',
   'agent.timeline.recapResearches': 'agent.timeline.recapResearchOne',
@@ -47,14 +42,12 @@ const IRREGULAR_TWINS: Record<string, string> = {
 /** `{count}` templates without a singular, each with the reason a count of
  * one cannot reach it or no noun follows the number. */
 const COUNT_NEUTRAL: Record<string, string> = {
-  'agent.activity.parallelTasks': 'parallel work starts at two tasks; both callers render it only above one',
   'agent.activityOperations.operations': 'activityProgress renders it only above one operation',
-  'agent.task.queryProgress': 'the query row renders it only above one request',
   'agent.composer.slashCapReached': 'no noun follows the number (max. {count})',
   'agent.timeline.evidenceReadProgress': 'no noun follows the number ({done}/{count} abgeschlossen)',
   'agent.timeline.gateActionsTitle': 'one action gets its own headline; the count title covers zero and several',
   'agent.canvas.commentLimit': 'filled with AGENT_CANVAS_COMMENT_LIMIT, a code constant of 20',
-  'agent.canvas.child.attempt': 'an ordinal after its noun (Versuch 2), not a counted noun',
+  'agent.canvas.providerCitedPlaces': 'the evidence view lists places only above one; the tally stands in parentheses after the heading',
   'sharingManagement.pendingCount': 'no noun follows the number',
   'fileLibrary.referencedTooltip': 'a multiplier ({count}×), no noun follows the number',
   'fileLibrary.selectedCount': 'no noun follows the number',
@@ -82,10 +75,8 @@ const UNREAD_AWAITING_DECISION = new Set([
  * with the reason the noun needs no singular. */
 const PLACEHOLDER_NEUTRAL: Record<string, string> = {
   'agent.composer.reportCap:max': 'filled with the server constant MAX_ATTACHED_REPORTS = 3',
-  'agent.plan.reportRulesCap:max': 'filled with the server constant REPORT_RULE_IDS_MAX = 3',
+  'agent.composer.ruleCap:max': 'filled with the server constant REPORT_RULE_IDS_MAX = 3',
   'agent.timeline.recapElapsed:duration': 'a duration, not a count',
-  'agent.tray.planSummary:web': 'a tool-kind tally: the word names the kind, like "intern"',
-  'agent.tray.planSummary:synthesis': 'a tool-kind tally: the word names the kind, like "intern"',
   'knowledge.retrievalDegradedCapDetail:cap': 'German dative "Kandidaten" is the same for one; English names no noun',
   'knowledge.evidenceUsedDocsMeta:chunks': 'rendered only when the passages span more than one document',
   'knowledge.evidenceUsedDocsMeta:docs': 'rendered only when the passages span more than one document',

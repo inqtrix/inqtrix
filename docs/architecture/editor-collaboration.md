@@ -4,7 +4,10 @@
 
 This page describes the optional live-collaboration architecture for editor
 documents: ownership boundaries, persistence, synchronization, suggestions,
-and failure semantics. It does not describe the end-user controls in detail.
+and failure semantics. It also describes how a document in Markdown mode keeps
+both versions when a second writer saves it: another tab, an accepted agent
+patch, or a conversion to collaboration mode elsewhere. It does not describe
+the end-user controls in detail.
 The transport remains online-only and single-replica. It does not provide
 offline document writes, mouse pointers, or full version restore. Account-less
 guest links are a separate opt-in module that rides this transport through
@@ -121,6 +124,125 @@ The room name is
 an address, never an authorization credential. Every connection and durable
 write is checked against tenant, document, generation, lease, current user,
 permission, and active Node fencing epoch.
+
+## Markdown mode: concurrent writers
+
+Collaboration mode is the place for simultaneous work. A document in Markdown
+mode is saved as one whole text with a revision counter, and it can still meet
+a second writer now and then: a second tab of the same user, an agent patch
+the server applies to its own text, or a conversion to collaboration mode
+somewhere else. The Markdown mode guarantees one thing for that case: no
+version of the text disappears without a notice.
+
+### Base
+
+Every document record carries a session field `syncBase`, the server state
+(text and revision) the local text was last reconciled with. Opening a
+document, a successful save (with the text that save sent, not the text typed
+since), a merge, an accepted agent patch, the save of a never-opened document
+after a rename and the detail of a shared document set text, revision and base
+together. A base holds only while its revision equals the record's revision;
+otherwise it counts as unknown. Neither the project file nor the save request
+carries it.
+
+### Merging
+
+`mergeMarkdownRevisions(base, ours, theirs)` (`features/editor/markdownMerge.ts`)
+merges line by line, as Git and `diff3` do. A paragraph is a line in Markdown.
+
+- Changes on both sides that neither overlap nor touch are both kept.
+- The same change on both sides is kept once.
+- Changes that overlap or touch are a conflict: two inserts at the same place
+  (both sides append to the end), neighboring lines of a table or a list, two
+  edits of the same paragraph. Nothing is placed by guesswork.
+- More than 20 000 lines in one of the three texts, or more than 1 000 removed
+  plus inserted lines on one side, are a conflict as well. The bounds count
+  lines, not time, so the outcome is the same on every machine.
+- After every clean result a check confirms that each line one side inserted
+  is in the result, that no line both sides kept is missing, and that no line
+  appears more often than base and inserts allow. A failed check is a conflict,
+  so an error in the merge leads to a conflict copy, never to a silent loss.
+
+With an unknown base, only an equal text counts as merged; any other text is a
+conflict.
+
+### Where a version saved elsewhere meets the local text
+
+| Way | What happens |
+|---|---|
+| A save refused with 409 for its revision | The sync hook fetches the document and merges that version into the record. The record then sits on the server's revision; changes that were merged save on top of it with the next autosave. |
+| A save refused with 409 and the reason `content_mode_changed` | Own changes (local text unlike the base, or unlike the converted text when the base is unknown) go to a conflict copy; then the record takes the converted document and the editor switches to collaboration mode. |
+| A refresh of the lists on focus, coming back online, a reconnect or a sharing event | A list row carries no text, so a document whose text this tab holds takes only metadata from it. A newer server revision of such a document is fetched and merged. A row that shows the document in collaboration mode makes a conflict copy of own changes first, as above, and the document then switches to collaboration mode. |
+| Accepting an agent patch | The document is saved first and the patch applied on that revision; the server's text with the patch is merged into the record afterwards. Text typed in another paragraph meanwhile stays next to the patch; text typed in the same paragraph goes to a conflict copy, and the record carries the accepted patch, so the cards are right to say accepted. If the document was converted elsewhere, nothing is applied and the document says so above the assistant. |
+| Opening a document | Text and revision of the detail are taken together, so the first save after a save elsewhere is not refused. |
+
+The version the record already stands on changes nothing when it is reported
+again, so two ways that report the same version neither double text nor make a
+conflict. A server version at the record's revision or behind it that is not
+that version, as after a restored database backup, is no newer version of the
+base: it merges like one with an unknown base, so a local text unlike it goes
+to a conflict copy, and the record moves to the server's revision.
+Title and folder follow the server when the local values still equal what this
+tab last saw there; an open local rename or move stays.
+
+### The editor
+
+The editor hands over its whole text together with the record text it showed
+when it made that text: the text it loaded, the last one it took over, or the
+last one it handed over. A merge can reach the record before the editor shows
+the result; a keystroke in that moment is made on the text before. The reducer
+then merges the editor's text with the record's text instead of overwriting
+it. When the two overlap, the record keeps its version, and the editor's text
+waits on the record (`pendingConflictMarkdown`, session only) until the sync
+hook turns it into a conflict copy, at once.
+
+A text another writer made reaches the editor in the commit that brought it,
+as one transaction that replaces only the range that changed. A caret outside
+that range keeps its place, and the transaction stays out of the undo history:
+undo takes back the user's own edits only. The source view takes such a text
+the same way, as the smallest changed range of the Markdown source, mapped
+selection, outside its undo history.
+
+### Conflict copy
+
+When two versions cannot be merged, the version saved first stays the
+document, as with file synchronization tools.
+
+- The record takes the server's version. The own version becomes a new,
+  ordinary document in the same folder, right before the original in the
+  tree, titled `<title> (conflicted copy <date> <time>).md` (German:
+  `Konfliktkopie`). It is saved at once, without the autosave delay.
+- The original shows a calm notice with **Open copy**, also when it is opened
+  later, for example after a conflict at a document that was not open. The
+  copy shows a bar with **Compare with original**, the document diff view with
+  the original's current text as its anchor, and **Delete copy**.
+- The link between copy and original lives in the session only. After a
+  reload the title says what the copy is.
+- Until the server confirms the copy's first save, or while an editor text
+  waits to become a copy, leaving the page asks first. Without project sync
+  nothing is saved on the server; the copy is a document of the project like
+  any other, and leaving does not ask.
+- A second conflict makes a second copy.
+
+### What does not pause
+
+Autosave, sharing, accepting an agent patch and converting the original go on.
+No way described here sends a delete request; only **Delete copy** deletes,
+and only the copy.
+
+### Limits
+
+- A text from an older project file carries no base. When the server is ahead,
+  it becomes a conflict copy even without own changes: one copy too many, and
+  both versions are kept.
+- Two changes in the same paragraph are always a conflict, as in Git.
+- When both sides rename the document, the last saved rename wins.
+- The editor writes the whole document in its own form with the first edit.
+  Both tabs use the same form, so their formatting agrees. Only a side that
+  still holds raw server text, an agent artifact never edited for example, can
+  meet more conflicts; nothing is lost.
+- Rewrites beyond 1 000 removed plus inserted lines on one side end as a
+  conflict copy.
 
 ## Authentication and authorization
 
@@ -509,12 +631,42 @@ seconds, so a reader that shows or orders them converts a value below
 carries the time of its suggestions, while a proposal through the patch API is
 stamped in Unix seconds, the unit that API keeps. The open-changes list and
 the patch list of a document therefore order patches by their time converted
-the same way, so agent proposals, older and newer AI suggestions, and typed
-suggestions sort by when they were made; each keeps its time as written. Server validation
+the same way, so proposals recorded through the patch API, older and newer AI
+suggestions, and typed suggestions sort by when they were made; each keeps its
+time as written. Server validation
 requires the original projection to remain unchanged for a `suggest` user,
 lets no user write a suggestion in another user's name or add text to another
 user's suggestion or move it, and lets a suggestion be decided only through
 the decision endpoint.
+
+### Agent proposals
+
+The agent proposes changes to Markdown documents only; a document in
+collaboration mode accepts no agent proposal. Three places hold that rule:
+
+| Place | What it does for a document in collaboration mode |
+|---|---|
+| The agent's two editor read tools | Name the document's `content_mode` in their result, outside the fenced document text, add that such a document accepts no agent proposal and that the change belongs in the answer, and record the mode with the read. |
+| The agent's `propose_editor_patch` | Asks for no approval when the run's last read found the document in collaboration mode, and refuses the call with `editor.collaboration_document` before it reaches the patch service. A call that reaches the tool body anyway is refused the same way, for example one whose approval card was edited onto such a document or one that runs in the same turn as its read. |
+| The patch service | Refuses every agent proposal to such a document with the same code: it checks access first (a caller without `suggest` access gets the usual not-found), then the mode, before it asks the collaboration service for a current projection, and it checks the document that projection read returns once more. No patch row and no audit entry is written. The last check and the write of the row are two steps: a conversion that falls between them leaves a private patch row, as below for proposals recorded before a conversion. |
+
+A run that has not read the document still shows the approval card for a
+proposal; after an approve, the tool refuses the call with
+`editor.read_required`. A run whose read was stored before reads recorded the
+mode shows the card as well; after an approve, the patch service refuses it.
+
+Agent proposals already recorded at a collaboration document stay private patch
+rows: those recorded at a Markdown document before it was converted, and those
+an earlier version recorded at a collaboration document. The editor shows them
+nowhere: the open-changes list holds only published patches, the editor
+fetches pending patches for Markdown documents only, and when a document
+enters collaboration mode, whether this editor converts it or the server
+shows the conversion, the editor drops the proposals it already showed for it
+from its review without deciding them. The patch list of the
+document shows them to their creator alone. Their creator can still publish one
+as a shared suggestion, with a browser session, through
+`POST /v1/editor/patches/{patch_id}:apply` with `expected_sequence` and
+`decision_id`.
 
 ### Editing text that holds suggestions
 

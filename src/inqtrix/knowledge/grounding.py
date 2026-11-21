@@ -345,11 +345,12 @@ def quote_key(text: str) -> str:
 def quote_is_verbatim(text: str, evidence_texts: list[str]) -> bool:
     """Whether *text* appears verbatim in ANY of the evidence texts.
 
-    The agent-side quote check (``agents/report_quality.verify_quotes``)
-    reuses the ONE normalizer chain through this helper instead of the
+    The agent-side quote checks (the review's re-check of an applied edit
+    in ``agents/kernel/review_pass.py``, ``knowledge.document.cite``)
+    reuse the ONE normalizer chain through this helper instead of the
     ``check_grounding`` answer-block contract — that parser is bound to
     per-label indices and the ``ANSWER:`` scaffold, neither of which
-    exists for memo quotes checked against the whole evidence ledger.
+    exists for a quote checked against stored source texts.
 
     Args:
         text: The quoted passage (without surrounding quote marks).

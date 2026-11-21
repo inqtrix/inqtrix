@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 
     from inqtrix.content.ports import FileRegistry
     from inqtrix.providers.base import ProviderContext
-    from inqtrix.runs.ports import RunStorePort
+    from inqtrix.runs.ports import CheckpointCleanup, RunStorePort
     from inqtrix.storage.object_store import ObjectStore
     from inqtrix.strategies import StrategyContext
 
@@ -230,7 +230,7 @@ def _require_valid_queue_storage(settings: Settings) -> None:
         )
 
 
-def build_run_store(settings: Settings, engine: "AsyncEngine | None" = None, *, checkpoint_cleanup: Callable[[str, str], None] | None = None) -> "RunStorePort":
+def build_run_store(settings: Settings, engine: "AsyncEngine | None" = None, *, checkpoint_cleanup: "CheckpointCleanup | None" = None) -> "RunStorePort":
     """Settings bridge for the run-store backend (env-coupled surface).
 
     Memory storage keeps the historical in-process store bit-for-bit.
@@ -585,7 +585,7 @@ def build_agent_memory_candidate_store(settings: Settings, engine: "AsyncEngine 
 
 
 def build_agent_feedback_store(settings: Settings, engine: "AsyncEngine | None" = None) -> Any:
-    """Settings bridge for personal workspace-agent feedback history."""
+    """Settings bridge for personal agent feedback history."""
     if settings.storage.backend != "postgres":
         from inqtrix.agents.memory_candidates_memory import (
             MemoryAgentFeedbackStore,
@@ -698,6 +698,41 @@ def _require_shareable_object_store(settings: Settings) -> None:
         )
 
 
+def _require_shareable_vector_index(settings: Settings) -> None:
+    """Reject the in-process vector index where several processes serve knowledge.
+
+    ``INQTRIX_VECTOR_BACKEND=memory`` keeps the knowledge vectors inside
+    each process. Behind a Valkey queue the workers index documents the
+    API process never sees, and across declared replicas each one finds
+    only what it indexed itself: searches miss the rest without an error.
+    Refusing at startup mirrors :func:`_require_shareable_object_store`;
+    one process keeps the zero-infrastructure trial.
+    """
+    knowledge = settings.knowledge
+    if not knowledge.enabled or knowledge.vector_backend != "memory":
+        return
+    behind_workers = settings.queue.backend == "valkey"
+    replicas = settings.storage.replica_count
+    if not behind_workers and replicas <= 1:
+        return
+    if behind_workers:
+        shared = (
+            "with INQTRIX_QUEUE_BACKEND=valkey: the worker processes index documents "
+            "that the API process never sees, so its searches miss them without an error"
+        )
+    else:
+        shared = (
+            f"across INQTRIX_REPLICA_COUNT={replicas} replicas: each replica finds only "
+            "the documents it indexed itself and misses the others without an error"
+        )
+    raise RuntimeError(
+        "With INQTRIX_KNOWLEDGE_ENABLED=true, INQTRIX_VECTOR_BACKEND=memory keeps the "
+        f"knowledge vectors inside each process and cannot be shared {shared}. "
+        "Set INQTRIX_VECTOR_BACKEND=qdrant with an INQTRIX_QDRANT_URL that every "
+        "process reaches."
+    )
+
+
 def build_object_store(settings: Settings) -> "ObjectStore":
     """Settings bridge for the blob store (env-coupled surface).
 
@@ -787,8 +822,11 @@ def build_knowledge_context(
     provider is constructed and no knowledge surface exists. The
     embedding endpoint falls back to the LiteLLM gateway configuration
     so a standard proxy deployment enables knowledge with a single
-    flag.
+    flag. The in-process vector index serves one process: it is refused
+    behind workers or replicas, and beside Postgres, where the documents
+    outlive it, it starts with a WARNING.
     """
+    _require_shareable_vector_index(settings)
     if not settings.knowledge.enabled:
         for raw, setting in (
             (settings.knowledge.embedding_extra_headers, "INQTRIX_EMBEDDING_EXTRA_HEADERS"),
@@ -868,6 +906,15 @@ def build_knowledge_context(
         else:
             from inqtrix.knowledge.stores.vector_index import MemoryVectorIndex
 
+            log.warning(
+                "CONFIG: INQTRIX_VECTOR_BACKEND=memory keeps the knowledge vectors in "
+                "this process while documents and chunks live in Postgres. The index is "
+                "volatile and has no size limit, and it is empty after every restart: "
+                "searches find no document indexed before the restart until its "
+                "collection is rebuilt, which embeds every chunk again. Use it for "
+                "trials only; set INQTRIX_VECTOR_BACKEND=qdrant with INQTRIX_QDRANT_URL "
+                "for a persistent index."
+            )
             vector_index = MemoryVectorIndex()
         store = PostgresKnowledgeStore(
             engine=engine,
@@ -1029,8 +1076,8 @@ class AppContainer:
             behind :class:`~inqtrix.runs.ports.RunStorePort`.
         semaphore_factory: Lazy provider of the shared concurrency
             limiter (the event loop may not exist at wiring time).
-        agent_checkpointer: Handle for the workspace agent's checkpoint
-            store, or ``None`` when the agent is not registered. Carried
+        agent_checkpointer: Handle for the checkpoint store of agent runs,
+            or ``None`` when agent runs are not set up (no Agent Desk). Carried
             here because it owns a pool on its own driver: no engine
             disposal reaches it, so whoever ends the container's life has
             to close it explicitly.
@@ -1080,8 +1127,8 @@ class AppContainer:
     editor_persistence_service: Any = None
     editor_patch_service: Any = None
     """Editor-patch lifecycle (propose/apply/reject over the patch store
-    pair); consumed by the patch router and the workspace-agent
-    patch phase. ``None`` only in hand-built test containers."""
+    pair); consumed by the patch router and the agent's editor
+    tools. ``None`` only in hand-built test containers."""
     editor_collaboration_service: Any = None
     """Optional Postgres-backed editor collaboration orchestration."""
     editor_guest_link_service: Any = None
@@ -1239,8 +1286,8 @@ def build_container(
     from inqtrix.agents.checkpointing import build_checkpointer_handle, cleanup_run_checkpoint
 
     agent_checkpointer = build_checkpointer_handle(settings)
-    def checkpoint_cleanup(run_id: str, mode: str) -> None:
-        cleanup_run_checkpoint(agent_checkpointer, run_id, mode)
+    def checkpoint_cleanup(run_id: str, mode: str, *, never_claimed: bool = False) -> None:
+        cleanup_run_checkpoint(agent_checkpointer, run_id, mode, never_claimed=never_claimed)
     # The initial durable-store retention sweep needs the same callback as
     # later explicit deletions. Injected worker stores bind before use here.
     active_run_store = run_store or build_run_store(
@@ -2121,14 +2168,7 @@ def build_container(
         run_store=active_run_store,
         audit=active_workspace_admin,
         editor_persistence=editor_persistence_service,
-        # The ONE collection-visibility gate, so an edited plan's rag tasks
-        # are visibility-checked at approval time, not only at task-run time.
-        knowledge=knowledge_service,
-        # Library rules attached at a plan gate resolve against the
-        # DECIDING caller's own catalog (never against client text).
-        prompt_templates=prompt_template_service,
         durable=settings.storage.backend == "postgres",
-        max_plan_tasks=settings.agent_platform.max_plan_tasks,
     )
     agent_sessions_service = AgentSessionsService(
         store=build_agent_session_store(settings, database_engine),
@@ -2168,10 +2208,6 @@ def build_container(
         search_provider=getattr(providers, "search", None),
         editor_patch_service=editor_patch_service,
     )
-    # The workspace agent registers only with a real checkpointer
-    # (Postgres) or the explicit volatile escape. A missing
-    # gate keeps mode=workspace_agent a loud 400 listing available modes,
-    # and /v1/capabilities reports features.workspace_agent=false.
     asset_deletion_service.bind_session_deletion(
         agent_sessions=agent_sessions_service,
         knowledge_sessions=knowledge_sessions_service,
@@ -2184,30 +2220,10 @@ def build_container(
         run_store=active_run_store,
         engine=database_engine,
     )
-    if agent_checkpointer is not None and "workspace_agent" not in (
-        active_registry.ids()
-    ):
-        from inqtrix.agents.algorithm import WorkspaceAgentAlgorithm
-
-        active_registry.register(
-            WorkspaceAgentAlgorithm(
-                control_store=agent_control_service.store,
-                run_service=run_service,
-                resolver=resolver,
-                capability_registry=capability_registry_instance,
-                checkpointer=agent_checkpointer,
-                platform=settings.agent_platform,
-                permission_service=active_permissions,
-                knowledge_service=knowledge_service,
-                editor_patch_service=editor_patch_service,
-                editor_persistence_service=editor_persistence_service,
-                agent_memory_service=agent_memory_service,
-                skill_service=skill_service,
-            )
-        )
     # Cognitive-kernel registration: on by default, switched off with
     # INQTRIX_AGENT_KERNEL_ENABLED=false, and additionally gated on the
-    # same checkpointer rule plus native tool calling on the LLM — a
+    # checkpointer (agent runs set up, see build_checkpointer_handle), the
+    # agent runtime and native tool calling on the LLM — a
     # failed gate WARNS and NAMES itself instead of silently dropping the
     # mode, because "the kernel is off" and "the kernel could not start"
     # are different answers to an operator.
